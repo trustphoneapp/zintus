@@ -20,6 +20,7 @@
       },
       "dependencies": {
         "@clack/prompts": "^0.10.0",
+        "@multipleai/engine": "workspace:*",
         "@multipleai/keychain": "workspace:*",
         "@multipleai/providers": "workspace:*",
         "@multipleai/router": "workspace:*",
@@ -69,6 +70,18 @@
         "tailwindcss": "^4.0.0",
         "tw-animate-css": "^1.2.5",
         "typescript": "^5.7.0",
+      },
+    },
+    "apps/gateway": {
+      "name": "@multipleai/gateway",
+      "version": "0.0.1",
+      "dependencies": {
+        "@multipleai/engine": "workspace:*",
+        "@multipleai/providers": "workspace:*",
+        "@multipleai/types": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
       },
     },
     "apps/mobile": {
@@ -121,6 +134,20 @@
         "@multipleai/providers": "workspace:*",
         "@multipleai/router": "workspace:*",
         "@multipleai/types": "workspace:*",
+      },
+    },
+    "packages/engine": {
+      "name": "@multipleai/engine",
+      "version": "0.0.1",
+      "dependencies": {
+        "@multipleai/keychain": "workspace:*",
+        "@multipleai/providers": "workspace:*",
+        "@multipleai/router": "workspace:*",
+        "@multipleai/types": "workspace:*",
+        "drizzle-orm": "^0.45.0",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
       },
     },
     "packages/keychain": {
@@ -547,6 +574,10 @@
     "@multipleai/core": ["@multipleai/core@workspace:packages/core"],
 
     "@multipleai/desktop": ["@multipleai/desktop@workspace:apps/desktop"],
+
+    "@multipleai/engine": ["@multipleai/engine@workspace:packages/engine"],
+
+    "@multipleai/gateway": ["@multipleai/gateway@workspace:apps/gateway"],
 
     "@multipleai/keychain": ["@multipleai/keychain@workspace:packages/keychain"],
 

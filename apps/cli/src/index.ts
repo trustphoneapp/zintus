@@ -5,6 +5,7 @@ import { PROVIDER_IDS } from "@multipleai/types";
 import { runChat } from "./commands/chat.js";
 import { runKeysSet, runKeysList, runKeysRemove } from "./commands/keys.js";
 import { runConfig } from "./commands/config.js";
+import { runHistory, runTrace } from "./commands/history.js";
 
 const program = new Command();
 
@@ -80,6 +81,21 @@ program
   .action(async () => {
     const { runSetup } = await import("./ui/setup.js");
     await runSetup();
+  });
+
+program
+  .command("history")
+  .description("List saved conversation threads")
+  .action(async () => {
+    await runHistory();
+  });
+
+program
+  .command("trace")
+  .description("Show routing trace waterfall for the last or given request")
+  .argument("[traceId]", "Trace UUID (defaults to last)")
+  .action(async (traceId?: string) => {
+    await runTrace(traceId);
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {

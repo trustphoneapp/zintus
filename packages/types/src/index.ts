@@ -20,3 +20,5 @@ export type {
   StreamChatResult,
   StreamChunk,
 } from "./stream.js";
+export type { TraceAttempt, RequestTrace } from "./trace.js";
+export type { Thread, ThreadMessage } from "./conversation.js";

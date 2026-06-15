@@ -10,13 +10,14 @@
   ],
   "scripts": {
     "typecheck": "tsc --build tsconfig.build.json && bun run --filter '@multipleai/web' --filter '@multipleai/desktop' --filter '@multipleai/mobile' typecheck",
-    "test": "vitest run && bun test packages/router/src/factory.test.ts packages/router/src/quota-ledger.test.ts apps/web/lib/chat.test.ts",
+    "test": "vitest run && bun test packages/router/src/factory.test.ts packages/router/src/quota-ledger.test.ts packages/engine/src/engine.test.ts apps/web/lib/chat.test.ts",
     "test:watch": "vitest",
     "dev": "bun run --filter multipleai dev",
     "dev:cli": "bun run --filter multipleai dev",
     "dev:web": "bun run --filter @multipleai/web dev",
     "dev:desktop": "bun run --filter @multipleai/desktop dev",
     "dev:mobile": "bun run --filter @multipleai/mobile dev",
+    "dev:gateway": "bun run --filter @multipleai/gateway dev",
     "build": "bun run typecheck"
   },
   "devDependencies": {

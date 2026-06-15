@@ -13,12 +13,22 @@ import { sortProviders } from "./priority.js";
 import { QuotaLedger } from "./quota-ledger.js";
 import { GROQ_MODEL_70B, GROQ_MODEL_8B } from "./limits.js";
 
+export interface RouteAttemptEvent {
+  providerId: ProviderId;
+  model: string;
+  status: "success" | "fail";
+  latencyMs: number;
+  errorCode?: number;
+  errorMessage?: string;
+}
+
 export interface RouterConfig {
   dbPath?: string;
   strategy?: RoutingStrategy;
   providerPriority?: ProviderId[];
   defaultProvider?: ProviderId;
   getApiKey?: (providerId: ProviderId) => Promise<string | null>;
+  onAttempt?: (event: RouteAttemptEvent) => void;
 }
 
 export interface Router {
@@ -154,6 +164,7 @@ export function createRouter(config: RouterConfig = {}): Router {
             : [request.model ?? provider.defaultModel];
 
         for (const model of modelsToTry) {
+          const attemptStarted = Date.now();
           try {
             const result = await provider.streamChat(request.messages, {
               model,
@@ -169,6 +180,12 @@ export function createRouter(config: RouterConfig = {}): Router {
             }
 
             cooldownRetries.set(provider.id, 0);
+            config.onAttempt?.({
+              providerId: provider.id,
+              model,
+              status: "success",
+              latencyMs: Date.now() - attemptStarted,
+            });
 
             const textStream = async function* (): AsyncGenerator<string> {
               let tokensOut = 0;
@@ -214,6 +231,14 @@ export function createRouter(config: RouterConfig = {}): Router {
 
             const status =
               error instanceof ProviderHttpError ? error.status : undefined;
+            config.onAttempt?.({
+              providerId: provider.id,
+              model,
+              status: "fail",
+              latencyMs: Date.now() - attemptStarted,
+              errorCode: status,
+              errorMessage: lastError.message,
+            });
             const shouldFailover = status === 429 || (status != null && status >= 500);
             const isLastGroqModel =
               provider.id === "groq" && model === modelsToTry.at(-1);

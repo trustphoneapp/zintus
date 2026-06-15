@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  ActivityIndicator,
   FlatList,
   Modal,
   Pressable,
@@ -9,6 +10,8 @@ import {
   View,
 } from "react-native";
 import type { ProviderId } from "@multipleai/types";
+import { streamChat, getGatewayUrl } from "@/lib/chat";
+import { toChatMessages } from "@/lib/messages";
 import { deleteProviderKey, getProviderKey, setProviderKey } from "@/lib/secure-keys";
 
 const PROVIDERS: Array<{ id: ProviderId; name: string }> = [
@@ -35,6 +38,8 @@ export default function ChatScreen() {
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>("groq");
   const [apiKey, setApiKey] = useState("");
   const [keyStatus, setKeyStatus] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function saveProviderKey() {
     await setProviderKey(selectedProvider, apiKey);
@@ -57,8 +62,8 @@ export default function ChatScreen() {
     setKeyStatus(`Removed ${selectedProvider} key.`);
   }
 
-  function send() {
-    if (!input.trim()) {
+  async function send() {
+    if (!input.trim() || sending) {
       return;
     }
 
@@ -67,17 +72,58 @@ export default function ChatScreen() {
       role: "user",
       content: input.trim(),
     };
+    const assistantId = `${Date.now()}-assistant`;
 
     setMessages((current) => [
       ...current,
       userMessage,
-      {
-        id: `${Date.now()}-assistant`,
-        role: "assistant",
-        content: `[${selectedProvider}] Mobile chat scaffold — wire to web /api/chat or a backend next.`,
-      },
+      { id: assistantId, role: "assistant", content: "" },
     ]);
     setInput("");
+    setSending(true);
+    setError(null);
+
+    try {
+      const result = await streamChat({
+        providerId: selectedProvider,
+        messages: toChatMessages([...messages, userMessage]),
+        onChunk: (text) => {
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === assistantId
+                ? { ...message, content: text }
+                : message,
+            ),
+          );
+        },
+      });
+
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === assistantId
+            ? {
+                ...message,
+                content:
+                  message.content ||
+                  `[${result.providerId}/${result.model}] (empty response)`,
+              }
+            : message,
+        ),
+      );
+    } catch (sendError) {
+      const message =
+        sendError instanceof Error ? sendError.message : "Request failed";
+      setError(message);
+      setMessages((current) =>
+        current.map((item) =>
+          item.id === assistantId
+            ? { ...item, content: `Error: ${message}` }
+            : item,
+        ),
+      );
+    } finally {
+      setSending(false);
+    }
   }
 
   return (
@@ -88,6 +134,8 @@ export default function ChatScreen() {
           <Text style={styles.chipText}>{selectedProvider}</Text>
         </Pressable>
       </View>
+      <Text style={styles.gatewayHint}>Gateway: {getGatewayUrl()}</Text>
+      {error && <Text style={styles.errorText}>{error}</Text>}
 
       <FlatList
         style={styles.list}
@@ -113,8 +161,16 @@ export default function ChatScreen() {
           placeholder="Message..."
           placeholderTextColor="#6b7280"
         />
-        <Pressable style={styles.sendButton} onPress={send}>
-          <Text style={styles.sendText}>Send</Text>
+        <Pressable
+          style={[styles.sendButton, sending && styles.sendButtonDisabled]}
+          onPress={send}
+          disabled={sending}
+        >
+          {sending ? (
+            <ActivityIndicator color="#041018" />
+          ) : (
+            <Text style={styles.sendText}>Send</Text>
+          )}
         </Pressable>
       </View>
 
@@ -177,6 +233,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   title: { color: "#e8eef5", fontSize: 22, fontWeight: "700" },
+  gatewayHint: {
+    color: "#6b7280",
+    fontSize: 12,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
+  errorText: {
+    color: "#f87171",
+    fontSize: 13,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
+  },
   chip: {
     backgroundColor: "#111827",
     borderRadius: 999,
@@ -214,7 +282,10 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     justifyContent: "center",
     paddingHorizontal: 14,
+    minWidth: 56,
+    alignItems: "center",
   },
+  sendButtonDisabled: { opacity: 0.7 },
   secondaryButton: {
     borderRadius: 10,
     borderWidth: 1,

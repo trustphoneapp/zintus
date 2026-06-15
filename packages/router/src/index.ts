@@ -1,4 +1,4 @@
-export type { Router, RouterConfig } from "./factory.js";
+export type { Router, RouterConfig, RouteAttemptEvent } from "./factory.js";
 export { createRouter } from "./factory.js";
 export { QuotaLedger } from "./quota-ledger.js";
 export { providers, usageLog } from "./schema.js";

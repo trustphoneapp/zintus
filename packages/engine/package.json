@@ -1,0 +1,27 @@
+{
+  "name": "@multipleai/engine",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/engine.test.ts"
+  },
+  "dependencies": {
+    "@multipleai/keychain": "workspace:*",
+    "@multipleai/providers": "workspace:*",
+    "@multipleai/router": "workspace:*",
+    "@multipleai/types": "workspace:*",
+    "drizzle-orm": "^0.45.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

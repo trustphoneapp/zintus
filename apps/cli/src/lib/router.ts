@@ -1,4 +1,4 @@
-import { createRouter, type Router } from "@multipleai/router";
+import { createEngine, type Engine } from "@multipleai/engine";
 import { listProviders } from "@multipleai/providers";
 import type { AppConfig, ProviderId, ProviderStatus } from "@multipleai/types";
 import { getDbPath } from "../db.js";
@@ -40,8 +40,8 @@ function statusToInfo(status: ProviderStatus): ProviderInfo {
   };
 }
 
-export function createAppRouter(config: AppConfig): Router {
-  return createRouter({
+export function createAppEngine(config: AppConfig): Engine {
+  return createEngine({
     strategy: config.routingStrategy,
     providerPriority: config.providerPriority,
     defaultProvider: config.defaultProvider,
@@ -49,7 +49,10 @@ export function createAppRouter(config: AppConfig): Router {
   });
 }
 
-export async function getProviderInfos(router: Router): Promise<ProviderInfo[]> {
-  const statuses = await router.getProviderStatus();
+/** @deprecated Use createAppEngine */
+export const createAppRouter = createAppEngine;
+
+export async function getProviderInfos(engine: Engine): Promise<ProviderInfo[]> {
+  const statuses = await engine.getProviderStatus();
   return statuses.map(statusToInfo).sort((a, b) => a.priority - b.priority);
 }

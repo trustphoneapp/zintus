@@ -5,7 +5,9 @@
     { "path": "./packages/providers" },
     { "path": "./packages/keychain" },
     { "path": "./packages/router" },
+    { "path": "./packages/engine" },
     { "path": "./apps/cli" },
+    { "path": "./apps/gateway" },
     { "path": "./workers/validate-key" }
   ]
 }

@@ -11,6 +11,7 @@
     { "path": "../../packages/types" },
     { "path": "../../packages/providers" },
     { "path": "../../packages/keychain" },
-    { "path": "../../packages/router" }
+    { "path": "../../packages/router" },
+    { "path": "../../packages/engine" }
   ]
 }
