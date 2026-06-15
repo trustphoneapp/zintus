@@ -1,0 +1,42 @@
+/* MultipleAI design tokens — OKLCH (Tailwind v4 @theme inline compatible) */
+@theme inline {
+  /* Backgrounds */
+  --color-bg: oklch(10% 0.03 280);
+  --color-surface: oklch(14% 0.04 280);
+  --color-elevated: oklch(18% 0.05 280);
+  --color-border: oklch(24% 0.05 280);
+  --color-border-bright: oklch(30% 0.06 280);
+
+  /* Brand purples */
+  --color-purple: oklch(38% 0.18 295);
+  --color-purple-mid: oklch(44% 0.22 295);
+  --color-purple-light: oklch(56% 0.22 295);
+  --color-purple-bright: oklch(68% 0.18 295);
+  --color-purple-glow: oklch(38% 0.18 295 / 0.25);
+  --color-purple-faint: oklch(38% 0.18 295 / 0.08);
+
+  /* Text */
+  --color-text: oklch(94% 0.02 280);
+  --color-text-sub: oklch(65% 0.05 280);
+  --color-text-muted: oklch(42% 0.05 280);
+
+  /* Semantic */
+  --color-green: oklch(58% 0.17 162);
+  --color-yellow: oklch(70% 0.18 70);
+  --color-red: oklch(58% 0.22 25);
+  --color-blue: oklch(55% 0.2 250);
+
+  /* Provider accents (Part 3) */
+  --color-provider-cerebras: oklch(58% 0.17 162);
+  --color-provider-groq: oklch(70% 0.18 70);
+  --color-provider-gemini: oklch(55% 0.2 250);
+  --color-provider-openrouter: oklch(56% 0.22 295);
+  --color-provider-cohere: oklch(62% 0.14 200);
+  --color-provider-mistral: oklch(68% 0.18 50);
+  --color-provider-deepseek: oklch(58% 0.22 350);
+  --color-provider-ollama: oklch(56% 0.22 295);
+
+  /* Typography */
+  --font-ui: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}

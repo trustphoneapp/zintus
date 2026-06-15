@@ -1,0 +1,24 @@
+name: Release Mobile
+
+on:
+  push:
+    tags:
+      - "mobile-v*"
+  workflow_dispatch:
+
+jobs:
+  eas-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - run: bun install
+      - run: cd apps/mobile && eas build --platform all --profile production --non-interactive
+        env:
+          EXPO_PUBLIC_VALIDATE_URL: ${{ vars.EXPO_PUBLIC_VALIDATE_URL }}

@@ -1,0 +1,166 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type { ProviderId } from "@multipleai/types";
+import { PROVIDER_IDS } from "@multipleai/types";
+import { deleteKey, getKey, isTauri, setKey } from "@/lib/tauri";
+import { useProviderStatusStore } from "@/lib/store";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { QuotaBar } from "./QuotaBar";
+
+export default function ProvidersScreen() {
+  const { providers, statusMessage, refresh, setStatusMessage } = useProviderStatusStore();
+  const [selected, setSelected] = useState<ProviderId>("groq");
+  const [keyInput, setKeyInput] = useState("");
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const saveKey = async () => {
+    if (!keyInput.trim()) {
+      return;
+    }
+    try {
+      await setKey(selected, keyInput.trim());
+      setKeyInput("");
+      setStatusMessage(`Saved key for ${selected}`);
+      await refresh();
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : "Failed to save key");
+    }
+  };
+
+  const removeKey = async (id: ProviderId) => {
+    await deleteKey(id);
+    setStatusMessage(`Removed key for ${id}`);
+    await refresh();
+  };
+
+  const revealMasked = async (id: ProviderId) => {
+    const key = await getKey(id);
+    setStatusMessage(key ? `${id}: ${key.slice(0, 4)}…${key.slice(-4)}` : `No key for ${id}`);
+  };
+
+  return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <h1 style={{ fontSize: 20, fontWeight: 700 }}>Providers</h1>
+        <p style={{ fontSize: 14, color: "var(--color-text-sub)" }}>
+          API keys stored in the OS keyring via tauri-plugin-keyring.
+          {!isTauri() && " Run `bun tauri dev` for keyring access."}
+        </p>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Add API key</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <select
+              value={selected}
+              onChange={(e) => setSelected(e.target.value as ProviderId)}
+              style={{ width: "auto", minWidth: 140 }}
+            >
+              {PROVIDER_IDS.filter((id) => id !== "ollama").map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </select>
+            <Input
+              type="password"
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder="sk-..."
+              style={{ maxWidth: 320, flex: 1 }}
+            />
+            <Button type="button" onClick={() => void saveKey()}>
+              Save to keyring
+            </Button>
+          </div>
+          {statusMessage && (
+            <p style={{ fontSize: 12, color: "var(--color-text-muted)" }}>{statusMessage}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      <div
+        style={{
+          display: "grid",
+          gap: 12,
+          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+        }}
+      >
+        {providers.map((provider) => (
+          <Card key={provider.id}>
+            <CardHeader
+              style={{
+                display: "flex",
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <CardTitle style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  style={{
+                    width: 12,
+                    height: 12,
+                    borderRadius: "50%",
+                    backgroundColor: provider.color,
+                  }}
+                />
+                {provider.name}
+              </CardTitle>
+              <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--color-text-muted)" }}>
+                P{provider.priority}
+              </span>
+            </CardHeader>
+            <CardContent style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <QuotaBar
+                used={provider.quotaUsed}
+                limit={provider.quotaLimit}
+                label="Daily tokens"
+              />
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  fontSize: 12,
+                  color: "var(--color-text-sub)",
+                }}
+              >
+                <span>{provider.hasKey ? "Key configured" : "No key"}</span>
+                <span>{provider.enabled ? "Ready" : "Unavailable"}</span>
+              </div>
+              {provider.id !== "ollama" && (
+                <div style={{ display: "flex", gap: 8 }}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void revealMasked(provider.id)}
+                  >
+                    Masked preview
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => void removeKey(provider.id)}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}

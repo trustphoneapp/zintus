@@ -1,0 +1,13 @@
+{
+  "name": "@multipleai/ui",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./tokens.css": "./styles/tokens.css",
+    "./globals.css": "./styles/globals.css"
+  },
+  "files": [
+    "styles"
+  ]
+}

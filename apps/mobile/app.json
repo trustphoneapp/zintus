@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "MultipleAI",
+    "slug": "multipleai",
+    "version": "0.0.1",
+    "scheme": "multipleai",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "plugins": ["expo-router", "expo-secure-store"],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

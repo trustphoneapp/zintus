@@ -1,0 +1,20 @@
+{
+  "name": "@multipleai/validate-key-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@multipleai/providers": "workspace:*",
+    "@multipleai/types": "workspace:*",
+    "hono": "^4.12.23"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "wrangler": "^4.0.0"
+  }
+}
