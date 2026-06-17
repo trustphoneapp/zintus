@@ -26,20 +26,37 @@ const providers: Provider[] = [
 ];
 
 describe("sortProviders", () => {
-  it("sorts by priority for fastest strategy", () => {
-    const sorted = sortProviders(providers, "fastest", () => 1);
+  it("falls back to priority order for fastest when no latency samples", () => {
+    const sorted = sortProviders(providers, "fastest", {
+      remainingRatio: () => 1,
+    });
     expect(sorted.map((p) => p.id)).toEqual(["cerebras", "groq", "gemini"]);
   });
 
+  it("orders fastest by lowest measured p95 latency", () => {
+    const latency: Record<string, number | null> = {
+      cerebras: 800,
+      groq: 120,
+      gemini: 400,
+    };
+    const sorted = sortProviders(providers, "fastest", {
+      remainingRatio: () => 1,
+      latencyP95: (id) => latency[id] ?? null,
+    });
+    expect(sorted.map((p) => p.id)).toEqual(["groq", "gemini", "cerebras"]);
+  });
+
   it("sorts by remaining quota for economy strategy", () => {
-    const sorted = sortProviders(providers, "economy", (id) =>
-      id === "groq" ? 0.9 : 0.1,
-    );
+    const sorted = sortProviders(providers, "economy", {
+      remainingRatio: (id) => (id === "groq" ? 0.9 : 0.1),
+    });
     expect(sorted[0]?.id).toBe("groq");
   });
 
   it("sorts by capability rank", () => {
-    const sorted = sortProviders(providers, "capability", () => 1);
+    const sorted = sortProviders(providers, "capability", {
+      remainingRatio: () => 1,
+    });
     expect(sorted.map((p) => p.id)).toEqual(["gemini", "cerebras", "groq"]);
   });
 });

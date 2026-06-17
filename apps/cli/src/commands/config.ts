@@ -2,7 +2,7 @@ import * as p from "@clack/prompts";
 import chalk from "chalk";
 import { DEFAULT_CONFIG, PROVIDER_IDS, type ProviderId, type RoutingStrategy } from "@multipleai/types";
 import { PROVIDER_META } from "../lib/router.js";
-import { loadConfig, saveConfig, isRoutingStrategy } from "../lib/config.js";
+import { loadConfig, saveConfig, isRoutingStrategy, CONFIG_PATH } from "../lib/config.js";
 
 export async function runConfig(): Promise<void> {
   p.intro(chalk.bgCyan.black(" multipleai config "));
@@ -15,7 +15,7 @@ export async function runConfig(): Promise<void> {
       {
         value: "fastest" as RoutingStrategy,
         label: "Fastest",
-        hint: "use provider priority order below",
+        hint: "prefer lowest recent p95 latency; priority order is the tie-break",
       },
       {
         value: "capability" as RoutingStrategy,
@@ -25,7 +25,7 @@ export async function runConfig(): Promise<void> {
       {
         value: "economy" as RoutingStrategy,
         label: "Economy",
-        hint: "prefer providers with most quota headroom",
+        hint: "spread across providers with the most remaining quota",
       },
     ],
     initialValue: current.routingStrategy,
@@ -70,6 +70,7 @@ export async function runConfig(): Promise<void> {
 
   const config = {
     routingStrategy,
+    contextMode: current.contextMode,
     providerPriority: priority as ProviderId[],
     ...(defaultProvider
       ? { defaultProvider: defaultProvider as ProviderId }
@@ -78,5 +79,5 @@ export async function runConfig(): Promise<void> {
 
   await saveConfig(config);
 
-  p.outro(chalk.green("Configuration saved to ~/.multipleai/config.json"));
+  p.outro(chalk.green(`Configuration saved to ${CONFIG_PATH}`));
 }

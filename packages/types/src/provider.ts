@@ -12,6 +12,10 @@ export const PROVIDER_IDS = [
   "cohere",
   "mistral",
   "deepseek",
+  "fireworks",
+  "xai",
+  "huggingface",
+  "lmstudio",
   "ollama",
 ] as const satisfies readonly ProviderId[];
 

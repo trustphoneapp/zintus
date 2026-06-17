@@ -16,6 +16,10 @@ export const PROVIDERS: ProviderDisplay[] = [
   { id: "cohere", name: "Cohere", color: "#06B6D4", priority: 5, quotaLimit: 1_000_000 },
   { id: "mistral", name: "Mistral", color: "#F97316", priority: 6, quotaLimit: 1_000_000 },
   { id: "deepseek", name: "DeepSeek", color: "#EC4899", priority: 7, quotaLimit: 1_000_000 },
+  { id: "fireworks", name: "Fireworks AI", color: "#22C55E", priority: 8, quotaLimit: 1_000_000 },
+  { id: "xai", name: "xAI Grok", color: "#0EA5E9", priority: 9, quotaLimit: 1_000_000 },
+  { id: "huggingface", name: "Hugging Face", color: "#F59E0B", priority: 10, quotaLimit: 1_000_000 },
+  { id: "lmstudio", name: "LM Studio", color: "#6366F1", priority: 98, quotaLimit: 1_000_000 },
   { id: "ollama", name: "Ollama", color: "#8B5CF6", priority: 99, quotaLimit: 1_000_000 },
 ];
 

@@ -1,65 +1,69 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
-  Modal,
   Pressable,
+  Share,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
 import type { ProviderId } from "@multipleai/types";
+import { useFocusEffect, useRouter } from "expo-router";
 import { streamChat, getGatewayUrl } from "@/lib/chat";
+import { loadConfig, loadSelectedProvider } from "@/lib/config";
 import { toChatMessages } from "@/lib/messages";
-import { deleteProviderKey, getProviderKey, setProviderKey } from "@/lib/secure-keys";
+import { migrateLegacyKeys } from "@/lib/secure-keys";
+import { COLORS } from "@/lib/theme";
 
-const PROVIDERS: Array<{ id: ProviderId; name: string }> = [
-  { id: "cerebras", name: "Cerebras" },
-  { id: "groq", name: "Groq" },
-  { id: "gemini", name: "Gemini" },
-  { id: "openrouter", name: "OpenRouter" },
-  { id: "cohere", name: "Cohere" },
-  { id: "mistral", name: "Mistral" },
-  { id: "deepseek", name: "DeepSeek" },
-  { id: "ollama", name: "Ollama" },
-];
+// "auto" is a UI-only sentinel: it sends NO provider so the gateway routes
+// using the configured strategy.
+type ProviderSelection = ProviderId | "auto";
 
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  streaming?: boolean;
+  providerId?: ProviderId;
+  model?: string;
 }
 
 export default function ChatScreen() {
+  const router = useRouter();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [sheetOpen, setSheetOpen] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("groq");
-  const [apiKey, setApiKey] = useState("");
-  const [keyStatus, setKeyStatus] = useState<string | null>(null);
+  const [selectedProvider, setSelectedProvider] =
+    useState<ProviderSelection>("auto");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function saveProviderKey() {
-    await setProviderKey(selectedProvider, apiKey);
-    setApiKey("");
-    setKeyStatus(`Saved ${selectedProvider} key to SecureStore.`);
-    setSheetOpen(false);
-  }
+  useEffect(() => {
+    void migrateLegacyKeys();
+  }, []);
 
-  async function checkProviderKey() {
-    const value = await getProviderKey(selectedProvider);
-    setKeyStatus(
-      value
-        ? `${selectedProvider} key is stored securely.`
-        : `No key stored for ${selectedProvider}.`,
+  useFocusEffect(
+    useCallback(() => {
+      setSelectedProvider(loadSelectedProvider());
+    }, []),
+  );
+
+  function toggleAuto() {
+    setSelectedProvider((current) =>
+      current === "auto" ? loadSelectedProvider() : "auto",
     );
   }
 
-  async function removeProviderKey() {
-    await deleteProviderKey(selectedProvider);
-    setKeyStatus(`Removed ${selectedProvider} key.`);
+  async function copyMessage(content: string) {
+    if (!content.trim()) {
+      return;
+    }
+    try {
+      await Share.share({ message: content });
+    } catch {
+      // Share sheet dismissed/unavailable — ignore.
+    }
   }
 
   async function send() {
@@ -67,6 +71,7 @@ export default function ChatScreen() {
       return;
     }
 
+    const config = loadConfig();
     const userMessage: Message = {
       id: `${Date.now()}-user`,
       role: "user",
@@ -77,7 +82,7 @@ export default function ChatScreen() {
     setMessages((current) => [
       ...current,
       userMessage,
-      { id: assistantId, role: "assistant", content: "" },
+      { id: assistantId, role: "assistant", content: "", streaming: true },
     ]);
     setInput("");
     setSending(true);
@@ -85,7 +90,10 @@ export default function ChatScreen() {
 
     try {
       const result = await streamChat({
-        providerId: selectedProvider,
+        // "auto" -> send no provider so the gateway routes by strategy.
+        providerId: selectedProvider === "auto" ? undefined : selectedProvider,
+        strategy: selectedProvider === "auto" ? config.routingStrategy : undefined,
+        mode: config.contextMode,
         messages: toChatMessages([...messages, userMessage]),
         onChunk: (text) => {
           setMessages((current) =>
@@ -103,6 +111,9 @@ export default function ChatScreen() {
           message.id === assistantId
             ? {
                 ...message,
+                streaming: false,
+                providerId: result.providerId,
+                model: result.model,
                 content:
                   message.content ||
                   `[${result.providerId}/${result.model}] (empty response)`,
@@ -117,7 +128,11 @@ export default function ChatScreen() {
       setMessages((current) =>
         current.map((item) =>
           item.id === assistantId
-            ? { ...item, content: `Error: ${message}` }
+            ? {
+                ...item,
+                streaming: false,
+                content: `Error: ${message}`,
+              }
             : item,
         ),
       );
@@ -126,31 +141,112 @@ export default function ChatScreen() {
     }
   }
 
+  const chipLabel = selectedProvider === "auto" ? "Auto" : selectedProvider;
+
   return (
     <View style={styles.container}>
       <View style={styles.header}>
         <Text style={styles.title}>MultipleAI</Text>
-        <Pressable style={styles.chip} onPress={() => setSheetOpen(true)}>
-          <Text style={styles.chipText}>{selectedProvider}</Text>
-        </Pressable>
+        <View style={styles.chipRow}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.chip,
+              selectedProvider === "auto" && styles.chipActive,
+              pressed && styles.pressed,
+            ]}
+            onPress={toggleAuto}
+          >
+            <Text
+              style={[
+                styles.chipText,
+                selectedProvider === "auto" && styles.chipTextActive,
+              ]}
+            >
+              {chipLabel}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
+            onPress={() => {
+              router.push("/providers");
+            }}
+          >
+            <Text style={styles.chipText}>Change</Text>
+          </Pressable>
+        </View>
       </View>
-      <Text style={styles.gatewayHint}>Gateway: {getGatewayUrl()}</Text>
+      <Text style={styles.gatewayHint}>
+        Gateway: {getGatewayUrl()}
+        {selectedProvider === "auto" ? " · auto-routing" : ""}
+      </Text>
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       <FlatList
         style={styles.list}
         data={messages}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <View
-            style={[
-              styles.bubble,
-              item.role === "user" ? styles.userBubble : styles.assistantBubble,
-            ]}
-          >
-            <Text style={styles.bubbleText}>{item.content}</Text>
+        contentContainerStyle={
+          messages.length === 0 ? styles.emptyContainer : undefined
+        }
+        ListEmptyComponent={
+          <View style={styles.empty}>
+            <Text style={styles.emptyTitle}>Ask anything</Text>
+            <Text style={styles.emptySubtitle}>
+              {selectedProvider === "auto"
+                ? "Auto mode routes your message to the best available free provider."
+                : `Messages route through ${selectedProvider}. Tap Auto to let the gateway choose.`}
+            </Text>
           </View>
-        )}
+        }
+        renderItem={({ item }) => {
+          const isUser = item.role === "user";
+          return (
+            <View
+              style={[
+                styles.bubble,
+                isUser ? styles.userBubble : styles.assistantBubble,
+              ]}
+            >
+              {item.streaming && !item.content ? (
+                <View style={styles.typingRow}>
+                  <ActivityIndicator size="small" color={COLORS.accentBright} />
+                  <Text style={styles.typingText}>Thinking…</Text>
+                </View>
+              ) : (
+                <Text style={[styles.bubbleText, isUser && styles.userBubbleText]}>
+                  {item.content}
+                  {item.streaming ? (
+                    <Text style={styles.cursor}>▋</Text>
+                  ) : null}
+                </Text>
+              )}
+
+              {!isUser && !item.streaming && item.content ? (
+                <View style={styles.assistantFooter}>
+                  {item.providerId ? (
+                    <Text style={styles.attribution}>
+                      {item.providerId}
+                      {item.model ? ` · ${item.model}` : ""}
+                    </Text>
+                  ) : (
+                    <View />
+                  )}
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.copyButton,
+                      pressed && styles.pressed,
+                    ]}
+                    onPress={() => {
+                      void copyMessage(item.content);
+                    }}
+                  >
+                    <Text style={styles.copyText}>Copy</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          );
+        }}
       />
 
       <View style={styles.composer}>
@@ -159,71 +255,36 @@ export default function ChatScreen() {
           value={input}
           onChangeText={setInput}
           placeholder="Message..."
-          placeholderTextColor="#6b7280"
+          placeholderTextColor={COLORS.muted}
+          editable={!sending}
+          onSubmitEditing={() => {
+            void send();
+          }}
         />
         <Pressable
-          style={[styles.sendButton, sending && styles.sendButtonDisabled]}
-          onPress={send}
-          disabled={sending}
+          style={({ pressed }) => [
+            styles.sendButton,
+            (sending || !input.trim()) && styles.sendButtonDisabled,
+            pressed && !sending && input.trim() ? styles.pressed : null,
+          ]}
+          onPress={() => {
+            void send();
+          }}
+          disabled={sending || !input.trim()}
         >
           {sending ? (
-            <ActivityIndicator color="#041018" />
+            <ActivityIndicator color={COLORS.onAccent} />
           ) : (
             <Text style={styles.sendText}>Send</Text>
           )}
         </Pressable>
       </View>
-
-      <Modal visible={sheetOpen} animationType="slide" transparent>
-        <View style={styles.sheetBackdrop}>
-          <View style={styles.sheet}>
-            <Text style={styles.sheetTitle}>Provider</Text>
-            {PROVIDERS.map((provider) => (
-              <Pressable
-                key={provider.id}
-                style={styles.sheetRow}
-                onPress={() => setSelectedProvider(provider.id)}
-              >
-                <Text
-                  style={[
-                    styles.sheetRowText,
-                    selectedProvider === provider.id && styles.sheetRowActive,
-                  ]}
-                >
-                  {provider.name}
-                </Text>
-              </Pressable>
-            ))}
-            <TextInput
-              style={styles.input}
-              value={apiKey}
-              onChangeText={setApiKey}
-              placeholder="API key"
-              placeholderTextColor="#6b7280"
-              secureTextEntry
-            />
-            <Pressable style={styles.sendButton} onPress={saveProviderKey}>
-              <Text style={styles.sendText}>Save key</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={checkProviderKey}>
-              <Text style={styles.secondaryText}>Check key</Text>
-            </Pressable>
-            <Pressable style={styles.secondaryButton} onPress={removeProviderKey}>
-              <Text style={styles.secondaryText}>Remove key</Text>
-            </Pressable>
-            {keyStatus && <Text style={styles.keyStatus}>{keyStatus}</Text>}
-            <Pressable onPress={() => setSheetOpen(false)}>
-              <Text style={styles.closeText}>Close</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#0b0f14" },
+  container: { flex: 1, backgroundColor: COLORS.surface },
   header: {
     paddingTop: 56,
     paddingHorizontal: 16,
@@ -232,85 +293,101 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
-  title: { color: "#e8eef5", fontSize: 22, fontWeight: "700" },
+  title: { color: COLORS.ink, fontSize: 22, fontWeight: "700" },
+  chipRow: { flexDirection: "row", gap: 8 },
   gatewayHint: {
-    color: "#6b7280",
+    color: COLORS.muted,
     fontSize: 12,
     paddingHorizontal: 16,
     paddingBottom: 8,
   },
   errorText: {
-    color: "#f87171",
+    color: COLORS.error,
     fontSize: 13,
     paddingHorizontal: 16,
     paddingBottom: 8,
   },
   chip: {
-    backgroundColor: "#111827",
+    backgroundColor: COLORS.panel,
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
-  chipText: { color: "#67e8f9", textTransform: "capitalize" },
+  chipActive: {
+    backgroundColor: COLORS.accent,
+    borderColor: COLORS.accent,
+  },
+  chipText: { color: COLORS.accentBright, textTransform: "capitalize" },
+  chipTextActive: { color: COLORS.onAccent, fontWeight: "700" },
+  pressed: { opacity: 0.7 },
   list: { flex: 1, paddingHorizontal: 16 },
+  emptyContainer: { flexGrow: 1, justifyContent: "center" },
+  empty: { alignItems: "center", paddingHorizontal: 24 },
+  emptyTitle: {
+    color: COLORS.ink,
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    color: COLORS.muted,
+    fontSize: 14,
+    textAlign: "center",
+    lineHeight: 20,
+  },
   bubble: {
     borderRadius: 12,
     padding: 12,
     marginBottom: 10,
     maxWidth: "85%",
   },
-  userBubble: { alignSelf: "flex-end", backgroundColor: "#0ea5e9" },
-  assistantBubble: { alignSelf: "flex-start", backgroundColor: "#111827" },
-  bubbleText: { color: "#e8eef5" },
+  userBubble: { alignSelf: "flex-end", backgroundColor: COLORS.accent },
+  assistantBubble: { alignSelf: "flex-start", backgroundColor: COLORS.panel },
+  bubbleText: { color: COLORS.ink },
+  userBubbleText: { color: COLORS.onAccent },
+  cursor: { color: COLORS.accentBright },
+  typingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  typingText: { color: COLORS.muted, fontSize: 13 },
+  assistantFooter: {
+    marginTop: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  attribution: { color: COLORS.muted, fontSize: 11 },
+  copyButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  copyText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "600" },
   composer: {
     flexDirection: "row",
     gap: 8,
     padding: 16,
     borderTopWidth: 1,
-    borderTopColor: "#1f2937",
+    borderTopColor: COLORS.border,
   },
   input: {
     flex: 1,
-    backgroundColor: "#111827",
-    color: "#e8eef5",
+    backgroundColor: COLORS.panel,
+    color: COLORS.ink,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
   },
   sendButton: {
-    backgroundColor: "#0ea5e9",
+    backgroundColor: COLORS.accent,
     borderRadius: 10,
     justifyContent: "center",
     paddingHorizontal: 14,
     minWidth: 56,
     alignItems: "center",
   },
-  sendButtonDisabled: { opacity: 0.7 },
-  secondaryButton: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#374151",
-    paddingVertical: 10,
-    alignItems: "center",
-  },
-  sendText: { color: "#041018", fontWeight: "700" },
-  secondaryText: { color: "#e8eef5" },
-  keyStatus: { color: "#9ca3af", fontSize: 13 },
-  sheetBackdrop: {
-    flex: 1,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(0,0,0,0.5)",
-  },
-  sheet: {
-    backgroundColor: "#111827",
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    padding: 16,
-    gap: 8,
-  },
-  sheetTitle: { color: "#e8eef5", fontSize: 18, fontWeight: "700" },
-  sheetRow: { paddingVertical: 10 },
-  sheetRowText: { color: "#9ca3af" },
-  sheetRowActive: { color: "#67e8f9", fontWeight: "600" },
-  closeText: { color: "#67e8f9", textAlign: "center", paddingVertical: 12 },
+  sendButtonDisabled: { opacity: 0.5 },
+  sendText: { color: COLORS.onAccent, fontWeight: "700" },
 });

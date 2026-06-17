@@ -7,7 +7,7 @@ import {
   type RoutingStrategy,
 } from "@multipleai/types";
 
-const CONFIG_PATH = join(homedir(), ".multipleai", "config.json");
+export const CONFIG_PATH = join(homedir(), ".multipleai", "config.json");
 
 export async function loadConfig(): Promise<AppConfig> {
   try {

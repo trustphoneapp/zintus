@@ -7,8 +7,18 @@ export {
   cohereProvider,
   mistralProvider,
   deepseekProvider,
+  fireworksProvider,
+  xaiProvider,
+  huggingFaceProvider,
+  lmStudioProvider,
   ollamaProvider,
 } from "./factory.js";
 export { GROQ_MODEL_70B, GROQ_MODEL_8B } from "./providers/groq.js";
 export { ProviderHttpError } from "./utils.js";
+export {
+  estimateUsage,
+  estimateInputTokens,
+  estimateTokensFromText,
+  usageFromProviderFields,
+} from "./token-estimate.js";
 export type { Provider, ProviderId } from "@multipleai/types";

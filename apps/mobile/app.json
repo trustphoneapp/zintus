@@ -6,7 +6,52 @@
     "scheme": "multipleai",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
-    "plugins": ["expo-router", "expo-secure-store"],
+    "icon": "./assets/icon.png",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "com.multipleai.app",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSLocalNetworkUsageDescription": "MultipleAI connects to a gateway running on your local network to route AI requests.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.multipleai.app",
+      "edgeToEdgeEnabled": true,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      "expo-sqlite",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 192,
+          "resizeMode": "contain",
+          "backgroundColor": "#0D0B14"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#A855F7"
+        }
+      ]
+    ],
     "experiments": {
       "typedRoutes": true
     }

@@ -6,7 +6,8 @@ import { PROVIDER_IDS, type ProviderId } from "@multipleai/types";
 import { PROVIDER_META } from "../lib/router.js";
 
 const CLOUD_PROVIDERS = PROVIDER_IDS.filter(
-  (id): id is Exclude<ProviderId, "ollama"> => id !== "ollama",
+  (id): id is Exclude<ProviderId, "ollama" | "lmstudio"> =>
+    id !== "ollama" && id !== "lmstudio",
 );
 
 export async function runSetup(): Promise<void> {

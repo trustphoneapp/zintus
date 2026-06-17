@@ -1,6 +1,6 @@
 import { listProviders } from "@multipleai/providers";
 import type { ProviderId } from "@multipleai/types";
-import { getProviderStatus } from "./router";
+import { fetchGatewayHealth, type GatewaySavings } from "./gateway";
 
 export interface DesktopProviderInfo {
   id: ProviderId;
@@ -14,38 +14,63 @@ export interface DesktopProviderInfo {
   inCooldown: boolean;
 }
 
+const DEFAULT_QUOTA_LIMIT = 1_000_000;
+
 const providerMeta = Object.fromEntries(
   listProviders().map((p) => [
     p.id,
-    {
-      name: p.name,
-      color: p.color,
-      priority: p.priority,
-      quotaLimit: 1_000_000,
-    },
+    { name: p.name, color: p.color, priority: p.priority },
   ]),
-) as Record<
-  ProviderId,
-  { name: string; color: string; priority: number; quotaLimit: number }
->;
+) as Record<ProviderId, { name: string; color: string; priority: number }>;
 
-export async function fetchProviderInfos(): Promise<DesktopProviderInfo[]> {
-  const statuses = await getProviderStatus();
+/**
+ * Provider status for the desktop UI comes exclusively from the gateway's
+ * `/health` endpoint — the gateway owns the quota ledger, keychain, and cooldown
+ * state (bun:sqlite). The desktop is a static webview and deliberately does not
+ * run a parallel router; when the gateway is down every provider is reported as
+ * unavailable rather than falling back to a divergent local view.
+ */
+function buildProviderInfos(
+  health: Awaited<ReturnType<typeof fetchGatewayHealth>>,
+): DesktopProviderInfo[] {
+  const statuses = new Map(health?.health.providers.map((p) => [p.id, p]));
 
-  return statuses
-    .map((status) => {
-      const meta = providerMeta[status.id];
+  return listProviders()
+    .map((provider) => {
+      const meta = providerMeta[provider.id];
+      const status = statuses.get(provider.id);
       return {
-        id: status.id,
-        name: status.name,
-        color: status.color,
-        quotaLimit: status.tokensLimit ?? meta.quotaLimit,
-        quotaUsed: status.tokensToday,
-        enabled: status.available,
-        hasKey: status.hasKey,
-        priority: status.priority,
-        inCooldown: status.inCooldown,
+        id: provider.id,
+        name: meta.name,
+        color: meta.color,
+        priority: meta.priority,
+        quotaLimit: status?.quotaLimit ?? DEFAULT_QUOTA_LIMIT,
+        quotaUsed: status?.quotaUsed ?? 0,
+        enabled: status?.available ?? false,
+        hasKey: status?.hasKey ?? false,
+        inCooldown: status?.inCooldown ?? false,
       };
     })
     .sort((a, b) => a.priority - b.priority);
+}
+
+export async function fetchProviderInfos(): Promise<DesktopProviderInfo[]> {
+  const gatewayHealth = await fetchGatewayHealth();
+  return buildProviderInfos(gatewayHealth);
+}
+
+/**
+ * Single gateway round-trip that returns provider status plus the savings
+ * estimate from `/health`, so the usage screen can show both without a second
+ * fetch (savings live alongside providers in the same payload).
+ */
+export async function fetchProviderSnapshot(): Promise<{
+  providers: DesktopProviderInfo[];
+  savings: GatewaySavings | null;
+}> {
+  const gatewayHealth = await fetchGatewayHealth();
+  return {
+    providers: buildProviderInfos(gatewayHealth),
+    savings: gatewayHealth?.health.savings ?? null,
+  };
 }

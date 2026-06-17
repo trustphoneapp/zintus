@@ -24,6 +24,10 @@
     "./groq-reset": {
       "types": "./src/groq-reset.ts",
       "default": "./src/groq-reset.ts"
+    },
+    "./quota-core": {
+      "types": "./src/quota-core.ts",
+      "default": "./src/quota-core.ts"
     }
   },
   "scripts": {

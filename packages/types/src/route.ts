@@ -1,4 +1,5 @@
 import type { ProviderId } from "./provider-id.js";
+import type { ContextMode, RoutingStrategy } from "./config.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -9,7 +10,19 @@ export interface RouteRequest {
   messages: ChatMessage[];
   model?: string;
   provider?: ProviderId;
+  mode?: ContextMode;
   stream?: boolean;
+  threadId?: string;
+  /** Gemini cached-content resource name, when the caller manages one. */
+  cachedContentHandle?: string;
+  stickySessionKey?: string;
+  stickySessionTtlMs?: number;
+  virtualKey?: string;
+  providerWeights?: Record<string, number>;
+  /** Per-request routing strategy override (else the router's configured default). */
+  strategy?: RoutingStrategy | "weighted";
+  temperature?: number;
+  maxTokens?: number;
 }
 
 export interface RouteResponse {

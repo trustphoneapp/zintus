@@ -6,6 +6,7 @@ import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { Ionicons } from "@expo/vector-icons";
 import { ensureNotificationPermissions } from "@/lib/notifications";
+import { COLORS } from "@/lib/theme";
 
 export default function RootLayout() {
   useEffect(() => {
@@ -17,14 +18,14 @@ export default function RootLayout() {
       <StatusBar style="light" />
       <Tabs
         screenOptions={{
-          headerStyle: { backgroundColor: "#0b0f14" },
-          headerTintColor: "#e8eef5",
+          headerStyle: { backgroundColor: COLORS.surface },
+          headerTintColor: COLORS.ink,
           tabBarStyle: {
-            backgroundColor: "#0b0f14",
-            borderTopColor: "#1f2937",
+            backgroundColor: COLORS.surface,
+            borderTopColor: COLORS.border,
           },
-          tabBarActiveTintColor: "#0ea5e9",
-          tabBarInactiveTintColor: "#6b7280",
+          tabBarActiveTintColor: COLORS.accentBright,
+          tabBarInactiveTintColor: COLORS.muted,
         }}
       >
         <Tabs.Screen

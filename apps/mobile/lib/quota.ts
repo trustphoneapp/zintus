@@ -1,6 +1,14 @@
 import * as SQLite from "expo-sqlite";
 import type { ProviderId } from "@multipleai/types";
 import { PROVIDER_IDS } from "@multipleai/types";
+import { parseGroqResetHeader } from "@multipleai/router/groq-reset";
+import {
+  applyUsage,
+  cooldownUntil,
+  isQuotaAvailable as coreIsQuotaAvailable,
+  remainingRatio as coreRemainingRatio,
+  resetPatch,
+} from "@multipleai/router/quota-core";
 import { PROVIDER_LIMITS, type ProviderQuotaRow } from "./limits";
 
 const DB_NAME = "multipleai-quota.db";
@@ -77,45 +85,29 @@ async function ensureProvider(
   return (await getProvider(db, id))!;
 }
 
-function startOfUtcDay(now: number): number {
-  const date = new Date(now);
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-}
-
+// All quota *decisions* come from @multipleai/router/quota-core; this file only
+// owns the expo-sqlite persistence adapter.
 async function maybeResetDailyCounters(
   db: SQLite.SQLiteDatabase,
   id: ProviderId,
   now = Date.now(),
 ): Promise<ProviderQuotaRow> {
-  const limits = PROVIDER_LIMITS[id];
   const row = await ensureProvider(db, id);
-
-  if (limits.rollingWindow) {
-    if (row.lastReset != null && now >= row.lastReset) {
-      await db.runAsync(
-        `UPDATE providers
-         SET requests_today = 0, tokens_today = 0, last_reset = NULL, cooldown_until = NULL
-         WHERE id = ?`,
-        id,
-      );
-      return (await getProvider(db, id))!;
-    }
+  const patch = resetPatch(row, PROVIDER_LIMITS[id], now);
+  if (!patch) {
     return row;
   }
-
-  const dayStart = startOfUtcDay(now);
-  if (row.lastReset == null || row.lastReset < dayStart) {
-    await db.runAsync(
-      `UPDATE providers
-       SET requests_today = 0, tokens_today = 0, last_reset = ?
-       WHERE id = ?`,
-      dayStart,
-      id,
-    );
-    return (await getProvider(db, id))!;
-  }
-
-  return row;
+  await db.runAsync(
+    `UPDATE providers
+     SET requests_today = ?, tokens_today = ?, last_reset = ?, cooldown_until = ?
+     WHERE id = ?`,
+    patch.requestsToday ?? row.requestsToday,
+    patch.tokensToday ?? row.tokensToday,
+    patch.lastReset !== undefined ? patch.lastReset : row.lastReset,
+    patch.cooldownUntil !== undefined ? patch.cooldownUntil : row.cooldownUntil,
+    id,
+  );
+  return (await getProvider(db, id))!;
 }
 
 export async function remainingRatio(
@@ -123,19 +115,8 @@ export async function remainingRatio(
   now = Date.now(),
 ): Promise<number> {
   const db = await getDb();
-  const limits = PROVIDER_LIMITS[id];
   const row = await maybeResetDailyCounters(db, id, now);
-
-  const requestRatio =
-    limits.requestsPerDay != null
-      ? 1 - row.requestsToday / limits.requestsPerDay
-      : 1;
-  const tokenRatio =
-    limits.tokensPerDay != null
-      ? 1 - row.tokensToday / limits.tokensPerDay
-      : 1;
-
-  return Math.min(requestRatio, tokenRatio);
+  return coreRemainingRatio(row, PROVIDER_LIMITS[id]);
 }
 
 export async function isQuotaAvailable(
@@ -143,29 +124,8 @@ export async function isQuotaAvailable(
   now = Date.now(),
 ): Promise<boolean> {
   const db = await getDb();
-  const limits = PROVIDER_LIMITS[id];
   const row = await maybeResetDailyCounters(db, id, now);
-
-  if (row.cooldownUntil != null && row.cooldownUntil > now) {
-    return false;
-  }
-
-  if (limits.rollingWindow && row.lastReset != null && row.lastReset > now) {
-    return false;
-  }
-
-  if (
-    limits.requestsPerDay != null &&
-    row.requestsToday >= limits.requestsPerDay
-  ) {
-    return false;
-  }
-
-  if (limits.tokensPerDay != null && row.tokensToday >= limits.tokensPerDay) {
-    return false;
-  }
-
-  return true;
+  return coreIsQuotaAvailable(row, PROVIDER_LIMITS[id], now);
 }
 
 export async function recordUsage(
@@ -182,13 +142,14 @@ export async function recordUsage(
   const row = await maybeResetDailyCounters(db, id, now);
   const tokensIn = input.tokensIn ?? 0;
   const tokensOut = input.tokensOut ?? 0;
+  const next = applyUsage(row, tokensIn, tokensOut);
 
   await db.runAsync(
     `UPDATE providers
      SET requests_today = ?, tokens_today = ?
      WHERE id = ?`,
-    row.requestsToday + 1,
-    row.tokensToday + tokensIn + tokensOut,
+    next.requestsToday,
+    next.tokensToday,
     id,
   );
 
@@ -212,11 +173,9 @@ export async function setCooldown(
 ): Promise<void> {
   const db = await getDb();
   await ensureProvider(db, id);
-  const base = 30_000 * 2 ** Math.max(retries, 0);
-  const until = now + Math.min(base, 1_800_000);
   await db.runAsync(
     "UPDATE providers SET cooldown_until = ? WHERE id = ?",
-    until,
+    cooldownUntil(retries, now),
     id,
   );
 }
@@ -234,26 +193,7 @@ export async function applyGroqRollingReset(
   resetHeader: string,
   now = Date.now(),
 ): Promise<void> {
-  const trimmed = resetHeader.trim().toLowerCase();
-  let resetAt = now + 60_000;
-  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)?$/.exec(trimmed);
-  if (match) {
-    const amount = Number.parseFloat(match[1]!);
-    const unit = match[2] ?? "s";
-    switch (unit) {
-      case "ms":
-        resetAt = now + amount;
-        break;
-      case "m":
-        resetAt = now + amount * 60_000;
-        break;
-      case "h":
-        resetAt = now + amount * 3_600_000;
-        break;
-      default:
-        resetAt = now + amount * 1_000;
-    }
-  }
+  const resetAt = parseGroqResetHeader(resetHeader, now);
 
   const db = await getDb();
   await db.runAsync(
@@ -283,6 +223,18 @@ export async function getQuotaSnapshot(
     inCooldown: row.cooldownUntil != null && row.cooldownUntil > now,
     limits: PROVIDER_LIMITS[id],
   };
+}
+
+/**
+ * Which quota source the usage UI should trust. The phone routes ONLY through
+ * the gateway, so its local expo-sqlite ledger is never updated by real traffic
+ * — when the gateway is reachable its `/health` is authoritative; when it is
+ * not, quota is genuinely unknown and must NOT be shown as authoritative zeros.
+ */
+export function resolveQuotaSource(
+  gatewayOnline: boolean,
+): "gateway" | "unknown" {
+  return gatewayOnline ? "gateway" : "unknown";
 }
 
 export async function getAllQuotaSnapshots(

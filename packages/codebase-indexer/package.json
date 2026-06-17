@@ -1,0 +1,24 @@
+{
+  "name": "@multipleai/codebase-indexer",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/index.test.ts"
+  },
+  "dependencies": {
+    "@multipleai/memory": "workspace:*",
+    "sqlite-vec": "^0.1.9"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

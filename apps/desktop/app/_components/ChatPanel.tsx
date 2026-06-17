@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { ProviderId } from "@multipleai/types";
 import { PROVIDER_IDS } from "@multipleai/types";
-import { streamChat } from "@/lib/router";
+import { streamChat, type ChatMessage } from "@/lib/chat-client";
 import {
+  createChatMessage,
   useChatStore,
   useProviderStatusStore,
   useSettingsStore,
@@ -13,6 +14,7 @@ import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { MessageBubble } from "./MessageBubble";
 
 export function ChatPanel() {
   const { settings, hydrate } = useSettingsStore();
@@ -25,14 +27,12 @@ export function ChatPanel() {
   } = useProviderStatusStore();
   const {
     prompt,
-    output,
+    messages,
     loading,
-    routedModel,
     setPrompt,
-    setOutput,
+    appendMessage,
+    updateMessage,
     setLoading,
-    setRoutedModel,
-    resetOutput,
   } = useChatStore();
 
   const abortRef = useRef<AbortController | null>(null);
@@ -44,10 +44,11 @@ export function ChatPanel() {
 
   useEffect(() => {
     outputRef.current?.scrollTo(0, outputRef.current.scrollHeight);
-  }, [output]);
+  }, [messages]);
 
   const send = useCallback(async () => {
-    if (!prompt.trim() || loading) {
+    const trimmed = prompt.trim();
+    if (!trimmed || loading) {
       return;
     }
 
@@ -55,52 +56,66 @@ export function ChatPanel() {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // Send the full conversation so multi-turn context is preserved.
+    const history: ChatMessage[] = [
+      ...messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+      { role: "user" as const, content: trimmed },
+    ];
+
+    const userMessage = createChatMessage("user", trimmed);
+    const assistant = createChatMessage("assistant", "");
+    appendMessage(userMessage);
+    appendMessage(assistant);
+    setPrompt("");
     setLoading(true);
-    resetOutput();
     setActiveProvider(null);
 
     try {
-      const result = await streamChat(
-        [{ role: "user", content: prompt.trim() }],
+      const result = await streamChat({
+        messages: history,
         settings,
-        {
-          provider: selectedProvider ?? undefined,
-          signal: controller.signal,
+        providerId: selectedProvider ?? undefined,
+        mode: settings.contextMode,
+        signal: controller.signal,
+        onChunk: (text) => {
+          if (!controller.signal.aborted) {
+            updateMessage(assistant.id, { content: text });
+          }
         },
-      );
+      });
 
+      updateMessage(assistant.id, {
+        providerId: result.providerId,
+        model: result.model,
+      });
       setActiveProvider(result.providerId);
-      setRoutedModel(result.model);
-      let text = "";
-
-      for await (const chunk of result.stream) {
-        if (controller.signal.aborted) {
-          break;
-        }
-        text += chunk;
-        setOutput(text);
-      }
 
       void refresh();
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         return;
       }
-      setOutput(error instanceof Error ? error.message : "Request failed");
+      updateMessage(assistant.id, {
+        content: error instanceof Error ? error.message : "Request failed",
+      });
     } finally {
       setLoading(false);
     }
   }, [
+    appendMessage,
     loading,
+    messages,
     prompt,
     refresh,
-    resetOutput,
     selectedProvider,
     setActiveProvider,
     setLoading,
-    setOutput,
-    setRoutedModel,
+    setPrompt,
     settings,
+    updateMessage,
   ]);
 
   const stop = () => {
@@ -116,7 +131,6 @@ export function ChatPanel() {
           {activeProvider && (
             <Badge style={{ color: "var(--color-purple-bright)" }}>
               routed → {activeProvider}
-              {routedModel ? ` · ${routedModel}` : ""}
             </Badge>
           )}
         </CardHeader>
@@ -145,6 +159,23 @@ export function ChatPanel() {
             </select>
           </div>
 
+          <div
+            ref={outputRef}
+            className="min-h-0 flex-1 overflow-auto"
+            style={{ display: "flex", flexDirection: "column", gap: 12 }}
+          >
+            {messages.length === 0 ? (
+              <span className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+                Streamed responses appear here. Cmd+Enter to send. Auto-routes via{" "}
+                {settings.routingStrategy} strategy.
+              </span>
+            ) : (
+              messages.map((message) => (
+                <MessageBubble key={message.id} message={message} />
+              ))
+            )}
+          </div>
+
           <Textarea
             rows={3}
             value={prompt}
@@ -152,31 +183,20 @@ export function ChatPanel() {
             placeholder="Ask anything..."
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
                 void send();
               }
             }}
           />
 
           <div className="flex gap-2">
-            <Button type="button" onClick={() => void send()} disabled={loading || !prompt}>
+            <Button type="button" onClick={() => void send()} disabled={loading || !prompt.trim()}>
               {loading ? "Streaming..." : "Send"}
             </Button>
             {loading && (
               <Button type="button" variant="secondary" onClick={stop}>
                 Stop
               </Button>
-            )}
-          </div>
-
-          <div
-            ref={outputRef}
-            className="output min-h-0 flex-1 overflow-auto whitespace-pre-wrap"
-          >
-            {output || (
-              <span style={{ color: "var(--color-text-muted)" }}>
-                Streamed responses appear here. Cmd+Enter to send. Auto-routes via{" "}
-                {settings.routingStrategy} strategy.
-              </span>
             )}
           </div>
         </CardContent>

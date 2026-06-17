@@ -55,6 +55,7 @@ function ProviderRow({ provider }: { provider: ProviderInfo }) {
 
 function StatusDashboard() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [saved, setSaved] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -64,8 +65,10 @@ function StatusDashboard() {
       const config = await loadConfig();
       const router = createAppRouter(config);
       const infos = await getProviderInfos(router);
+      const savings = router.getSavings();
       if (active) {
         setProviders(infos);
+        setSaved(savings.total);
         setLoading(false);
       }
     }
@@ -95,6 +98,13 @@ function StatusDashboard() {
           providers.map((p) => <ProviderRow key={p.id} provider={p} />)
         )}
       </Box>
+      {!loading && (
+        <Box marginTop={1}>
+          <Text dimColor>
+            Estimated saved vs paid APIs: ${saved.toFixed(2)} (est.)
+          </Text>
+        </Box>
+      )}
       <Box marginTop={1}>
         <Text dimColor>Press Ctrl+C to exit</Text>
       </Box>

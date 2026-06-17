@@ -17,4 +17,25 @@ export const usageLog = sqliteTable("usage_log", {
   tokensOut: integer("tokens_out").notNull().default(0),
   status: text("status").notNull(),
   errorCode: integer("error_code"),
+  latencyMs: integer("latency_ms"),
+});
+
+export const virtualKeys = sqliteTable("virtual_keys", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  requestsToday: integer("requests_today").notNull().default(0),
+  tokensToday: integer("tokens_today").notNull().default(0),
+  lastReset: integer("last_reset"),
+  requestsLimit: integer("requests_limit"),
+  tokensLimit: integer("tokens_limit"),
+  requestsPerMinute: integer("requests_per_minute"),
+  tokensPerMinute: integer("tokens_per_minute"),
+});
+
+// Timestamped per-virtual-key usage events, for rolling 60s RPM/TPM windows.
+export const vkUsage = sqliteTable("vk_usage", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  vkId: text("vk_id").notNull(),
+  timestamp: integer("timestamp").notNull(),
+  tokens: integer("tokens").notNull().default(0),
 });

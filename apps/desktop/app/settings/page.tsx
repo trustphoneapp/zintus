@@ -1,10 +1,9 @@
 "use client";
 
 import { useEffect } from "react";
-import type { ProviderId, RoutingStrategy } from "@multipleai/types";
+import type { ContextMode, ProviderId, RoutingStrategy } from "@multipleai/types";
 import { PROVIDER_IDS } from "@multipleai/types";
 import { useSettingsStore } from "@/lib/store";
-import { Button } from "../_components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../_components/ui/card";
 
 const STRATEGIES: Array<{
@@ -15,7 +14,8 @@ const STRATEGIES: Array<{
   {
     value: "fastest",
     label: "Fastest",
-    description: "Follow configured provider priority order.",
+    description:
+      "Prefer the provider with the lowest recent p95 latency; falls back to priority order until enough samples exist.",
   },
   {
     value: "capability",
@@ -25,7 +25,29 @@ const STRATEGIES: Array<{
   {
     value: "economy",
     label: "Economy",
-    description: "Spread usage across providers with most remaining quota.",
+    description: "Spread usage across providers with the most remaining quota.",
+  },
+];
+
+const CONTEXT_MODES: Array<{
+  value: ContextMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "fast",
+    label: "Fast",
+    description: "Lowest compile latency and context expansion.",
+  },
+  {
+    value: "smart",
+    label: "Smart",
+    description: "Balanced context depth for most chats.",
+  },
+  {
+    value: "deep",
+    label: "Deep",
+    description: "Maximum context expansion for complex tasks.",
   },
 ];
 
@@ -105,6 +127,34 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Context mode</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {CONTEXT_MODES.map((mode) => (
+            <label
+              key={mode.value}
+              style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}
+            >
+              <input
+                type="radio"
+                name="context-mode"
+                checked={settings.contextMode === mode.value}
+                onChange={() => update({ contextMode: mode.value })}
+              />
+              <span>
+                <strong>{mode.label}</strong>
+                <br />
+                <small style={{ color: "var(--color-text-muted)" }}>
+                  {mode.description}
+                </small>
+              </span>
+            </label>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Priority order</CardTitle>
         </CardHeader>
         <CardContent>
@@ -118,9 +168,9 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Button type="button" onClick={() => update({})}>
-        Saved automatically
-      </Button>
+      <p style={{ fontSize: 12, color: "var(--color-text-muted)", margin: 0 }}>
+        Changes are saved automatically and applied to chat auto-routing.
+      </p>
     </div>
   );
 }

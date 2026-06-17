@@ -1,5 +1,11 @@
 import { createRouter } from "@multipleai/router";
-import type { AppConfig, ChatMessage, ProviderId, RouteStreamResult } from "@multipleai/types";
+import type {
+  AppConfig,
+  ChatMessage,
+  ContextMode,
+  ProviderId,
+  RouteStreamResult,
+} from "@multipleai/types";
 import { DEFAULT_CONFIG } from "@multipleai/types";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,8 +13,14 @@ import { join } from "node:path";
 export interface ChatRequestBody {
   messages: ChatMessage[];
   provider?: ProviderId;
+  mode?: ContextMode;
+  threadId?: string;
   apiKeys?: Partial<Record<ProviderId, string>>;
   settings?: Partial<AppConfig>;
+}
+
+export interface ChatServerStreamResult extends RouteStreamResult {
+  compileTokens?: number;
 }
 
 function quotaDbPath(): string {
@@ -18,7 +30,9 @@ function quotaDbPath(): string {
   );
 }
 
-export async function streamChat(body: ChatRequestBody): Promise<RouteStreamResult> {
+export async function streamChat(
+  body: ChatRequestBody,
+): Promise<ChatServerStreamResult> {
   const config = { ...DEFAULT_CONFIG, ...body.settings };
   const router = createRouter({
     strategy: config.routingStrategy,
@@ -26,15 +40,19 @@ export async function streamChat(body: ChatRequestBody): Promise<RouteStreamResu
     defaultProvider: config.defaultProvider,
     dbPath: quotaDbPath(),
     getApiKey: async (providerId: ProviderId) => {
-      if (providerId === "ollama") {
+      if (providerId === "ollama" || providerId === "lmstudio") {
         return null;
       }
       return body.apiKeys?.[providerId] ?? null;
     },
   });
 
-  return router.routeAndStream({
+  const result = await router.routeAndStream({
     messages: body.messages,
     provider: body.provider,
+    mode: body.mode ?? config.contextMode,
+    threadId: body.threadId,
   });
+
+  return { ...result, compileTokens: undefined };
 }

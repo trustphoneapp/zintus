@@ -6,4 +6,8 @@ export type ProviderId =
   | "cohere"
   | "mistral"
   | "deepseek"
+  | "fireworks"
+  | "xai"
+  | "huggingface"
+  | "lmstudio"
   | "ollama";

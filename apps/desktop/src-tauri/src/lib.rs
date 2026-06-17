@@ -33,9 +33,24 @@ fn keyring_delete(provider_id: String) -> Result<(), String> {
   }
 }
 
+/// Resolve a sensible default shell per OS for the embedded terminal. The
+/// webview cannot read host env (`$SHELL`/`%COMSPEC%`), so the backend does it:
+/// honor the user's login shell on macOS/Linux, fall back to a shell that is
+/// guaranteed to exist on each platform.
 #[tauri::command]
-fn greet(name: &str) -> String {
-  format!("Hello, {name}!")
+fn default_shell() -> String {
+  #[cfg(target_os = "windows")]
+  {
+    std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
+  }
+  #[cfg(target_os = "macos")]
+  {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
+  }
+  #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+  {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
+  }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,10 +58,10 @@ pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_pty::init())
     .invoke_handler(tauri::generate_handler![
-      greet,
       keyring_get,
       keyring_set,
-      keyring_delete
+      keyring_delete,
+      default_shell
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

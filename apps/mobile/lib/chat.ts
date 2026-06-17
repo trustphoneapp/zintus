@@ -1,10 +1,23 @@
-import type { ChatMessage, ProviderId } from "@multipleai/types";
+import type {
+  ChatMessage,
+  ContextMode,
+  ProviderId,
+  RoutingStrategy,
+} from "@multipleai/types";
 
 const DEFAULT_GATEWAY_URL =
   process.env.EXPO_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";
+const GATEWAY_TOKEN = process.env.EXPO_PUBLIC_GATEWAY_TOKEN?.trim() || "";
+
+function gatewayAuthHeaders(): Record<string, string> {
+  return GATEWAY_TOKEN ? { Authorization: `Bearer ${GATEWAY_TOKEN}` } : {};
+}
 
 export interface StreamChatParams {
   providerId?: ProviderId;
+  /** Routing strategy override; only meaningful when no provider is sent. */
+  strategy?: RoutingStrategy;
+  mode?: ContextMode;
   messages: ChatMessage[];
   threadId?: string;
   onChunk: (text: string) => void;
@@ -21,6 +34,8 @@ interface GatewayChunk {
 
 export async function streamChat({
   providerId,
+  strategy,
+  mode,
   messages,
   threadId,
   onChunk,
@@ -33,11 +48,13 @@ export async function streamChat({
 }> {
   const response = await fetch(`${DEFAULT_GATEWAY_URL}/v1/chat/completions`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
     body: JSON.stringify({
       messages,
       stream: true,
       provider: providerId,
+      strategy,
+      mode,
       thread_id: threadId,
     }),
     signal,

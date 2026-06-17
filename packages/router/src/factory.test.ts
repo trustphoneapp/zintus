@@ -3,7 +3,7 @@ import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ChatMessage, Provider, ProviderId } from "@multipleai/types";
-import { ProviderHttpError } from "@multipleai/providers";
+import { ProviderHttpError, estimateUsage } from "@multipleai/providers";
 import { createRouter } from "./factory.js";
 
 const dbPaths: string[] = [];
@@ -37,6 +37,7 @@ function createTestRouter(providers: Provider[]) {
   mock.module("@multipleai/providers", () => ({
     listProviders: () => providers,
     ProviderHttpError,
+    estimateUsage,
   }));
 
   return createRouter({
@@ -108,5 +109,59 @@ describe("createRouter failover", () => {
     expect(models).toEqual(["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]);
     expect(result.model).toBe("llama-3.1-8b-instant");
     expect(result.providerId).toBe("groq");
+  });
+});
+
+describe("createRouter token accounting", () => {
+  const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+
+  test("records provider-reported usage in the quota ledger", async () => {
+    const router = createTestRouter([
+      stubProvider("gemini", 1, async () => ({
+        stream: (async function* () {
+          yield { content: "hello world" };
+          yield {
+            usage: {
+              inputTokens: 42,
+              outputTokens: 7,
+              totalTokens: 49,
+              source: "provider" as const,
+            },
+          };
+        })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({ messages });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+
+    const status = await router.getProviderStatus();
+    const gemini = status.find((entry) => entry.id === "gemini");
+    // tokensToday must equal the provider-reported total, not a char count.
+    expect(gemini?.tokensToday).toBe(49);
+  });
+
+  test("falls back to a local estimate when the provider reports no usage", async () => {
+    const router = createTestRouter([
+      stubProvider("gemini", 1, async () => ({
+        stream: (async function* () {
+          yield { content: "some output text" };
+        })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({ messages });
+    let output = "";
+    for await (const chunk of result.stream) {
+      output += chunk;
+    }
+
+    const expected = estimateUsage(messages, output);
+    const status = await router.getProviderStatus();
+    const gemini = status.find((entry) => entry.id === "gemini");
+    expect(gemini?.tokensToday).toBe(expected.totalTokens);
+    expect(gemini?.tokensToday).toBeGreaterThan(0);
   });
 });

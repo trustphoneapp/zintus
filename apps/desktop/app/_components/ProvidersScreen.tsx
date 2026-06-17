@@ -65,7 +65,7 @@ export default function ProvidersScreen() {
               onChange={(e) => setSelected(e.target.value as ProviderId)}
               style={{ width: "auto", minWidth: 140 }}
             >
-              {PROVIDER_IDS.filter((id) => id !== "ollama").map((id) => (
+              {PROVIDER_IDS.filter((id) => id !== "ollama" && id !== "lmstudio").map((id) => (
                 <option key={id} value={id}>
                   {id}
                 </option>
@@ -137,7 +137,7 @@ export default function ProvidersScreen() {
                 <span>{provider.hasKey ? "Key configured" : "No key"}</span>
                 <span>{provider.enabled ? "Ready" : "Unavailable"}</span>
               </div>
-              {provider.id !== "ollama" && (
+              {provider.id !== "ollama" && provider.id !== "lmstudio" && (
                 <div style={{ display: "flex", gap: 8 }}>
                   <Button
                     type="button"

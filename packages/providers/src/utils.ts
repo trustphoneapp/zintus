@@ -1,4 +1,23 @@
 import type { RateLimitInfo, StreamChunk } from "@multipleai/types";
+import { usageFromProviderFields } from "./token-estimate.js";
+
+interface OpenAiUsageFields {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+function toUsageChunk(usage: OpenAiUsageFields | undefined): StreamChunk | null {
+  if (!usage) {
+    return null;
+  }
+  const normalized = usageFromProviderFields({
+    inputTokens: usage.prompt_tokens,
+    outputTokens: usage.completion_tokens,
+    totalTokens: usage.total_tokens,
+  });
+  return normalized ? { usage: normalized } : null;
+}
 
 export function parseGroqRateLimitHeaders(
   headers: Headers,
@@ -58,12 +77,17 @@ export async function* parseOpenAiSseStream(
               delta?: { content?: string };
               finish_reason?: string | null;
             }>;
+            usage?: OpenAiUsageFields;
           };
           const content = parsed.choices?.[0]?.delta?.content;
           const finished = parsed.choices?.[0]?.finish_reason != null;
 
           if (content) {
             yield { content };
+          }
+          const usageChunk = toUsageChunk(parsed.usage);
+          if (usageChunk) {
+            yield usageChunk;
           }
           if (finished) {
             yield { done: true };
@@ -82,10 +106,15 @@ export async function* parseOpenAiSseStream(
           try {
             const parsed = JSON.parse(data) as {
               choices?: Array<{ delta?: { content?: string } }>;
+              usage?: OpenAiUsageFields;
             };
             const content = parsed.choices?.[0]?.delta?.content;
             if (content) {
               yield { content };
+            }
+            const usageChunk = toUsageChunk(parsed.usage);
+            if (usageChunk) {
+              yield usageChunk;
             }
           } catch {
             // Skip malformed trailing chunk.

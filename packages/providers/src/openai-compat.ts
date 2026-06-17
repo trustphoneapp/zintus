@@ -21,6 +21,7 @@ export interface OpenAiCompatConfig {
   defaultModel: string;
   baseUrl: string;
   includeRateLimit?: boolean;
+  validatePath?: string;
 }
 
 export function createOpenAiCompatProvider(
@@ -35,6 +36,7 @@ export function createOpenAiCompatProvider(
     defaultModel,
     baseUrl,
     includeRateLimit = false,
+    validatePath = "/models",
   } = config;
 
   return {
@@ -69,6 +71,10 @@ export function createOpenAiCompatProvider(
           model: options.model ?? defaultModel,
           messages,
           stream: true,
+          // Ask OpenAI-compatible providers to emit a final usage chunk so we
+          // record real token counts instead of estimating. Providers that do
+          // not support this field ignore it.
+          stream_options: { include_usage: true },
           temperature: options.temperature,
           max_tokens: options.maxTokens,
         }),
@@ -108,7 +114,7 @@ export function createOpenAiCompatProvider(
         return true;
       }
 
-      return validateWithFetch(`${baseUrl}/models`, {
+      return validateWithFetch(`${baseUrl}${validatePath}`, {
         method: "GET",
         headers: { Authorization: `Bearer ${key}` },
       });

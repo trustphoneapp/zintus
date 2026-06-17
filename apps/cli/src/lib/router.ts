@@ -40,12 +40,16 @@ function statusToInfo(status: ProviderStatus): ProviderInfo {
   };
 }
 
-export function createAppEngine(config: AppConfig): Engine {
+export function createAppEngine(
+  config: AppConfig,
+  options?: { workspaceDir?: string },
+): Engine {
   return createEngine({
     strategy: config.routingStrategy,
     providerPriority: config.providerPriority,
     defaultProvider: config.defaultProvider,
     dbPath: getDbPath(),
+    workspaceDir: options?.workspaceDir,
   });
 }
 

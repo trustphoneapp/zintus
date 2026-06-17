@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["node", "bun"]
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../types" },
+    { "path": "../providers" }
+  ]
+}

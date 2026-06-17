@@ -48,7 +48,7 @@ export async function runKeysSet(
     process.exit(1);
   }
 
-  if (provider !== "ollama") {
+  if (provider !== "ollama" && provider !== "lmstudio") {
     const result = await validateKeyRemote(provider, key);
     if (!result.valid) {
       console.error(chalk.red(result.error ?? "Key validation failed"));

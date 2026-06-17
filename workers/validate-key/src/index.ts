@@ -13,9 +13,38 @@ interface ValidateKeyResponse {
   error?: string;
 }
 
+/** Cloudflare native Rate Limiting binding (configured in wrangler.toml). */
+interface RateLimiter {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+
+interface Bindings {
+  RATE_LIMITER?: RateLimiter;
+  /** Comma-separated allowlist of origins, or unset/"*" for any. */
+  ALLOWED_ORIGINS?: string;
+}
+
 const RATE_LIMIT = 10;
 const WINDOW_MS = 60_000;
-const hits = new Map<string, { count: number; resetAt: number }>();
+
+// In-memory limiter is ONLY a best-effort fallback for `wrangler dev`. On the
+// production edge it is ineffective (state is per-isolate and not shared), so we
+// rely on the Cloudflare RATE_LIMITER binding there. See wrangler.toml.
+const localHits = new Map<string, { count: number; resetAt: number }>();
+
+function localRateLimitOk(ip: string): boolean {
+  const now = Date.now();
+  const entry = localHits.get(ip);
+  if (!entry || entry.resetAt <= now) {
+    localHits.set(ip, { count: 1, resetAt: now + WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= RATE_LIMIT) {
+    return false;
+  }
+  entry.count += 1;
+  return true;
+}
 
 function getClientIp(request: Request): string {
   return (
@@ -25,39 +54,34 @@ function getClientIp(request: Request): string {
   );
 }
 
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now();
-  const entry = hits.get(ip);
-
-  if (!entry || entry.resetAt <= now) {
-    hits.set(ip, { count: 1, resetAt: now + WINDOW_MS });
-    return true;
+async function rateLimitOk(env: Bindings, ip: string): Promise<boolean> {
+  if (env.RATE_LIMITER) {
+    const { success } = await env.RATE_LIMITER.limit({ key: ip });
+    return success;
   }
-
-  if (entry.count >= RATE_LIMIT) {
-    return false;
-  }
-
-  entry.count += 1;
-  return true;
+  return localRateLimitOk(ip);
 }
 
-const app = new Hono();
+const app = new Hono<{ Bindings: Bindings }>();
 
-app.use(
-  "*",
-  cors({
-    origin: "*",
+app.use("*", (c, next) => {
+  const allowed = c.env.ALLOWED_ORIGINS?.trim();
+  const origin =
+    !allowed || allowed === "*"
+      ? "*"
+      : allowed.split(",").map((value) => value.trim());
+  return cors({
+    origin,
     allowMethods: ["GET", "POST", "OPTIONS"],
     allowHeaders: ["Content-Type"],
-  }),
-);
+  })(c, next);
+});
 
 app.get("/health", (c) => c.json({ ok: true }));
 
 app.post("/validate", async (c) => {
   const ip = getClientIp(c.req.raw);
-  if (!checkRateLimit(ip)) {
+  if (!(await rateLimitOk(c.env, ip))) {
     return c.json(
       { valid: false, error: "Rate limit exceeded (10 req/min per IP)" },
       429,

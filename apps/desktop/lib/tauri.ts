@@ -42,7 +42,7 @@ export async function deleteKey(providerId: ProviderId): Promise<void> {
 }
 
 export async function hasKey(providerId: ProviderId): Promise<boolean> {
-  if (providerId === "ollama") {
+  if (providerId === "ollama" || providerId === "lmstudio") {
     return true;
   }
   const key = await getKey(providerId);

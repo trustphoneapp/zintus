@@ -1,24 +1,41 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createEngine } from "./engine.js";
+import { createEngine, type EngineConfig } from "./engine.js";
+
+// Always inject a key resolver so tests never touch the real OS keychain
+// (which is slow/blocking and non-deterministic in CI).
+const NO_KEYS: EngineConfig["getApiKey"] = async () => null;
 
 describe("createEngine", () => {
-  test("creates threads and traces without routing when no keys", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "multipleai-engine-"));
-    const conversationsPath = join(dir, "conversations.db");
-    const dbPath = join(dir, "quota.db");
+  let dir: string;
 
-    const engine = createEngine({
-      conversationsPath,
-      dbPath,
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "multipleai-engine-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function engineForTest(overrides: Partial<EngineConfig> = {}) {
+    return createEngine({
+      conversationsPath: join(dir, "conversations.db"),
+      dbPath: join(dir, "quota.db"),
+      cachePath: join(dir, "cache.db"),
+      getApiKey: NO_KEYS,
+      ...overrides,
+    });
+  }
+
+  test("creates a thread and records a trace even when routing fails", async () => {
+    const engine = engineForTest({
       persistConversations: true,
       persistTraces: true,
     });
 
-    const threadsBefore = engine.listThreads();
-    expect(threadsBefore.length).toBe(0);
+    expect(engine.listThreads().length).toBe(0);
 
     await expect(
       engine.routeAndStream({
@@ -26,29 +43,20 @@ describe("createEngine", () => {
       }),
     ).rejects.toThrow();
 
-    const threadsAfter = engine.listThreads();
-    expect(threadsAfter.length).toBe(1);
-    expect(threadsAfter[0]?.title).toBe("hello");
+    const threads = engine.listThreads();
+    expect(threads.length).toBe(1);
+    expect(threads[0]?.title).toBe("hello");
 
-    const messages = engine.getThreadMessages(threadsAfter[0]!.id);
+    const messages = engine.getThreadMessages(threads[0]!.id);
     expect(messages.length).toBe(1);
     expect(messages[0]?.role).toBe("user");
 
     const trace = engine.getLastTrace();
     expect(trace).not.toBeNull();
-    expect(trace?.attempts.length).toBeGreaterThanOrEqual(0);
-
-    rmSync(dir, { recursive: true, force: true });
   });
 
-  test("does not duplicate user messages on continued thread", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "multipleai-engine-"));
-    const conversationsPath = join(dir, "conversations.db");
-    const dbPath = join(dir, "quota.db");
-
-    const engine = createEngine({
-      conversationsPath,
-      dbPath,
+  test("does not duplicate user messages on a continued thread", async () => {
+    const engine = engineForTest({
       persistConversations: true,
       persistTraces: false,
     });
@@ -67,7 +75,18 @@ describe("createEngine", () => {
     const messages = engine.getThreadMessages(thread.id);
     expect(messages.filter((message) => message.role === "user").length).toBe(1);
     expect(messages.at(-1)?.content).toBe("second");
+  });
 
-    rmSync(dir, { recursive: true, force: true });
+  test("reports provider status offline: keyed providers lack keys, local ones do not need them", async () => {
+    const engine = engineForTest({ persistConversations: false });
+    const statuses = await engine.getProviderStatus();
+
+    const groq = statuses.find((status) => status.id === "groq");
+    expect(groq?.hasKey).toBe(false);
+    expect(groq?.available).toBe(false);
+
+    // Ollama and LM Studio require no API key, so they always report hasKey.
+    const ollama = statuses.find((status) => status.id === "ollama");
+    expect(ollama?.hasKey).toBe(true);
   });
 });

@@ -1,0 +1,26 @@
+{
+  "name": "@multipleai/cache",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/cache.test.ts"
+  },
+  "dependencies": {
+    "@multipleai/types": "workspace:*",
+    "@multipleai/providers": "workspace:*",
+    "drizzle-orm": "^0.45.0",
+    "sqlite-vec": "^0.1.9"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

@@ -12,8 +12,13 @@ import { listProviders } from "@multipleai/providers";
 import type { ProviderId } from "@multipleai/types";
 import { ProviderSheet } from "@/components/ProviderSheet";
 import { QuotaBar } from "@/components/QuotaBar";
+import { loadSelectedProvider, saveSelectedProvider } from "@/lib/config";
 import { deleteApiKey, hasApiKey } from "@/lib/keys";
 import { getQuotaSnapshot } from "@/lib/quota";
+import {
+  fetchGatewayHealth,
+  type GatewayProviderStatus,
+} from "@/lib/gateway";
 
 interface ProviderRowState {
   providerId: ProviderId;
@@ -26,28 +31,46 @@ interface ProviderRowState {
 export default function ProvidersScreen() {
   const sheetRef = useRef<BottomSheet>(null);
   const [rows, setRows] = useState<ProviderRowState[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("groq");
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>(
+    loadSelectedProvider(),
+  );
   const [loading, setLoading] = useState(true);
+  const [gatewayStatus, setGatewayStatus] = useState<Record<
+    ProviderId,
+    GatewayProviderStatus | undefined
+  > | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const providers = listProviders();
-      const next = await Promise.all(
-        providers.map(async (provider) => {
-          const snapshot = await getQuotaSnapshot(provider.id);
-          const keySaved =
-            provider.id === "ollama" ? true : await hasApiKey(provider.id);
-          return {
-            providerId: provider.id,
-            hasKey: keySaved,
-            requestsUsed: snapshot.requestsUsed,
-            tokensUsed: snapshot.tokensUsed,
-            inCooldown: snapshot.inCooldown,
-          };
-        }),
-      );
+      const [next, health] = await Promise.all([
+        Promise.all(
+          providers.map(async (provider) => {
+            const snapshot = await getQuotaSnapshot(provider.id);
+            const keySaved =
+              provider.id === "ollama" || provider.id === "lmstudio"
+                ? true
+                : await hasApiKey(provider.id);
+            return {
+              providerId: provider.id,
+              hasKey: keySaved,
+              requestsUsed: snapshot.requestsUsed,
+              tokensUsed: snapshot.tokensUsed,
+              inCooldown: snapshot.inCooldown,
+            };
+          }),
+        ),
+        fetchGatewayHealth(),
+      ]);
       setRows(next);
+      setGatewayStatus(
+        health
+          ? (Object.fromEntries(
+              health.providers.map((status) => [status.id, status]),
+            ) as Record<ProviderId, GatewayProviderStatus | undefined>)
+          : null,
+      );
     } finally {
       setLoading(false);
     }
@@ -72,10 +95,11 @@ export default function ProvidersScreen() {
         </Text>
 
         {loading ? (
-          <ActivityIndicator color="#0ea5e9" />
+          <ActivityIndicator color="#f4f6f8" />
         ) : (
           listProviders().map((provider) => {
             const row = rowMap[provider.id];
+            const live = gatewayStatus?.[provider.id];
             return (
               <View
                 key={provider.id}
@@ -90,6 +114,25 @@ export default function ProvidersScreen() {
                       {row?.hasKey ? "Key configured" : "No key"}
                       {row?.inCooldown ? " · cooldown" : ""}
                     </Text>
+                    {live ? (
+                      <Text
+                        className={`text-xs ${
+                          live.available && !live.inCooldown
+                            ? "text-accent-bright"
+                            : "text-amber-500"
+                        }`}
+                      >
+                        Gateway:{" "}
+                        {live.inCooldown
+                          ? "cooldown"
+                          : live.available
+                            ? "available"
+                            : "unavailable"}
+                        {live.quotaLimit != null
+                          ? ` · ${live.quotaUsed ?? 0}/${live.quotaLimit}`
+                          : ""}
+                      </Text>
+                    ) : null}
                   </View>
                   <View
                     className="h-3 w-3 rounded-full"
@@ -111,6 +154,7 @@ export default function ProvidersScreen() {
                     className="flex-1 items-center rounded-lg bg-accent py-2.5"
                     onPress={() => {
                       setSelectedProvider(provider.id);
+                      saveSelectedProvider(provider.id);
                       sheetRef.current?.expand();
                     }}
                   >
@@ -118,7 +162,9 @@ export default function ProvidersScreen() {
                       {row?.hasKey ? "Update key" : "Add key"}
                     </Text>
                   </Pressable>
-                  {row?.hasKey && provider.id !== "ollama" ? (
+                  {row?.hasKey &&
+                  provider.id !== "ollama" &&
+                  provider.id !== "lmstudio" ? (
                     <Pressable
                       className="items-center rounded-lg border border-slate-600 px-4 py-2.5"
                       onPress={async () => {
@@ -139,7 +185,10 @@ export default function ProvidersScreen() {
       <ProviderSheet
         sheetRef={sheetRef}
         selectedProvider={selectedProvider}
-        onSelectProvider={setSelectedProvider}
+        onSelectProvider={(providerId) => {
+          setSelectedProvider(providerId);
+          saveSelectedProvider(providerId);
+        }}
         onSaved={refresh}
       />
     </View>

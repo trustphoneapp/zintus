@@ -1,17 +1,40 @@
-import * as SecureStore from "expo-secure-store";
 import type { ProviderId } from "@multipleai/types";
+import {
+  deleteApiKey,
+  getApiKey,
+  hasApiKey,
+  setApiKey,
+} from "./keys";
 
-export async function getProviderKey(providerId: ProviderId): Promise<string | null> {
-  return SecureStore.getItemAsync(`key:${providerId}`);
-}
+/** @deprecated Use getApiKey from ./keys */
+export const getProviderKey = getApiKey;
 
-export async function setProviderKey(
-  providerId: ProviderId,
-  key: string,
-): Promise<void> {
-  await SecureStore.setItemAsync(`key:${providerId}`, key);
-}
+/** @deprecated Use setApiKey from ./keys */
+export const setProviderKey = setApiKey;
 
-export async function deleteProviderKey(providerId: ProviderId): Promise<void> {
-  await SecureStore.deleteItemAsync(`key:${providerId}`);
+/** @deprecated Use deleteApiKey from ./keys */
+export const deleteProviderKey = deleteApiKey;
+
+export { getApiKey, setApiKey, deleteApiKey, hasApiKey };
+
+const LEGACY_PREFIX = "key:";
+
+/** Migrate keys saved under the old `key:<provider>` namespace. */
+export async function migrateLegacyKeys(): Promise<void> {
+  const { listProviders } = await import("@multipleai/providers");
+  for (const provider of listProviders()) {
+    const legacy = await import("expo-secure-store").then((mod) =>
+      mod.getItemAsync(`${LEGACY_PREFIX}${provider.id}`),
+    );
+    if (!legacy?.trim()) {
+      continue;
+    }
+    const current = await getApiKey(provider.id);
+    if (!current) {
+      await setApiKey(provider.id, legacy);
+    }
+    await import("expo-secure-store").then((mod) =>
+      mod.deleteItemAsync(`${LEGACY_PREFIX}${provider.id}`),
+    );
+  }
 }

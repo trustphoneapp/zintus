@@ -1,0 +1,18 @@
+# MultipleAI gateway — one-liner self-host: `docker compose up`.
+# Gateway on :8788. Keys + quota.db persist in ./.multipleai-data (host volume).
+# Set GATEWAY_TOKEN in your shell or a .env file before `up` for a public bind.
+services:
+  gateway:
+    build: .
+    ports:
+      - "8788:8788"
+    environment:
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: "8788"
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
+      # Provider keys can be supplied via env (otherwise mount your keychain-backed
+      # ~/.multipleai). Example: GROQ_API_KEY, GEMINI_API_KEY, ...
+    volumes:
+      - ./.multipleai-data:/root/.multipleai
+      - ./policy.json:/app/policy.json:ro
+    restart: unless-stopped

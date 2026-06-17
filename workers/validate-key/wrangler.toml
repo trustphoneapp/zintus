@@ -2,3 +2,15 @@ name = "validate-key"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
+
+# Native Cloudflare rate limiting. This is enforced at the edge across all
+# isolates (unlike an in-process Map). 10 requests per 60s per client IP.
+[[unsafe.bindings]]
+name = "RATE_LIMITER"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 10, period = 60 }
+
+# Optional: restrict CORS to specific origins, e.g.
+# [vars]
+# ALLOWED_ORIGINS = "https://your-web-app.example.com"

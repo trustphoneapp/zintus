@@ -16,13 +16,25 @@ jobs:
       - run: bun install
       - run: bun run typecheck
 
-  apps:
+  test:
     runs-on: ubuntu-latest
     needs: typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run test
+
+  apps:
+    runs-on: ubuntu-latest
+    needs: test
     strategy:
       matrix:
         app:
           - apps/cli
+          - apps/gateway
           - apps/web
           - apps/desktop
           - apps/mobile
@@ -35,9 +47,25 @@ jobs:
       - run: bun install
       - run: cd ${{ matrix.app }} && bun run typecheck
 
+  packages:
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      matrix:
+        pkg:
+          - packages/memory
+          - packages/context-compiler
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: cd ${{ matrix.pkg }} && bun run typecheck
+
   cli-smoke:
     runs-on: ubuntu-latest
-    needs: typecheck
+    needs: test
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -45,3 +73,30 @@ jobs:
           bun-version: latest
       - run: bun install
       - run: cd apps/cli && bun run dev -- --help
+
+  gateway-smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - name: Start gateway
+        run: bun run apps/gateway/src/index.ts &
+        env:
+          GATEWAY_PORT: "8788"
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8788/health >/dev/null; then
+              echo "gateway up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "gateway did not start"; exit 1
+      - name: Load smoke (p95 /health target)
+        run: bun run smoke:gateway
+        env:
+          GATEWAY_URL: http://localhost:8788

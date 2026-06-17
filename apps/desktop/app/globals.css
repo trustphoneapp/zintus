@@ -9,10 +9,12 @@
   --color-text: #e8eef5;
   --color-text-sub: #9ca3af;
   --color-text-muted: #6b7280;
-  --color-purple-bright: #67e8f9;
-  --color-purple-mid: #22d3ee;
-  --color-purple-faint: rgba(103, 232, 249, 0.12);
-  --color-purple-glow: rgba(103, 232, 249, 0.35);
+  /* Neutral, professional accent (ChatGPT/Claude-style monochrome). Token names
+     kept for compatibility; values are now a near-white neutral on the dark UI. */
+  --color-purple-bright: #f4f6f8;
+  --color-purple-mid: #e2e8f0;
+  --color-purple-faint: rgba(244, 246, 248, 0.08);
+  --color-purple-glow: rgba(244, 246, 248, 0.16);
   --color-green: #34d399;
   --color-red: #f87171;
 }
@@ -284,4 +286,73 @@ button:disabled {
 .strategy-option small {
   display: block;
   color: var(--color-text-muted);
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.typing-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-purple-bright);
+  animation: blink 1.2s ease-in-out infinite;
+}
+
+.typing-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.typing-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.chat-bubble-user {
+  align-self: flex-end;
+  max-width: 80%;
+  background: var(--color-purple-faint);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 0.6rem 0.85rem;
+  white-space: pre-wrap;
+}
+
+.chat-bubble-assistant {
+  align-self: flex-start;
+  max-width: 90%;
+  background: var(--color-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 0.6rem 0.85rem;
+  white-space: pre-wrap;
+}
+
+.chat-bubble-meta {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin: 0 0 4px;
+  font-family: var(--font-mono);
 }

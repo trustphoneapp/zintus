@@ -8,7 +8,11 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../types" },
+    { "path": "../memory" },
+    { "path": "../codebase-indexer" },
+    { "path": "../context-compiler" },
     { "path": "../router" },
-    { "path": "../keychain" }
+    { "path": "../keychain" },
+    { "path": "../cache" }
   ]
 }

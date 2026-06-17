@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@multipleai/types";
 import { loadConfig, saveConfig } from "./config";
-import { fetchProviderInfos, type DesktopProviderInfo } from "./providers";
+import { fetchProviderSnapshot, type DesktopProviderInfo } from "./providers";
+import type { GatewaySavings } from "./gateway";
 
 interface SettingsState {
   settings: AppConfig;
@@ -12,7 +13,9 @@ interface SettingsState {
 
 interface ProviderStatusState {
   providers: DesktopProviderInfo[];
+  savings: GatewaySavings | null;
   loading: boolean;
+  loaded: boolean;
   statusMessage: string;
   selectedProvider: ProviderId | null;
   activeProvider: ProviderId | null;
@@ -22,16 +25,30 @@ interface ProviderStatusState {
   setActiveProvider: (id: ProviderId | null) => void;
 }
 
+export interface ChatMessageUi {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  providerId?: ProviderId;
+  model?: string;
+}
+
 interface ChatState {
   prompt: string;
-  output: string;
+  messages: ChatMessageUi[];
   loading: boolean;
-  routedModel: string | null;
   setPrompt: (prompt: string) => void;
-  setOutput: (output: string) => void;
+  appendMessage: (message: ChatMessageUi) => void;
+  updateMessage: (id: string, partial: Partial<ChatMessageUi>) => void;
   setLoading: (loading: boolean) => void;
-  setRoutedModel: (model: string | null) => void;
-  resetOutput: () => void;
+  resetMessages: () => void;
+}
+
+function createMessageId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export const useSettingsStore = create<SettingsState>((set) => ({
@@ -48,17 +65,19 @@ export const useSettingsStore = create<SettingsState>((set) => ({
 
 export const useProviderStatusStore = create<ProviderStatusState>((set) => ({
   providers: [],
+  savings: null,
   loading: false,
+  loaded: false,
   statusMessage: "",
   selectedProvider: null,
   activeProvider: null,
   refresh: async () => {
     set({ loading: true });
     try {
-      const providers = await fetchProviderInfos();
-      set({ providers, loading: false });
+      const { providers, savings } = await fetchProviderSnapshot();
+      set({ providers, savings, loading: false, loaded: true });
     } catch {
-      set({ loading: false });
+      set({ loading: false, loaded: true });
     }
   },
   setStatusMessage: (statusMessage) => set({ statusMessage }),
@@ -68,12 +87,24 @@ export const useProviderStatusStore = create<ProviderStatusState>((set) => ({
 
 export const useChatStore = create<ChatState>((set) => ({
   prompt: "",
-  output: "",
+  messages: [],
   loading: false,
-  routedModel: null,
   setPrompt: (prompt) => set({ prompt }),
-  setOutput: (output) => set({ output }),
+  appendMessage: (message) =>
+    set((state) => ({ messages: [...state.messages, message] })),
+  updateMessage: (id, partial) =>
+    set((state) => ({
+      messages: state.messages.map((message) =>
+        message.id === id ? { ...message, ...partial } : message,
+      ),
+    })),
   setLoading: (loading) => set({ loading }),
-  setRoutedModel: (routedModel) => set({ routedModel }),
-  resetOutput: () => set({ output: "", routedModel: null }),
+  resetMessages: () => set({ messages: [] }),
 }));
+
+export function createChatMessage(
+  role: ChatMessageUi["role"],
+  content: string,
+): ChatMessageUi {
+  return { id: createMessageId(), role, content };
+}

@@ -29,8 +29,9 @@ async function deriveKey(
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
+      // OWASP-recommended minimum for PBKDF2-HMAC-SHA256 (2023+).
       salt,
-      iterations: 120_000,
+      iterations: 600_000,
       hash: "SHA-256",
     },
     material,

@@ -5,8 +5,12 @@ import { geminiProvider } from "./providers/gemini.js";
 import {
   cohereProvider,
   deepseekProvider,
+  fireworksProvider,
+  huggingFaceProvider,
+  lmStudioProvider,
   mistralProvider,
   openrouterProvider,
+  xaiProvider,
 } from "./providers/skeletons.js";
 import { ollamaProvider } from "./providers/ollama.js";
 
@@ -18,6 +22,10 @@ const providers: Record<ProviderId, Provider> = {
   cohere: cohereProvider,
   mistral: mistralProvider,
   deepseek: deepseekProvider,
+  fireworks: fireworksProvider,
+  xai: xaiProvider,
+  huggingface: huggingFaceProvider,
+  lmstudio: lmStudioProvider,
   ollama: ollamaProvider,
 };
 
@@ -41,5 +49,9 @@ export {
   cohereProvider,
   mistralProvider,
   deepseekProvider,
+  fireworksProvider,
+  xaiProvider,
+  huggingFaceProvider,
+  lmStudioProvider,
   ollamaProvider,
 };

@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
 import chalk from "chalk";
-import { PROVIDER_IDS } from "@multipleai/types";
-import { runChat } from "./commands/chat.js";
+import { PROVIDER_IDS, type ContextMode } from "@multipleai/types";
+import { runChat, type ChatOptions } from "./commands/chat.js";
 import { runKeysSet, runKeysList, runKeysRemove } from "./commands/keys.js";
 import { runConfig } from "./commands/config.js";
 import { runHistory, runTrace } from "./commands/history.js";
@@ -14,28 +14,64 @@ program
   .description("Multi-provider AI CLI")
   .version("0.0.1");
 
+interface ChatCliOptions {
+  mode?: string;
+  // From `--code` / `--workspace [dir]`. Commander stores the value under the
+  // long flag (`workspace`): `true` when bare, a path string when given.
+  workspace?: string | boolean;
+  diff?: boolean;
+}
+
+function toChatOptions(options: ChatCliOptions): ChatOptions {
+  const mode = options.mode as ContextMode | undefined;
+  if (mode && !["fast", "smart", "deep"].includes(mode)) {
+    throw new Error("Invalid --mode. Expected one of: fast, smart, deep");
+  }
+  let workspaceDir: string | undefined;
+  if (options.workspace === true) {
+    workspaceDir = process.cwd();
+  } else if (typeof options.workspace === "string") {
+    workspaceDir = options.workspace;
+  }
+  return { mode, workspaceDir, diff: options.diff };
+}
+
 program
   .command("chat")
   .description("Stream a chat response")
   .argument("<prompt>", "Chat prompt to send")
-  .action(async (prompt: string) => {
-    await runChat(prompt);
+  .option("--mode <mode>", "Context mode (fast|smart|deep)")
+  .option(
+    "--code, --workspace [dir]",
+    "Index a workspace for codebase-aware context (default: current dir)",
+  )
+  .option("--diff", "Include the current git diff as context")
+  .action(async (prompt: string, options: ChatCliOptions) => {
+    await runChat(prompt, toChatOptions(options));
   });
 
 program
   .argument("[prompt]", "Shorthand for chat")
-  .action(async (prompt?: string) => {
+  .option("--mode <mode>", "Context mode (fast|smart|deep)")
+  .option(
+    "--code, --workspace [dir]",
+    "Index a workspace for codebase-aware context (default: current dir)",
+  )
+  .option("--diff", "Include the current git diff as context")
+  .action(async (prompt: string | undefined, options: ChatCliOptions) => {
     if (!prompt) {
       program.help();
       return;
     }
-    await runChat(prompt);
+    await runChat(prompt, toChatOptions(options));
   });
 
 program
   .command("status")
   .description("Live dashboard of providers and quota usage")
   .action(async () => {
+    // Source is status.tsx; TS/bundler emits status.js, so the ESM
+    // specifier must use the .js extension (not .tsx) to resolve at runtime.
     const { runStatus } = await import("./commands/status.js");
     runStatus();
   });

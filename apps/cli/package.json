@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.10.0",
+    "@multipleai/context-compiler": "workspace:*",
     "@multipleai/engine": "workspace:*",
     "@multipleai/keychain": "workspace:*",
     "@multipleai/providers": "workspace:*",

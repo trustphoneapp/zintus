@@ -10,8 +10,10 @@
   ],
   "scripts": {
     "typecheck": "tsc --build tsconfig.build.json && bun run --filter '@multipleai/web' --filter '@multipleai/desktop' --filter '@multipleai/mobile' typecheck",
-    "test": "vitest run && bun test packages/router/src/factory.test.ts packages/router/src/quota-ledger.test.ts packages/engine/src/engine.test.ts apps/web/lib/chat.test.ts",
+    "test": "vitest run packages/router/src/priority.test.ts packages/router/src/cooldown.test.ts packages/router/src/groq-reset.test.ts packages/router/src/quota-core.test.ts && bun test packages/providers/src/token-estimate.test.ts packages/providers/src/utils.test.ts packages/providers/src/vcr.test.ts packages/router/src/factory.test.ts packages/router/src/factory.cooldown.test.ts packages/router/src/factory.model-groups.test.ts packages/router/src/factory.latency.test.ts packages/router/src/factory.probe.test.ts packages/router/src/policy.test.ts packages/router/src/quota-ledger.test.ts packages/router/src/quota-ledger.vk.test.ts packages/router/src/weighted.test.ts packages/engine/src/engine.test.ts packages/engine/src/otel.test.ts packages/context-compiler/src/compiler.test.ts packages/memory/src/vector.test.ts packages/memory/src/llm-memory.test.ts packages/memory/src/memory-checkpoints.test.ts packages/cache/src/cache.test.ts apps/gateway/src/auth.test.ts apps/gateway/src/handler.test.ts apps/gateway/src/metrics.test.ts apps/web/lib/chat.test.ts apps/web/lib/crypto.test.ts apps/web/lib/worker.test.ts && bun test packages/engine/src/engine.integration.test.ts packages/engine/src/engine.failover.integration.test.ts apps/gateway/src/handler.integration.test.ts && bun test packages/codebase-indexer/src/index.test.ts packages/context-compiler/src/util/terminal-compress.test.ts packages/context-compiler/src/util/diff-context.test.ts packages/context-compiler/src/smart-context.test.ts",
     "test:watch": "vitest",
+    "test:live": "bun test tests/live",
+    "smoke:gateway": "bun run scripts/gateway-load-smoke.ts",
     "dev": "bun run --filter multipleai dev",
     "dev:cli": "bun run --filter multipleai dev",
     "dev:web": "bun run --filter @multipleai/web dev",
@@ -21,10 +23,17 @@
     "build": "bun run typecheck"
   },
   "devDependencies": {
+    "@multipleai/router": "workspace:*",
     "@types/bun": "latest",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "typescript": "^5.7.0",
     "vitest": "^4.1.9"
+  },
+  "dependencies": {
+    "@radix-ui/react-tooltip": "^1.2.10",
+    "framer-motion": "^12.40.0",
+    "lucide-react": "^1.18.0",
+    "next-themes": "^0.4.6"
   }
 }

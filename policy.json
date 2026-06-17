@@ -1,0 +1,32 @@
+{
+  "$comment": "MultipleAI declarative routing policy. Place at repo root or ~/.multipleai/policy.json (or point $MULTIPLEAI_POLICY at it). Gateway/CLI hot-reload on change. Every field is optional; missing fields fall back to built-in defaults.",
+  "providerPriority": [
+    "cerebras",
+    "groq",
+    "gemini",
+    "fireworks",
+    "xai",
+    "huggingface",
+    "openrouter",
+    "cohere",
+    "mistral",
+    "deepseek",
+    "lmstudio",
+    "ollama"
+  ],
+  "providerWeights": {
+    "groq": 7,
+    "cerebras": 3
+  },
+  "modelGroups": {
+    "llama-3.3-70b": ["groq", "openrouter", "fireworks"]
+  },
+  "fallbacks": {
+    "on_429": "next_provider",
+    "on_5xx": "next_provider"
+  },
+  "limits": {
+    "groq": { "requestsPerDay": 1000, "tokensPerDay": 100000, "requestsPerMinute": 30 },
+    "gemini": { "requestsPerDay": 1500, "requestsPerMinute": 15 }
+  }
+}

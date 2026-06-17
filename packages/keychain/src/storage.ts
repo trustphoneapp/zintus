@@ -29,8 +29,29 @@ function readManifest(): string[] {
   }
 }
 
+/**
+ * The OS keychain backend can be absent — most often on headless Linux with no
+ * Secret Service (gnome-keyring/KWallet) running, or in CI/containers. Turn the
+ * opaque native error into actionable guidance instead of a raw stack.
+ */
+function keychainError(error: unknown): Error {
+  const cause = error instanceof Error ? error.message : String(error);
+  return new Error(
+    "OS keychain is unavailable. On macOS/Windows it should work out of the " +
+      "box; on headless Linux start a Secret Service (e.g. `gnome-keyring` + " +
+      "`dbus`), or run the gateway/CLI on a machine that has one. " +
+      `Cause: ${cause}`,
+  );
+}
+
+// Best-effort: the manifest just speeds up `listKeys`; discovery still works by
+// scanning known provider ids, so a manifest write must never break `setKey`.
 function writeManifest(ids: string[]): void {
-  manifestEntry().setPassword(JSON.stringify(Array.from(new Set(ids))));
+  try {
+    manifestEntry().setPassword(JSON.stringify(Array.from(new Set(ids))));
+  } catch {
+    // ignore — listKeys() falls back to scanning PROVIDER_IDS
+  }
 }
 
 export async function setKey(providerId: ProviderId, key: string): Promise<void> {
@@ -38,7 +59,11 @@ export async function setKey(providerId: ProviderId, key: string): Promise<void>
     throw new Error(`Unknown provider: ${providerId}`);
   }
 
-  providerEntry(providerId).setPassword(key);
+  try {
+    providerEntry(providerId).setPassword(key);
+  } catch (error) {
+    throw keychainError(error);
+  }
   const manifest = readManifest();
   if (!manifest.includes(providerId)) {
     writeManifest([...manifest, providerId]);

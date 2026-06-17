@@ -15,7 +15,11 @@
     "test": "bun test src/engine.test.ts"
   },
   "dependencies": {
+    "@multipleai/cache": "workspace:*",
+    "@multipleai/codebase-indexer": "workspace:*",
+    "@multipleai/context-compiler": "workspace:*",
     "@multipleai/keychain": "workspace:*",
+    "@multipleai/memory": "workspace:*",
     "@multipleai/providers": "workspace:*",
     "@multipleai/router": "workspace:*",
     "@multipleai/types": "workspace:*",

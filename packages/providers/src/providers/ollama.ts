@@ -6,6 +6,7 @@ import type {
   StreamChatResult,
 } from "@multipleai/types";
 import { assertOkResponse } from "../utils.js";
+import { usageFromProviderFields } from "../token-estimate.js";
 
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 
@@ -69,11 +70,20 @@ export const ollamaProvider: Provider = {
               const parsed = JSON.parse(trimmed) as {
                 message?: { content?: string };
                 done?: boolean;
+                prompt_eval_count?: number;
+                eval_count?: number;
               };
               if (parsed.message?.content) {
                 yield { content: parsed.message.content };
               }
               if (parsed.done) {
+                const usage = usageFromProviderFields({
+                  inputTokens: parsed.prompt_eval_count,
+                  outputTokens: parsed.eval_count,
+                });
+                if (usage) {
+                  yield { usage };
+                }
                 yield { done: true };
               }
             } catch {

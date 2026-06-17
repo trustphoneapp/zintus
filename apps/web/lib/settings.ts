@@ -33,16 +33,17 @@ export const ROUTING_STRATEGIES: Array<{
   {
     value: "fastest",
     label: "Fastest",
-    description: "Prefer providers with the most remaining quota.",
+    description:
+      "Prefer the provider with the lowest recent p95 latency; falls back to priority order until enough samples exist.",
   },
   {
     value: "capability",
     label: "Capability",
-    description: "Prefer higher-priority models first.",
+    description: "Prefer higher-capability models first.",
   },
   {
     value: "economy",
     label: "Economy",
-    description: "Spread usage across providers evenly.",
+    description: "Spread usage across providers with the most remaining quota.",
   },
 ];

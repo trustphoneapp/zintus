@@ -56,7 +56,7 @@ function buildProviderStatus(
       color: provider.color,
       priority: provider.priority,
       hasKey,
-      enabled: hasKey || provider.id === "ollama",
+      enabled: hasKey || provider.id === "ollama" || provider.id === "lmstudio",
     };
   });
 }

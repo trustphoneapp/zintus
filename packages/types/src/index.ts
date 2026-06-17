@@ -1,5 +1,12 @@
 export type { ProviderId } from "./provider-id.js";
-export type { AppConfig, RoutingStrategy } from "./config.js";
+export type {
+  AppConfig,
+  ContextMode,
+  RoutingStrategy,
+  PolicyConfig,
+  PolicyLimits,
+  FallbackAction,
+} from "./config.js";
 export { DEFAULT_CONFIG } from "./config.js";
 export {
   PROVIDER_IDS,
@@ -15,10 +22,18 @@ export type {
   RouteStreamResult,
 } from "./route.js";
 export type {
+  CacheHints,
   RateLimitInfo,
   StreamChatOptions,
   StreamChatResult,
   StreamChunk,
+  TokenUsage,
 } from "./stream.js";
 export type { TraceAttempt, RequestTrace } from "./trace.js";
 export type { Thread, ThreadMessage } from "./conversation.js";
+export type {
+  MemoryChunkHit,
+  MemoryFact,
+  MemoryStore,
+  MemoryThreadState,
+} from "./memory.js";

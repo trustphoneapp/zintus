@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   decryptKeys,
   encryptKeys,
@@ -8,11 +8,15 @@ import {
 } from "./crypto";
 
 const store = new Map<string, string>();
+const originalWindow = globalThis.window;
+const originalLocalStorage = globalThis.localStorage;
 
 beforeEach(() => {
   store.clear();
-  vi.stubGlobal("window", {});
-  vi.stubGlobal("localStorage", {
+  // @ts-expect-error test-only global shim
+  globalThis.window = {};
+  // @ts-expect-error test-only global shim
+  globalThis.localStorage = {
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => {
       store.set(key, value);
@@ -20,11 +24,14 @@ beforeEach(() => {
     removeItem: (key: string) => {
       store.delete(key);
     },
-  });
+  };
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
+  // @ts-ignore test-only global restore
+  globalThis.window = originalWindow;
+  // @ts-ignore test-only global restore
+  globalThis.localStorage = originalLocalStorage;
 });
 
 describe("Web Crypto vault", () => {

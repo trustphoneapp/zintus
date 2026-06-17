@@ -6,8 +6,24 @@ function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-function defaultShell(): string {
-  return navigator.platform.toLowerCase().includes("win") ? "powershell.exe" : "/bin/zsh";
+/**
+ * Resolve the shell from the Rust backend (honors $SHELL / COMSPEC and the OS).
+ * Falls back to a per-OS guess only if the command is unavailable.
+ */
+async function resolveShell(): Promise<string> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const shell = await invoke<string>("default_shell");
+    if (shell) {
+      return shell;
+    }
+  } catch (error) {
+    console.error("[terminal] default_shell command failed:", error);
+  }
+  if (navigator.userAgent.includes("Windows")) {
+    return "powershell.exe";
+  }
+  return navigator.userAgent.includes("Mac") ? "/bin/zsh" : "/bin/bash";
 }
 
 export function TerminalPane() {
@@ -47,9 +63,13 @@ export function TerminalPane() {
       term.loadAddon(fit);
 
       try {
-        term.loadAddon(new WebglAddon());
+        const webgl = new WebglAddon();
+        // On some Linux/VM/headless GPUs the context is lost after load rather
+        // than throwing — dispose so xterm falls back to the DOM renderer.
+        webgl.onContextLoss(() => webgl.dispose());
+        term.loadAddon(webgl);
       } catch {
-        // WebGL unavailable — canvas fallback
+        // WebGL unavailable at construction — DOM renderer used
       }
 
       term.open(container);
@@ -61,7 +81,8 @@ export function TerminalPane() {
       if (isTauriRuntime()) {
         try {
           const { spawn } = await import("tauri-pty");
-          const pty = spawn(defaultShell(), [], { cols: term.cols, rows: term.rows });
+          const shell = await resolveShell();
+          const pty = spawn(shell, [], { cols: term.cols, rows: term.rows });
 
           pty.onData((data) => {
             const text =
@@ -83,8 +104,10 @@ export function TerminalPane() {
             pty.kill();
             term.dispose();
           };
-        } catch {
-          term.writeln("PTY plugin unavailable — check src-tauri Cargo.toml.\r\n");
+        } catch (error) {
+          console.error("[terminal] PTY init failed:", error);
+          const detail = error instanceof Error ? error.message : String(error);
+          term.writeln(`PTY unavailable: ${detail}\r\n`);
         }
       } else {
         term.writeln("MultipleAI terminal preview (browser dev mode).\r\n");

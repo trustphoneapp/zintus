@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
@@ -13,7 +14,11 @@ import type {
 } from "@multipleai/types";
 import * as schema from "./schema.js";
 
-const DEFAULT_CONVERSATIONS_PATH = `${process.env.HOME ?? "."}/.multipleai/conversations.db`;
+const DEFAULT_CONVERSATIONS_PATH = join(
+  homedir(),
+  ".multipleai",
+  "conversations.db",
+);
 
 export class ConversationStore {
   private readonly db;
@@ -55,6 +60,12 @@ export class ConversationStore {
         latency_ms INTEGER NOT NULL,
         error_code INTEGER,
         error_message TEXT
+      );
+      CREATE TABLE IF NOT EXISTS thread_memory (
+        thread_id TEXT PRIMARY KEY,
+        summary TEXT NOT NULL,
+        facts_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
       );
     `);
     this.db = drizzle(sqlite, { schema });
@@ -229,4 +240,19 @@ export class ConversationStore {
     }
     return this.getTrace(traceRow.id);
   }
+
+  /** The most recent `limit` traces, newest first (for the trace list API). */
+  listTraces(limit: number): RequestTrace[] {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit) || 20));
+    const rows = this.db
+      .select()
+      .from(schema.traces)
+      .orderBy(desc(schema.traces.startedAt))
+      .limit(safeLimit)
+      .all();
+    return rows
+      .map((row) => this.getTrace(row.id))
+      .filter((trace): trace is RequestTrace => trace !== null);
+  }
+
 }

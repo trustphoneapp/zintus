@@ -3,8 +3,10 @@ import type {
   Provider,
   StreamChatOptions,
   StreamChatResult,
+  StreamChunk,
 } from "@multipleai/types";
 import { assertOkResponse, validateWithFetch } from "../utils.js";
+import { usageFromProviderFields } from "../token-estimate.js";
 
 const GEMINI_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
@@ -30,7 +32,7 @@ function splitGeminiMessages(messages: ChatMessage[]) {
 
 async function* parseGeminiSseStream(
   body: ReadableStream<Uint8Array>,
-): AsyncGenerator<{ content?: string; done?: boolean }> {
+): AsyncGenerator<StreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -62,10 +64,25 @@ async function* parseGeminiSseStream(
             candidates?: Array<{
               content?: { parts?: Array<{ text?: string }> };
             }>;
+            usageMetadata?: {
+              promptTokenCount?: number;
+              candidatesTokenCount?: number;
+              totalTokenCount?: number;
+            };
           };
           const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
           if (text) {
             yield { content: text };
+          }
+          if (parsed.usageMetadata) {
+            const usage = usageFromProviderFields({
+              inputTokens: parsed.usageMetadata.promptTokenCount,
+              outputTokens: parsed.usageMetadata.candidatesTokenCount,
+              totalTokens: parsed.usageMetadata.totalTokenCount,
+            });
+            if (usage) {
+              yield { usage };
+            }
           }
         } catch {
           // Skip malformed SSE chunks.
@@ -105,6 +122,7 @@ export const geminiProvider: Provider = {
       signal: options.signal,
       body: JSON.stringify({
         ...splitGeminiMessages(messages),
+        cachedContent: options.cacheHints?.cachedContentHandle,
         generationConfig: {
           temperature: options.temperature,
           maxOutputTokens: options.maxTokens,
