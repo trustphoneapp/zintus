@@ -12,6 +12,7 @@ import {
 import type { ProviderId } from "@zintus/types";
 import { useFocusEffect, useRouter } from "expo-router";
 import { streamChat, getGatewayUrl } from "@/lib/chat";
+import { fetchGatewayHealth } from "@/lib/gateway";
 import { loadConfig, loadSelectedProvider } from "@/lib/config";
 import { toChatMessages } from "@/lib/messages";
 import { migrateLegacyKeys } from "@/lib/secure-keys";
@@ -38,9 +39,27 @@ export default function ChatScreen() {
     useState<ProviderSelection>("auto");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [gatewayOnline, setGatewayOnline] = useState(true);
+  const [gatewayChecked, setGatewayChecked] = useState(false);
 
   useEffect(() => {
     void migrateLegacyKeys();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    async function refresh() {
+      const health = await fetchGatewayHealth();
+      if (!active) return;
+      setGatewayOnline(Boolean(health?.ok));
+      setGatewayChecked(true);
+    }
+    void refresh();
+    const interval = setInterval(() => void refresh(), 5000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
   }, []);
 
   useFocusEffect(
@@ -175,6 +194,17 @@ export default function ChatScreen() {
           </Pressable>
         </View>
       </View>
+      {gatewayChecked && !gatewayOnline && (
+        <View style={styles.offlineBanner}>
+          <Text style={styles.offlineText}>
+            Gateway offline — run `zintus serve` on your computer
+          </Text>
+          <Text style={styles.offlineSub}>
+            Expecting it at {getGatewayUrl()} · set EXPO_PUBLIC_GATEWAY_URL to a
+            reachable host (use your computer&apos;s LAN IP, not localhost)
+          </Text>
+        </View>
+      )}
       <Text style={styles.gatewayHint}>
         Gateway: {getGatewayUrl()}
         {selectedProvider === "auto" ? " · auto-routing" : ""}
@@ -306,6 +336,25 @@ const styles = StyleSheet.create({
     fontSize: 13,
     paddingHorizontal: 16,
     paddingBottom: 8,
+  },
+  offlineBanner: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.error,
+    backgroundColor: COLORS.panel,
+  },
+  offlineText: {
+    color: COLORS.error,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  offlineSub: {
+    color: COLORS.muted,
+    fontSize: 11,
+    marginTop: 2,
   },
   chip: {
     backgroundColor: COLORS.panel,

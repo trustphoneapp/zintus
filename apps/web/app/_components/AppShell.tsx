@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
-import { fetchGatewayHealth } from "@/lib/gateway";
+import { fetchGatewayHealth, GATEWAY_URL } from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
 import { Sidebar } from "./Sidebar";
+import { GatewayOfflineBanner } from "./GatewayOfflineBanner";
 
 const TITLES: Record<string, string> = {
   "/chat": "Chat",
@@ -17,6 +18,7 @@ const TITLES: Record<string, string> = {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [checked, setChecked] = useState(false);
   const { gatewayConnected, setGatewayStatus } = useAppStore();
 
   useEffect(() => {
@@ -32,6 +34,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         health?.providers ?? [],
         health?.savings,
       );
+      setChecked(true);
     }
 
     refresh();
@@ -47,6 +50,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <header className="app-topbar">
         <span className="app-topbar-title">{TITLES[pathname] ?? "Zintus"}</span>
       </header>
+
+      {checked && !gatewayConnected && (
+        <GatewayOfflineBanner url={GATEWAY_URL} />
+      )}
 
       <div className="app-body">
         <Sidebar

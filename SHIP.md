@@ -8,7 +8,7 @@ Single-pass hardening of the existing MVP. No speculative features added. Branch
 Runnable end-to-end; proves the lane works. Needs Bun (and Docker for step 1).
 
 1. **Container boots:** `docker compose up -d` → `curl -s localhost:8788/health` returns `{"ok":true,...}` (HTTP 200).
-2. **Web up:** `bun run dev:gateway` + `bun run dev:web` → open `http://localhost:3000/chat`.
+2. **Web up:** `zintus serve` (or `bun run dev:gateway`) + `bun run dev:web` → open `http://localhost:3000/chat`. Stop the gateway and the web/desktop/mobile clients show a "Gateway offline — run `zintus serve`" banner.
 3. **Add keys:** `bun run dev:cli -- keys set groq <key>` (repeat for `gemini`, `cerebras`). `keys list` shows them.
 4. **Strategy actually routes:** in Settings pick **economy**, send a prompt; then **fastest**, send again → the winning provider differs (check the network POST body has `"strategy"`, and `X-Provider-Used` in the response).
 5. **Cache hit:** send the *same* prompt twice → 2nd response header `X-Cache-Hit: L1` (auto-routed; see the get/set key fix).

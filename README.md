@@ -135,11 +135,13 @@ bun run dev:cli -- keys list
 
 ### Web (Next.js 16, Vercel-ready)
 
-Start the gateway first, then run web.
+Start the gateway first, then run web. The GUI is a thin client over the
+gateway — if it isn't running, every screen shows a "Gateway offline — run
+`zintus serve`" banner.
 
 ```bash
 # terminal 1 (repo root)
-bun run dev:gateway
+zintus serve          # or: bun run dev:gateway
 ```
 
 ```bash
@@ -157,16 +159,20 @@ API routes:
 
 ### Gateway (Bun + engine)
 
+The gateway is the single stateful "brain" the GUI clients connect to. Start it
+with the CLI:
+
 ```bash
-cd apps/gateway
-bun install
-bun run dev
+zintus serve                 # 127.0.0.1:8788 by default
+zintus serve --port 9000     # or pick a port / --host
 ```
 
-From repo root:
+Equivalent dev scripts:
 
 ```bash
-bun run dev:gateway
+bun run dev:gateway          # repo root
+# or
+cd apps/gateway && bun run dev
 ```
 
 `POST /v1/chat/completions` accepts the OpenAI-style `messages`/`stream` plus

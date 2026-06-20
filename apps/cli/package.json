@@ -18,6 +18,7 @@
     "@clack/prompts": "^0.10.0",
     "@zintus/context-compiler": "workspace:*",
     "@zintus/engine": "workspace:*",
+    "@zintus/gateway": "workspace:*",
     "@zintus/keychain": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/router": "workspace:*",

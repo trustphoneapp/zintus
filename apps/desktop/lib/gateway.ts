@@ -102,7 +102,7 @@ export async function streamGatewayChat(params: {
   const gatewayUrl = await resolveGatewayUrl();
   if (!gatewayUrl) {
     throw new Error(
-      "Gateway is unavailable. Start it with `bun run dev:gateway` " +
+      "Gateway is unavailable. Start it with `zintus serve` " +
         "(or set NEXT_PUBLIC_GATEWAY_URL to your gateway).",
     );
   }
