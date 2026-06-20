@@ -59,7 +59,7 @@ export async function runCloudLogin(options?: {
     process.exit(1);
   }
 
-  const loginUrl = `${relayUrl}/login?cli=true&state=${state}`;
+  const loginUrl = `${relayUrl}/api/auth/magic-link?cli=true&state=${state}`;
   console.error(chalk.bold("Opening browser to sign in to Zintus Cloud..."));
   console.error(chalk.dim(`  ${loginUrl}`));
   console.error(chalk.dim("  Waiting for login... (Ctrl+C to cancel)"));
