@@ -18,7 +18,8 @@ code path is wired.
 |------|--------|
 | 12 providers (10 OpenAI-compat via factory + Gemini + Ollama) | ✅ |
 | `fastest` = **real latency** (p95 over recent successes), not static priority | ✅ |
-| `weighted` / `capability` / `economy` strategies; per-request strategy override | ✅ |
+| `weighted` / `capability` strategies; per-request strategy override | ✅ |
+| `economy` = **cheapest paid-equivalent model with quota left** (cost-ranked, quota-aware: low-quota providers demoted behind healthy ones) | ✅ |
 | **Same-model multi-provider failover** (model groups via `policy.json`) | ✅ |
 | Declarative `policy.json` (priority/weights/groups/fallbacks/limits) + **hot-reload** | ✅ |
 | Failover on 429/5xx, **cooldown for all providers** (not just Groq) | ✅ |

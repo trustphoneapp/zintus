@@ -19,7 +19,11 @@ import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
 import { sortProviders } from "./priority.js";
 import { QuotaLedger } from "./quota-ledger.js";
-import { GROQ_MODEL_70B, GROQ_MODEL_8B } from "./limits.js";
+import {
+  GROQ_MODEL_70B,
+  GROQ_MODEL_8B,
+  PAID_EQUIVALENT_USD_PER_MTOK,
+} from "./limits.js";
 
 export interface RouteAttemptEvent {
   providerId: ProviderId;
@@ -254,6 +258,7 @@ export function createRouter(config: RouterConfig = {}): Router {
       remainingRatio,
       providerPriority,
       latencyP95,
+      costPerMillion: (id) => PAID_EQUIVALENT_USD_PER_MTOK[id] ?? 0,
     });
 
     if (config.defaultProvider) {
