@@ -7,8 +7,8 @@ import type {
   ProviderId,
   StreamChatOptions,
   StreamChatResult,
-} from "@multipleai/types";
-import { ProviderHttpError, estimateUsage } from "@multipleai/providers";
+} from "@zintus/types";
+import { ProviderHttpError, estimateUsage } from "@zintus/providers";
 
 /**
  * End-to-end FAILOVER integration test (criterion A1): real engine → router →
@@ -42,7 +42,7 @@ describe("engine failover integration (stubbed providers)", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "multipleai-failover-int-"));
+    dir = mkdtempSync(join(tmpdir(), "zintus-failover-int-"));
   });
 
   afterEach(() => {
@@ -51,7 +51,7 @@ describe("engine failover integration (stubbed providers)", () => {
   });
 
   async function makeEngine(providers: Provider[]) {
-    mock.module("@multipleai/providers", () => ({
+    mock.module("@zintus/providers", () => ({
       listProviders: () => providers,
       ProviderHttpError,
       estimateUsage,

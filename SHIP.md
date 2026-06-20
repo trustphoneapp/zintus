@@ -1,7 +1,7 @@
-# SHIP — MultipleAI product-readiness pass
+# SHIP — Zintus product-readiness pass
 
 Single-pass hardening of the existing MVP. No speculative features added. Branch:
-`cursor/multipleai-full-stack-implementation`. **Not committed** (per request).
+`cursor/zintus-full-stack-implementation`. **Not committed** (per request).
 
 ## Release verification — 10-step manual smoke (fresh Mac)
 
@@ -105,7 +105,7 @@ invalid Groq key in the OS keychain produced a graceful `400`, not a crash), and
 
 Made the Expo app actually buildable, not just typecheck-clean:
 - **`app.json` completed**: `ios.bundleIdentifier` + `android.package`
-  (`com.multipleai.app`), app icon, adaptive icon, branded splash
+  (`com.zintus.app`), app icon, adaptive icon, branded splash
   (`expo-splash-screen`), and the `expo-notifications` plugin. Added iOS
   **App Transport Security** exceptions (`NSAllowsLocalNetworking` +
   `NSLocalNetworkUsageDescription`) so the app can reach a LAN/HTTP gateway, and
@@ -114,7 +114,7 @@ Made the Expo app actually buildable, not just typecheck-clean:
   babel/runtime deps that bun's isolated `node_modules` hid
   (`@babel/plugin-transform-react-jsx`, `@babel/core`, `react-native-worklets`,
   `react-native-css-interop`, `expo-splash-screen`) and made `metro.config.js`
-  monorepo-aware with a `.js`→`.ts` resolver for the shared `@multipleai/*`
+  monorepo-aware with a `.js`→`.ts` resolver for the shared `@zintus/*`
   packages.
 - **Verified by bundling**: `expo export` succeeds for **iOS (1810 modules →
   Hermes `.hbc`)** and **Android (1811 modules)**; `expo config` validates.
@@ -141,7 +141,7 @@ applied the safe fixes:
 **Web `/terminal` is now a real command console** (works on any OS via the
 browser, talks only to the gateway): `help`, `status`, `keys`, `models`,
 `history`, `trace`, `gateway`, `clear`, `version`, and `chat <msg>` (bare text
-still sends a chat). Up/down arrow command history. Mirrors the `multipleai`
+still sends a chat). Up/down arrow command history. Mirrors the `zintus`
 CLI. Cleaned up the terminal-line store model. Verified: web build OK, the
 gateway `/v1/models` and `/v1/threads` it calls return 200.
 
@@ -149,11 +149,11 @@ gateway `/v1/models` and `/v1/threads` it calls return 200.
 - **Windows `HOME` bug** — `${process.env.HOME ?? "."}` is undefined on Windows,
   so DB files scattered into the cwd. Fixed in 5 files (router/factory,
   engine, conversation-store, cache, memory-store) to use
-  `join(homedir(), ".multipleai", "<db>")`.
+  `join(homedir(), ".zintus", "<db>")`.
 - **Headless-Linux keychain** — `keys set` threw an opaque native error when no
   Secret Service is running. Now throws an actionable message; the convenience
   manifest write is best-effort so it never hard-fails. (`packages/keychain`)
-- Fixed a hardcoded `~/.multipleai/config.json` message to print the real path.
+- Fixed a hardcoded `~/.zintus/config.json` message to print the real path.
 
 **Desktop terminal cross-OS:**
 - Hardcoded `/bin/zsh` broke Linux and ignored `$SHELL`. Added a Rust
@@ -186,6 +186,6 @@ A teardown of LiteLLM, OpenRouter, Portkey, Helicone, Cloudflare/Kong/Envoy,
 TensorZero, RouteLLM, etc. fed ROADMAP "Phase 4": same-model multi-provider
 failover (model groups), PeakEWMA/P2C latency routing, token/cost budgets +
 tiers, context-window/content-policy fallbacks, OpenTelemetry tracing, and
-content-aware cost/quality routing. MultipleAI's native L1+L2 cache and
+content-aware cost/quality routing. Zintus's native L1+L2 cache and
 single-binary SQLite ledger (no Postgres/Redis) are genuine differentiators to
 keep.

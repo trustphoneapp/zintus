@@ -5,11 +5,11 @@ import { Database } from "bun:sqlite";
 import { load as loadSqliteVec } from "sqlite-vec";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { eq, and } from "drizzle-orm";
-import type { ChatMessage } from "@multipleai/types";
+import type { ChatMessage } from "@zintus/types";
 import * as schema from "./schema.js";
 import crypto from "node:crypto";
 
-const DEFAULT_CACHE_PATH = join(homedir(), ".multipleai", "cache.db");
+const DEFAULT_CACHE_PATH = join(homedir(), ".zintus", "cache.db");
 const FALLBACK_VECTOR_SIZE = 256;
 const DEFAULT_OLLAMA_MODEL = "nomic-embed-text";
 

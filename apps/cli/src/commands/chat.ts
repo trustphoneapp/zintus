@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import ora from "ora";
-import { tryGitDiff } from "@multipleai/context-compiler";
-import type { ContextMode } from "@multipleai/types";
+import { tryGitDiff } from "@zintus/context-compiler";
+import type { ContextMode } from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
 

@@ -1,4 +1,4 @@
-import type { RequestTrace } from "@multipleai/types";
+import type { RequestTrace } from "@zintus/types";
 
 /**
  * Dependency-free OpenTelemetry export (Phase 4.1, "Helicone-lite").
@@ -21,7 +21,7 @@ export interface OtelRequestInfo {
   outputTokens?: number;
 }
 
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME ?? "multipleai-gateway";
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME ?? "zintus-gateway";
 
 export function isOtelEnabled(): boolean {
   return Boolean(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
@@ -70,15 +70,15 @@ export function buildOtlpPayload(info: OtelRequestInfo): Record<string, unknown>
       startTimeUnixNano: startNano,
       endTimeUnixNano: endNano,
       attributes: attrs([
-        str("gen_ai.system", "multipleai"),
+        str("gen_ai.system", "zintus"),
         str("gen_ai.request.model", trace.winner?.model),
-        str("multipleai.winner.provider", trace.winner?.providerId),
-        str("multipleai.cache.hit", info.cacheHit),
-        int("multipleai.failover.count", info.failoverCount),
-        int("multipleai.compile.tokens", info.compileTokens),
+        str("zintus.winner.provider", trace.winner?.providerId),
+        str("zintus.cache.hit", info.cacheHit),
+        int("zintus.failover.count", info.failoverCount),
+        int("zintus.compile.tokens", info.compileTokens),
         int("gen_ai.usage.input_tokens", info.inputTokens),
         int("gen_ai.usage.output_tokens", info.outputTokens),
-        int("multipleai.total.latency_ms", trace.totalLatencyMs),
+        int("zintus.total.latency_ms", trace.totalLatencyMs),
       ]),
       status: { code: 1 }, // OK
     };
@@ -99,10 +99,10 @@ export function buildOtlpPayload(info: OtelRequestInfo): Record<string, unknown>
         attributes: attrs([
           str("gen_ai.system", attempt.providerId),
           str("gen_ai.request.model", attempt.model),
-          str("multipleai.attempt.status", attempt.status),
+          str("zintus.attempt.status", attempt.status),
           int("http.response.status_code", attempt.errorCode),
           str("error.message", attempt.errorMessage),
-          int("multipleai.attempt.latency_ms", attempt.latencyMs),
+          int("zintus.attempt.latency_ms", attempt.latencyMs),
         ]),
         status: { code: attempt.status === "fail" ? 2 : 1 }, // ERROR : OK
       };
@@ -116,7 +116,7 @@ export function buildOtlpPayload(info: OtelRequestInfo): Record<string, unknown>
           },
           scopeSpans: [
             {
-              scope: { name: "@multipleai/engine" },
+              scope: { name: "@zintus/engine" },
               spans: [parentSpan, ...childSpans],
             },
           ],

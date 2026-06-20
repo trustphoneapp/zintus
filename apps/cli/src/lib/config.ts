@@ -5,9 +5,9 @@ import {
   DEFAULT_CONFIG,
   type AppConfig,
   type RoutingStrategy,
-} from "@multipleai/types";
+} from "@zintus/types";
 
-export const CONFIG_PATH = join(homedir(), ".multipleai", "config.json");
+export const CONFIG_PATH = join(homedir(), ".zintus", "config.json");
 
 export async function loadConfig(): Promise<AppConfig> {
   try {
@@ -19,7 +19,7 @@ export async function loadConfig(): Promise<AppConfig> {
 }
 
 export async function saveConfig(config: AppConfig): Promise<void> {
-  await mkdir(join(homedir(), ".multipleai"), { recursive: true });
+  await mkdir(join(homedir(), ".zintus"), { recursive: true });
   await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
 }
 

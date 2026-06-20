@@ -2,7 +2,7 @@ import { describe, expect, mock, test, afterEach } from "bun:test";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { ChatMessage, Provider, ProviderId } from "@multipleai/types";
+import type { ChatMessage, Provider, ProviderId } from "@zintus/types";
 import { createRouter } from "./factory.js";
 import { QuotaLedger } from "./quota-ledger.js";
 
@@ -30,11 +30,11 @@ function stubProvider(
 function createTestRouterWithLedger(providers: Provider[]) {
   const dbPath = join(
     tmpdir(),
-    `multipleai-router-weighted-test-${Date.now()}-${Math.random()}.db`,
+    `zintus-router-weighted-test-${Date.now()}-${Math.random()}.db`,
   );
   dbPaths.push(dbPath);
 
-  mock.module("@multipleai/providers", () => ({
+  mock.module("@zintus/providers", () => ({
     listProviders: () => providers,
     ProviderHttpError: class ProviderHttpError extends Error {
       status: number;

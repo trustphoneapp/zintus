@@ -5,7 +5,7 @@ import type {
   MemoryStore,
   MemoryThreadState,
   ThreadMessage,
-} from "@multipleai/types";
+} from "@zintus/types";
 
 export type CompileMode = "fast" | "smart" | "deep";
 

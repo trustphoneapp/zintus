@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MultipleAI",
+  "productName": "Zintus",
   "version": "0.0.1",
-  "identifier": "com.multipleai.desktop",
+  "identifier": "com.zintus.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:3001",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MultipleAI",
+        "title": "Zintus",
         "width": 1280,
         "height": 840,
         "minWidth": 960,

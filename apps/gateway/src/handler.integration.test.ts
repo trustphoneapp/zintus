@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Provider, ProviderId } from "@multipleai/types";
-import { ProviderHttpError, estimateUsage } from "@multipleai/providers";
+import type { Provider, ProviderId } from "@zintus/types";
+import { ProviderHttpError, estimateUsage } from "@zintus/providers";
 import type { GatewayConfig } from "./auth.js";
 
 /**
@@ -35,7 +35,7 @@ describe("gateway handler integration (real engine)", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "multipleai-gw-int-"));
+    dir = mkdtempSync(join(tmpdir(), "zintus-gw-int-"));
   });
 
   afterEach(() => {
@@ -44,12 +44,12 @@ describe("gateway handler integration (real engine)", () => {
   });
 
   async function makeHandler(providers: Provider[]) {
-    mock.module("@multipleai/providers", () => ({
+    mock.module("@zintus/providers", () => ({
       listProviders: () => providers,
       ProviderHttpError,
       estimateUsage,
     }));
-    const { createEngine } = await import("@multipleai/engine");
+    const { createEngine } = await import("@zintus/engine");
     const { createGatewayHandler } = await import("./handler.js");
     const engine = createEngine({
       conversationsPath: join(dir, "conversations.db"),

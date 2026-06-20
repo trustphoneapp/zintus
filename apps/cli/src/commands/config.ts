@@ -1,11 +1,11 @@
 import * as p from "@clack/prompts";
 import chalk from "chalk";
-import { DEFAULT_CONFIG, PROVIDER_IDS, type ProviderId, type RoutingStrategy } from "@multipleai/types";
+import { DEFAULT_CONFIG, PROVIDER_IDS, type ProviderId, type RoutingStrategy } from "@zintus/types";
 import { PROVIDER_META } from "../lib/router.js";
 import { loadConfig, saveConfig, isRoutingStrategy, CONFIG_PATH } from "../lib/config.js";
 
 export async function runConfig(): Promise<void> {
-  p.intro(chalk.bgCyan.black(" multipleai config "));
+  p.intro(chalk.bgCyan.black(" zintus config "));
 
   const current = await loadConfig();
 

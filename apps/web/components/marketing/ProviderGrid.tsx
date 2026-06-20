@@ -26,7 +26,7 @@ export function ProviderGrid() {
           <h2 className="m-title">12 AI services. One chat box.</h2>
           <p className="m-subtitle">
             Mix fast cloud models with private models that run on your own computer. Turn on
-            the ones you want &mdash; MultipleAI picks the best one for each message.
+            the ones you want &mdash; Zintus picks the best one for each message.
           </p>
         </Reveal>
         <div className="m-provider-grid">

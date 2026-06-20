@@ -23,7 +23,7 @@ const COMMANDS = `Commands (run against the gateway — work on any OS, any brow
   clear                Clear the screen
   version              CLI/console version
 
-This mirrors the \`multipleai\` CLI. Native key management (keys set/remove,
+This mirrors the \`zintus\` CLI. Native key management (keys set/remove,
 config, setup) lives in the CLI — it needs the OS keychain.`;
 
 export default function TerminalPage() {
@@ -84,7 +84,7 @@ export default function TerminalPage() {
     );
     if (configured.length === 0) {
       print("No provider keys configured. Add one with the CLI:", "muted");
-      print("  multipleai keys set groq <your-key>", "code");
+      print("  zintus keys set groq <your-key>", "code");
       return;
     }
     print(`Configured providers (${configured.length}):`, "accent");
@@ -116,7 +116,7 @@ export default function TerminalPage() {
         clearTerminal();
         return;
       case "version":
-        print("multipleai console 0.0.1", "muted");
+        print("zintus console 0.0.1", "muted");
         return;
       case "gateway":
         print(

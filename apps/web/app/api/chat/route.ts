@@ -1,4 +1,4 @@
-import type { ContextMode, ProviderId } from "@multipleai/types";
+import type { ContextMode, ProviderId } from "@zintus/types";
 
 export const runtime = "nodejs";
 

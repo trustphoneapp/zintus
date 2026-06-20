@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { PolicyConfig, ProviderId } from "@multipleai/types";
+import type { PolicyConfig, ProviderId } from "@zintus/types";
 
 /**
  * Declarative routing policy loader (Phase 1.4).
@@ -10,21 +10,21 @@ import type { PolicyConfig, ProviderId } from "@multipleai/types";
  * JSON file so operators can retune provider order, weights, model groups, and
  * quota limits without editing code. Resolution order:
  *   1. explicit path argument
- *   2. $MULTIPLEAI_POLICY env var
- *   3. ~/.multipleai/policy.json
+ *   2. $ZINTUS_POLICY env var
+ *   3. ~/.zintus/policy.json
  *   4. <repo-root>/policy.json (cwd)
  * When no file exists we return an empty policy and callers fall back to their
  * hardcoded defaults — the file is purely an override layer.
  */
 
-const HOME_POLICY = join(homedir(), ".multipleai", "policy.json");
+const HOME_POLICY = join(homedir(), ".zintus", "policy.json");
 const CWD_POLICY = join(process.cwd(), "policy.json");
 
 export function resolvePolicyPath(explicit?: string): string | null {
   if (explicit) {
     return explicit;
   }
-  const fromEnv = process.env.MULTIPLEAI_POLICY;
+  const fromEnv = process.env.ZINTUS_POLICY;
   if (fromEnv) {
     return fromEnv;
   }

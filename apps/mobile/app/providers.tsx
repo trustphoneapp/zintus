@@ -8,8 +8,8 @@ import {
 } from "react-native";
 import BottomSheet from "@gorhom/bottom-sheet";
 import { useFocusEffect } from "expo-router";
-import { listProviders } from "@multipleai/providers";
-import type { ProviderId } from "@multipleai/types";
+import { listProviders } from "@zintus/providers";
+import type { ProviderId } from "@zintus/types";
 import { ProviderSheet } from "@/components/ProviderSheet";
 import { QuotaBar } from "@/components/QuotaBar";
 import { loadSelectedProvider, saveSelectedProvider } from "@/lib/config";

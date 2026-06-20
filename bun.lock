@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "multipleai",
+      "name": "zintus",
       "dependencies": {
         "@radix-ui/react-tooltip": "^1.2.10",
         "framer-motion": "^12.40.0",
@@ -11,28 +11,28 @@
         "next-themes": "^0.4.6",
       },
       "devDependencies": {
-        "@multipleai/router": "workspace:*",
         "@types/bun": "latest",
         "@types/node": "^22.0.0",
         "@types/react": "^19.0.0",
+        "@zintus/router": "workspace:*",
         "typescript": "^5.7.0",
         "vitest": "^4.1.9",
       },
     },
     "apps/cli": {
-      "name": "multipleai",
+      "name": "zintus",
       "version": "0.0.1",
       "bin": {
-        "multipleai": "./src/index.ts",
+        "zintus": "./src/index.ts",
       },
       "dependencies": {
         "@clack/prompts": "^0.10.0",
-        "@multipleai/context-compiler": "workspace:*",
-        "@multipleai/engine": "workspace:*",
-        "@multipleai/keychain": "workspace:*",
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/router": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/context-compiler": "workspace:*",
+        "@zintus/engine": "workspace:*",
+        "@zintus/keychain": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/router": "workspace:*",
+        "@zintus/types": "workspace:*",
         "chalk": "^5.4.1",
         "commander": "^12.1.0",
         "drizzle-orm": "^0.45.0",
@@ -46,17 +46,17 @@
       },
     },
     "apps/desktop": {
-      "name": "@multipleai/desktop",
+      "name": "@zintus/desktop",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/router": "workspace:*",
-        "@multipleai/types": "workspace:*",
-        "@multipleai/ui": "workspace:*",
         "@tauri-apps/api": "^2.2.0",
         "@xterm/addon-fit": "^0.10.0",
         "@xterm/addon-webgl": "^0.18.0",
         "@xterm/xterm": "^5.5.0",
+        "@zintus/providers": "workspace:*",
+        "@zintus/router": "workspace:*",
+        "@zintus/types": "workspace:*",
+        "@zintus/ui": "workspace:*",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "lucide-react": "^0.469.0",
@@ -81,27 +81,27 @@
       },
     },
     "apps/gateway": {
-      "name": "@multipleai/gateway",
+      "name": "@zintus/gateway",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/engine": "workspace:*",
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/router": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/engine": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/router": "workspace:*",
+        "@zintus/types": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "latest",
       },
     },
     "apps/mobile": {
-      "name": "@multipleai/mobile",
+      "name": "@zintus/mobile",
       "version": "0.0.1",
       "dependencies": {
         "@expo/vector-icons": "^15.1.1",
         "@gorhom/bottom-sheet": "^5.2.14",
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/router": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/router": "workspace:*",
+        "@zintus/types": "workspace:*",
         "expo": "~56.0.0",
         "expo-notifications": "^56.0.18",
         "expo-router": "~6.0.0",
@@ -129,11 +129,12 @@
       },
     },
     "apps/web": {
-      "name": "@multipleai/web",
+      "name": "@zintus/web",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/types": "workspace:*",
-        "@multipleai/ui": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/types": "workspace:*",
+        "@zintus/ui": "workspace:*",
         "framer-motion": "^12.40.0",
         "lucide-react": "^1.18.0",
         "next": "^16.2.7",
@@ -153,11 +154,11 @@
       },
     },
     "packages/cache": {
-      "name": "@multipleai/cache",
+      "name": "@zintus/cache",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/types": "workspace:*",
         "drizzle-orm": "^0.45.0",
         "sqlite-vec": "^0.1.9",
       },
@@ -166,10 +167,10 @@
       },
     },
     "packages/codebase-indexer": {
-      "name": "@multipleai/codebase-indexer",
+      "name": "@zintus/codebase-indexer",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/memory": "workspace:*",
+        "@zintus/memory": "workspace:*",
         "sqlite-vec": "^0.1.9",
       },
       "devDependencies": {
@@ -177,28 +178,28 @@
       },
     },
     "packages/context-compiler": {
-      "name": "@multipleai/context-compiler",
+      "name": "@zintus/context-compiler",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/memory": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/memory": "workspace:*",
+        "@zintus/types": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "latest",
       },
     },
     "packages/engine": {
-      "name": "@multipleai/engine",
+      "name": "@zintus/engine",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/cache": "workspace:*",
-        "@multipleai/codebase-indexer": "workspace:*",
-        "@multipleai/context-compiler": "workspace:*",
-        "@multipleai/keychain": "workspace:*",
-        "@multipleai/memory": "workspace:*",
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/router": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/cache": "workspace:*",
+        "@zintus/codebase-indexer": "workspace:*",
+        "@zintus/context-compiler": "workspace:*",
+        "@zintus/keychain": "workspace:*",
+        "@zintus/memory": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/router": "workspace:*",
+        "@zintus/types": "workspace:*",
         "drizzle-orm": "^0.45.0",
       },
       "devDependencies": {
@@ -206,20 +207,20 @@
       },
     },
     "packages/keychain": {
-      "name": "@multipleai/keychain",
+      "name": "@zintus/keychain",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/types": "workspace:*",
         "@napi-rs/keyring": "^1.3.0",
+        "@zintus/types": "workspace:*",
       },
     },
     "packages/memory": {
-      "name": "@multipleai/memory",
+      "name": "@zintus/memory",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/keychain": "workspace:*",
-        "@multipleai/router": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/keychain": "workspace:*",
+        "@zintus/router": "workspace:*",
+        "@zintus/types": "workspace:*",
         "drizzle-orm": "^0.45.0",
         "sqlite-vec": "^0.1.9",
       },
@@ -228,22 +229,22 @@
       },
     },
     "packages/providers": {
-      "name": "@multipleai/providers",
+      "name": "@zintus/providers",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/types": "workspace:*",
+        "@zintus/types": "workspace:*",
       },
       "devDependencies": {
         "@types/node": "^22.0.0",
       },
     },
     "packages/router": {
-      "name": "@multipleai/router",
+      "name": "@zintus/router",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/keychain": "workspace:*",
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/keychain": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/types": "workspace:*",
         "drizzle-orm": "^0.45.0",
       },
       "devDependencies": {
@@ -252,19 +253,19 @@
       },
     },
     "packages/types": {
-      "name": "@multipleai/types",
+      "name": "@zintus/types",
       "version": "0.0.0",
     },
     "packages/ui": {
-      "name": "@multipleai/ui",
+      "name": "@zintus/ui",
       "version": "0.0.1",
     },
     "workers/validate-key": {
-      "name": "@multipleai/validate-key-worker",
+      "name": "@zintus/validate-key-worker",
       "version": "0.0.1",
       "dependencies": {
-        "@multipleai/providers": "workspace:*",
-        "@multipleai/types": "workspace:*",
+        "@zintus/providers": "workspace:*",
+        "@zintus/types": "workspace:*",
         "hono": "^4.12.23",
       },
       "devDependencies": {
@@ -654,36 +655,6 @@
 
     "@jridgewell/trace-mapping": ["@jridgewell/trace-mapping@0.3.31", "", { "dependencies": { "@jridgewell/resolve-uri": "^3.1.0", "@jridgewell/sourcemap-codec": "^1.4.14" } }, "sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw=="],
 
-    "@multipleai/cache": ["@multipleai/cache@workspace:packages/cache"],
-
-    "@multipleai/codebase-indexer": ["@multipleai/codebase-indexer@workspace:packages/codebase-indexer"],
-
-    "@multipleai/context-compiler": ["@multipleai/context-compiler@workspace:packages/context-compiler"],
-
-    "@multipleai/desktop": ["@multipleai/desktop@workspace:apps/desktop"],
-
-    "@multipleai/engine": ["@multipleai/engine@workspace:packages/engine"],
-
-    "@multipleai/gateway": ["@multipleai/gateway@workspace:apps/gateway"],
-
-    "@multipleai/keychain": ["@multipleai/keychain@workspace:packages/keychain"],
-
-    "@multipleai/memory": ["@multipleai/memory@workspace:packages/memory"],
-
-    "@multipleai/mobile": ["@multipleai/mobile@workspace:apps/mobile"],
-
-    "@multipleai/providers": ["@multipleai/providers@workspace:packages/providers"],
-
-    "@multipleai/router": ["@multipleai/router@workspace:packages/router"],
-
-    "@multipleai/types": ["@multipleai/types@workspace:packages/types"],
-
-    "@multipleai/ui": ["@multipleai/ui@workspace:packages/ui"],
-
-    "@multipleai/validate-key-worker": ["@multipleai/validate-key-worker@workspace:workers/validate-key"],
-
-    "@multipleai/web": ["@multipleai/web@workspace:apps/web"],
-
     "@napi-rs/keyring": ["@napi-rs/keyring@1.3.0", "", { "optionalDependencies": { "@napi-rs/keyring-darwin-arm64": "1.3.0", "@napi-rs/keyring-darwin-x64": "1.3.0", "@napi-rs/keyring-freebsd-x64": "1.3.0", "@napi-rs/keyring-linux-arm-gnueabihf": "1.3.0", "@napi-rs/keyring-linux-arm64-gnu": "1.3.0", "@napi-rs/keyring-linux-arm64-musl": "1.3.0", "@napi-rs/keyring-linux-riscv64-gnu": "1.3.0", "@napi-rs/keyring-linux-x64-gnu": "1.3.0", "@napi-rs/keyring-linux-x64-musl": "1.3.0", "@napi-rs/keyring-win32-arm64-msvc": "1.3.0", "@napi-rs/keyring-win32-ia32-msvc": "1.3.0", "@napi-rs/keyring-win32-x64-msvc": "1.3.0" } }, "sha512-WrOw/bcXm0f9qHkumlT1QlArXSTWqaY9sunsDpOk+yCCorCKMxvWT/a3xko4EYHVdeZoh00yI2TydXn6eyICDA=="],
 
     "@napi-rs/keyring-darwin-arm64": ["@napi-rs/keyring-darwin-arm64@1.3.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-pl76hJvdYUBn6I24bXiOBMA9nbDapo3I5B+f3OorjDU4dUMSypXeKbOVehJe8fhgTiH24flMyTS3aAIy43xegQ=="],
@@ -989,6 +960,36 @@
     "@xterm/addon-webgl": ["@xterm/addon-webgl@0.18.0", "", { "peerDependencies": { "@xterm/xterm": "^5.0.0" } }, "sha512-xCnfMBTI+/HKPdRnSOHaJDRqEpq2Ugy8LEj9GiY4J3zJObo3joylIFaMvzBwbYRg8zLtkO0KQaStCeSfoaI2/w=="],
 
     "@xterm/xterm": ["@xterm/xterm@5.5.0", "", {}, "sha512-hqJHYaQb5OptNunnyAnkHyM8aCjZ1MEIDTQu1iIbbTD/xops91NB5yq1ZK/dC2JDbVWtF23zUtl9JE2NqwT87A=="],
+
+    "@zintus/cache": ["@zintus/cache@workspace:packages/cache"],
+
+    "@zintus/codebase-indexer": ["@zintus/codebase-indexer@workspace:packages/codebase-indexer"],
+
+    "@zintus/context-compiler": ["@zintus/context-compiler@workspace:packages/context-compiler"],
+
+    "@zintus/desktop": ["@zintus/desktop@workspace:apps/desktop"],
+
+    "@zintus/engine": ["@zintus/engine@workspace:packages/engine"],
+
+    "@zintus/gateway": ["@zintus/gateway@workspace:apps/gateway"],
+
+    "@zintus/keychain": ["@zintus/keychain@workspace:packages/keychain"],
+
+    "@zintus/memory": ["@zintus/memory@workspace:packages/memory"],
+
+    "@zintus/mobile": ["@zintus/mobile@workspace:apps/mobile"],
+
+    "@zintus/providers": ["@zintus/providers@workspace:packages/providers"],
+
+    "@zintus/router": ["@zintus/router@workspace:packages/router"],
+
+    "@zintus/types": ["@zintus/types@workspace:packages/types"],
+
+    "@zintus/ui": ["@zintus/ui@workspace:packages/ui"],
+
+    "@zintus/validate-key-worker": ["@zintus/validate-key-worker@workspace:workers/validate-key"],
+
+    "@zintus/web": ["@zintus/web@workspace:apps/web"],
 
     "abort-controller": ["abort-controller@3.0.0", "", { "dependencies": { "event-target-shim": "^5.0.0" } }, "sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg=="],
 
@@ -1490,8 +1491,6 @@
 
     "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
 
-    "multipleai": ["multipleai@workspace:apps/cli"],
-
     "multitars": ["multitars@1.0.0", "", {}, "sha512-H/J4fMLedtudftaYMOg7ajzLYgT3/rwbWVJbqr/iUgB8DQztn38ys5HOqI1CzSxx8QhXXwOOnnBvd4v3jG5+Mg=="],
 
     "mz": ["mz@2.7.0", "", { "dependencies": { "any-promise": "^1.0.0", "object-assign": "^4.0.1", "thenify-all": "^1.0.0" } }, "sha512-z81GNO7nnYMEhrGh9LeymoE4+Yr0Wn5McHIZMK5cfQCl+NDX08sCZgUc9/6MHni9IWuFLm1Z3HTCXu2z9fN62Q=="],
@@ -1910,6 +1909,8 @@
 
     "youch-core": ["youch-core@0.3.3", "", { "dependencies": { "@poppinss/exception": "^1.2.2", "error-stack-parser-es": "^1.0.5" } }, "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA=="],
 
+    "zintus": ["zintus@workspace:apps/cli"],
+
     "zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
 
     "zustand": ["zustand@5.0.14", "", { "peerDependencies": { "@types/react": ">=18.0.0", "immer": ">=9.0.6", "react": ">=18.0.0", "use-sync-external-store": ">=1.2.0" }, "optionalPeers": ["@types/react", "immer", "react", "use-sync-external-store"] }, "sha512-/8tAspM5LMPr28b3fwLYrtdj77ECpfZviaP75CMTnwO8ISyaE4GDIG/9rDDYq/cH9D2Xw2A2RXglLInmVBQB/g=="],
@@ -1976,12 +1977,6 @@
 
     "@jest/types/chalk": ["chalk@4.1.2", "", { "dependencies": { "ansi-styles": "^4.1.0", "supports-color": "^7.1.0" } }, "sha512-oKnbhFyRIXpUuez8iBMmyEa4nbj4IOQyuhc/wy9kY7/WVPcwIO9VA668Pu8RkO7+0G76SLROeyw9CpQ061i4mA=="],
 
-    "@multipleai/desktop/lucide-react": ["lucide-react@0.469.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-28vvUnnKQ/dBwiCQtwJw7QauYnE7yd2Cyp4tTTJpvglX4EMpbflcdBgrgToX2j71B3YvugK/NH3BGUk+E/p/Fw=="],
-
-    "@multipleai/mobile/react": ["react@19.2.0", "", {}, "sha512-tmbWg6W31tQLeB5cdIBOicJDJRR2KzXsV7uSK9iNfLWQ5bIZfxuPEHp7M8wiHyHnn0DD1i7w3Zmin0FtkrwoCQ=="],
-
-    "@multipleai/mobile/tailwindcss": ["tailwindcss@3.4.19", "", { "dependencies": { "@alloc/quick-lru": "^5.2.0", "arg": "^5.0.2", "chokidar": "^3.6.0", "didyoumean": "^1.2.2", "dlv": "^1.1.3", "fast-glob": "^3.3.2", "glob-parent": "^6.0.2", "is-glob": "^4.0.3", "jiti": "^1.21.7", "lilconfig": "^3.1.3", "micromatch": "^4.0.8", "normalize-path": "^3.0.0", "object-hash": "^3.0.0", "picocolors": "^1.1.1", "postcss": "^8.4.47", "postcss-import": "^15.1.0", "postcss-js": "^4.0.1", "postcss-load-config": "^4.0.2 || ^5.0 || ^6.0", "postcss-nested": "^6.2.0", "postcss-selector-parser": "^6.1.2", "resolve": "^1.22.8", "sucrase": "^3.35.0" }, "bin": { "tailwind": "lib/cli.js", "tailwindcss": "lib/cli.js" } }, "sha512-3ofp+LL8E+pK/JuPLPggVAIaEuhvIz4qNcf3nA1Xn2o/7fb7s/TYpHhwGDv1ZU3PkBluUVaF8PyCHcm48cKLWQ=="],
-
     "@poppinss/colors/kleur": ["kleur@4.1.5", "", {}, "sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ=="],
 
     "@poppinss/dumper/supports-color": ["supports-color@10.2.2", "", {}, "sha512-SS+jx45GF1QjgEXQx4NJZV9ImqmO2NPz5FNsIHrsDjh2YsHnawpan7SNQ1o8NuhrbHZy9AZhIoCUiCeaW/C80g=="],
@@ -2037,6 +2032,12 @@
     "@tailwindcss/oxide-wasm32-wasi/@tybys/wasm-util": ["@tybys/wasm-util@0.10.2", "", { "dependencies": { "tslib": "^2.4.0" }, "bundled": true }, "sha512-RoBvJ2X0wuKlWFIjrwffGw1IqZHKQqzIchKaadZZfnNpsAYp2mM0h36JtPCjNDAHGgYez/15uMBpfGwchhiMgg=="],
 
     "@tailwindcss/oxide-wasm32-wasi/tslib": ["tslib@2.8.1", "", { "bundled": true }, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
+
+    "@zintus/desktop/lucide-react": ["lucide-react@0.469.0", "", { "peerDependencies": { "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-28vvUnnKQ/dBwiCQtwJw7QauYnE7yd2Cyp4tTTJpvglX4EMpbflcdBgrgToX2j71B3YvugK/NH3BGUk+E/p/Fw=="],
+
+    "@zintus/mobile/react": ["react@19.2.0", "", {}, "sha512-tmbWg6W31tQLeB5cdIBOicJDJRR2KzXsV7uSK9iNfLWQ5bIZfxuPEHp7M8wiHyHnn0DD1i7w3Zmin0FtkrwoCQ=="],
+
+    "@zintus/mobile/tailwindcss": ["tailwindcss@3.4.19", "", { "dependencies": { "@alloc/quick-lru": "^5.2.0", "arg": "^5.0.2", "chokidar": "^3.6.0", "didyoumean": "^1.2.2", "dlv": "^1.1.3", "fast-glob": "^3.3.2", "glob-parent": "^6.0.2", "is-glob": "^4.0.3", "jiti": "^1.21.7", "lilconfig": "^3.1.3", "micromatch": "^4.0.8", "normalize-path": "^3.0.0", "object-hash": "^3.0.0", "picocolors": "^1.1.1", "postcss": "^8.4.47", "postcss-import": "^15.1.0", "postcss-js": "^4.0.1", "postcss-load-config": "^4.0.2 || ^5.0 || ^6.0", "postcss-nested": "^6.2.0", "postcss-selector-parser": "^6.1.2", "resolve": "^1.22.8", "sucrase": "^3.35.0" }, "bin": { "tailwind": "lib/cli.js", "tailwindcss": "lib/cli.js" } }, "sha512-3ofp+LL8E+pK/JuPLPggVAIaEuhvIz4qNcf3nA1Xn2o/7fb7s/TYpHhwGDv1ZU3PkBluUVaF8PyCHcm48cKLWQ=="],
 
     "anymatch/picomatch": ["picomatch@2.3.2", "", {}, "sha512-V7+vQEJ06Z+c5tSye8S+nHUfI51xoXIXjHQ99cQtKUkQqqO1kO/KCJUfZXuB47h/YBlDhah2H3hdUGXn8ie0oA=="],
 

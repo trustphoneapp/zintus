@@ -1,6 +1,6 @@
 import { expect, test, describe, beforeAll, afterAll, beforeEach } from "bun:test";
 import { ResponseCache } from "./cache.js";
-import type { ChatMessage } from "@multipleai/types";
+import type { ChatMessage } from "@zintus/types";
 import { rmSync } from "node:fs";
 
 const TEST_DB_PATH = `${import.meta.dirname}/test_cache.db`;

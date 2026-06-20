@@ -1,5 +1,5 @@
-import { listProviders } from "@multipleai/providers";
-import type { ProviderId } from "@multipleai/types";
+import { listProviders } from "@zintus/providers";
+import type { ProviderId } from "@zintus/types";
 import { fetchGatewayHealth, type GatewaySavings } from "./gateway";
 
 export interface DesktopProviderInfo {

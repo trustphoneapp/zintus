@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { createProvider } from "@multipleai/providers";
-import { isProviderId } from "@multipleai/types";
+import { createProvider } from "@zintus/providers";
+import { isProviderId } from "@zintus/types";
 
 interface ValidateKeyRequest {
   providerId: string;

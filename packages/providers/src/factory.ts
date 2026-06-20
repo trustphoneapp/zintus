@@ -1,4 +1,4 @@
-import type { Provider, ProviderId } from "@multipleai/types";
+import type { Provider, ProviderId } from "@zintus/types";
 import { cerebrasProvider } from "./providers/cerebras.js";
 import { groqProvider } from "./providers/groq.js";
 import { geminiProvider } from "./providers/gemini.js";

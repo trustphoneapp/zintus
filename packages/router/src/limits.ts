@@ -1,4 +1,4 @@
-import type { PolicyLimits, ProviderId } from "@multipleai/types";
+import type { PolicyLimits, ProviderId } from "@zintus/types";
 
 export interface ProviderLimits {
   requestsPerDay?: number;

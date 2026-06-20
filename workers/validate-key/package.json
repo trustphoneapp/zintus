@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/validate-key-worker",
+  "name": "@zintus/validate-key-worker",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -9,8 +9,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@multipleai/providers": "workspace:*",
-    "@multipleai/types": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/types": "workspace:*",
     "hono": "^4.12.23"
   },
   "devDependencies": {

@@ -9,8 +9,8 @@
  * a secret without breaking forks/PRs that have none.
  */
 import { describe, expect, test } from "bun:test";
-import { openrouterProvider } from "@multipleai/providers";
-import type { TokenUsage } from "@multipleai/types";
+import { openrouterProvider } from "@zintus/providers";
+import type { TokenUsage } from "@zintus/types";
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY?.trim();
 const describeLive = OPENROUTER_API_KEY ? describe : describe.skip;

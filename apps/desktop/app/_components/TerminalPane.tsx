@@ -97,7 +97,7 @@ export function TerminalPane() {
           });
           resizeObserver.observe(container);
 
-          term.writeln("\x1b[35mMultipleAI\x1b[0m terminal — tauri-plugin-pty\r\n");
+          term.writeln("\x1b[35mZintus\x1b[0m terminal — tauri-plugin-pty\r\n");
 
           cleanup = () => {
             resizeObserver?.disconnect();
@@ -110,7 +110,7 @@ export function TerminalPane() {
           term.writeln(`PTY unavailable: ${detail}\r\n`);
         }
       } else {
-        term.writeln("MultipleAI terminal preview (browser dev mode).\r\n");
+        term.writeln("Zintus terminal preview (browser dev mode).\r\n");
         term.writeln("Run `bun tauri dev` for a real shell.\r\n");
         term.write("$ ");
         term.onData((data) => {

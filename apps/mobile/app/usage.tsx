@@ -1,8 +1,8 @@
 import { useCallback, useState } from "react";
 import { ActivityIndicator, ScrollView, Text, View } from "react-native";
 import { useFocusEffect } from "expo-router";
-import { listProviders } from "@multipleai/providers";
-import type { ProviderId } from "@multipleai/types";
+import { listProviders } from "@zintus/providers";
+import type { ProviderId } from "@zintus/types";
 import { getAllQuotaSnapshots, resolveQuotaSource } from "@/lib/quota";
 import {
   fetchGatewayHealth,

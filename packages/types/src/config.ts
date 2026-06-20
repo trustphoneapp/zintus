@@ -27,7 +27,7 @@ export interface PolicyLimits {
 export type FallbackAction = "next_provider" | "fail";
 
 /**
- * Declarative routing policy. Loaded from ~/.multipleai/policy.json (or a
+ * Declarative routing policy. Loaded from ~/.zintus/policy.json (or a
  * repo-root policy.json) and hot-reloaded on change. Every field is optional;
  * sane code defaults apply when the file is missing or partial.
  */

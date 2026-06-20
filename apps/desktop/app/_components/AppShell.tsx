@@ -28,7 +28,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         }}
       >
         <span style={{ fontSize: 20, fontWeight: 700, color: "var(--color-purple-light)" }}>
-          MultipleAI
+          Zintus
         </span>
         <nav style={{ display: "flex", gap: 4 }}>
           {NAV.map((item) => {

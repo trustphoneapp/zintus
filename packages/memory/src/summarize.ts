@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@multipleai/types";
+import type { ChatMessage } from "@zintus/types";
 
 export function summarizeTurns(previousSummary: string, newTurns: ChatMessage[]): string {
   const userTurns = newTurns.filter((turn) => turn.role === "user").slice(-2);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Provider, ProviderId } from "@multipleai/types";
+import type { Provider, ProviderId } from "@zintus/types";
 import { sortProviders } from "./priority.js";
 
 function stub(id: ProviderId, priority: number): Provider {

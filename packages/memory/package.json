@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/memory",
+  "name": "@zintus/memory",
   "version": "0.0.1",
   "type": "module",
   "main": "./src/index.ts",
@@ -15,9 +15,9 @@
     "test": "bun test src/llm-memory.test.ts src/vector.test.ts src/memory-checkpoints.test.ts"
   },
   "dependencies": {
-    "@multipleai/keychain": "workspace:*",
-    "@multipleai/router": "workspace:*",
-    "@multipleai/types": "workspace:*",
+    "@zintus/keychain": "workspace:*",
+    "@zintus/router": "workspace:*",
+    "@zintus/types": "workspace:*",
     "drizzle-orm": "^0.45.0",
     "sqlite-vec": "^0.1.9"
   },

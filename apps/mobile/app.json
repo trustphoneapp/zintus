@@ -1,26 +1,26 @@
 {
   "expo": {
-    "name": "MultipleAI",
-    "slug": "multipleai",
+    "name": "Zintus",
+    "slug": "zintus",
     "version": "0.0.1",
-    "scheme": "multipleai",
+    "scheme": "zintus",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "icon": "./assets/icon.png",
     "newArchEnabled": true,
     "ios": {
-      "bundleIdentifier": "com.multipleai.app",
+      "bundleIdentifier": "com.zintus.app",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSLocalNetworkUsageDescription": "MultipleAI connects to a gateway running on your local network to route AI requests.",
+        "NSLocalNetworkUsageDescription": "Zintus connects to a gateway running on your local network to route AI requests.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
       }
     },
     "android": {
-      "package": "com.multipleai.app",
+      "package": "com.zintus.app",
       "edgeToEdgeEnabled": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",

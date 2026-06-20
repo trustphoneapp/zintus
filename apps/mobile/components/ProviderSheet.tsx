@@ -3,8 +3,8 @@ import BottomSheet, {
   BottomSheetTextInput,
   BottomSheetView,
 } from "@gorhom/bottom-sheet";
-import { listProviders } from "@multipleai/providers";
-import type { ProviderId } from "@multipleai/types";
+import { listProviders } from "@zintus/providers";
+import type { ProviderId } from "@zintus/types";
 import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { deleteApiKey, getApiKey, setApiKey } from "@/lib/keys";

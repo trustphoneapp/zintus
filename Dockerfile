@@ -1,8 +1,8 @@
-# MultipleAI gateway — local-first BYOK quota router.
-# Build:  docker build -t multipleai .
+# Zintus gateway — local-first BYOK quota router.
+# Build:  docker build -t zintus .
 # Run:    docker run -p 8788:8788 -e GATEWAY_TOKEN=secret \
-#           -v "$HOME/.multipleai:/root/.multipleai" multipleai
-# Keys/quota.db live in the mounted ~/.multipleai volume (no SaaS, no cloud).
+#           -v "$HOME/.zintus:/root/.zintus" zintus
+# Keys/quota.db live in the mounted ~/.zintus volume (no SaaS, no cloud).
 FROM oven/bun:1 AS base
 WORKDIR /app
 

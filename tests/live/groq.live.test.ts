@@ -9,7 +9,7 @@
  * secret without breaking forks/PRs that have none.
  */
 import { describe, expect, test } from "bun:test";
-import { createRouter } from "@multipleai/router";
+import { createRouter } from "@zintus/router";
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY?.trim();
 const describeLive = GROQ_API_KEY ? describe : describe.skip;
@@ -17,7 +17,7 @@ const describeLive = GROQ_API_KEY ? describe : describe.skip;
 describeLive("live: Groq via the router", () => {
   test("streams a non-empty completion from a real provider", async () => {
     const router = createRouter({
-      dbPath: `${process.env.TMPDIR ?? "/tmp"}/multipleai-live-${Date.now()}.db`,
+      dbPath: `${process.env.TMPDIR ?? "/tmp"}/zintus-live-${Date.now()}.db`,
       getApiKey: async (id) => (id === "groq" ? (GROQ_API_KEY ?? null) : null),
     });
 

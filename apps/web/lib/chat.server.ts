@@ -1,12 +1,12 @@
-import { createRouter } from "@multipleai/router";
+import { createRouter } from "@zintus/router";
 import type {
   AppConfig,
   ChatMessage,
   ContextMode,
   ProviderId,
   RouteStreamResult,
-} from "@multipleai/types";
-import { DEFAULT_CONFIG } from "@multipleai/types";
+} from "@zintus/types";
+import { DEFAULT_CONFIG } from "@zintus/types";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -25,8 +25,8 @@ export interface ChatServerStreamResult extends RouteStreamResult {
 
 function quotaDbPath(): string {
   return (
-    process.env.MULTIPLEAI_QUOTA_PATH ??
-    join(homedir(), ".multipleai", "quota-web.db")
+    process.env.ZINTUS_QUOTA_PATH ??
+    join(homedir(), ".zintus", "quota-web.db")
   );
 }
 

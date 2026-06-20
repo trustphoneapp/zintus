@@ -9,7 +9,7 @@ import { chunkSource } from "./chunker.js";
  * Deterministic, offline, network-free embedding.
  *
  * A token-hashing bag-of-words embedding in the same family as the repo's
- * @multipleai/memory fallback. Identical/overlapping vocabulary produces high
+ * @zintus/memory fallback. Identical/overlapping vocabulary produces high
  * cosine similarity, so a query that shares words with one file's source will
  * rank that file's chunks first. No Ollama, no randomness.
  */

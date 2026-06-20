@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 function createStore(): MemoryStore {
-  const dbPath = join(tmpdir(), `multipleai-memory-${Date.now()}-${Math.random()}.db`);
+  const dbPath = join(tmpdir(), `zintus-memory-${Date.now()}-${Math.random()}.db`);
   tempDbPaths.push(dbPath);
   const store = new MemoryStore(dbPath);
   store.init();

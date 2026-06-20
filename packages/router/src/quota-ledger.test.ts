@@ -16,7 +16,7 @@ describe("QuotaLedger", () => {
   });
 
   it("tracks usage and enforces daily limits", () => {
-    const dir = mkdtempSync(join(tmpdir(), "multipleai-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
     dbPath = join(dir, "quota.db");
     ledger = new QuotaLedger(dbPath);
 
@@ -31,7 +31,7 @@ describe("QuotaLedger", () => {
   });
 
   it("applies Groq rolling-window reset from headers", () => {
-    const dir = mkdtempSync(join(tmpdir(), "multipleai-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
     dbPath = join(dir, "quota.db");
     ledger = new QuotaLedger(dbPath);
 
@@ -44,7 +44,7 @@ describe("QuotaLedger", () => {
   });
 
   it("sets exponential cooldown", () => {
-    const dir = mkdtempSync(join(tmpdir(), "multipleai-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
     dbPath = join(dir, "quota.db");
     ledger = new QuotaLedger(dbPath);
 

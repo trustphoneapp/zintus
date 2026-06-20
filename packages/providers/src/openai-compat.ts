@@ -4,7 +4,7 @@ import type {
   RateLimitInfo,
   StreamChatOptions,
   StreamChatResult,
-} from "@multipleai/types";
+} from "@zintus/types";
 import {
   assertOkResponse,
   parseGroqRateLimitHeaders,

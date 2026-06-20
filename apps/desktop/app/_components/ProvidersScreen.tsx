@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { ProviderId } from "@multipleai/types";
-import { PROVIDER_IDS } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
+import { PROVIDER_IDS } from "@zintus/types";
 import { deleteKey, getKey, isTauri, setKey } from "@/lib/tauri";
 import { useProviderStatusStore } from "@/lib/store";
 import { Button } from "./ui/button";

@@ -1,8 +1,8 @@
 import * as p from "@clack/prompts";
 import chalk from "chalk";
 import { runKeysSet } from "../commands/keys.js";
-import { listKeys } from "@multipleai/keychain";
-import { PROVIDER_IDS, type ProviderId } from "@multipleai/types";
+import { listKeys } from "@zintus/keychain";
+import { PROVIDER_IDS, type ProviderId } from "@zintus/types";
 import { PROVIDER_META } from "../lib/router.js";
 
 const CLOUD_PROVIDERS = PROVIDER_IDS.filter(
@@ -11,7 +11,7 @@ const CLOUD_PROVIDERS = PROVIDER_IDS.filter(
 );
 
 export async function runSetup(): Promise<void> {
-  p.intro(chalk.bgCyan.black(" multipleai setup "));
+  p.intro(chalk.bgCyan.black(" zintus setup "));
 
   const existing = await listKeys();
   if (existing.length > 0) {
@@ -60,5 +60,5 @@ export async function runSetup(): Promise<void> {
     await runKeysSet(provider, String(key).trim());
   }
 
-  p.outro(chalk.green("Setup complete. Run `multipleai status` to verify providers."));
+  p.outro(chalk.green("Setup complete. Run `zintus status` to verify providers."));
 }

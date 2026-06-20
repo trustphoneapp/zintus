@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/context-compiler",
+  "name": "@zintus/context-compiler",
   "version": "0.0.1",
   "type": "module",
   "main": "./src/index.ts",
@@ -15,8 +15,8 @@
     "test": "bun test src/compiler.test.ts"
   },
   "dependencies": {
-    "@multipleai/memory": "workspace:*",
-    "@multipleai/types": "workspace:*"
+    "@zintus/memory": "workspace:*",
+    "@zintus/types": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest"

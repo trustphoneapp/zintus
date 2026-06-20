@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Engine } from "@multipleai/engine";
+import type { Engine } from "@zintus/engine";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler } from "./handler.js";
 
@@ -294,7 +294,7 @@ describe("gateway handler", () => {
       new Request("http://x/metrics", { headers: { accept: "text/plain" } }),
     );
     expect(res.headers.get("content-type")).toContain("text/plain");
-    expect(await res.text()).toContain("multipleai_gateway_requests_total");
+    expect(await res.text()).toContain("zintus_gateway_requests_total");
   });
 
   test("OPTIONS preflight returns 204 with CORS headers", async () => {

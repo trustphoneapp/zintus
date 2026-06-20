@@ -5,7 +5,7 @@ import type {
   MemoryStore,
   MemoryThreadState,
   ThreadMessage,
-} from "@multipleai/types";
+} from "@zintus/types";
 import { compileContext } from "./compiler.js";
 
 class StubMemoryStore implements MemoryStore {

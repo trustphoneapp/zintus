@@ -2,8 +2,8 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { ChatMessage, Provider, ProviderId } from "@multipleai/types";
-import { ProviderHttpError, estimateUsage } from "@multipleai/providers";
+import type { ChatMessage, Provider, ProviderId } from "@zintus/types";
+import { ProviderHttpError, estimateUsage } from "@zintus/providers";
 import { createRouter, type RouterConfig } from "./factory.js";
 
 const dbPaths: string[] = [];
@@ -30,11 +30,11 @@ function stubProvider(
 function createTestRouter(providers: Provider[], extra: Partial<RouterConfig> = {}) {
   const dbPath = join(
     tmpdir(),
-    `multipleai-mg-test-${Date.now()}-${Math.random()}.db`,
+    `zintus-mg-test-${Date.now()}-${Math.random()}.db`,
   );
   dbPaths.push(dbPath);
 
-  mock.module("@multipleai/providers", () => ({
+  mock.module("@zintus/providers", () => ({
     listProviders: () => providers,
     ProviderHttpError,
     estimateUsage,

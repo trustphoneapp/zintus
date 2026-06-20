@@ -1,4 +1,4 @@
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 
 export interface ProviderDisplay {
   id: ProviderId;

@@ -4,7 +4,7 @@ import type {
   Provider,
   StreamChatOptions,
   StreamChatResult,
-} from "@multipleai/types";
+} from "@zintus/types";
 import { assertOkResponse } from "../utils.js";
 import { usageFromProviderFields } from "../token-estimate.js";
 

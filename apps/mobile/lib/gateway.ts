@@ -1,4 +1,4 @@
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import { getGatewayUrl } from "@/lib/chat";
 
 const GATEWAY_TOKEN = process.env.EXPO_PUBLIC_GATEWAY_TOKEN?.trim() || "";

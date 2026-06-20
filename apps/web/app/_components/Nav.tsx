@@ -16,7 +16,7 @@ export default function Nav() {
   return (
     <header className="nav">
       <Link href="/" className="nav-brand">
-        MultipleAI
+        Zintus
       </Link>
       <nav className="nav-links" aria-label="Main">
         {links.map((link) => (

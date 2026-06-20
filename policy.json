@@ -1,5 +1,5 @@
 {
-  "$comment": "MultipleAI declarative routing policy. Place at repo root or ~/.multipleai/policy.json (or point $MULTIPLEAI_POLICY at it). Gateway/CLI hot-reload on change. Every field is optional; missing fields fall back to built-in defaults.",
+  "$comment": "Zintus declarative routing policy. Place at repo root or ~/.zintus/policy.json (or point $ZINTUS_POLICY at it). Gateway/CLI hot-reload on change. Every field is optional; missing fields fall back to built-in defaults.",
   "providerPriority": [
     "cerebras",
     "groq",

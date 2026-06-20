@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { StreamChunk, TokenUsage } from "@multipleai/types";
+import type { StreamChunk, TokenUsage } from "@zintus/types";
 import { groqProvider } from "./providers/groq.js";
 import { geminiProvider } from "./providers/gemini.js";
 

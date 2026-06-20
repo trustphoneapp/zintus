@@ -14,7 +14,7 @@ config.resolver.nodeModulesPaths = [
   path.resolve(workspaceRoot, "node_modules"),
 ];
 
-// The shared `@multipleai/*` packages are authored in TypeScript and use ESM
+// The shared `@zintus/*` packages are authored in TypeScript and use ESM
 // `.js` import specifiers (NodeNext style). Metro does not map `.js` → `.ts`,
 // so resolve those relative imports to their TS source, falling back to the
 // real module when no TS file exists.

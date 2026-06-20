@@ -1,4 +1,4 @@
-import type { ChatMessage, MemoryChunkHit, MemoryFact, MemoryThreadState } from "@multipleai/types";
+import type { ChatMessage, MemoryChunkHit, MemoryFact, MemoryThreadState } from "@zintus/types";
 import type { BudgetBreakdown } from "../types.js";
 
 export type ContextBlockSectionId = "working-summary" | "top-facts" | "retrieved-memory";

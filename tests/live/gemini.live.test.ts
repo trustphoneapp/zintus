@@ -9,8 +9,8 @@
  * secret without breaking forks/PRs that have none.
  */
 import { describe, expect, test } from "bun:test";
-import { geminiProvider } from "@multipleai/providers";
-import type { TokenUsage } from "@multipleai/types";
+import { geminiProvider } from "@zintus/providers";
+import type { TokenUsage } from "@zintus/types";
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY?.trim();
 const describeLive = GEMINI_API_KEY ? describe : describe.skip;

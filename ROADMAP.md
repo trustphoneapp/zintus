@@ -1,16 +1,16 @@
-# MultipleAI Roadmap
+# Zintus Roadmap
 
-This document outlines the current state, architectural lessons, and the forward roadmap for MultipleAI. It distinguishes between what is shipped and working today, what was intentionally removed or deprecated, and what is planned for future phases.
+This document outlines the current state, architectural lessons, and the forward roadmap for Zintus. It distinguishes between what is shipped and working today, what was intentionally removed or deprecated, and what is planned for future phases.
 
 ---
 
 ## 1. Current State (Shipped & Verified)
 
-MultipleAI is a local-first multi-provider AI gateway and memory system. The following modules are active and tested in the codebase:
+Zintus is a local-first multi-provider AI gateway and memory system. The following modules are active and tested in the codebase:
 
 | Component | Status | Reality in Codebase |
 | :--- | :--- | :--- |
-| **Multi-Provider Routing** | ✅ Shipped | Standardized adapters in `@multipleai/providers` routing through `@multipleai/router` with `fastest`, `economy`, and `capability` strategies. Supports sticky sessions (30-min TTL) and failover. |
+| **Multi-Provider Routing** | ✅ Shipped | Standardized adapters in `@zintus/providers` routing through `@zintus/router` with `fastest`, `economy`, and `capability` strategies. Supports sticky sessions (30-min TTL) and failover. |
 | **Rate Limit & Cooldown** | ✅ Shipped | Exponential backoff cooldown logic. Specialized parsing of Groq `x-ratelimit-*` headers to trigger rolling-window resets. |
 | **Quota Ledger** | ✅ Shipped | SQLite-backed database (`quota.db`) driven by Drizzle ORM to enforce daily per-provider limits (Requests + Tokens). |
 | **Context Compiler** | ✅ Shipped | Dynamic token budget allocator (`Smart`, `Fast`, `Deep` modes) managing static profiles, facts summary, and recalled vectors. |
@@ -36,7 +36,7 @@ All work adheres to these strict constraints:
 -   **Gateway-First State:** Stateful databases (`bun:sqlite`, keyring, memory indices) exist *only* inside the Gateway (Bun) and CLI. Frontends remain lightweight clients.
 -   **Realistic Latency Goals:** L1 exact matches must resolve in `< 2ms`. L2 semantic vector matches must account for local embedding model times (Ollama/Transformers.js), typically taking `100ms - 300ms+`.
 
-### Phase 1: Real Two-Tier Response Caching (`@multipleai/cache`) — ✅ Shipped
+### Phase 1: Real Two-Tier Response Caching (`@zintus/cache`) — ✅ Shipped
 Implemented in `packages/cache`, consulted by the engine before any provider call:
 1.  **L1 Exact Hash Cache — ✅** SHA-256 of message history + model/provider/temperature/max-tokens. O(1) lookup.
 2.  **L2 Semantic Cache (opt-in path) — ✅** `sqlite-vec` cosine search on prompt embeddings, bounded by a strict threshold (≤ 0.12), with a deterministic hashing fallback when no embedding model is available.

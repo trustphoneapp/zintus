@@ -7,7 +7,7 @@ import { QuotaLedger } from "./quota-ledger.js";
 const dbPaths: string[] = [];
 
 function ledger(): QuotaLedger {
-  const dbPath = join(tmpdir(), `multipleai-vk-${Date.now()}-${Math.random()}.db`);
+  const dbPath = join(tmpdir(), `zintus-vk-${Date.now()}-${Math.random()}.db`);
   dbPaths.push(dbPath);
   return new QuotaLedger(dbPath);
 }

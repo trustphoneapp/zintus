@@ -1,4 +1,4 @@
-# MultipleAI Phase 2 OSS Research
+# Zintus Phase 2 OSS Research
 
 Date: 2026-06-15  
 Scope: memory, embeddings, LLM summarization, semantic cache  
@@ -17,7 +17,7 @@ Constraint: Bun-native, local-first, avoid heavy dependencies
 - **Bun/TypeScript compatibility:** TS package exists (`mem0ai`), but full stack is broad and provider-heavy.
 - **COPY vs DEPEND:**
   - **COPY:** memory pipeline layering (`extract -> embed -> index -> retrieve`), scoped memory model (user/session/app), provider abstraction.
-  - **DEPEND:** not recommended for `@multipleai/memory` core right now.
+  - **DEPEND:** not recommended for `@zintus/memory` core right now.
 - **Recommendation:** **fork pattern only**
 
 ## 2) sqlite-vec (and sqlite-vss comparison)
@@ -96,7 +96,7 @@ Constraint: Bun-native, local-first, avoid heavy dependencies
 
 ## Actionable guidance for implementation agents
 
-- Keep `@multipleai/memory` dependency surface small and Bun-native.
+- Keep `@zintus/memory` dependency surface small and Bun-native.
 - Add `sqlite-vec` for local vector search; maintain SQL visibility for debugging.
 - Keep Ollama as default embedding provider and add explicit batch embedding support.
 - Harden semantic cache with:

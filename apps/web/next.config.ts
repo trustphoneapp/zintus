@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  transpilePackages: ["@multipleai/types", "@multipleai/ui"],
+  transpilePackages: ["@zintus/providers", "@zintus/types", "@zintus/ui"],
   webpack: (config) => {
     config.resolve.extensionAlias = {
       ".js": [".ts", ".tsx", ".js"],

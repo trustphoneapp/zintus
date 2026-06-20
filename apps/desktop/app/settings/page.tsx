@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect } from "react";
-import type { ContextMode, ProviderId, RoutingStrategy } from "@multipleai/types";
-import { PROVIDER_IDS } from "@multipleai/types";
+import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
+import { PROVIDER_IDS } from "@zintus/types";
 import { useSettingsStore } from "@/lib/store";
 import { Card, CardContent, CardHeader, CardTitle } from "../_components/ui/card";
 

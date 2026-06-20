@@ -1,4 +1,4 @@
-import type { ChatMessage, MemoryThreadState } from "@multipleai/types";
+import type { ChatMessage, MemoryThreadState } from "@zintus/types";
 
 export function buildHandoffBlock(
   threadState: MemoryThreadState | null,

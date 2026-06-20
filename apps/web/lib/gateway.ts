@@ -1,4 +1,4 @@
-import type { ContextMode, ProviderId, RoutingStrategy } from "@multipleai/types";
+import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
 
 export const GATEWAY_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";

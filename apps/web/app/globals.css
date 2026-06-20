@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import "@multipleai/ui/tokens.css";
+@import "@zintus/ui/tokens.css";
 
 :root {
   color-scheme: light;

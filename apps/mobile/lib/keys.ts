@@ -1,7 +1,7 @@
 import * as SecureStore from "expo-secure-store";
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 
-const KEY_PREFIX = "multipleai:key:";
+const KEY_PREFIX = "zintus:key:";
 
 function storageKey(providerId: ProviderId): string {
   return `${KEY_PREFIX}${providerId}`;

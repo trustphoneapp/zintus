@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { useSettingsStore } from "@/lib/store";
 import { ROUTING_STRATEGIES } from "@/lib/settings";
 import { PROVIDER_BY_ID, PROVIDERS } from "@/lib/providers";
-import type { ContextMode, ProviderId, RoutingStrategy } from "@multipleai/types";
+import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
 
 const CONTEXT_MODES: Array<{
   value: ContextMode;
@@ -116,7 +116,7 @@ export default function SettingsPage() {
 
       <div className="settings-card about-card">
         <h2>About</h2>
-        <p>MultipleAI v0.1.0</p>
+        <p>Zintus v0.1.0</p>
         <p className="muted">Client-side free-tier orchestrator</p>
         <p className="muted">Run gateway: <code>bun run dev:gateway</code></p>
       </div>

@@ -1,4 +1,4 @@
-# Contributing to MultipleAI
+# Contributing to Zintus
 
 Thanks for your interest. This is a Bun monorepo; everything below assumes
 `bun` 1.2+ on your PATH.
@@ -33,7 +33,7 @@ memory, context-compiler → engine
 1. **No fake features.** If something cannot be verified, do not ship it as if
    it works. (An earlier *fake* "semantic cache" — an exact-match store that
    replayed canned responses — and a prompt-marker layer were removed for this
-   reason and replaced by the real L1/L2 `@multipleai/cache`; see the
+   reason and replaced by the real L1/L2 `@zintus/cache`; see the
    "Response cache" section in README.)
 2. **Tests must pass and not hang.** Tests must never touch the real OS keychain
    or the network — inject `getApiKey` and stub providers via `mock.module`

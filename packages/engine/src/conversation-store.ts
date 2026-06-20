@@ -11,12 +11,12 @@ import type {
   Thread,
   ThreadMessage,
   TraceAttempt,
-} from "@multipleai/types";
+} from "@zintus/types";
 import * as schema from "./schema.js";
 
 const DEFAULT_CONVERSATIONS_PATH = join(
   homedir(),
-  ".multipleai",
+  ".zintus",
   "conversations.db",
 );
 

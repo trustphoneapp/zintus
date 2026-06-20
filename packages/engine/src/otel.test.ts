@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { RequestTrace } from "@multipleai/types";
+import type { RequestTrace } from "@zintus/types";
 import { buildOtlpPayload, exportRequestTrace, isOtelEnabled } from "./otel.js";
 
 const trace: RequestTrace = {
@@ -43,7 +43,7 @@ describe("otel OTLP payload", () => {
     const failed = spans.find(
       (s: any) =>
         s.attributes.some(
-          (a: any) => a.key === "multipleai.attempt.status" && a.value.stringValue === "fail",
+          (a: any) => a.key === "zintus.attempt.status" && a.value.stringValue === "fail",
         ),
     );
     expect(failed.status.code).toBe(2);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
 import type { UiMessage } from "@/lib/app-store";
 import { Icon } from "./Icons";

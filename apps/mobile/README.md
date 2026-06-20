@@ -1,4 +1,4 @@
-# MultipleAI Mobile
+# Zintus Mobile
 
 Expo SDK 56 app with streaming chat, secure API key storage, local quota ledger, and push notifications for quota warnings.
 
@@ -28,7 +28,7 @@ On a physical device, replace `localhost` with your machine's LAN IP for Metro a
 
 | Feature | Implementation |
 |---------|----------------|
-| Chat | Inverted `FlatList`, `KeyboardAvoidingView`, streaming via `@multipleai/providers` |
+| Chat | Inverted `FlatList`, `KeyboardAvoidingView`, streaming via `@zintus/providers` |
 | Keys | `expo-secure-store` per provider |
 | Quota | `expo-sqlite` ledger (mirrors CLI/desktop schema) |
 | Warnings | `expo-notifications` when quota drops below 20% |

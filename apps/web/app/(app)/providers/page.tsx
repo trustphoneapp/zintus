@@ -82,7 +82,7 @@ export default function ProvidersPage() {
         </label>
         <p className="vault-hint">
           Stored in browser with AES-256-GCM. For OS keychain routing, use{" "}
-          <code>multipleai keys set</code> and run the gateway.
+          <code>zintus keys set</code> and run the gateway.
         </p>
       </div>
 

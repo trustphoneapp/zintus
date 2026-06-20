@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatMessage } from "@multipleai/types";
+import type { ChatMessage } from "@zintus/types";
 import { extractFactsWithLlm, summarizeWithLlm } from "./llm-memory.js";
 
 const turns: ChatMessage[] = [

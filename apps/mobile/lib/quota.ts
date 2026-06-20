@@ -1,17 +1,17 @@
 import * as SQLite from "expo-sqlite";
-import type { ProviderId } from "@multipleai/types";
-import { PROVIDER_IDS } from "@multipleai/types";
-import { parseGroqResetHeader } from "@multipleai/router/groq-reset";
+import type { ProviderId } from "@zintus/types";
+import { PROVIDER_IDS } from "@zintus/types";
+import { parseGroqResetHeader } from "@zintus/router/groq-reset";
 import {
   applyUsage,
   cooldownUntil,
   isQuotaAvailable as coreIsQuotaAvailable,
   remainingRatio as coreRemainingRatio,
   resetPatch,
-} from "@multipleai/router/quota-core";
+} from "@zintus/router/quota-core";
 import { PROVIDER_LIMITS, type ProviderQuotaRow } from "./limits";
 
-const DB_NAME = "multipleai-quota.db";
+const DB_NAME = "zintus-quota.db";
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -85,7 +85,7 @@ async function ensureProvider(
   return (await getProvider(db, id))!;
 }
 
-// All quota *decisions* come from @multipleai/router/quota-core; this file only
+// All quota *decisions* come from @zintus/router/quota-core; this file only
 // owns the expo-sqlite persistence adapter.
 async function maybeResetDailyCounters(
   db: SQLite.SQLiteDatabase,

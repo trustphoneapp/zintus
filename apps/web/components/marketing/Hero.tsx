@@ -30,7 +30,7 @@ export function Hero() {
           </div>
           <h1>Use the best free AIs, all from one place.</h1>
           <p>
-            MultipleAI connects you to 12 free AI services at once. Ask a question and it
+            Zintus connects you to 12 free AI services at once. Ask a question and it
             automatically picks one that&apos;s fast and available. If one runs out, it
             switches to another — so you can keep chatting.
           </p>

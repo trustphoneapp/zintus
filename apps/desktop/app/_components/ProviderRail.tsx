@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import { useProviderStatusStore } from "@/lib/store";
 
 export function ProviderRail() {

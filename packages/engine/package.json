@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/engine",
+  "name": "@zintus/engine",
   "version": "0.0.1",
   "type": "module",
   "main": "./src/index.ts",
@@ -15,14 +15,14 @@
     "test": "bun test src/engine.test.ts"
   },
   "dependencies": {
-    "@multipleai/cache": "workspace:*",
-    "@multipleai/codebase-indexer": "workspace:*",
-    "@multipleai/context-compiler": "workspace:*",
-    "@multipleai/keychain": "workspace:*",
-    "@multipleai/memory": "workspace:*",
-    "@multipleai/providers": "workspace:*",
-    "@multipleai/router": "workspace:*",
-    "@multipleai/types": "workspace:*",
+    "@zintus/cache": "workspace:*",
+    "@zintus/codebase-indexer": "workspace:*",
+    "@zintus/context-compiler": "workspace:*",
+    "@zintus/keychain": "workspace:*",
+    "@zintus/memory": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/router": "workspace:*",
+    "@zintus/types": "workspace:*",
     "drizzle-orm": "^0.45.0"
   },
   "devDependencies": {

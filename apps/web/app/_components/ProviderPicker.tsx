@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import { PROVIDERS } from "@/lib/providers";
 import { useAppStore } from "@/lib/app-store";
 import { getRemainingQuotaPercent } from "@/lib/quota";

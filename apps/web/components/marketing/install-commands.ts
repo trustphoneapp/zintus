@@ -1,5 +1,5 @@
 export const REPO_INSTALL_COMMAND =
-  "git clone https://github.com/multipleai/multipleai.git && cd multipleai && bun install";
+  "git clone https://github.com/zintus/zintus.git && cd zintus && bun install";
 
 export const INSTALL_SNIPPETS = {
   repo: REPO_INSTALL_COMMAND,

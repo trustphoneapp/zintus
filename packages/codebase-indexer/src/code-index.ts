@@ -4,11 +4,11 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { load as loadSqliteVec } from "sqlite-vec";
-import { embedBatch } from "@multipleai/memory";
+import { embedBatch } from "@zintus/memory";
 import { chunkSource } from "./chunker.js";
 import { detectLang, isSourceFile } from "./lang.js";
 
-const DEFAULT_DB_PATH = join(homedir(), ".multipleai", "code.db");
+const DEFAULT_DB_PATH = join(homedir(), ".zintus", "code.db");
 
 /** Directories that are never walked. */
 const SKIP_DIRS = new Set([
@@ -42,7 +42,7 @@ export interface CodeIndexOptions {
   dbPath?: string;
   /**
    * Optional embedding function. When omitted, falls back to the repo's
-   * @multipleai/memory embedBatch (local Ollama nomic-embed-text with a
+   * @zintus/memory embedBatch (local Ollama nomic-embed-text with a
    * deterministic offline fallback, so it works with NO Ollama running).
    */
   embed?: (texts: string[]) => Promise<number[][]>;

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   compileContext,
   type CompileMode,
-} from "@multipleai/context-compiler";
+} from "@zintus/context-compiler";
 import {
   MemoryStore,
   extractFacts,
@@ -13,12 +13,12 @@ import {
   summarizeWithLlm,
   consolidateFactsWithLlm,
   type CompileTraceRow,
-} from "@multipleai/memory";
+} from "@zintus/memory";
 import {
   createRouter,
   type Router,
   type RouterConfig,
-} from "@multipleai/router";
+} from "@zintus/router";
 import type {
   ChatMessage,
   ContextMode,
@@ -32,13 +32,13 @@ import type {
   Thread,
   ThreadMessage,
   TraceAttempt,
-} from "@multipleai/types";
-import { getKey } from "@multipleai/keychain";
+} from "@zintus/types";
+import { getKey } from "@zintus/keychain";
 import { ConversationStore } from "./conversation-store.js";
 import { exportRequestTrace } from "./otel.js";
-import { ResponseCache } from "@multipleai/cache";
-import { CodeIndex } from "@multipleai/codebase-indexer";
-import { listProviders } from "@multipleai/providers";
+import { ResponseCache } from "@zintus/cache";
+import { CodeIndex } from "@zintus/codebase-indexer";
+import { listProviders } from "@zintus/providers";
 
 /** Conservative context windows (tokens) for sizing code/diff/terminal context
  *  to the target model — smaller window ⇒ the compiler auto-shrinks those
@@ -60,7 +60,7 @@ export interface EngineConfig extends RouterConfig {
   cachePath?: string;
   enableCache?: boolean;
   /** Local workspace to index for codebase-aware context (Smart Context
-   *  Engine). Defaults to $MULTIPLEAI_WORKSPACE. Off when neither is set. */
+   *  Engine). Defaults to $ZINTUS_WORKSPACE. Off when neither is set. */
   workspaceDir?: string;
 }
 
@@ -113,7 +113,7 @@ export interface Engine {
   listCheckpoints(threadId: string): Array<{ checkpointId: string; parentCheckpointId: string | null; createdAt: Date }>;
 }
 
-const DEFAULT_QUOTA_PATH = join(homedir(), ".multipleai", "quota.db");
+const DEFAULT_QUOTA_PATH = join(homedir(), ".zintus", "quota.db");
 // LLM-assisted memory makes extra network calls (and costs quota/money). It is
 // strictly opt-in; the default path uses deterministic, offline summarization.
 const ENABLE_MEMORY_LLM = process.env.MEMORY_LLM === "1";
@@ -168,7 +168,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
 
   // Codebase-aware context (Smart Context Engine). Off unless a workspace is
   // configured. Indexed lazily on first use; idempotent re-index is cheap.
-  const workspaceDir = config.workspaceDir ?? process.env.MULTIPLEAI_WORKSPACE;
+  const workspaceDir = config.workspaceDir ?? process.env.ZINTUS_WORKSPACE;
   let codeIndex: CodeIndex | null = null;
   let codeIndexReady: Promise<unknown> | null = null;
   const codeSearch = workspaceDir

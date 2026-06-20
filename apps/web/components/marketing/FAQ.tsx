@@ -6,7 +6,7 @@ import { Reveal } from "./Reveal";
 const faqs = [
   {
     q: "Is it really free?",
-    a: "Yes. MultipleAI uses the free tiers of each AI service, and the app itself is free and open source. You only pay if you choose to upgrade a provider's plan yourself.",
+    a: "Yes. Zintus uses the free tiers of each AI service, and the app itself is free and open source. You only pay if you choose to upgrade a provider's plan yourself.",
   },
   {
     q: "Are my API keys safe?",
@@ -18,7 +18,7 @@ const faqs = [
   },
   {
     q: "What happens when a free AI runs out?",
-    a: "MultipleAI tracks each service's usage and automatically switches to another available one when a provider is exhausted.",
+    a: "Zintus tracks each service's usage and automatically switches to another available one when a provider is exhausted.",
   },
   {
     q: "Which AIs are supported?",

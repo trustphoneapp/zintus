@@ -1,6 +1,6 @@
-import { createEngine, type Engine } from "@multipleai/engine";
-import { listProviders } from "@multipleai/providers";
-import type { AppConfig, ProviderId, ProviderStatus } from "@multipleai/types";
+import { createEngine, type Engine } from "@zintus/engine";
+import { listProviders } from "@zintus/providers";
+import type { AppConfig, ProviderId, ProviderStatus } from "@zintus/types";
 import { getDbPath } from "../db.js";
 
 export interface ProviderInfo {

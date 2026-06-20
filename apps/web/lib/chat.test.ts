@@ -5,9 +5,9 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { streamChat } from "./chat.server";
 
 beforeAll(() => {
-  const dir = join(tmpdir(), "multipleai-web-test");
+  const dir = join(tmpdir(), "zintus-web-test");
   mkdirSync(dir, { recursive: true });
-  process.env.MULTIPLEAI_QUOTA_PATH = join(dir, "quota.db");
+  process.env.ZINTUS_QUOTA_PATH = join(dir, "quota.db");
 });
 
 describe("streamChat", () => {

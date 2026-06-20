@@ -1,19 +1,19 @@
 import chalk from "chalk";
-import { setKey, deleteKey, listKeys, getKey } from "@multipleai/keychain";
-import { createProvider } from "@multipleai/providers";
-import { isProviderId, PROVIDER_IDS } from "@multipleai/types";
+import { setKey, deleteKey, listKeys, getKey } from "@zintus/keychain";
+import { createProvider } from "@zintus/providers";
+import { isProviderId, PROVIDER_IDS } from "@zintus/types";
 
 const VALIDATE_URL =
-  process.env.MULTIPLEAI_VALIDATE_URL ??
+  process.env.ZINTUS_VALIDATE_URL ??
   "http://localhost:8787/validate";
 
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 
 async function validateKeyRemote(
   provider: ProviderId,
   key: string,
 ): Promise<{ valid: boolean; error?: string }> {
-  if (process.env.MULTIPLEAI_SKIP_VALIDATE === "1") {
+  if (process.env.ZINTUS_SKIP_VALIDATE === "1") {
     const local = createProvider(provider);
     const valid = await local.validateKey(key);
     return valid ? { valid: true } : { valid: false, error: "Invalid key format or provider rejected key" };
@@ -65,7 +65,7 @@ export async function runKeysList(): Promise<void> {
 
   if (keys.length === 0) {
     console.log(chalk.dim("No API keys stored."));
-    console.log(chalk.dim("Use: multipleai keys set <provider> <key>"));
+    console.log(chalk.dim("Use: zintus keys set <provider> <key>"));
     return;
   }
 

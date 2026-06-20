@@ -1,4 +1,4 @@
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import { deleteKey, getKey, listKeys, setKey } from "./storage.js";
 import type { Keychain } from "./keychain.js";
 

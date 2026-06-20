@@ -1,10 +1,10 @@
-# MultipleAI
+# Zintus
 
 Cross-platform AI router — routes chat requests across 12 providers (Cerebras, Groq, Gemini, OpenRouter, Cohere, Mistral, DeepSeek, Fireworks AI, xAI Grok, Hugging Face, LM Studio, Ollama) with quota-aware failover.
 
 ## What this is (and isn't)
 
-**MultipleAI is a local-first, BYOK router that maximizes free-tier quotas across ~12 providers** — automatic same-model failover, cooldown, health-aware routing, transparent quota bars, and an estimate of the money you'd otherwise have spent on paid APIs. Your keys live in your OS keychain (CLI/desktop) or your browser (web); there is **no SaaS bill and no hosted control plane**.
+**Zintus is a local-first, BYOK router that maximizes free-tier quotas across ~12 providers** — automatic same-model failover, cooldown, health-aware routing, transparent quota bars, and an estimate of the money you'd otherwise have spent on paid APIs. Your keys live in your OS keychain (CLI/desktop) or your browser (web); there is **no SaaS bill and no hosted control plane**.
 
 **Who it's for:** individuals and small teams who want to stretch free tiers across many providers from one OpenAI-compatible endpoint, self-hosted.
 
@@ -12,7 +12,7 @@ Cross-platform AI router — routes chat requests across 12 providers (Cerebras,
 
 ### Honest comparison (this lane only)
 
-| Capability | MultipleAI | LiteLLM | OpenRouter | Open WebUI |
+| Capability | Zintus | LiteLLM | OpenRouter | Open WebUI |
 |---|---|---|---|---|
 | Free-tier quota tracking + transparent remaining bars | ✅ daily + per-minute (TPM/RPM) | partial | ❌ (paid credits) | ❌ |
 | Same-model multi-provider failover ("model groups") | ✅ via `policy.json` | ✅ | ✅ | ❌ |
@@ -28,11 +28,11 @@ Every free-tier token served is valued at what an equivalent paid API would have
 
 ### Declarative routing (`policy.json`)
 
-Provider priority, weights, model groups, fallbacks, and per-provider quota limits live in a single `policy.json` (repo root, `~/.multipleai/policy.json`, or `$MULTIPLEAI_POLICY`). The gateway loads it at startup and **hot-reloads on change** — no restart needed.
+Provider priority, weights, model groups, fallbacks, and per-provider quota limits live in a single `policy.json` (repo root, `~/.zintus/policy.json`, or `$ZINTUS_POLICY`). The gateway loads it at startup and **hot-reloads on change** — no restart needed.
 
 ```bash
 # Start from the example (no secrets in it):
-cp policy.example.json ~/.multipleai/policy.json
+cp policy.example.json ~/.zintus/policy.json
 # edit, save — the running gateway picks it up automatically.
 ```
 
@@ -56,25 +56,25 @@ One command, no SaaS — the gateway runs locally and your keys stay on the host
 # 1. Routing policy (no secrets in it):
 cp policy.example.json policy.json
 
-# 2. Bring up the gateway on :8788 (keys + quota.db persist in ./.multipleai-data):
+# 2. Bring up the gateway on :8788 (keys + quota.db persist in ./.zintus-data):
 GATEWAY_TOKEN=$(openssl rand -hex 24) docker compose up -d
 
 # 3. Verify:
 curl -s localhost:8788/health | jq      # { "ok": true, ... "savings": {...} }
 
 # 4. Add provider keys (free tiers) — either via env on the container,
-#    or mount your CLI keychain dir at /root/.multipleai.
+#    or mount your CLI keychain dir at /root/.zintus.
 ```
 
 Prebuilt images are published to GHCR on each `v*` tag
-(`ghcr.io/<owner>/multipleai-gateway`):
+(`ghcr.io/<owner>/zintus-gateway`):
 
 ```bash
-docker pull ghcr.io/<owner>/multipleai-gateway:latest
+docker pull ghcr.io/<owner>/zintus-gateway:latest
 docker run -p 8788:8788 -e GATEWAY_TOKEN=secret \
-  -v "$HOME/.multipleai:/root/.multipleai" \
+  -v "$HOME/.zintus:/root/.zintus" \
   -v "$PWD/policy.json:/app/policy.json:ro" \
-  ghcr.io/<owner>/multipleai-gateway:latest
+  ghcr.io/<owner>/zintus-gateway:latest
 ```
 
 Point any OpenAI-compatible client at `http://localhost:8788/v1` with
@@ -124,7 +124,7 @@ bun run dev -- --help
 bun run dev -- keys set groq gsk_your_key_here
 bun run dev -- config
 bun run dev -- status
-bun run dev -- "Hello from MultipleAI"
+bun run dev -- "Hello from Zintus"
 ```
 
 From repo root:
@@ -152,7 +152,7 @@ bun run dev
 
 API routes:
 
-- `POST /api/chat` — stream chat via `@multipleai/router`
+- `POST /api/chat` — stream chat via `@zintus/router`
 - `POST /api/validate` — validate provider keys (local or via `VALIDATE_WORKER_URL`)
 
 ### Gateway (Bun + engine)
@@ -233,7 +233,7 @@ Token usage is read from each provider's reported `usage` (OpenAI-compatible
 `prompt_eval_count`/`eval_count`) and recorded in the quota ledger as real input
 + output tokens. When a provider reports no usage, a clearly-marked local
 estimate (`source: "estimate"`) is used as a fallback. Quota decisions live in a
-single shared module, `@multipleai/router/quota-core`. The gateway and CLI own
+single shared module, `@zintus/router/quota-core`. The gateway and CLI own
 the authoritative ledger (`bun:sqlite`); the desktop app reads provider/quota
 status from the gateway's `/health` endpoint (it runs no router of its own); and
 mobile persists its own ledger in `expo-sqlite`. All of them make quota
@@ -284,10 +284,10 @@ GROQ_API_KEY=gsk_your_key bun run test:live
 
 ## Memory & context
 
-`@multipleai/memory` provides deterministic `summarizeTurns()` and regex-first
+`@zintus/memory` provides deterministic `summarizeTurns()` and regex-first
 `extractFacts()` helpers. After each assistant response the engine updates a
 working summary and extracted facts asynchronously (fire-and-forget, never
-blocking the stream; failures are logged, not thrown). `@multipleai/context-compiler`
+blocking the stream; failures are logged, not thrown). `@zintus/context-compiler`
 assembles the prompt from the working summary, recent turns, and top facts under
 a token budget.
 
@@ -300,7 +300,7 @@ so a thread tends to stay on one provider.
 
 ## Response cache
 
-`@multipleai/cache` provides a two-tier response cache that the engine consults
+`@zintus/cache` provides a two-tier response cache that the engine consults
 before calling any provider (`packages/engine/src/engine.ts`):
 
 - **L1 — exact match.** SHA-256 over the message history + model/provider/

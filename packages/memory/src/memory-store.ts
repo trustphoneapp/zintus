@@ -6,11 +6,11 @@ import { Database } from "bun:sqlite";
 import { load as loadSqliteVec } from "sqlite-vec";
 import { and, desc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
-import type { MemoryFact, MemoryThreadState } from "@multipleai/types";
+import type { MemoryFact, MemoryThreadState } from "@zintus/types";
 import * as schema from "./schema.js";
 import { chunkText, embedBatchWithMetadata, embedText } from "./embeddings.js";
 
-const DEFAULT_MEMORY_PATH = join(homedir(), ".multipleai", "memory.db");
+const DEFAULT_MEMORY_PATH = join(homedir(), ".zintus", "memory.db");
 
 type JsonRecord = Record<string, unknown>;
 

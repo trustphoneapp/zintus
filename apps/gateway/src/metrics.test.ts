@@ -34,7 +34,7 @@ describe("metrics", () => {
     m.recordRequest(200, 5);
     m.recordChat("groq");
     const text = m.toPrometheus();
-    expect(text).toContain("multipleai_gateway_requests_total 1");
-    expect(text).toContain('multipleai_gateway_chat_completions_total{provider="groq"} 1');
+    expect(text).toContain("zintus_gateway_requests_total 1");
+    expect(text).toContain('zintus_gateway_chat_completions_total{provider="groq"} 1');
   });
 });

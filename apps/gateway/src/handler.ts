@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { listProviders } from "@multipleai/providers";
-import type { Engine } from "@multipleai/engine";
-import type { ChatMessage, ContextMode, ProviderId, RoutingStrategy } from "@multipleai/types";
+import { listProviders } from "@zintus/providers";
+import type { Engine } from "@zintus/engine";
+import type { ChatMessage, ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
@@ -332,7 +332,7 @@ export function createGatewayHandler(
         })),
         // Provable savings: estimated USD a paid API would have charged for the
         // free-tier tokens served so far. Labelled an estimate (see
-        // PAID_EQUIVALENT_USD_PER_MTOK in @multipleai/router).
+        // PAID_EQUIVALENT_USD_PER_MTOK in @zintus/router).
         savings: {
           estimatedUsdSaved: Number(savings.total.toFixed(4)),
           byProvider: savings.byProvider,

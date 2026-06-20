@@ -86,7 +86,7 @@ function StatusDashboard() {
   return (
     <Box flexDirection="column" padding={1} borderStyle="round" borderColor="cyan">
       <Text bold color="cyan">
-        MultipleAI Status
+        Zintus Status
       </Text>
       <Text dimColor>
         {configured}/{providers.length} providers configured · refreshes every 2s

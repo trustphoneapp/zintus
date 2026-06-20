@@ -12,7 +12,7 @@ export default function Nav({ active }: { active?: string }) {
   return (
     <nav className="nav">
       <Link href="/" className="nav-brand">
-        MultipleAI
+        Zintus
       </Link>
       <div className="nav-links">
         {links.map((link) => (

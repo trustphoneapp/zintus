@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/desktop",
+  "name": "@zintus/desktop",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -12,10 +12,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@multipleai/providers": "workspace:*",
-    "@multipleai/router": "workspace:*",
-    "@multipleai/types": "workspace:*",
-    "@multipleai/ui": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/router": "workspace:*",
+    "@zintus/types": "workspace:*",
+    "@zintus/ui": "workspace:*",
     "@tauri-apps/api": "^2.2.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-webgl": "^0.18.0",

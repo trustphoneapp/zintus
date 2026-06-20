@@ -46,7 +46,7 @@ export function Sidebar({
         <div className="sidebar-logo">
           <Icon name="layers" size={14} />
         </div>
-        {!collapsed ? <span className="sidebar-brand">MultipleAI</span> : null}
+        {!collapsed ? <span className="sidebar-brand">Zintus</span> : null}
         <button
           type="button"
           className="sidebar-toggle"

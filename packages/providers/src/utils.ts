@@ -1,4 +1,4 @@
-import type { RateLimitInfo, StreamChunk } from "@multipleai/types";
+import type { RateLimitInfo, StreamChunk } from "@zintus/types";
 import { usageFromProviderFields } from "./token-estimate.js";
 
 interface OpenAiUsageFields {

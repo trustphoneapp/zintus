@@ -2,7 +2,7 @@ name: Release gateway (GHCR)
 
 # Build + publish the gateway Docker image to GitHub Container Registry on a
 # version tag (e.g. `git tag v0.1.0 && git push --tags`). Pull + run:
-#   docker pull ghcr.io/<owner>/multipleai-gateway:latest
+#   docker pull ghcr.io/<owner>/zintus-gateway:latest
 #   docker compose up   # (or docker run -p 8788:8788 ...)
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/multipleai-gateway
+          images: ghcr.io/${{ github.repository_owner }}/zintus-gateway
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

@@ -9,7 +9,7 @@ const steps = [
   },
   {
     title: "Ask your question",
-    body: "Type a message like you would in any chat app. No need to choose which AI to use — MultipleAI handles that for you.",
+    body: "Type a message like you would in any chat app. No need to choose which AI to use — Zintus handles that for you.",
   },
   {
     title: "Get an answer, every time",

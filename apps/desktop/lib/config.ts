@@ -1,6 +1,6 @@
-import { DEFAULT_CONFIG, type AppConfig, type RoutingStrategy } from "@multipleai/types";
+import { DEFAULT_CONFIG, type AppConfig, type RoutingStrategy } from "@zintus/types";
 
-const STORAGE_KEY = "multipleai.config";
+const STORAGE_KEY = "zintus.config";
 
 export function loadConfig(): AppConfig {
   if (typeof window === "undefined") {

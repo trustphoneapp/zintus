@@ -1,6 +1,6 @@
 # Security model & threat assumptions
 
-This document states what MultipleAI does and does not protect against. Read it
+This document states what Zintus does and does not protect against. Read it
 before deploying anything beyond your own machine.
 
 ## Components and trust boundaries

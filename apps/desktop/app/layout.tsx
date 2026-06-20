@@ -16,7 +16,7 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "MultipleAI",
+  title: "Zintus",
   description: "Cross-platform AI router — desktop",
 };
 

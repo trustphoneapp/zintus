@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@multipleai/types";
+import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@zintus/types";
 import { loadSettings, saveSettings } from "./settings";
 import { PROVIDERS } from "./providers";
 import {

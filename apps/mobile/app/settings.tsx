@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { useFocusEffect } from "expo-router";
-import type { RoutingStrategy } from "@multipleai/types";
+import type { RoutingStrategy } from "@zintus/types";
 import { getGatewayUrl } from "@/lib/chat";
 import {
   ROUTING_STRATEGIES,

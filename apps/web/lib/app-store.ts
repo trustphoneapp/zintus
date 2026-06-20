@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import type { GatewayProviderStatus, GatewaySavings } from "./gateway";
 
 export interface UiMessage {
@@ -61,7 +61,7 @@ export const useAppStore = create<AppState>((set) => ({
   gatewayProviders: [],
   gatewaySavings: undefined,
   terminalLines: [
-    { text: "MultipleAI Terminal — type 'help' for commands", tone: "accent" },
+    { text: "Zintus Terminal — type 'help' for commands", tone: "accent" },
     { text: "Runs against the gateway over HTTP (works on any OS).", tone: "muted" },
     { text: "", tone: "muted" },
   ],
@@ -130,7 +130,7 @@ export const useAppStore = create<AppState>((set) => ({
   },
   clearTerminal: () =>
     set({
-      terminalLines: [{ text: "MultipleAI Terminal — cleared", tone: "muted" }],
+      terminalLines: [{ text: "Zintus Terminal — cleared", tone: "muted" }],
     }),
   newChat: () =>
     set({ messages: [], threadId: undefined, activeProvider: null }),

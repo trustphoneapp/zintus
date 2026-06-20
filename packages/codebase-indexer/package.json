@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/codebase-indexer",
+  "name": "@zintus/codebase-indexer",
   "version": "0.0.1",
   "type": "module",
   "main": "./src/index.ts",
@@ -15,7 +15,7 @@
     "test": "bun test src/index.test.ts"
   },
   "dependencies": {
-    "@multipleai/memory": "workspace:*",
+    "@zintus/memory": "workspace:*",
     "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {

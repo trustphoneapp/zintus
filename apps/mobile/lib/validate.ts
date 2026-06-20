@@ -1,5 +1,5 @@
-import { createProvider } from "@multipleai/providers";
-import type { ProviderId } from "@multipleai/types";
+import { createProvider } from "@zintus/providers";
+import type { ProviderId } from "@zintus/types";
 import { VALIDATE_URL } from "./limits";
 
 export async function validateProviderKey(

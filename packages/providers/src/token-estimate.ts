@@ -1,4 +1,4 @@
-import type { ChatMessage, TokenUsage } from "@multipleai/types";
+import type { ChatMessage, TokenUsage } from "@zintus/types";
 
 /**
  * Local token estimation used ONLY when a provider does not report usage.

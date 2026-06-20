@@ -8,7 +8,7 @@ export async function runHistory(): Promise<void> {
   const threads = engine.listThreads();
 
   if (threads.length === 0) {
-    console.log(chalk.dim("No conversations yet. Run `multipleai chat \"hello\"` first."));
+    console.log(chalk.dim("No conversations yet. Run `zintus chat \"hello\"` first."));
     return;
   }
 

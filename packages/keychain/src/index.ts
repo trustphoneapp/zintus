@@ -2,7 +2,7 @@ import {
   isProviderId,
   PROVIDER_IDS,
   type ProviderId,
-} from "@multipleai/types";
+} from "@zintus/types";
 import {
   deleteKey,
   getKey,

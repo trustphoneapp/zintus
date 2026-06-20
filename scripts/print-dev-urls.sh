@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Print suggested MultipleAI gateway dev URLs.
+# Print suggested Zintus gateway dev URLs.
 #
 # Shows the loopback URL (for the web app on the same machine) and a LAN URL
 # (for a physical phone / another device on the same Wi-Fi), so a developer
@@ -24,7 +24,7 @@ if [ -z "$LAN_IP" ] && command -v hostname >/dev/null 2>&1; then
   LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 fi
 
-echo "MultipleAI gateway dev URLs (port ${PORT})"
+echo "Zintus gateway dev URLs (port ${PORT})"
 echo
 echo "  Web app (same machine):"
 echo "    GATEWAY_URL=http://localhost:${PORT}"

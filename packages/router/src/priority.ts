@@ -1,4 +1,4 @@
-import type { Provider, ProviderId, RoutingStrategy } from "@multipleai/types";
+import type { Provider, ProviderId, RoutingStrategy } from "@zintus/types";
 
 /** Lower rank = higher model capability (used by `capability` strategy). */
 const CAPABILITY_RANK: Record<ProviderId, number> = {

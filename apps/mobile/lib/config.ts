@@ -4,9 +4,9 @@ import {
   type AppConfig,
   type ProviderId,
   type RoutingStrategy,
-} from "@multipleai/types";
+} from "@zintus/types";
 
-const storage = createMMKV({ id: "multipleai.config" });
+const storage = createMMKV({ id: "zintus.config" });
 const STORAGE_KEY = "config";
 const SELECTED_PROVIDER_KEY = "selectedProvider";
 

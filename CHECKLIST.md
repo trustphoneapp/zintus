@@ -1,7 +1,7 @@
-# MultipleAI — Readiness Checklist
+# Zintus — Readiness Checklist
 
 Audit date: June 16, 2026
-Repo: `/Users/yashwanthsurabhi/Projects/multipleai`
+Repo: `/Users/yashwanthsurabhi/Projects/zintus`
 
 Legend: ✅ done · 🟡 partial / needs config · ❌ missing
 
@@ -41,7 +41,7 @@ code path is wired.
 
 | Item | Status |
 |------|--------|
-| Bun HTTP gateway over `@multipleai/engine` | ✅ |
+| Bun HTTP gateway over `@zintus/engine` | ✅ |
 | Loopback by default; refuses public bind without `GATEWAY_TOKEN` | ✅ |
 | Bearer auth on all routes except `/health`, `/metrics` | ✅ |
 | Clients (web/desktop/mobile) send bearer when token configured | ✅ |
@@ -70,7 +70,7 @@ code path is wired.
 
 **Quota storage per platform (accurate):** gateway/CLI → Drizzle `bun:sqlite`
 (`quota.db`); desktop → reads gateway `/health` (no local ledger); mobile →
-`expo-sqlite`. All decisions go through `@multipleai/router/quota-core`. There is
+`expo-sqlite`. All decisions go through `@zintus/router/quota-core`. There is
 **no Tauri `rusqlite`** — the desktop Rust backend only exposes keyring commands.
 
 ---
@@ -112,7 +112,7 @@ code path is wired.
 
 ```bash
 export PATH="$HOME/.bun/bin:$PATH"
-cd /Users/yashwanthsurabhi/Projects/multipleai
+cd /Users/yashwanthsurabhi/Projects/zintus
 bun install
 bun run typecheck   # ✅ passes
 bun run test        # ✅ passes (vitest + bun 1.3.x)

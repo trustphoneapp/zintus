@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono, Lora, Plus_Jakarta_Sans } from "next/font/google";
-import "@multipleai/ui/globals.css";
+import "@zintus/ui/globals.css";
 import "./globals.css";
 import { ThemeProvider } from "@/components/marketing/ThemeProvider";
 
@@ -29,9 +29,9 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "MultipleAI — Use the best free AIs from one place",
+  title: "Zintus — Use the best free AIs from one place",
   description:
-    "MultipleAI connects you to 12 free AI services in one chat. Ask once and it automatically picks a fast, available model — and switches when one runs out. Free and open source.",
+    "Zintus connects you to 12 free AI services in one chat. Ask once and it automatically picks a fast, available model — and switches when one runs out. Free and open source.",
 };
 
 export default function RootLayout({

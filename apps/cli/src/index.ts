@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
 import chalk from "chalk";
-import { PROVIDER_IDS, type ContextMode } from "@multipleai/types";
+import { PROVIDER_IDS, type ContextMode } from "@zintus/types";
 import { runChat, type ChatOptions } from "./commands/chat.js";
 import { runKeysSet, runKeysList, runKeysRemove } from "./commands/keys.js";
 import { runConfig } from "./commands/config.js";
@@ -10,7 +10,7 @@ import { runHistory, runTrace } from "./commands/history.js";
 const program = new Command();
 
 program
-  .name("multipleai")
+  .name("zintus")
   .description("Multi-provider AI CLI")
   .version("0.0.1");
 

@@ -1,10 +1,10 @@
 {
-  "name": "multipleai",
+  "name": "zintus",
   "version": "0.0.1",
   "private": true,
   "type": "module",
   "bin": {
-    "multipleai": "./src/index.ts"
+    "zintus": "./src/index.ts"
   },
   "scripts": {
     "dev": "bun run src/index.ts",
@@ -16,12 +16,12 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.10.0",
-    "@multipleai/context-compiler": "workspace:*",
-    "@multipleai/engine": "workspace:*",
-    "@multipleai/keychain": "workspace:*",
-    "@multipleai/providers": "workspace:*",
-    "@multipleai/router": "workspace:*",
-    "@multipleai/types": "workspace:*",
+    "@zintus/context-compiler": "workspace:*",
+    "@zintus/engine": "workspace:*",
+    "@zintus/keychain": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/router": "workspace:*",
+    "@zintus/types": "workspace:*",
     "chalk": "^5.4.1",
     "commander": "^12.1.0",
     "drizzle-orm": "^0.45.0",

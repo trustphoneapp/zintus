@@ -1,5 +1,5 @@
-const STORAGE_KEY = "multipleai.web.keys";
-const SALT_KEY = "multipleai.web.salt";
+const STORAGE_KEY = "zintus.web.keys";
+const SALT_KEY = "zintus.web.salt";
 
 function bytesToBase64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes));

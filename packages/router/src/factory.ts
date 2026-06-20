@@ -9,13 +9,13 @@ import type {
   RouteRequest,
   RouteStreamResult,
   RoutingStrategy,
-} from "@multipleai/types";
+} from "@zintus/types";
 import {
   estimateUsage,
   listProviders,
   ProviderHttpError,
-} from "@multipleai/providers";
-import type { TokenUsage } from "@multipleai/types";
+} from "@zintus/providers";
+import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
 import { sortProviders } from "./priority.js";
 import { QuotaLedger } from "./quota-ledger.js";
@@ -77,7 +77,7 @@ export interface Router {
   probeProviders(): Promise<Array<{ providerId: ProviderId; ok: boolean }>>;
 }
 
-const DEFAULT_DB_PATH = join(homedir(), ".multipleai", "quota.db");
+const DEFAULT_DB_PATH = join(homedir(), ".zintus", "quota.db");
 const OPENROUTER_FREE_MODELS = [
   "meta-llama/llama-3.3-70b-instruct:free",
   "google/gemma-2-9b-it:free",

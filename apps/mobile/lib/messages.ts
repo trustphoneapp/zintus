@@ -1,5 +1,5 @@
-import type { ChatMessage } from "@multipleai/types";
-import type { ProviderId } from "@multipleai/types";
+import type { ChatMessage } from "@zintus/types";
+import type { ProviderId } from "@zintus/types";
 
 export interface UiMessage extends ChatMessage {
   id: string;

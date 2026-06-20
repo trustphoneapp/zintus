@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import type { ProviderId } from "@multipleai/types";
-import { PROVIDER_IDS } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
+import { PROVIDER_IDS } from "@zintus/types";
 import { streamChat, type ChatMessage } from "@/lib/chat-client";
 import {
   createChatMessage,

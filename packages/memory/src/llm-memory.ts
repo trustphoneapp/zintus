@@ -1,6 +1,6 @@
-import { getKey } from "@multipleai/keychain";
-import { createRouter, type Router } from "@multipleai/router";
-import type { ChatMessage, MemoryFact, ProviderId } from "@multipleai/types";
+import { getKey } from "@zintus/keychain";
+import { createRouter, type Router } from "@zintus/router";
+import type { ChatMessage, MemoryFact, ProviderId } from "@zintus/types";
 import { extractFacts } from "./extract.js";
 import { summarizeTurns } from "./summarize.js";
 

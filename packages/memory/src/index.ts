@@ -1,4 +1,4 @@
-import type { ChatMessage, MemoryThreadState } from "@multipleai/types";
+import type { ChatMessage, MemoryThreadState } from "@zintus/types";
 import { MemoryStore, type ThreadStateRow } from "./memory-store.js";
 
 export { MemoryStore } from "./memory-store.js";

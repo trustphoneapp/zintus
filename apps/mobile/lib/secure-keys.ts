@@ -1,4 +1,4 @@
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import {
   deleteApiKey,
   getApiKey,
@@ -21,7 +21,7 @@ const LEGACY_PREFIX = "key:";
 
 /** Migrate keys saved under the old `key:<provider>` namespace. */
 export async function migrateLegacyKeys(): Promise<void> {
-  const { listProviders } = await import("@multipleai/providers");
+  const { listProviders } = await import("@zintus/providers");
   for (const provider of listProviders()) {
     const legacy = await import("expo-secure-store").then((mod) =>
       mod.getItemAsync(`${LEGACY_PREFIX}${provider.id}`),

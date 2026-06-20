@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
-import type { PolicyLimits, ProviderId } from "@multipleai/types";
+import type { PolicyLimits, ProviderId } from "@zintus/types";
 import { parseGroqResetHeader } from "./groq-reset.js";
 import {
   PAID_EQUIVALENT_USD_PER_MTOK,

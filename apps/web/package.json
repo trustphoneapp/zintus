@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/web",
+  "name": "@zintus/web",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -10,8 +10,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@multipleai/types": "workspace:*",
-    "@multipleai/ui": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/types": "workspace:*",
+    "@zintus/ui": "workspace:*",
     "framer-motion": "^12.40.0",
     "lucide-react": "^1.18.0",
     "next": "^16.2.7",

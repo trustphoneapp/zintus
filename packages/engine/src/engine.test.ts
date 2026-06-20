@@ -12,7 +12,7 @@ describe("createEngine", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "multipleai-engine-"));
+    dir = mkdtempSync(join(tmpdir(), "zintus-engine-"));
   });
 
   afterEach(() => {

@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/cache",
+  "name": "@zintus/cache",
   "version": "0.0.1",
   "type": "module",
   "main": "./src/index.ts",
@@ -15,8 +15,8 @@
     "test": "bun test src/cache.test.ts"
   },
   "dependencies": {
-    "@multipleai/types": "workspace:*",
-    "@multipleai/providers": "workspace:*",
+    "@zintus/types": "workspace:*",
+    "@zintus/providers": "workspace:*",
     "drizzle-orm": "^0.45.0",
     "sqlite-vec": "^0.1.9"
   },

@@ -21,4 +21,4 @@ export {
   estimateTokensFromText,
   usageFromProviderFields,
 } from "./token-estimate.js";
-export type { Provider, ProviderId } from "@multipleai/types";
+export type { Provider, ProviderId } from "@zintus/types";

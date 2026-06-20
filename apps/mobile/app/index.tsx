@@ -9,7 +9,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import { useFocusEffect, useRouter } from "expo-router";
 import { streamChat, getGatewayUrl } from "@/lib/chat";
 import { loadConfig, loadSelectedProvider } from "@/lib/config";
@@ -146,7 +146,7 @@ export default function ChatScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>MultipleAI</Text>
+        <Text style={styles.title}>Zintus</Text>
         <View style={styles.chipRow}>
           <Pressable
             style={({ pressed }) => [

@@ -7,7 +7,7 @@ const features = [
   {
     icon: InfinityIcon,
     title: "Keep chatting when one runs out",
-    body: "Free AIs run out of usage quickly. MultipleAI watches all 12 and switches automatically when another provider has quota left.",
+    body: "Free AIs run out of usage quickly. Zintus watches all 12 and switches automatically when another provider has quota left.",
   },
   {
     icon: Wallet,

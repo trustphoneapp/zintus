@@ -1,4 +1,4 @@
-import type { AppConfig, ContextMode, ProviderId } from "@multipleai/types";
+import type { AppConfig, ContextMode, ProviderId } from "@zintus/types";
 import { fetchGatewayHealth, streamGatewayChat } from "./gateway";
 
 export interface ChatMessage {

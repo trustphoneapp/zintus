@@ -1,5 +1,5 @@
 import { View, Text } from "react-native";
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 import { PROVIDER_LIMITS } from "@/lib/limits";
 
 interface QuotaBarProps {

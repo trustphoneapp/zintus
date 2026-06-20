@@ -21,7 +21,7 @@ export function Navbar() {
       <div className="m-shell m-nav">
         <Link className="m-brand" href="/">
           <span className="m-brand-mark">M</span>
-          <span>MultipleAI</span>
+          <span>Zintus</span>
         </Link>
         <nav className="m-nav-links">
           {navItems.map((item) => (

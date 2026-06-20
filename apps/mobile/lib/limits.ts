@@ -1,10 +1,10 @@
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 
 // Provider limits and the limit type come from the single shared source of
 // truth so mobile can never drift from the gateway/desktop. Do not redefine
 // PROVIDER_LIMITS here.
-export { PROVIDER_LIMITS } from "@multipleai/router/limits";
-export type { ProviderLimits } from "@multipleai/router/limits";
+export { PROVIDER_LIMITS } from "@zintus/router/limits";
+export type { ProviderLimits } from "@zintus/router/limits";
 
 export const QUOTA_WARNING_THRESHOLD = 0.2;
 

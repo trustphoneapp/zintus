@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@multipleai/types";
+import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@zintus/types";
 import { loadConfig, saveConfig } from "./config";
 import { fetchProviderSnapshot, type DesktopProviderInfo } from "./providers";
 import type { GatewaySavings } from "./gateway";

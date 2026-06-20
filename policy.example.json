@@ -1,5 +1,5 @@
 {
-  "$comment": "Example MultipleAI routing policy. Copy to ~/.multipleai/policy.json (or set $MULTIPLEAI_POLICY, or mount at /app/policy.json in Docker). The gateway loads it at startup and hot-reloads on change. Every field is optional; missing fields fall back to built-in defaults. No secrets belong in this file.",
+  "$comment": "Example Zintus routing policy. Copy to ~/.zintus/policy.json (or set $ZINTUS_POLICY, or mount at /app/policy.json in Docker). The gateway loads it at startup and hot-reloads on change. Every field is optional; missing fields fall back to built-in defaults. No secrets belong in this file.",
   "providerPriority": [
     "cerebras",
     "groq",

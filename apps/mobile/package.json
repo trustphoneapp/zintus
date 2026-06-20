@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/mobile",
+  "name": "@zintus/mobile",
   "version": "0.0.1",
   "private": true,
   "main": "expo-router/entry",
@@ -13,9 +13,9 @@
   "dependencies": {
     "@expo/vector-icons": "^15.1.1",
     "@gorhom/bottom-sheet": "^5.2.14",
-    "@multipleai/providers": "workspace:*",
-    "@multipleai/router": "workspace:*",
-    "@multipleai/types": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/router": "workspace:*",
+    "@zintus/types": "workspace:*",
     "expo": "~56.0.0",
     "expo-notifications": "^56.0.18",
     "expo-router": "~6.0.0",

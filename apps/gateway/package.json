@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/gateway",
+  "name": "@zintus/gateway",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -9,10 +9,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@multipleai/engine": "workspace:*",
-    "@multipleai/providers": "workspace:*",
-    "@multipleai/router": "workspace:*",
-    "@multipleai/types": "workspace:*"
+    "@zintus/engine": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/router": "workspace:*",
+    "@zintus/types": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest"

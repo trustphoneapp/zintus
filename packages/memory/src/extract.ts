@@ -1,4 +1,4 @@
-import type { ChatMessage, MemoryFact } from "@multipleai/types";
+import type { ChatMessage, MemoryFact } from "@zintus/types";
 
 const preferencePatterns: Array<{
   keyPrefix: string;

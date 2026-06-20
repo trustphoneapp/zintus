@@ -3,7 +3,7 @@ import type {
   ContextMode,
   ProviderId,
   RoutingStrategy,
-} from "@multipleai/types";
+} from "@zintus/types";
 
 const DEFAULT_GATEWAY_URL =
   process.env.EXPO_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";

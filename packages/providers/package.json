@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/providers",
+  "name": "@zintus/providers",
   "version": "0.0.1",
   "type": "module",
   "main": "./src/index.ts",
@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@multipleai/types": "workspace:*"
+    "@zintus/types": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0"

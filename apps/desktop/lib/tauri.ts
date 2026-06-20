@@ -1,6 +1,6 @@
-import type { ProviderId } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
 
-const SERVICE = "com.multipleai.desktop";
+const SERVICE = "com.zintus.desktop";
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;

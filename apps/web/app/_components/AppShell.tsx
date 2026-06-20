@@ -45,7 +45,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-root">
       <header className="app-topbar">
-        <span className="app-topbar-title">{TITLES[pathname] ?? "MultipleAI"}</span>
+        <span className="app-topbar-title">{TITLES[pathname] ?? "Zintus"}</span>
       </header>
 
       <div className="app-body">

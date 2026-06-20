@@ -1,7 +1,7 @@
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
-import { listProviders } from "@multipleai/providers";
-import type { ProviderId } from "@multipleai/types";
+import { listProviders } from "@zintus/providers";
+import type { ProviderId } from "@zintus/types";
 import { QUOTA_WARNING_THRESHOLD } from "./limits";
 import { remainingRatio } from "./quota";
 

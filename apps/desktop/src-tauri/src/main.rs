@@ -1,3 +1,3 @@
 fn main() {
-  multipleai_desktop_lib::run();
+  zintus_desktop_lib::run();
 }

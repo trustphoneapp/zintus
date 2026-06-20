@@ -2,7 +2,7 @@
 
 use keyring::Entry;
 
-const SERVICE: &str = "com.multipleai.desktop";
+const SERVICE: &str = "com.zintus.desktop";
 
 fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
   Entry::new(SERVICE, provider_id).map_err(|error| error.to_string())

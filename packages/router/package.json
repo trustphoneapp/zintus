@@ -1,5 +1,5 @@
 {
-  "name": "@multipleai/router",
+  "name": "@zintus/router",
   "version": "0.0.1",
   "type": "module",
   "main": "./src/index.ts",
@@ -35,9 +35,9 @@
     "test": "vitest run --config ../../vitest.config.ts && bun test src/factory.test.ts src/quota-ledger.test.ts"
   },
   "dependencies": {
-    "@multipleai/keychain": "workspace:*",
-    "@multipleai/providers": "workspace:*",
-    "@multipleai/types": "workspace:*",
+    "@zintus/keychain": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/types": "workspace:*",
     "drizzle-orm": "^0.45.0"
   },
   "devDependencies": {

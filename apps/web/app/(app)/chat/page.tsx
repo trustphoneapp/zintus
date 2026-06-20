@@ -59,7 +59,7 @@ export default function ChatPage() {
       setLoading(true);
       setActiveProvider(null);
       pushTerminalLine({
-        text: `$ multipleai '${promptForLog.slice(0, 64)}${promptForLog.length > 64 ? "…" : ""}'`,
+        text: `$ zintus '${promptForLog.slice(0, 64)}${promptForLog.length > 64 ? "…" : ""}'`,
         tone: "default",
       });
 

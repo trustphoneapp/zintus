@@ -1,6 +1,6 @@
-import { createEngine } from "@multipleai/engine";
-import { loadPolicy, watchPolicy } from "@multipleai/router";
-import { DEFAULT_CONFIG } from "@multipleai/types";
+import { createEngine } from "@zintus/engine";
+import { loadPolicy, watchPolicy } from "@zintus/router";
+import { DEFAULT_CONFIG } from "@zintus/types";
 import { buildGatewayConfig } from "./auth.js";
 import { createGatewayHandler, type LogFn } from "./handler.js";
 

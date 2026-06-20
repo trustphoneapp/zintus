@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Provider, ProviderId, StreamChunk } from "@multipleai/types";
-import { ProviderHttpError, estimateUsage } from "@multipleai/providers";
+import type { Provider, ProviderId, StreamChunk } from "@zintus/types";
+import { ProviderHttpError, estimateUsage } from "@zintus/providers";
 
 /**
  * End-to-end integration test: drives the real engine → router → quota ledger →
@@ -35,7 +35,7 @@ describe("engine integration (stubbed provider)", () => {
   let dir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "multipleai-engine-int-"));
+    dir = mkdtempSync(join(tmpdir(), "zintus-engine-int-"));
   });
 
   afterEach(() => {
@@ -44,7 +44,7 @@ describe("engine integration (stubbed provider)", () => {
   });
 
   async function makeEngine(provider: Provider) {
-    mock.module("@multipleai/providers", () => ({
+    mock.module("@zintus/providers", () => ({
       listProviders: () => [provider],
       ProviderHttpError,
       estimateUsage,

@@ -3,10 +3,10 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: "export",
   transpilePackages: [
-    "@multipleai/providers",
-    "@multipleai/router",
-    "@multipleai/types",
-    "@multipleai/ui",
+    "@zintus/providers",
+    "@zintus/router",
+    "@zintus/types",
+    "@zintus/ui",
   ],
   webpack: (config) => {
     config.resolve.extensionAlias = {

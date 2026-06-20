@@ -1,8 +1,8 @@
 import { Entry } from "@napi-rs/keyring";
-import type { ProviderId } from "@multipleai/types";
-import { isProviderId, PROVIDER_IDS } from "@multipleai/types";
+import type { ProviderId } from "@zintus/types";
+import { isProviderId, PROVIDER_IDS } from "@zintus/types";
 
-const SERVICE = "multipleai";
+const SERVICE = "zintus";
 const MANIFEST_ACCOUNT = "__manifest__";
 
 function manifestEntry(): Entry {

@@ -1,4 +1,4 @@
-// Single source of truth for the MultipleAI brand palette on mobile.
+// Single source of truth for the Zintus brand palette on mobile.
 // Mirrors tailwind.config.js so StyleSheet-based screens and NativeWind
 // className-based screens stay visually aligned. Neutral, professional accent
 // (ChatGPT/Claude-style monochrome): the accent is a near-white used as a
