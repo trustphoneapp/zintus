@@ -332,4 +332,6 @@ supplied.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Zintus is source-available under the Business Source License 1.1. Free for
+personal and internal business use. Contact YS Ventures LLC for commercial
+licensing. See [LICENSE](LICENSE).
