@@ -25,7 +25,7 @@ id = "e37d30031cb2409daa2fd5d44003ec0c"
 # GOOGLE_CLIENT_ID
 # GOOGLE_CLIENT_SECRET
 # RESEND_API_KEY
-# RELAY_BASE_URL      — e.g. https://relay.zintus.app
+# RELAY_BASE_URL      — e.g. https://zintus-relay.yashwanth-surabhi.workers.dev
 
 [vars]
 RELAY_BASE_URL = "https://zintus-relay.yashwanth-surabhi.workers.dev"
