@@ -60,8 +60,6 @@ export interface CompileRequest {
   codeSearch?: (query: string, topK: number) => Promise<CodeContextHit[]>;
   /** Raw unified git diff for this turn (CLI/desktop coding flows). Compressed before inclusion. */
   diffText?: string;
-  /** Raw terminal/build/log output for this turn. Compressed before inclusion. */
-  terminalText?: string;
 }
 
 export interface CompileTrace {
@@ -78,7 +76,6 @@ export interface CompileTrace {
     | "handoff"
     | "code-recall"
     | "diff"
-    | "terminal"
   >;
   droppedSections: string[];
 }

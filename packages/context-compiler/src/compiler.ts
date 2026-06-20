@@ -7,7 +7,6 @@ import {
   VectorRecallBlock,
 } from "./blocks/index.js";
 import { buildHandoffBlock } from "./handoff.js";
-import { compressTerminalOutput } from "./util/terminal-compress.js";
 import { formatDiffContext } from "./util/diff-context.js";
 import type { CompileRequest, CompileResult } from "./types.js";
 
@@ -276,19 +275,6 @@ export async function compileContext(request: CompileRequest): Promise<CompileRe
     }
   }
 
-  // Terminal/build/log output for this turn (compressed).
-  if (request.terminalText && request.terminalText.trim()) {
-    const terminalCap = Math.floor(avail * 0.1);
-    const { text } = compressTerminalOutput(request.terminalText, {
-      maxLines: Math.max(20, Math.floor(terminalCap / 12)),
-    });
-    if (text && estimateTokens(text) <= terminalCap) {
-      sections.push(untrustedDataBlock("TERMINAL OUTPUT", text));
-      includedSections.push("terminal");
-    } else if (text) {
-      droppedSections.push("terminal over budget");
-    }
-  }
 
   sections.push({ role: "user", content: request.newUserMessage });
 

@@ -34,7 +34,6 @@ code path is wired.
 | Two-tier cache: L1 SHA-256 exact + L2 `sqlite-vec` (env-gated, TTL, bypass) | ✅ |
 | Memory: deterministic summary + regex facts; opt-in LLM (`MEMORY_LLM=1`) | ✅ |
 | Context compiler (Fast/Smart/Deep budgets) | ✅ |
-| Local execution checkpoints (`thread_id` + serialized state) | ✅ |
 
 ---
 

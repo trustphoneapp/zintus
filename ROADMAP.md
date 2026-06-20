@@ -26,6 +26,9 @@ During past iterations, several speculative or fragile architectures were intent
 
 -   **Old Cache Layer:** An exact-match replay cache and a prompt-marker cache (injecting marker text into prompts to simulate caching without actual backend support) were removed.
 -   **Speculative Checkpoint Store:** A graph-like agent execution checkpoint store was removed to prevent premature complexity (YAGNI).
+-   **Thread checkpoint API:** A later `thread_id`-keyed checkpoint store (`saveCheckpoint`/`getCheckpoint`/`listCheckpoints` + the `thread_checkpoints` table) was also removed — it was never wired to a gateway route or any client, so it was dead surface area. Conversation/thread persistence already covers session continuity.
+-   **Terminal context block:** The Smart Context Engine's terminal/log block (`terminalText` + `compressTerminalOutput`) and the gateway's `terminal` body field were removed — no client ever sent terminal output. The git **diff** block (used by the CLI) and workspace code indexing remain.
+-   **Unused keychain abstraction:** `createKeychain()` and the `Keychain`/`KeychainEntry` interfaces were removed; callers use the `getKey`/`setKey`/`listKeys` functions directly.
 -   **Direct Web/Tauri Databases:** Direct database calls or keychain bindings from the Web frontend were avoided. Next.js in serverless contexts cannot bind to `bun:sqlite` or native OS keyrings. The **Gateway** must serve as the stateful engine.
 
 ---
@@ -47,9 +50,9 @@ Implemented in `packages/cache`, consulted by the engine before any provider cal
 2.  **Virtual API Keys — ✅** Downstream per-key daily quota **and rolling 60s RPM/TPM** limits enforced in `quota-ledger.ts` (`quota-ledger.vk.test.ts`) and exposed on the gateway as `virtual_key`.
 3.  **Declarative Policies — ✅ Shipped** Hot-reloadable `policy.json` (priority/weights/model-groups/fallbacks/limits) via `policy.ts` + `watchPolicy`, loaded and live-reloaded by the gateway (`apps/gateway/src/index.ts`); covered by `policy.test.ts`.
 
-### Phase 3: Memory Hardening & Checkpointing — ✅ Shipped
+### Phase 3: Memory Hardening — ✅ Shipped
 1.  **Fact Conflict Resolution (Mem0-style) — ✅** `consolidateFactsWithLlm` detects contradictions and adds/updates/deletes facts; opt-in via `MEMORY_LLM=1` (deterministic regex extraction is the default).
-2.  **Local Execution Checkpoints (LangGraph-style) — ✅** SQLite checkpoint table keyed by `thread_id` with serialized state; exposed via the engine's `saveCheckpoint`/`getCheckpoint`/`listCheckpoints`.
+2.  **Local Execution Checkpoints — ❌ Removed.** A `thread_id`-keyed checkpoint API was built but never wired to a route or client; it was removed as dead code (see "Removed or Deprecated"). Thread/conversation persistence covers session continuity.
 
 ### Phase 4: Competitive parity — ✅ Mostly shipped
 1.  **Same-model multi-provider failover — ✅** OpenRouter-style "model groups": a logical model maps to an ordered provider list with whole-group cooldown (`factory.ts`, `factory.model-groups.test.ts`).

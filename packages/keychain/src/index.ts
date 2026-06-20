@@ -18,8 +18,6 @@ export function isValidProvider(value: string): value is ProviderId {
 }
 
 export { deleteKey, getKey, setKey };
-export type { Keychain, KeychainEntry } from "./keychain.js";
-export { createKeychain } from "./factory.js";
 
 export async function removeKey(provider: ProviderId): Promise<boolean> {
   const existing = await getKey(provider);

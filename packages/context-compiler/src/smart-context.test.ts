@@ -70,16 +70,6 @@ describe("Smart Context Engine blocks", () => {
     expect(block!.role).toBe("user");
   });
 
-  test("terminalText produces a compressed terminal block", async () => {
-    const log = ["start", ...Array.from({ length: 500 }, (_u, i) => `line ${i}`), "ERROR: boom at app.ts:42"].join("\n");
-    const result = await compileContext({ ...base, terminalText: log });
-    expect(result.compileTrace.includedSections).toContain("terminal");
-    const block = result.messages.find((m) => m.content.includes("TERMINAL OUTPUT"));
-    expect(block).toBeDefined();
-    expect(block!.role).toBe("user");
-    expect(block!.content).toContain("ERROR: boom");
-  });
-
   test("quota-aware: a smaller model window includes fewer code chunks", async () => {
     const big = await compileContext({
       ...base,

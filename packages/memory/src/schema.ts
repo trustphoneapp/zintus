@@ -37,11 +37,3 @@ export const compileTraces = sqliteTable("compile_traces", {
   traceJson: text("trace_json").notNull(),
   createdAt: integer("created_at").notNull(),
 });
-
-export const threadCheckpoints = sqliteTable("thread_checkpoints", {
-  threadId: text("thread_id").notNull(),
-  checkpointId: text("checkpoint_id").notNull(),
-  parentCheckpointId: text("parent_checkpoint_id"),
-  stateBin: blob("state_bin").notNull(),
-  createdAt: integer("created_at").notNull(),
-});

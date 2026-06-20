@@ -74,8 +74,6 @@ export interface EngineRouteRequest extends Omit<RouteRequest, "messages"> {
   bypassCache?: boolean;
   /** Raw unified git diff for this turn (compressed into context). */
   diffText?: string;
-  /** Raw terminal/build/log output for this turn (compressed into context). */
-  terminalText?: string;
 }
 
 export interface EngineStreamResult extends RouteStreamResult {
@@ -108,9 +106,6 @@ export interface Engine {
   getTrace(traceId: string): RequestTrace | null;
   getLastTrace(): RequestTrace | null;
   listTraces(limit: number): RequestTrace[];
-  saveCheckpoint(threadId: string, checkpointId: string, parentCheckpointId: string | null, state: Record<string, unknown>): void;
-  getCheckpoint(threadId: string, checkpointId: string): Record<string, unknown> | null;
-  listCheckpoints(threadId: string): Array<{ checkpointId: string; parentCheckpointId: string | null; createdAt: Date }>;
 }
 
 const DEFAULT_QUOTA_PATH = join(homedir(), ".zintus", "quota.db");
@@ -414,7 +409,6 @@ export function createEngine(config: EngineConfig = {}): Engine {
           contextWindow,
           codeSearch,
           diffText: request.diffText,
-          terminalText: request.terminalText,
         });
         effectiveMessages = compiled.messages;
         compileTokenEstimate = compiled.tokenEstimate;
@@ -622,18 +616,6 @@ export function createEngine(config: EngineConfig = {}): Engine {
         return null;
       }
       return memory.getCompileTrace(parsed);
-    },
-
-    saveCheckpoint(threadId: string, checkpointId: string, parentCheckpointId: string | null, state: Record<string, unknown>): void {
-      memory.saveCheckpoint(threadId, checkpointId, parentCheckpointId, state);
-    },
-
-    getCheckpoint(threadId: string, checkpointId: string): Record<string, unknown> | null {
-      return memory.getCheckpoint(threadId, checkpointId);
-    },
-
-    listCheckpoints(threadId: string): Array<{ checkpointId: string; parentCheckpointId: string | null; createdAt: Date }> {
-      return memory.listCheckpoints(threadId);
     },
   };
 }

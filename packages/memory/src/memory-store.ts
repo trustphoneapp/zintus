@@ -130,14 +130,6 @@ export class MemoryStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS thread_checkpoints (
-        thread_id TEXT NOT NULL,
-        checkpoint_id TEXT NOT NULL,
-        parent_checkpoint_id TEXT,
-        state_bin BLOB NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY (thread_id, checkpoint_id)
-      );
     `);
     try {
       this.db.$client.exec(`
@@ -605,69 +597,6 @@ export class MemoryStore {
       this.sqliteVecAvailable = false;
       return null;
     }
-  }
-
-  saveCheckpoint(
-    threadId: string,
-    checkpointId: string,
-    parentCheckpointId: string | null,
-    state: Record<string, unknown>,
-  ): void {
-    const now = Date.now();
-    const stateBin = new TextEncoder().encode(JSON.stringify(state));
-
-    this.db
-      .insert(schema.threadCheckpoints)
-      .values({
-        threadId,
-        checkpointId,
-        parentCheckpointId,
-        stateBin,
-        createdAt: now,
-      })
-      .onConflictDoUpdate({
-        target: [schema.threadCheckpoints.threadId, schema.threadCheckpoints.checkpointId],
-        set: {
-          stateBin,
-          createdAt: now,
-        },
-      })
-      .run();
-  }
-
-  getCheckpoint(threadId: string, checkpointId: string): Record<string, unknown> | null {
-    const row = this.db
-      .select()
-      .from(schema.threadCheckpoints)
-      .where(
-        and(
-          eq(schema.threadCheckpoints.threadId, threadId),
-          eq(schema.threadCheckpoints.checkpointId, checkpointId),
-        ),
-      )
-      .get();
-    if (!row || !row.stateBin) {
-      return null;
-    }
-    try {
-      return JSON.parse(new TextDecoder().decode(row.stateBin)) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-
-  listCheckpoints(threadId: string): Array<{ checkpointId: string; parentCheckpointId: string | null; createdAt: Date }> {
-    const rows = this.db
-      .select()
-      .from(schema.threadCheckpoints)
-      .where(eq(schema.threadCheckpoints.threadId, threadId))
-      .orderBy(desc(schema.threadCheckpoints.createdAt))
-      .all();
-    return rows.map((r) => ({
-      checkpointId: r.checkpointId,
-      parentCheckpointId: r.parentCheckpointId ?? null,
-      createdAt: new Date(r.createdAt),
-    }));
   }
 }
 

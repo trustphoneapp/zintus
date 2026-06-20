@@ -74,7 +74,7 @@ invalid Groq key in the OS keychain produced a graceful `400`, not a crash), and
   storage (**no Tauri rusqlite** — desktop reads `/health`), "PRODUCTION ✅"
   downgraded to honest MVP/🟡/❌.
 - ROADMAP marks shipped phases (cache, weighted routing, virtual keys,
-  checkpoints, `consolidateFactsWithLlm`) vs. still-planned (`policy.json`
+  `consolidateFactsWithLlm`) vs. still-planned (`policy.json`
   hot-reload). CONTRIBUTING's stale "we removed the cache" rule corrected.
 
 ### P3/P4 — tests, CI, cleanup

@@ -35,9 +35,6 @@ function fakeEngine(overrides: Partial<Engine> = {}): Engine {
     async compileThreadContext() {
       return { traceId: "0", messages: [] };
     },
-    saveCheckpoint() {},
-    getCheckpoint: () => null,
-    listCheckpoints: () => [],
   };
   return { ...base, ...overrides };
 }

@@ -147,7 +147,6 @@ export function createGatewayHandler(
       temperature?: number;
       max_tokens?: number;
       diff?: string;
-      terminal?: string;
     };
     try {
       body = JSON.parse(raw);
@@ -187,7 +186,6 @@ export function createGatewayHandler(
           providerWeights: body.provider_weights ?? body.providerWeights,
           strategy: body.strategy,
           diffText: body.diff,
-          terminalText: body.terminal,
           temperature: body.temperature,
           maxTokens: body.max_tokens,
           // Honor `Cache-Control: no-cache` (or no-store) to bypass the cache.

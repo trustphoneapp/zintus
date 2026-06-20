@@ -8,11 +8,6 @@ export {
 export { compileContext } from "./compiler.js";
 export { buildHandoffBlock } from "./handoff.js";
 export {
-  compressTerminalOutput,
-  type TerminalCompressOptions,
-  type TerminalCompressResult,
-} from "./util/terminal-compress.js";
-export {
   formatDiffContext,
   tryGitDiff,
   type DiffContextOptions,
