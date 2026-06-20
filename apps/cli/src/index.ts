@@ -124,13 +124,43 @@ program
   .description("Run the gateway HTTP server the GUI clients connect to")
   .option("--host <host>", "Interface to bind (default 127.0.0.1)")
   .option("--port <port>", "Port to listen on (default 8788)")
-  .action(async (options: { host?: string; port?: string }) => {
+  .option("--cloud", "Connect to Zintus Cloud relay (requires: zintus cloud login)")
+  .action(async (options: { host?: string; port?: string; cloud?: boolean }) => {
     const { runServe } = await import("./commands/serve.js");
     const port = options.port == null ? undefined : Number(options.port);
     if (port != null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
       throw new Error("Invalid --port. Expected an integer 1–65535.");
     }
-    await runServe({ host: options.host, port });
+    await runServe({ host: options.host, port, cloud: options.cloud });
+  });
+
+const cloud = program
+  .command("cloud")
+  .description("Connect your gateway to Zintus Cloud for remote access");
+
+cloud
+  .command("login")
+  .description("Sign in to zintus.app and save credentials to ~/.zintus/cloud.json")
+  .option("--relay-url <url>", "Custom relay URL (default: https://relay.zintus.app)")
+  .action(async (options: { relayUrl?: string }) => {
+    const { runCloudLogin } = await import("./commands/cloud.js");
+    await runCloudLogin({ relayUrl: options.relayUrl });
+  });
+
+cloud
+  .command("status")
+  .description("Show cloud connection status")
+  .action(async () => {
+    const { runCloudStatus } = await import("./commands/cloud.js");
+    await runCloudStatus();
+  });
+
+cloud
+  .command("logout")
+  .description("Sign out and remove ~/.zintus/cloud.json")
+  .action(async () => {
+    const { runCloudLogout } = await import("./commands/cloud.js");
+    await runCloudLogout();
   });
 
 program

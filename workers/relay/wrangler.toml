@@ -1,0 +1,31 @@
+name = "zintus-relay"
+main = "src/index.ts"
+compatibility_date = "2026-04-07"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "GATEWAY_SESSION"
+class_name = "GatewaySession"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GatewaySession"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "zintus-relay"
+database_id = "FILL_AFTER_wrangler_d1_create"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "FILL_AFTER_wrangler_kv_create"
+
+# Secrets — set via: wrangler secret put <NAME>
+# RELAY_AUTH_SECRET   — random hex, signs session tokens
+# GOOGLE_CLIENT_ID
+# GOOGLE_CLIENT_SECRET
+# RESEND_API_KEY
+# RELAY_BASE_URL      — e.g. https://relay.zintus.app
+
+[vars]
+RELAY_BASE_URL = "http://localhost:8787"

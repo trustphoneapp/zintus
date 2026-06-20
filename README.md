@@ -330,6 +330,74 @@ supplied.
 > layer that injected text into prompts without any real provider caching. Both
 > were removed and replaced by the real L1/L2 cache described above.
 
+## Zintus Cloud — remote gateway control
+
+Zintus Cloud lets you control your home gateway from the mobile app (or `zintus.app/dashboard`) without re-scanning a QR code on every restart.
+
+### Security model
+
+```
+Mobile ──HTTPS──► Cloudflare Worker (Hono routing)
+                        │
+                 GatewaySession Durable Object
+                 (WebSocket Hibernation API)
+                        ▲
+                        │ outbound WebSocket (home machine initiates)
+                 zintus serve --cloud (home machine)
+
+zintus.app ──HTTPS──► same Worker/DO
+Cloudflare D1: users, gateway sessions (secret stored as SHA-256 hash only)
+Cloudflare KV: relay tokens (1h TTL), magic-link tokens, OAuth state
+```
+
+- **Outbound-only**: home machine initiates all connections outward; no inbound ports, works behind NAT/home routers/corporate firewalls with zero config
+- **Keys never leave the home machine**: only status JSON, control commands, and SSE events pass through the relay
+- **Short-lived, scoped credentials**: `gateway_secret` → hashed in D1, never transmitted to mobile; `relay_token` → 1h TTL, in-memory only on the gateway, invalidated on session delete; mobile uses Better Auth session cookie in MMKV (never AsyncStorage)
+
+### Quick setup
+
+```bash
+# 1. Sign in to zintus.app and save credentials (opens browser):
+zintus cloud login
+
+# 2. Start gateway + connect to cloud relay:
+zintus serve --cloud
+
+# 3. Open zintus.app/dashboard — your gateway appears online
+# 4. Sign in to the mobile app → Remote tab → tap your gateway
+```
+
+### Deploy the relay worker
+
+```bash
+# Create D1 + KV:
+wrangler d1 create zintus-relay      # paste database_id into wrangler.toml
+wrangler kv namespace create RELAY_KV # paste id into wrangler.toml
+
+# Set secrets:
+wrangler secret put RELAY_AUTH_SECRET
+wrangler secret put GOOGLE_CLIENT_ID
+wrangler secret put GOOGLE_CLIENT_SECRET
+wrangler secret put RESEND_API_KEY
+
+# Apply schema + deploy:
+wrangler d1 execute zintus-relay --file=schema.sql
+wrangler deploy
+```
+
+Worker lives in `workers/relay/`. See `workers/relay/.env.example` for all vars. `NEXT_PUBLIC_RELAY_URL` in the web app must point at the deployed worker.
+
+### What flows through the relay (and what doesn't)
+
+| Through relay | Never through relay |
+|---|---|
+| Session heartbeat / online status | API keys for any provider |
+| `/remote/status` (provider quota bars) | Raw chat messages |
+| Control commands (set_strategy, pause, resume, reload_keys) | Router state or embeddings |
+| SSE events (request_routed, quota_warning, provider_failed) | gateway_secret (hashed only) |
+
+---
+
 ## License
 
 Zintus is source-available under the Business Source License 1.1. Free for

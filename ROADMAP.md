@@ -64,3 +64,23 @@ Implemented in `packages/cache`, consulted by the engine before any provider cal
 ### Phase 5: Onboarding & context-by-default — ✅ Shipped
 1.  **Context by default — ✅** The CLI now includes the working **git diff** automatically (`--no-diff` to opt out), engaging the Smart Context Engine without a flag; `--workspace` still indexes a codebase, and the gateway reads `ZINTUS_WORKSPACE` to index a workspace server-side (documented in `.env.example`). Diff/terminal can also be sent per-turn in the gateway body. Web/mobile have no local repo, so this is CLI/gateway-scoped by design.
 2.  **Guided onboarding — ✅** `zintus setup` lists each provider with its **free-key URL**, validates each key inline with a spinner and **retries on failure instead of aborting the whole wizard** (the old flow called `process.exit` on the first bad key — fixed by extracting `validateAndStoreKey`). A zero-config nudge points first-run users at `setup` when no keys are stored (`keys.test.ts`).
+
+### Phase 6: Zintus Cloud — outbound relay + account layer
+
+Mirrors the Claude Code Remote Control and ChatGPT Codex Mobile security model: the home machine initiates ALL connections outward; no inbound ports ever open; keys and routing decisions never leave the home machine.
+
+1.  **Cloudflare relay worker (`workers/relay/`) — ✅ Shipped**  
+    Hono Worker entry + `GatewaySession` Durable Object using the **WebSocket Hibernation API** (`acceptWebSocket` / `webSocketMessage` / `webSocketClose`, `serializeAttachment` for state that survives DO sleep). D1 for user accounts + gateway sessions (secret stored only as SHA-256 hash); KV for relay tokens (1h TTL, in-memory only on the gateway), magic-link tokens, OAuth state, user sessions. Auth endpoints: magic link via Resend, Google OAuth, CLI-state poll, mobile one-time-token.  
+    Credential model: `gateway_secret` → hashed in D1, never transmitted to mobile; `relay_token` → short-lived (1h), in-memory only on gateway, rotated on reconnect, invalidated on session delete. `zintus_session` cookie for user auth — `cookieCache` disabled (see better-auth bug #4203 note in `apps/web/lib/auth.ts`).
+
+2.  **Gateway cloud module (`apps/gateway/src/cloud.ts`) — ✅ Shipped**  
+    `startCloudConnection()`: outbound WebSocket to DO relay, first-message `{ type: "register", gateway_secret }` → receives `relay_token` (in memory only), then reconnects using relay_token in `Sec-WebSocket-Protocol`; 30s heartbeat + status push; exponential backoff (1s→60s).
+
+3.  **CLI cloud commands (`zintus cloud login/status/logout`) — ✅ Shipped**  
+    `zintus cloud login`: opens browser, registers CLI state in relay KV, polls `/api/auth/cli-status` until complete, writes `~/.zintus/cloud.json` (chmod 600, never committed). `zintus serve --cloud`: reads credentials, starts local gateway, then calls `startCloudConnection`.
+
+4.  **Dashboard pages (`apps/web/app/dashboard/`) — ✅ Shipped**  
+    `/login`: magic link + Google OAuth. `/dashboard`: session list with online/offline dots, "Add Gateway" modal (shows setup command with gateway_secret once, never again). `/dashboard/sessions/[id]`: live provider quota bars, SSE event feed, strategy picker + pause/resume/reload-keys controls. `/dashboard/cli-callback`: completes CLI login flow.
+
+5.  **Mobile Remote tab (`apps/mobile/app/remote.tsx`) — ✅ Shipped**  
+    Sign in via `expo-web-browser` → deep link `zintus://auth?token=…` → `POST /api/auth/mobile-verify` exchanges one-time token for session cookie stored in MMKV (never AsyncStorage). Session list → gateway detail: live status + provider quota bars + strategy controls + SSE event feed. Offline banner when status fetch fails.

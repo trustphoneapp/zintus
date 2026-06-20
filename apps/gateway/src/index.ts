@@ -1,3 +1,4 @@
+export { startCloudConnection, type CloudOptions, type CloudConnection } from "./cloud.js";
 import { createEngine } from "@zintus/engine";
 import { loadPolicy, watchPolicy } from "@zintus/router";
 import { DEFAULT_CONFIG } from "@zintus/types";
