@@ -9,16 +9,16 @@ class_name = "GatewaySession"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["GatewaySession"]
+new_sqlite_classes = ["GatewaySession"]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "zintus-relay"
-database_id = "FILL_AFTER_wrangler_d1_create"
+database_id = "1320e7ad-6ab9-4a28-a5b2-255ffc13d58d"
 
 [[kv_namespaces]]
 binding = "KV"
-id = "FILL_AFTER_wrangler_kv_create"
+id = "e37d30031cb2409daa2fd5d44003ec0c"
 
 # Secrets — set via: wrangler secret put <NAME>
 # RELAY_AUTH_SECRET   — random hex, signs session tokens
@@ -28,4 +28,4 @@ id = "FILL_AFTER_wrangler_kv_create"
 # RELAY_BASE_URL      — e.g. https://relay.zintus.app
 
 [vars]
-RELAY_BASE_URL = "http://localhost:8787"
+RELAY_BASE_URL = "https://zintus-relay.yashwanth-surabhi.workers.dev"
