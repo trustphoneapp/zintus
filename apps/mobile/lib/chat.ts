@@ -5,8 +5,12 @@ import type {
   RoutingStrategy,
 } from "@zintus/types";
 
-const DEFAULT_GATEWAY_URL =
-  process.env.EXPO_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";
+import { getGatewayUrl } from "./gateway-url";
+
+// Re-exported so existing importers (`@/lib/chat`) keep working; resolution
+// (user-saved → env → dev host → localhost) lives in lib/gateway-url.
+export { getGatewayUrl } from "./gateway-url";
+
 const GATEWAY_TOKEN = process.env.EXPO_PUBLIC_GATEWAY_TOKEN?.trim() || "";
 
 function gatewayAuthHeaders(): Record<string, string> {
@@ -46,7 +50,7 @@ export async function streamChat({
   threadId?: string;
   traceId?: string;
 }> {
-  const response = await fetch(`${DEFAULT_GATEWAY_URL}/v1/chat/completions`, {
+  const response = await fetch(`${getGatewayUrl()}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
     body: JSON.stringify({
@@ -127,8 +131,4 @@ export async function streamChat({
     threadId: resolvedThreadId,
     traceId,
   };
-}
-
-export function getGatewayUrl(): string {
-  return DEFAULT_GATEWAY_URL;
 }

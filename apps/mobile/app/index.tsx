@@ -200,8 +200,8 @@ export default function ChatScreen() {
             Gateway offline — run `zintus serve` on your computer
           </Text>
           <Text style={styles.offlineSub}>
-            Expecting it at {getGatewayUrl()} · set EXPO_PUBLIC_GATEWAY_URL to a
-            reachable host (use your computer&apos;s LAN IP, not localhost)
+            Expecting it at {getGatewayUrl()} · set the gateway URL in Settings
+            (your computer&apos;s LAN IP, not localhost)
           </Text>
         </View>
       )}

@@ -1,28 +1,44 @@
 import { useCallback, useEffect, useState } from "react";
-import { Pressable, ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { useFocusEffect } from "expo-router";
 import type { RoutingStrategy } from "@zintus/types";
-import { getGatewayUrl } from "@/lib/chat";
+import {
+  getDefaultGatewayUrl,
+  getGatewayUrl,
+  getSavedGatewayUrl,
+  setGatewayUrl as persistGatewayUrl,
+} from "@/lib/gateway-url";
 import {
   ROUTING_STRATEGIES,
   loadConfig,
   saveConfig,
 } from "@/lib/config";
 import { fetchGatewayHealth, type GatewaySavings } from "@/lib/gateway";
+import { COLORS } from "@/lib/theme";
 
 function formatUsd(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
 export default function SettingsScreen() {
-  const [gatewayUrl, setGatewayUrl] = useState("");
+  const [gatewayInput, setGatewayInput] = useState("");
+  const [effectiveUrl, setEffectiveUrl] = useState("");
+  const [savedNote, setSavedNote] = useState(false);
   const [strategy, setStrategy] = useState<RoutingStrategy>("fastest");
   const [savings, setSavings] = useState<GatewaySavings | null>(null);
 
   useEffect(() => {
-    setGatewayUrl(getGatewayUrl());
+    setGatewayInput(getSavedGatewayUrl() ?? "");
+    setEffectiveUrl(getGatewayUrl());
     setStrategy(loadConfig().routingStrategy);
   }, []);
+
+  function saveGateway(value: string) {
+    persistGatewayUrl(value);
+    setGatewayInput(getSavedGatewayUrl() ?? "");
+    setEffectiveUrl(getGatewayUrl());
+    setSavedNote(true);
+  }
 
   useFocusEffect(
     useCallback(() => {
@@ -130,9 +146,45 @@ export default function SettingsScreen() {
         </View>
 
         <View className="rounded-xl border border-slate-800 bg-panel p-4">
-          <Text className="mb-3 text-lg font-semibold text-ink">Gateway</Text>
-          <Text className="rounded-xl bg-surface px-3 py-3 font-mono text-sm text-ink">
-            {gatewayUrl}
+          <Text className="mb-1 text-lg font-semibold text-ink">Gateway</Text>
+          <Text className="mb-3 text-xs text-muted">
+            URL of the machine running `zintus serve`. On a phone or emulator,
+            `localhost` means the device itself — use your computer&apos;s LAN IP
+            (e.g. http://192.168.1.x:8788). Leave blank to auto-detect.
+          </Text>
+          <TextInput
+            value={gatewayInput}
+            onChangeText={(text) => {
+              setGatewayInput(text);
+              setSavedNote(false);
+            }}
+            placeholder={getDefaultGatewayUrl()}
+            placeholderTextColor={COLORS.muted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            className="rounded-xl bg-surface px-3 py-3 font-mono text-sm text-ink"
+          />
+          <View className="mt-3 flex-row gap-2">
+            <Pressable
+              className="flex-1 rounded-xl border border-accent bg-accent/20 px-3 py-3"
+              onPress={() => saveGateway(gatewayInput)}
+            >
+              <Text className="text-center font-semibold text-accent-bright">
+                Save
+              </Text>
+            </Pressable>
+            <Pressable
+              className="rounded-xl border border-slate-800 bg-surface px-3 py-3"
+              onPress={() => saveGateway("")}
+            >
+              <Text className="text-center font-semibold text-ink">
+                Use default
+              </Text>
+            </Pressable>
+          </View>
+          <Text className="mt-3 text-xs text-muted">
+            {savedNote ? "Saved. " : ""}Using: {effectiveUrl}
           </Text>
         </View>
       </ScrollView>

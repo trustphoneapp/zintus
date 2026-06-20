@@ -16,13 +16,24 @@ bun install
 bun run start
 ```
 
-Set `EXPO_PUBLIC_VALIDATE_URL` to your web app validate proxy (defaults to `http://localhost:3000/api/validate`):
+### Gateway URL
+
+Start the gateway on your computer with `zintus serve`. The app finds it
+automatically: it derives the host from the Metro bundler URL (your machine's
+LAN IP on a physical device, `10.0.2.2` on the Android emulator) and uses the
+gateway port `8788`. No IP to hand-edit for the common dev case.
+
+To override, set it in-app under **Settings → Gateway**, or pin a fixed URL with
+`EXPO_PUBLIC_GATEWAY_URL` (e.g. a production gateway). Resolution order:
+in-app setting → `EXPO_PUBLIC_GATEWAY_URL` → auto-detected dev host → `localhost`.
+
+Key validation uses `EXPO_PUBLIC_VALIDATE_URL` (defaults to
+`http://localhost:3000/api/validate`) and falls back to a local provider check
+when unreachable, so it works on-device without configuration:
 
 ```bash
 EXPO_PUBLIC_VALIDATE_URL=https://your-app.vercel.app/api/validate bun run start
 ```
-
-On a physical device, replace `localhost` with your machine's LAN IP for Metro and the validate URL.
 
 ## Features
 
