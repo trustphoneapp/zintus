@@ -63,7 +63,7 @@ code path is wired.
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **CLI** — chat/status/keys/config, Ink dashboard, OS keychain | ✅ | Most complete client. Honest `fastest` hint; `status`/`chat` show estimated $ saved. Cross-OS DB paths; requires Bun. |
+| **CLI** — chat/status/keys/config, Ink dashboard, OS keychain | ✅ | Most complete client. Honest `fastest` hint; `status`/`chat` show estimated $ saved. **Working git diff included by default** (`--no-diff` to opt out); `--workspace` for codebase context. **Guided `setup` wizard** (free-key URLs, inline validation w/ retry); zero-config nudge to `setup` when no keys. Cross-OS DB paths; requires Bun. |
 | **Web** (Next.js 16) — chat via gateway, AES-256-GCM key vault | ✅ | Strategy + default-provider now reach the gateway; Providers/Usage show real quota+cooldown + $ saved; loading/disabled/focus states. Neutral pro UI. |
 | **Desktop** (Tauri 2) — chat via gateway, OS keyring commands | ✅ | Honest `fastest` copy; savings on Usage; multi-turn chat with message bubbles + streaming; strategy wired. Neutral pro UI. |
 | **Mobile** (Expo SDK 56) — chat via gateway, SecureStore keys | ✅ | Gateway-`/health` quota+savings (local `expo-sqlite` fallback); strategy selector; "Auto" routing; chat polish. Neutral pro UI. Copy uses native Share (true clipboard needs `expo-clipboard`). |

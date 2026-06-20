@@ -36,6 +36,25 @@ async function validateKeyRemote(
   }
 }
 
+/**
+ * Validate and store a key, returning a result instead of exiting. Shared by the
+ * `keys set` command (which exits on failure) and the setup wizard (which retries
+ * inline) so a bad key never tears down an interactive flow.
+ */
+export async function validateAndStoreKey(
+  provider: ProviderId,
+  key: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (provider !== "ollama" && provider !== "lmstudio") {
+    const result = await validateKeyRemote(provider, key);
+    if (!result.valid) {
+      return { ok: false, error: result.error ?? "Key validation failed" };
+    }
+  }
+  await setKey(provider, key);
+  return { ok: true };
+}
+
 export async function runKeysSet(
   provider: string,
   key: string,
@@ -48,15 +67,12 @@ export async function runKeysSet(
     process.exit(1);
   }
 
-  if (provider !== "ollama" && provider !== "lmstudio") {
-    const result = await validateKeyRemote(provider, key);
-    if (!result.valid) {
-      console.error(chalk.red(result.error ?? "Key validation failed"));
-      process.exit(1);
-    }
+  const result = await validateAndStoreKey(provider, key);
+  if (!result.ok) {
+    console.error(chalk.red(result.error ?? "Key validation failed"));
+    process.exit(1);
   }
 
-  await setKey(provider, key);
   console.log(chalk.green(`✓ Stored key for ${provider}`));
 }
 

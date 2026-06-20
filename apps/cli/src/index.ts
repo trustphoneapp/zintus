@@ -45,7 +45,7 @@ program
     "--code, --workspace [dir]",
     "Index a workspace for codebase-aware context (default: current dir)",
   )
-  .option("--diff", "Include the current git diff as context")
+  .option("--no-diff", "Don't auto-include the working git diff as context")
   .action(async (prompt: string, options: ChatCliOptions) => {
     await runChat(prompt, toChatOptions(options));
   });
@@ -57,7 +57,7 @@ program
     "--code, --workspace [dir]",
     "Index a workspace for codebase-aware context (default: current dir)",
   )
-  .option("--diff", "Include the current git diff as context")
+  .option("--no-diff", "Don't auto-include the working git diff as context")
   .action(async (prompt: string | undefined, options: ChatCliOptions) => {
     if (!prompt) {
       program.help();
