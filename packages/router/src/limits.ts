@@ -78,6 +78,38 @@ export const PAID_EQUIVALENT_USD_PER_MTOK: Record<ProviderId, number> = {
   ollama: 0,
 };
 
+/**
+ * Per-model paid-equivalent overrides (USD per 1M tokens), for providers that
+ * serve more than one model class behind a single id. A provider-level anchor in
+ * {@link PAID_EQUIVALENT_USD_PER_MTOK} overstates the cheap models — e.g. Groq's
+ * 8B tier is far cheaper than its 70B tier, and several OpenRouter `:free` models
+ * are smaller than the 70B the provider anchor assumes. These keep both the
+ * `economy` ranking and the savings estimate honest. Same conservative public
+ * list-price spirit as the provider anchors; an estimate, not a promise.
+ */
+export const MODEL_PAID_EQUIVALENT_USD_PER_MTOK: Record<string, number> = {
+  [GROQ_MODEL_8B]: 0.08,
+  [GROQ_MODEL_70B]: 0.6,
+  "meta-llama/llama-3.3-70b-instruct:free": 0.6,
+  "google/gemma-2-9b-it:free": 0.2,
+  "mistralai/mistral-7b-instruct:free": 0.2,
+};
+
+/**
+ * Paid-equivalent price for a specific (provider, model) pair: a per-model anchor
+ * when one exists, otherwise the provider-level anchor. Used by `economy` routing
+ * and the savings estimate.
+ */
+export function paidEquivalentUsdPerMTok(
+  providerId: ProviderId,
+  model?: string,
+): number {
+  if (model && model in MODEL_PAID_EQUIVALENT_USD_PER_MTOK) {
+    return MODEL_PAID_EQUIVALENT_USD_PER_MTOK[model]!;
+  }
+  return PAID_EQUIVALENT_USD_PER_MTOK[providerId] ?? 0;
+}
+
 /** Merge policy.json limit overrides on top of the built-in defaults. */
 export function resolveLimits(
   overrides?: Partial<Record<ProviderId, PolicyLimits>>,

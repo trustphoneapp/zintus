@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/bun-sqlite";
 import type { PolicyLimits, ProviderId } from "@zintus/types";
 import { parseGroqResetHeader } from "./groq-reset.js";
 import {
-  PAID_EQUIVALENT_USD_PER_MTOK,
+  paidEquivalentUsdPerMTok,
   resolveLimits,
   type ProviderLimits,
 } from "./limits.js";
@@ -62,6 +62,7 @@ export class QuotaLedger {
       CREATE TABLE IF NOT EXISTS usage_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         provider_id TEXT NOT NULL,
+        model TEXT,
         timestamp INTEGER NOT NULL,
         requests INTEGER NOT NULL DEFAULT 1,
         tokens_in INTEGER NOT NULL DEFAULT 0,
@@ -100,6 +101,7 @@ export class QuotaLedger {
     // Migrate pre-existing databases that lack newer columns.
     for (const ddl of [
       `ALTER TABLE usage_log ADD COLUMN latency_ms INTEGER`,
+      `ALTER TABLE usage_log ADD COLUMN model TEXT`,
       `ALTER TABLE virtual_keys ADD COLUMN requests_per_minute INTEGER`,
       `ALTER TABLE virtual_keys ADD COLUMN tokens_per_minute INTEGER`,
     ]) {
@@ -255,20 +257,27 @@ export class QuotaLedger {
    * PAID_EQUIVALENT_USD_PER_MTOK), labelled as such in the UI.
    */
   savingsUsd(): { byProvider: Record<string, number>; total: number } {
+    // Group by (provider, model) so each model is valued at its own paid
+    // equivalent — Groq 8B is far cheaper than 70B, several OpenRouter :free
+    // models are smaller than the provider anchor assumes. Rows logged before
+    // the model column existed have NULL model and fall back to the provider
+    // anchor via paidEquivalentUsdPerMTok.
     const rows = this.sqlite
       .query(
-        `SELECT provider_id, COALESCE(SUM(tokens_in + tokens_out), 0) AS tokens
+        `SELECT provider_id, model, COALESCE(SUM(tokens_in + tokens_out), 0) AS tokens
          FROM usage_log WHERE status = 'success'
-         GROUP BY provider_id`,
+         GROUP BY provider_id, model`,
       )
-      .all() as Array<{ provider_id: string; tokens: number }>;
+      .all() as Array<{ provider_id: string; model: string | null; tokens: number }>;
     const byProvider: Record<string, number> = {};
     let total = 0;
     for (const row of rows) {
-      const price =
-        PAID_EQUIVALENT_USD_PER_MTOK[row.provider_id as ProviderId] ?? 0;
+      const price = paidEquivalentUsdPerMTok(
+        row.provider_id as ProviderId,
+        row.model ?? undefined,
+      );
       const usd = (row.tokens / 1_000_000) * price;
-      byProvider[row.provider_id] = usd;
+      byProvider[row.provider_id] = (byProvider[row.provider_id] ?? 0) + usd;
       total += usd;
     }
     return { byProvider, total };
@@ -340,6 +349,8 @@ export class QuotaLedger {
       status: string;
       errorCode?: number;
       latencyMs?: number;
+      /** Model served, so savings can be valued per-model (not just provider). */
+      model?: string;
     },
     now = Date.now(),
   ): void {
@@ -370,6 +381,7 @@ export class QuotaLedger {
       .insert(usageLog)
       .values({
         providerId: id,
+        model: input.model ?? null,
         timestamp: now,
         requests: 1,
         tokensIn: billable ? tokensIn : 0,

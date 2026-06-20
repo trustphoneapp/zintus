@@ -30,6 +30,30 @@ describe("QuotaLedger", () => {
     expect(ledger.isQuotaAvailable("gemini", now)).toBe(false);
   });
 
+  it("values savings per-model, not just per-provider", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
+    dbPath = join(dir, "quota.db");
+    ledger = new QuotaLedger(dbPath);
+
+    const now = Date.UTC(2026, 5, 15, 12, 0, 0);
+    // 1M tokens on Groq's cheap 8B tier ($0.08/Mtok) and 1M on its 70B tier
+    // ($0.60/Mtok). A per-provider anchor would value both at 0.60.
+    ledger.recordUsage(
+      "groq",
+      { status: "success", tokensIn: 1_000_000, model: "llama-3.1-8b-instant" },
+      now,
+    );
+    ledger.recordUsage(
+      "groq",
+      { status: "success", tokensIn: 1_000_000, model: "llama-3.3-70b-versatile" },
+      now,
+    );
+
+    const savings = ledger.savingsUsd();
+    expect(savings.byProvider.groq).toBeCloseTo(0.08 + 0.6, 5);
+    expect(savings.total).toBeCloseTo(0.68, 5);
+  });
+
   it("applies Groq rolling-window reset from headers", () => {
     const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
     dbPath = join(dir, "quota.db");

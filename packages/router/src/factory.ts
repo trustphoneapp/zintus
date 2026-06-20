@@ -22,7 +22,7 @@ import { QuotaLedger } from "./quota-ledger.js";
 import {
   GROQ_MODEL_70B,
   GROQ_MODEL_8B,
-  PAID_EQUIVALENT_USD_PER_MTOK,
+  paidEquivalentUsdPerMTok,
 } from "./limits.js";
 
 export interface RouteAttemptEvent {
@@ -254,11 +254,18 @@ export function createRouter(config: RouterConfig = {}): Router {
       return scored.sort((a, b) => b.score - a.score).map((s) => s.provider);
     }
 
+    // economy ranks by the cost of the model each provider would actually serve
+    // (the requested model, else the provider's default — which for Groq is the
+    // 70B tier it tries first), so per-model anchors like Groq 8B vs 70B count.
+    const defaultModelById = new Map(
+      allProviders.map((p) => [p.id, p.defaultModel]),
+    );
     const ordered = sortProviders(allProviders, effStrategy, {
       remainingRatio,
       providerPriority,
       latencyP95,
-      costPerMillion: (id) => PAID_EQUIVALENT_USD_PER_MTOK[id] ?? 0,
+      costPerMillion: (id) =>
+        paidEquivalentUsdPerMTok(id, request.model ?? defaultModelById.get(id)),
     });
 
     if (config.defaultProvider) {
@@ -434,6 +441,7 @@ export function createRouter(config: RouterConfig = {}): Router {
                   tokensIn: usage.inputTokens,
                   tokensOut: usage.outputTokens,
                   latencyMs: Date.now() - attemptStarted,
+                  model,
                 });
                 if (vKey) {
                   ledger.recordVirtualKeyUsage(vKey, usage.inputTokens, usage.outputTokens);
@@ -450,6 +458,7 @@ export function createRouter(config: RouterConfig = {}): Router {
                     streamError instanceof ProviderHttpError
                       ? streamError.status
                       : undefined,
+                  model,
                 });
                 if (vKey) {
                   ledger.recordVirtualKeyUsage(vKey, usage.inputTokens, usage.outputTokens);
@@ -493,6 +502,7 @@ export function createRouter(config: RouterConfig = {}): Router {
             ledger.recordUsage(provider.id, {
               status: status === 429 ? "rate_limited" : "error",
               errorCode: status,
+              model,
             });
 
             if (

@@ -11,6 +11,7 @@ export const providers = sqliteTable("providers", {
 export const usageLog = sqliteTable("usage_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   providerId: text("provider_id").notNull(),
+  model: text("model"),
   timestamp: integer("timestamp").notNull(),
   requests: integer("requests").notNull().default(1),
   tokensIn: integer("tokens_in").notNull().default(0),

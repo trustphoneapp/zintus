@@ -28,7 +28,7 @@ code path is wired.
 | Sticky provider affinity per thread (30-min TTL) | ✅ |
 | Quota ledger: **daily + rolling-minute (TPM/RPM)** windows | ✅ |
 | **Zero-cost failed requests** (errors don't debit token budget) | ✅ |
-| **Provable savings**: $ avoided vs paid-API pricing (estimate) | ✅ |
+| **Provable savings**: $ avoided vs paid-API pricing, valued **per-model** (Groq 8B vs 70B, OpenRouter `:free` tiers), estimate | ✅ |
 | Real provider `usage` accounting; tagged estimate fallback | ✅ |
 | Virtual keys: per-key daily **+ rolling 60s RPM/TPM** limits | ✅ |
 | Two-tier cache: L1 SHA-256 exact + L2 `sqlite-vec` (env-gated, TTL, bypass) | ✅ |
