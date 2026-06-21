@@ -18,3 +18,4 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.10", features = [] }
 tauri-plugin-pty = "0.3"
+tauri-plugin-updater = "2"

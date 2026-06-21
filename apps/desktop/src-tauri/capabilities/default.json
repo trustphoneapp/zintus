@@ -3,5 +3,5 @@
   "identifier": "com.zintus.desktop",
   "description": "Zintus desktop capabilities",
   "windows": ["main"],
-  "permissions": ["core:default", "pty:default"]
+  "permissions": ["core:default", "pty:default", "updater:default"]
 }
