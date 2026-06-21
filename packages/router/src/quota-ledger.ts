@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 /// <reference types="bun-types" />
 import { Database } from "bun:sqlite";
@@ -39,6 +39,10 @@ export class QuotaLedger {
   ) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.sqlite = new Database(dbPath);
+    // Owner-only permissions (rw-------) — quota.db never contains API keys
+    // but it does contain quota metadata that warrants protection.
+    try { chmodSync(dbPath, 0o600); } catch { /* pre-existing DB, best-effort */ }
+    this.sqlite.exec("PRAGMA journal_mode=WAL");
     this.db = drizzle(this.sqlite);
     this.limits = resolveLimits(limitOverrides);
     this.initSchema();

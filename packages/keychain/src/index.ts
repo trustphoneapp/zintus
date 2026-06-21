@@ -7,6 +7,7 @@ import {
   deleteKey,
   getKey,
   listKeys as listStoredKeys,
+  probeKeychain,
   setKey,
 } from "./storage.js";
 
@@ -17,7 +18,7 @@ export function isValidProvider(value: string): value is ProviderId {
   return isProviderId(value);
 }
 
-export { deleteKey, getKey, setKey };
+export { deleteKey, getKey, setKey, probeKeychain };
 
 export async function removeKey(provider: ProviderId): Promise<boolean> {
   const existing = await getKey(provider);

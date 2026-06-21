@@ -108,3 +108,22 @@ export async function listKeys(): Promise<ProviderId[]> {
 
   return Array.from(new Set([...manifest, ...discovered.filter(Boolean)])) as ProviderId[];
 }
+
+/** Set/get/delete a sentinel key to confirm the OS keychain is accessible. */
+export function probeKeychain(): { ok: boolean; error?: string } {
+  const PROBE_ACCOUNT = "__doctor_probe__";
+  const PROBE_VALUE = "zintus-probe";
+  try {
+    const entry = new Entry(SERVICE, PROBE_ACCOUNT);
+    entry.setPassword(PROBE_VALUE);
+    const got = entry.getPassword();
+    entry.deletePassword();
+    if (got !== PROBE_VALUE) {
+      return { ok: false, error: "Keychain read-back mismatch" };
+    }
+    return { ok: true };
+  } catch (err) {
+    const cause = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: cause };
+  }
+}

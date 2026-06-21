@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { PROVIDER_IDS, type ContextMode } from "@zintus/types";
+import { redactSecrets } from "@zintus/router";
 import { runChat, type ChatOptions } from "./commands/chat.js";
 import { runKeysSet, runKeysList, runKeysRemove } from "./commands/keys.js";
 import { runConfig } from "./commands/config.js";
@@ -164,6 +165,14 @@ cloud
   });
 
 program
+  .command("doctor")
+  .description("Check system health: keychain, quota DB, provider keys, Ollama, relay")
+  .action(async () => {
+    const { runDoctor } = await import("./commands/doctor.js");
+    await runDoctor();
+  });
+
+program
   .command("history")
   .description("List saved conversation threads")
   .action(async () => {
@@ -179,6 +188,7 @@ program
   });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
-  console.error(chalk.red("Error:"), err instanceof Error ? err.message : err);
+  const raw = err instanceof Error ? err.message : String(err);
+  console.error(chalk.red("Error:"), redactSecrets(raw));
   process.exit(1);
 });

@@ -1,0 +1,49 @@
+{
+  "name": "tokzen",
+  "version": "0.1.0",
+  "description": "Token-efficient LLM context compression. TypeScript-native.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
+    },
+    "./ml": {
+      "types": "./src/ml/llmlingua.ts",
+      "default": "./src/ml/llmlingua.ts",
+      "import": "./dist/ml/llmlingua.mjs",
+      "require": "./dist/ml/llmlingua.cjs"
+    }
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "files": ["dist", "grammars"],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsup",
+    "test": "bun test tests/",
+    "postinstall": "bun run scripts/postinstall.ts 2>/dev/null || true"
+  },
+  "dependencies": {
+    "gpt-tokenizer": "3.4.0",
+    "@anthropic-ai/sdk": "0.105.0"
+  },
+  "peerDependencies": {
+    "web-tree-sitter": "^0.25.10"
+  },
+  "peerDependenciesMeta": {
+    "web-tree-sitter": { "optional": true },
+    "@toon-format/toon": { "optional": true },
+    "drain3-js": { "optional": true },
+    "@atjsh/llmlingua-2": { "optional": true },
+    "@huggingface/transformers": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "tsup": "8.5.1",
+    "web-tree-sitter": "0.25.10"
+  }
+}
