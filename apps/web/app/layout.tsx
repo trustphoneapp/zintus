@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter, JetBrains_Mono, Lora, Plus_Jakarta_Sans } from "next/font/google";
+import { Inter, JetBrains_Mono, Lora, Plus_Jakarta_Sans, Syne } from "next/font/google";
 import "@zintus/ui/globals.css";
 import "./globals.css";
 import { ThemeProvider } from "@/components/marketing/ThemeProvider";
@@ -28,6 +28,13 @@ const jetbrainsMono = JetBrains_Mono({
   display: "swap",
 });
 
+const syne = Syne({
+  subsets: ["latin"],
+  variable: "--font-syne",
+  display: "swap",
+  weight: ["400", "600", "700", "800"],
+});
+
 export const metadata: Metadata = {
   title: "Zintus — Use the best free AIs from one place",
   description:
@@ -43,7 +50,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${inter.variable} ${plusJakartaSans.variable} ${jetbrainsMono.variable} ${lora.variable}`}
+      className={`${inter.variable} ${plusJakartaSans.variable} ${jetbrainsMono.variable} ${lora.variable} ${syne.variable}`}
     >
       <body className={plusJakartaSans.className}>
         <ThemeProvider>{children}</ThemeProvider>

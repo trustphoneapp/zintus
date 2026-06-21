@@ -73,7 +73,10 @@ export class GatewaySession {
       return this.handleStream(request);
     }
     if (method === "POST" && path === "/offline") {
-      return this.markOffline(url.searchParams.get("session_id") ?? "");
+      await this.markOffline(url.searchParams.get("session_id") ?? "");
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     return new Response("Not found", { status: 404 });

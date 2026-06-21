@@ -28,6 +28,7 @@
  */
 
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { cors } from "hono/cors";
 import type { Env, GatewaySessionRow, UserRow } from "./types.js";
 import {
@@ -46,7 +47,15 @@ export { GatewaySession } from "./GatewaySession.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
-// ── CORS ──────────────────────────────────────────────────────────────────
+// ── Security headers + CORS ────────────────────────────────────────────────
+
+app.use("*", async (c, next) => {
+  await next();
+  c.res.headers.set("X-Content-Type-Options", "nosniff");
+  c.res.headers.set("X-Frame-Options", "DENY");
+  c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  c.res.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+});
 
 app.use(
   "*",
@@ -68,7 +77,7 @@ function isSecure(request: Request): boolean {
 }
 
 async function requireSession(
-  c: Parameters<Parameters<typeof app.use>[0]>[0],
+  c: Context<{ Bindings: Env }>,
 ): Promise<SessionPayload | null> {
   const cookie = parseSessionCookie(c.req.header("Cookie") ?? null);
   if (!cookie) return null;
@@ -302,7 +311,7 @@ app.post("/api/auth/cli-login", async (c) => {
 
 // Called by the web dashboard's /dashboard/cli-callback page after auth.
 app.post("/api/auth/cli-complete", async (c) => {
-  const session = await requireSession(c as Parameters<typeof requireSession>[0]);
+  const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return c.json({ error: "Unauthorized" }, 401);
 
   const { state, session_id, gateway_secret } = (await c.req.json<{
@@ -384,7 +393,7 @@ app.post("/api/auth/signout", async (c) => {
 // ── AUTH — who am I ───────────────────────────────────────────────────────
 
 app.get("/api/auth/me", async (c) => {
-  const session = await requireSession(c as Parameters<typeof requireSession>[0]);
+  const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return c.json({ authenticated: false }, 401);
   return c.json({ authenticated: true, email: session.email, user_id: session.user_id });
 });
@@ -392,7 +401,7 @@ app.get("/api/auth/me", async (c) => {
 // ── SESSIONS — list / create / delete ────────────────────────────────────
 
 app.get("/api/sessions", async (c) => {
-  const session = await requireSession(c as Parameters<typeof requireSession>[0]);
+  const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return c.json({ error: "Unauthorized" }, 401);
 
   const rows = await c.env.DB.prepare(
@@ -405,7 +414,7 @@ app.get("/api/sessions", async (c) => {
 });
 
 app.post("/api/sessions", async (c) => {
-  const session = await requireSession(c as Parameters<typeof requireSession>[0]);
+  const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return c.json({ error: "Unauthorized" }, 401);
 
   const { name } = (await c.req.json<{ name?: string }>()) ?? {};
@@ -424,7 +433,7 @@ app.post("/api/sessions", async (c) => {
 });
 
 app.delete("/api/sessions/:id", async (c) => {
-  const session = await requireSession(c as Parameters<typeof requireSession>[0]);
+  const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return c.json({ error: "Unauthorized" }, 401);
 
   const sessionId = c.req.param("id");
@@ -480,11 +489,11 @@ app.get("/relay/:sessionId", async (c) => {
 // ── RELAY — mobile HTTP (status / control / stream) ───────────────────────
 
 async function relayToSession(
-  c: Parameters<Parameters<typeof app.use>[0]>[0],
+  c: Context<{ Bindings: Env }>,
   sessionId: string,
   path: string,
 ): Promise<Response> {
-  const session = await requireSession(c as Parameters<typeof requireSession>[0]);
+  const session = await requireSession(c);
   if (!session) return c.json({ error: "Unauthorized" }, 401);
 
   // Rate limit: 30 req/min per user for control.
@@ -517,20 +526,20 @@ async function relayToSession(
 }
 
 app.get("/api/sessions/:id/status", async (c) =>
-  relayToSession(c as Parameters<typeof relayToSession>[0], c.req.param("id"), "/status"),
+  relayToSession(c as Context<{ Bindings: Env }>, c.req.param("id"), "/status"),
 );
 app.post("/api/sessions/:id/control", async (c) =>
-  relayToSession(c as Parameters<typeof relayToSession>[0], c.req.param("id"), "/control"),
+  relayToSession(c as Context<{ Bindings: Env }>, c.req.param("id"), "/control"),
 );
 app.get("/api/sessions/:id/stream", async (c) =>
-  relayToSession(c as Parameters<typeof relayToSession>[0], c.req.param("id"), "/stream"),
+  relayToSession(c as Context<{ Bindings: Env }>, c.req.param("id"), "/stream"),
 );
 
 // ── Mobile one-time token endpoint ─────────────────────────────────────────
 // After OAuth/magic link on mobile web-browser, issue a short-lived OTP and
 // redirect to the deep link so the native app can exchange it.
 app.get("/api/auth/mobile-redirect", async (c) => {
-  const session = await requireSession(c as Parameters<typeof requireSession>[0]);
+  const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return Response.redirect(`${c.env.RELAY_BASE_URL}/login?mobile=true`);
 
   const otp = crypto.randomUUID() + "-" + crypto.randomUUID();

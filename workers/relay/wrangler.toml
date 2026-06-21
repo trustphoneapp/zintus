@@ -20,12 +20,35 @@ database_id = "1320e7ad-6ab9-4a28-a5b2-255ffc13d58d"
 binding = "KV"
 id = "e37d30031cb2409daa2fd5d44003ec0c"
 
-# Secrets — set via: wrangler secret put <NAME>
-# RELAY_AUTH_SECRET   — random hex, signs session tokens
-# GOOGLE_CLIENT_ID
+# ── Deploy sequence (Step 8) ──────────────────────────────────────────────
+# 1. Create D1 (if not yet created):
+#      bunx wrangler d1 create zintus-relay
+#    Update database_id above with the returned ID.
+#
+# 2. Apply schema:
+#      bunx wrangler d1 execute zintus-relay --file=schema.sql --remote
+#
+# 3. Create KV namespace (if not yet created):
+#      bunx wrangler kv namespace create ZINTUS_KV
+#    Update id above with the returned ID.
+#
+# 4. Set secrets:
+#      bunx wrangler secret put RELAY_AUTH_SECRET   # openssl rand -hex 32
+#      bunx wrangler secret put GOOGLE_CLIENT_ID
+#      bunx wrangler secret put GOOGLE_CLIENT_SECRET
+#      bunx wrangler secret put RESEND_API_KEY
+#
+# 5. Deploy:
+#      bunx wrangler deploy
+#
+# 6. Verify security headers (Step 9):
+#      curl -I https://zintus-relay.yashwanth-surabhi.workers.dev/health
+#
+# Secrets — set via: bunx wrangler secret put <NAME>
+# RELAY_AUTH_SECRET   — openssl rand -hex 32
+# GOOGLE_CLIENT_ID    — from console.cloud.google.com
 # GOOGLE_CLIENT_SECRET
-# RESEND_API_KEY
-# RELAY_BASE_URL      — e.g. https://zintus-relay.yashwanth-surabhi.workers.dev
+# RESEND_API_KEY      — from resend.com
 
 [vars]
 RELAY_BASE_URL = "https://zintus-relay.yashwanth-surabhi.workers.dev"
