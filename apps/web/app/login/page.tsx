@@ -15,7 +15,9 @@ export default function LoginPage() {
   const isCli = searchParams.get("cli") === "true";
   const isMobile = searchParams.get("mobile") === "true";
   const cliState = searchParams.get("state") ?? undefined;
-  const redirectTo = isMobile ? "/api/auth/mobile-redirect" : "/dashboard";
+  const redirectTo = isMobile
+    ? "https://www.zintus.ai/api/auth/mobile-redirect"
+    : "https://www.zintus.ai/dashboard";
 
   async function handleMagicLink(event: React.FormEvent) {
     event.preventDefault();

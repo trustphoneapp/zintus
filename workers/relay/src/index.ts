@@ -163,7 +163,7 @@ app.post("/api/auth/magic-link", async (c) => {
   // Store a short-lived token in KV (15 min).
   const token = crypto.randomUUID() + "-" + crypto.randomUUID();
   const hash = await sha256Hex(token);
-  const redirectTo = c.req.query("redirect_to") ?? "/dashboard";
+  const redirectTo = c.req.query("redirect_to") ?? "https://www.zintus.ai/dashboard";
   await c.env.KV.put(
     `ml:${hash}`,
     JSON.stringify({ email, redirect_to: redirectTo }),
@@ -229,7 +229,7 @@ app.get("/api/auth/verify", async (c) => {
 
 app.get("/api/auth/google", async (c) => {
   const state = crypto.randomUUID();
-  const redirectTo = c.req.query("redirect_to") ?? "/dashboard";
+  const redirectTo = c.req.query("redirect_to") ?? "https://www.zintus.ai/dashboard";
   await c.env.KV.put(
     `oauth:${state}`,
     JSON.stringify({ redirect_to: redirectTo }),
@@ -540,7 +540,7 @@ app.get("/api/sessions/:id/stream", async (c) =>
 // redirect to the deep link so the native app can exchange it.
 app.get("/api/auth/mobile-redirect", async (c) => {
   const session = await requireSession(c as Context<{ Bindings: Env }>);
-  if (!session) return Response.redirect(`${c.env.RELAY_BASE_URL}/login?mobile=true`);
+  if (!session) return Response.redirect("https://www.zintus.ai/login?mobile=true");
 
   const otp = crypto.randomUUID() + "-" + crypto.randomUUID();
   const hash = await sha256Hex(otp);

@@ -13,10 +13,29 @@ export interface MetricsSnapshot {
   latencyMs: { count: number; sum: number; max: number; avg: number };
 }
 
+export interface TokzenMetricsSnapshot {
+  tokensSavedTotal: number;
+  avgCompressionRatio: number;
+  cacheHitRate: number;
+  compressionsByProvider: Record<string, number>;
+}
+
+export interface MetricsSnapshot {
+  uptimeSeconds: number;
+  requestsTotal: number;
+  requestsByOutcome: { ok: number; clientError: number; serverError: number };
+  chatCompletionsTotal: number;
+  chatByProvider: Record<string, number>;
+  errorsTotal: number;
+  latencyMs: { count: number; sum: number; max: number; avg: number };
+  tokzen: TokzenMetricsSnapshot;
+}
+
 export interface Metrics {
   recordRequest(status: number, latencyMs: number): void;
   recordChat(providerId: string): void;
   recordError(): void;
+  recordTokzenSavings(originalTokens: number, compressedTokens: number, ratio: number, provider?: string): void;
   snapshot(): MetricsSnapshot;
   toPrometheus(): string;
 }
@@ -34,6 +53,14 @@ export function createMetrics(now: () => number = Date.now): Metrics {
   let latencySum = 0;
   let latencyMax = 0;
 
+  // Tokzen metrics
+  let tokzenTokensSaved = 0;
+  let tokzenRatioSum = 0;
+  let tokzenRatioCount = 0;
+  let tokzenCacheHits = 0;
+  let tokzenRequests = 0;
+  const tokzenByProvider: Record<string, number> = {};
+
   function snapshot(): MetricsSnapshot {
     return {
       uptimeSeconds: Math.floor((now() - startedAt) / 1000),
@@ -47,6 +74,12 @@ export function createMetrics(now: () => number = Date.now): Metrics {
         sum: latencySum,
         max: latencyMax,
         avg: latencyCount === 0 ? 0 : Math.round(latencySum / latencyCount),
+      },
+      tokzen: {
+        tokensSavedTotal: tokzenTokensSaved,
+        avgCompressionRatio: tokzenRatioCount === 0 ? 1 : tokzenRatioSum / tokzenRatioCount,
+        cacheHitRate: tokzenRequests === 0 ? 0 : tokzenCacheHits / tokzenRequests,
+        compressionsByProvider: { ...tokzenByProvider },
       },
     };
   }
@@ -74,6 +107,18 @@ export function createMetrics(now: () => number = Date.now): Metrics {
     recordError() {
       errorsTotal += 1;
     },
+    recordTokzenSavings(originalTokens, compressedTokens, ratio, provider) {
+      tokzenRequests += 1;
+      tokzenTokensSaved += Math.max(0, originalTokens - compressedTokens);
+      tokzenRatioSum += ratio;
+      tokzenRatioCount += 1;
+      if (ratio < 1) {
+        tokzenCacheHits += 1;
+      }
+      if (provider) {
+        tokzenByProvider[provider] = (tokzenByProvider[provider] ?? 0) + 1;
+      }
+    },
     snapshot,
     toPrometheus() {
       const s = snapshot();
@@ -100,6 +145,15 @@ export function createMetrics(now: () => number = Date.now): Metrics {
         "# HELP zintus_gateway_request_latency_ms_avg Avg request latency (ms).",
         "# TYPE zintus_gateway_request_latency_ms_avg gauge",
         `zintus_gateway_request_latency_ms_avg ${s.latencyMs.avg}`,
+        "# HELP tokzen_tokens_saved_total Total input tokens saved by Tokzen compression.",
+        "# TYPE tokzen_tokens_saved_total counter",
+        `tokzen_tokens_saved_total ${s.tokzen.tokensSavedTotal}`,
+        "# HELP tokzen_compression_ratio Average compression ratio (lower = more compressed).",
+        "# TYPE tokzen_compression_ratio gauge",
+        `tokzen_compression_ratio ${s.tokzen.avgCompressionRatio.toFixed(4)}`,
+        "# HELP tokzen_cache_hit_rate Fraction of requests where compression reduced tokens.",
+        "# TYPE tokzen_cache_hit_rate gauge",
+        `tokzen_cache_hit_rate ${s.tokzen.cacheHitRate.toFixed(4)}`,
       ];
       return lines.join("\n") + "\n";
     },

@@ -20,7 +20,8 @@
     "@zintus/engine": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/router": "workspace:*",
-    "@zintus/types": "workspace:*"
+    "@zintus/types": "workspace:*",
+    "tokzen": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest"

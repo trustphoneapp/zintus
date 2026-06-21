@@ -8,6 +8,7 @@ import {
   type GatewayConfig,
 } from "./auth.js";
 import { createMetrics, type Metrics } from "./metrics.js";
+import { compress } from "tokzen";
 
 export type LogFn = (
   level: "info" | "warn" | "error",
@@ -60,6 +61,8 @@ export interface GatewayHandlerDeps {
   onError?: ErrorHook;
   /** Inject a metrics collector (defaults to a fresh in-process one). */
   metrics?: Metrics;
+  /** Optional quota-remaining getter for Tokzen dial (0.0–1.0). */
+  getQuotaRemaining?: (provider: ProviderId) => number;
 }
 
 /**
@@ -74,6 +77,7 @@ export function createGatewayHandler(
   const log = deps.log ?? noopLog;
   const onError = deps.onError;
   const metrics = deps.metrics ?? createMetrics();
+  const getQuotaRemaining = deps.getQuotaRemaining;
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxMessages = config.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -163,11 +167,39 @@ export function createGatewayHandler(
       );
     }
 
+    // Tokzen: compress system + assistant messages before routing
+    const selectedProvider = body.provider;
+    const quotaRemaining = selectedProvider ? (getQuotaRemaining?.(selectedProvider) ?? 1.0) : 1.0;
+    const tokzenProvider =
+      selectedProvider === "groq" ? "groq" as const
+      : selectedProvider === "gemini" ? "gemini" as const
+      : "openai" as const;
+    const tokzenResult = await compress(
+      { messages: messages.map((m) => ({ ...m, role: m.role as "system" | "user" | "assistant" | "tool" })) },
+      {
+        provider: tokzenProvider,
+        model: body.model ?? "unknown",
+        quotaRemaining,
+        tokenBudget: 8000,
+        sessionId: body.thread_id,
+      },
+    );
+    const compressedMessages: ChatMessage[] = tokzenResult.messages
+      .filter((m): m is { role: "system" | "user" | "assistant"; content: string } =>
+        m.role === "system" || m.role === "user" || m.role === "assistant",
+      );
+    metrics.recordTokzenSavings(
+      tokzenResult.totalResult.originalTokens,
+      tokzenResult.totalResult.compressedTokens,
+      tokzenResult.totalResult.ratio,
+      selectedProvider,
+    );
+
     let result: Awaited<ReturnType<Engine["routeAndStream"]>>;
     try {
       result = await withTimeout(
         engine.routeAndStream({
-          messages,
+          messages: compressedMessages.length > 0 ? compressedMessages : messages,
           message:
             typeof body.message === "string"
               ? { role: "user", content: body.message }

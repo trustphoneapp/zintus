@@ -10,6 +10,7 @@
     { "path": "./packages/codebase-indexer" },
     { "path": "./packages/context-compiler" },
     { "path": "./packages/engine" },
+    { "path": "./packages/tokzen" },
     { "path": "./apps/cli" },
     { "path": "./apps/gateway" },
     { "path": "./workers/validate-key" }
