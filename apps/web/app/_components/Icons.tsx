@@ -13,7 +13,12 @@ type IconName =
   | "copy"
   | "refresh"
   | "stop"
-  | "chevron-down";
+  | "chevron-down"
+  | "more-horizontal"
+  | "pencil"
+  | "trash"
+  | "check"
+  | "x";
 
 const paths: Record<IconName, ReactNode> = {
   send: (
@@ -74,6 +79,32 @@ const paths: Record<IconName, ReactNode> = {
   ),
   stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
   "chevron-down": <polyline points="6 9 12 15 18 9" />,
+  "more-horizontal": (
+    <>
+      <circle cx="12" cy="12" r="1" />
+      <circle cx="19" cy="12" r="1" />
+      <circle cx="5" cy="12" r="1" />
+    </>
+  ),
+  pencil: (
+    <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+  ),
+  trash: (
+    <>
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </>
+  ),
+  check: <polyline points="20 6 9 17 4 12" />,
+  x: (
+    <>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </>
+  ),
 };
 
 export function Icon({

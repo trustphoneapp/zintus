@@ -20,9 +20,9 @@ export function CTA() {
                 Open the chat
                 <ArrowRight size={16} />
               </Link>
-              <a className="m-secondary-btn" href="https://github.com/zintus/zintus" target="_blank" rel="noopener noreferrer">
-                View on GitHub
-              </a>
+              <Link href="/docs" className="m-secondary-btn">
+                Read the docs
+              </Link>
             </div>
           </div>
         </Reveal>

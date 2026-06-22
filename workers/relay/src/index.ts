@@ -69,13 +69,6 @@ app.use(
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-function isSecure(request: Request): boolean {
-  return (
-    new URL(request.url).protocol === "https:" ||
-    request.headers.get("x-forwarded-proto") === "https"
-  );
-}
-
 async function requireSession(
   c: Context<{ Bindings: Env }>,
 ): Promise<SessionPayload | null> {
@@ -120,7 +113,7 @@ async function createUserSession(
   kv: KVNamespace,
   db: D1Database,
   user: UserRow,
-  secure: boolean,
+  cookieDomain: string,
 ): Promise<string> {
   const payload: SessionPayload = {
     session_id: crypto.randomUUID(),
@@ -139,7 +132,7 @@ async function createUserSession(
       Date.now() + 30 * 24 * 60 * 60 * 1000,
     )
     .run();
-  return buildSessionCookie(token, secure);
+  return buildSessionCookie(token, cookieDomain);
 }
 
 // ── Health ────────────────────────────────────────────────────────────────
@@ -213,8 +206,7 @@ app.get("/api/auth/verify", async (c) => {
   await c.env.KV.delete(`ml:${hash}`);
 
   const user = await findOrCreateUser(c.env.DB, email);
-  const secure = isSecure(c.req.raw);
-  const cookieValue = await createUserSession(c.env.KV, c.env.DB, user, secure);
+  const cookieValue = await createUserSession(c.env.KV, c.env.DB, user, c.env.COOKIE_DOMAIN);
 
   return new Response(null, {
     status: 302,
@@ -285,8 +277,7 @@ app.get("/api/auth/google/callback", async (c) => {
   if (!claims.email) return c.json({ error: "No email in token" }, 502);
 
   const user = await findOrCreateUser(c.env.DB, claims.email);
-  const secure = isSecure(c.req.raw);
-  const cookieValue = await createUserSession(c.env.KV, c.env.DB, user, secure);
+  const cookieValue = await createUserSession(c.env.KV, c.env.DB, user, c.env.COOKIE_DOMAIN);
 
   return new Response(null, {
     status: 302,
@@ -385,7 +376,7 @@ app.post("/api/auth/signout", async (c) => {
   return new Response(JSON.stringify({ ok: true }), {
     headers: {
       "Content-Type": "application/json",
-      "Set-Cookie": clearSessionCookie(isSecure(c.req.raw)),
+      "Set-Cookie": clearSessionCookie(c.env.COOKIE_DOMAIN),
     },
   });
 });

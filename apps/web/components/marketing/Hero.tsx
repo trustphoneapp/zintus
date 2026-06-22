@@ -4,19 +4,22 @@ import { useState } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowRight, Check, Copy, Sparkles } from "lucide-react";
-import { REPO_INSTALL_COMMAND } from "./install-commands";
+import { GalaxyBackground } from "@/components/GalaxyBackground";
+import { ZintusLogo } from "@/components/ZintusLogo";
+import { NPM_INSTALL_COMMAND } from "./install-commands";
 
 export function Hero() {
   const [copied, setCopied] = useState(false);
 
   async function copyInstallCommand() {
-    await navigator.clipboard.writeText(REPO_INSTALL_COMMAND);
+    await navigator.clipboard.writeText(NPM_INSTALL_COMMAND);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   }
 
   return (
     <section className="m-hero">
+      <GalaxyBackground />
       <div className="m-shell">
         <motion.div
           initial={{ opacity: 0, y: 30 }}
@@ -24,6 +27,9 @@ export function Hero() {
           transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
           className="m-hero-inner"
         >
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <ZintusLogo size="lg" showWordmark />
+          </div>
           <div className="m-hero-pill">
             <Sparkles size={14} />
             12 free AI models, one simple chat
@@ -44,11 +50,11 @@ export function Hero() {
             </a>
           </div>
           <div className="m-hero-note">
-            Free &amp; open source. Connect provider keys when you&apos;re ready.
+            Free to use. Bring your own keys.
           </div>
           <div className="m-command-strip">
             <span className="m-command-label">Developer?</span>
-            <code>{REPO_INSTALL_COMMAND}</code>
+            <code>{NPM_INSTALL_COMMAND}</code>
             <button
               type="button"
               aria-label="Copy install command"

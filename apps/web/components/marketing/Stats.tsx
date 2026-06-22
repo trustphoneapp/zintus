@@ -6,7 +6,7 @@ const stats = [
   { value: "12", label: "Free AI services" },
   { value: "4", label: "Ways to use it" },
   { value: "$0", label: "To get started" },
-  { value: "100%", label: "Open source" },
+  { value: "0%", label: "Markup on keys" },
 ];
 
 export function Stats() {

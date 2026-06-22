@@ -2,17 +2,16 @@
 
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { INSTALL_SNIPPETS, type InstallSnippetKey } from "./install-commands";
+import { INSTALL_STEPS } from "./install-commands";
 import { Reveal } from "./Reveal";
 
-export function InstallSection() {
-  const [tab, setTab] = useState<InstallSnippetKey>("repo");
-  const [copied, setCopied] = useState(false);
-  const tabs = Object.keys(INSTALL_SNIPPETS) as InstallSnippetKey[];
-  const activeSnippet = INSTALL_SNIPPETS[tab];
+const COPY_TEXT = INSTALL_STEPS.join("\n");
 
-  async function copySnippet() {
-    await navigator.clipboard.writeText(activeSnippet);
+export function InstallSection() {
+  const [copied, setCopied] = useState(false);
+
+  async function copySteps() {
+    await navigator.clipboard.writeText(COPY_TEXT);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   }
@@ -22,32 +21,22 @@ export function InstallSection() {
       <div className="m-shell">
         <Reveal>
           <p className="m-eyebrow">For developers</p>
-          <h2 className="m-title">Run it yourself in under a minute</h2>
+          <h2 className="m-title">Up in 60 seconds</h2>
           <p className="m-subtitle">
-            Clone the repo, install dependencies, then start the CLI, gateway, or web app.
-            Not a developer? Use the web chat — no install needed.
+            Install the CLI from npm. Keys are stored in your OS keychain — never sent anywhere.
           </p>
         </Reveal>
         <Reveal delay={0.08}>
           <div className="m-terminal">
             <div className="m-terminal-header">
-              <div className="m-terminal-tabs">
-                {tabs.map((item) => (
-                  <button
-                    key={item}
-                    type="button"
-                    className={item === tab ? "active" : ""}
-                    onClick={() => setTab(item)}
-                  >
-                    {item}
-                  </button>
-                ))}
-              </div>
+              <span style={{ fontSize: 11, color: "var(--marketing-muted)", letterSpacing: "0.05em" }}>
+                TERMINAL
+              </span>
               <button
                 type="button"
                 className="m-terminal-copy"
-                aria-label="Copy command"
-                onClick={() => void copySnippet()}
+                aria-label="Copy all commands"
+                onClick={() => void copySteps()}
               >
                 {copied ? <Check size={14} /> : <Copy size={14} />}
                 {copied ? "Copied" : "Copy"}
@@ -55,10 +44,7 @@ export function InstallSection() {
             </div>
             <pre>
               <code>
-                {activeSnippet
-                  .split("\n")
-                  .map((line) => `$ ${line}`)
-                  .join("\n")}
+                {INSTALL_STEPS.map((step) => `$ ${step}`).join("\n")}
               </code>
             </pre>
           </div>

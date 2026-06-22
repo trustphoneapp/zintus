@@ -6,7 +6,7 @@ import { Reveal } from "./Reveal";
 const faqs = [
   {
     q: "Is it really free?",
-    a: "Yes. Zintus uses the free tiers of each AI service, and the app itself is free and open source. You only pay if you choose to upgrade a provider's plan yourself.",
+    a: "Yes. Zintus uses the free tiers of each AI service, and the app itself is free to use. You only pay if you choose to upgrade a provider's plan yourself.",
   },
   {
     q: "Are my API keys safe?",
@@ -26,7 +26,7 @@ const faqs = [
   },
   {
     q: "Is it open source?",
-    a: "Yes, it's MIT licensed. You can read the code, run it yourself, or contribute on GitHub.",
+    a: "Zintus is source-available under the Business Source License 1.1 — you can self-host it for personal or internal use at no cost. It's not an OSI open-source license; commercial hosting or resale needs a separate license.",
   },
 ];
 

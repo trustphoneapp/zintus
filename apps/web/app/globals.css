@@ -2,18 +2,20 @@
 @import "@zintus/ui/tokens.css";
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   --font-display: var(--font-syne), var(--font-plus-jakarta-sans), system-ui, sans-serif;
-  --marketing-bg: #ffffff;
-  --marketing-surface: #ffffff;
-  --marketing-surface-2: #f5f5f4;
-  --marketing-text: #1c1917;
-  --marketing-muted: #6b7280;
-  --marketing-border: #e7e5e4;
-  --marketing-accent: #111111;
+  --marketing-bg: #07040f;
+  --marketing-surface: #0d0820;
+  --marketing-surface-2: #110a24;
+  --marketing-text: #f1f5f9;
+  --marketing-muted: #94a3b8;
+  --marketing-border: #1e0a3c;
+  --marketing-accent: #7c3aed;
+  --marketing-accent-light: #a78bfa;
+  --marketing-accent-dim: #2e1065;
   --marketing-on-accent: #ffffff;
-  --marketing-accent-soft: rgba(17, 17, 17, 0.05);
-  --marketing-glow: rgba(17, 17, 17, 0.02);
+  --marketing-accent-soft: rgba(124, 58, 237, 0.12);
+  --marketing-glow: rgba(124, 58, 237, 0.18);
   --marketing-red: #f04438;
   --marketing-red-soft: rgba(240, 68, 56, 0.18);
   --marketing-shell: 1140px;
@@ -22,20 +24,22 @@
   --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
 }
 
-.dark {
-  color-scheme: dark;
-  --marketing-bg: #09090b;
-  --marketing-surface: #111218;
-  --marketing-surface-2: #151623;
-  --marketing-text: #f4f4f5;
-  --marketing-muted: #a1a1aa;
-  --marketing-border: #252531;
-  --marketing-accent: #ffffff;
-  --marketing-on-accent: #09090b;
-  --marketing-accent-soft: rgba(255, 255, 255, 0.1);
-  --marketing-glow: rgba(255, 255, 255, 0.18);
-  --marketing-red: #ff5a4d;
-  --marketing-red-soft: rgba(255, 90, 77, 0.22);
+.light {
+  color-scheme: light;
+  --marketing-bg: #f5f3ff;
+  --marketing-surface: #ffffff;
+  --marketing-surface-2: #f9f7ff;
+  --marketing-text: #1e1b4b;
+  --marketing-muted: #4b5563;
+  --marketing-border: #ede9fe;
+  --marketing-accent: #6d28d9;
+  --marketing-accent-light: #6d28d9;
+  --marketing-accent-dim: #ddd6fe;
+  --marketing-on-accent: #ffffff;
+  --marketing-accent-soft: rgba(109, 40, 217, 0.08);
+  --marketing-glow: rgba(109, 40, 217, 0.06);
+  --marketing-red: #f04438;
+  --marketing-red-soft: rgba(240, 68, 56, 0.18);
 }
 
 * {
@@ -252,12 +256,8 @@ code {
 .sidebar-logo {
   width: 28px;
   height: 28px;
-  border-radius: 8px;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, var(--color-purple-mid), var(--color-purple));
-  color: white;
-  box-shadow: 0 0 12px var(--color-purple-glow);
   flex-shrink: 0;
 }
 
@@ -1262,8 +1262,10 @@ select:focus-visible {
   display: inline-flex;
   padding: 0.2rem 0.48rem;
   border-radius: 999px;
-  border: 1px solid var(--marketing-border);
-  color: var(--marketing-muted);
+  border: 1px solid color-mix(in oklab, var(--marketing-accent) 40%, var(--marketing-border));
+  background: var(--marketing-accent-soft);
+  color: var(--marketing-accent-light);
+  font-weight: 600;
   font-size: 0.78rem;
 }
 
@@ -1286,6 +1288,28 @@ select:focus-visible {
 .m-provider-card span {
   color: var(--marketing-muted);
   font-size: 0.83rem;
+}
+
+.m-provider-quota {
+  margin-top: 0.6rem;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--marketing-accent-dim);
+  overflow: hidden;
+}
+
+.m-provider-quota-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--marketing-accent);
+}
+
+.m-provider-limit {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 0.74rem;
+  color: var(--marketing-muted);
 }
 
 .m-feature-grid {
@@ -1487,6 +1511,22 @@ select:focus-visible {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.m-coming-soon-pill {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.22rem 0.6rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--marketing-accent-light);
+  background: var(--marketing-accent-soft);
+  border: 1px solid color-mix(in oklab, var(--marketing-accent) 45%, var(--marketing-border));
+}
+
 .m-faq-shell {
   max-width: 760px;
 }
@@ -1591,6 +1631,141 @@ select:focus-visible {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--color-text-muted);
+}
+
+/* ── Redesign: sidebar thread list (RECENTS) ──────────────────────────── */
+.sidebar-threads {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+}
+
+.sidebar-thread {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 9px;
+  padding-right: 4px;
+}
+
+.sidebar-thread:hover,
+.sidebar-thread.active {
+  background: var(--color-purple-faint);
+}
+
+.sidebar-thread.active .sidebar-thread-title {
+  color: var(--color-purple-light);
+}
+
+.sidebar-thread-button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 4px 8px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar-thread-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--color-text-sub);
+}
+
+.sidebar-thread-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.sidebar-thread-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.sidebar-thread:hover .sidebar-thread-action,
+.sidebar-thread.editing .sidebar-thread-action {
+  opacity: 1;
+}
+
+.sidebar-thread-action:hover {
+  background: var(--color-elevated);
+  color: var(--color-text);
+}
+
+.sidebar-thread-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 140px;
+  padding: 4px;
+  border-radius: 9px;
+  border: 1px solid var(--color-border-bright);
+  background: var(--color-elevated);
+  box-shadow: 0 8px 28px rgba(17, 17, 17, 0.18);
+}
+
+.sidebar-thread-dropdown button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-sub);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar-thread-dropdown button:hover {
+  background: var(--color-purple-faint);
+  color: var(--color-text);
+}
+
+.sidebar-thread-dropdown button.danger {
+  color: var(--color-red);
+}
+
+.sidebar-thread-dropdown button.danger:hover {
+  background: color-mix(in oklch, var(--color-red) 12%, transparent);
+}
+
+.sidebar-thread.editing {
+  padding: 4px 6px;
+  gap: 4px;
+}
+
+.sidebar-thread-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--color-purple-bright);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 13px;
 }
 
 /* ── Redesign: composer provider picker ───────────────────────────────── */

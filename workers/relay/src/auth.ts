@@ -142,29 +142,33 @@ export function parseSessionCookie(cookieHeader: string | null): string | null {
   return null;
 }
 
-/** Build the Set-Cookie header value for the session token. */
-export function buildSessionCookie(token: string, secure: boolean): string {
+/** Build the Set-Cookie header value for the session token.
+ *  cookieDomain should be ".zintus.ai" in prod (relay now lives at relay.zintus.ai,
+ *  same-site as www.zintus.ai) and "" for local dev (localhost can't set a
+ *  Domain attribute for a different host). Empty string omits Domain entirely.
+ */
+export function buildSessionCookie(token: string, cookieDomain: string): string {
   const maxAge = SESSION_TOKEN_TTL_SECONDS;
-  const parts = [
+  return [
     `zintus_session=${token}`,
     `Max-Age=${maxAge}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
-  ];
-  if (secure) parts.push("Secure");
-  return parts.join("; ");
+    "SameSite=None",
+    "Secure",
+    ...(cookieDomain ? [`Domain=${cookieDomain}`] : []),
+  ].join("; ");
 }
 
 /** Build a clearing Set-Cookie (sign-out). */
-export function clearSessionCookie(secure: boolean): string {
-  const parts = [
+export function clearSessionCookie(cookieDomain: string): string {
+  return [
     "zintus_session=",
     "Max-Age=0",
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
-  ];
-  if (secure) parts.push("Secure");
-  return parts.join("; ");
+    "SameSite=None",
+    "Secure",
+    ...(cookieDomain ? [`Domain=${cookieDomain}`] : []),
+  ].join("; ");
 }

@@ -41,3 +41,56 @@
   --font-ui: "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
 }
+
+/*
+ * .dark / .light overrides — same `attribute="class"` toggle the marketing
+ * site uses (apps/web/components/marketing/ThemeProvider.tsx). The un-classed
+ * :root values above are kept untouched as the default/fallback so consumers
+ * that don't apply the class (e.g. apps/desktop) keep working unchanged.
+ */
+.dark {
+  /* Backgrounds — near-black violet-tinted surfaces, matches --marketing-bg family */
+  --color-bg: oklch(15% 0.03 295);
+  --color-surface: oklch(19% 0.035 295);
+  --color-elevated: oklch(23% 0.04 295);
+  --color-border: oklch(30% 0.045 295);
+  --color-border-bright: oklch(38% 0.06 295);
+
+  /* Accent — violet (#7c3aed family), bright enough to read on dark surfaces */
+  --color-purple: oklch(58% 0.23 295);
+  --color-purple-mid: oklch(52% 0.24 295);
+  --color-purple-light: oklch(72% 0.17 295);
+  --color-purple-bright: oklch(78% 0.14 295);
+  --color-purple-glow: oklch(58% 0.23 295 / 0.35);
+  --color-purple-faint: oklch(58% 0.23 295 / 0.14);
+
+  /* Text */
+  --color-text: oklch(96% 0.01 295);
+  --color-text-sub: oklch(80% 0.02 295);
+  --color-text-muted: oklch(62% 0.03 295);
+}
+
+.light {
+  /* Backgrounds — warm white, violet-tinted surfaces */
+  --color-bg: oklch(98.5% 0.006 295);
+  --color-surface: oklch(100% 0 0);
+  --color-elevated: oklch(97% 0.01 295);
+  --color-border: oklch(90% 0.015 295);
+  --color-border-bright: oklch(84% 0.025 295);
+
+  /* Accent — deeper, more saturated violet (#6d28d9 family) so it still
+     reads on white; do not just lighten the dark-mode violet (low-chroma
+     light violet on white loses contrast — same issue that caused the
+     earlier neutralization of this token to near-black). */
+  --color-purple: oklch(40% 0.2 295);
+  --color-purple-mid: oklch(34% 0.21 295);
+  --color-purple-light: oklch(46% 0.19 295);
+  --color-purple-bright: oklch(52% 0.18 295);
+  --color-purple-glow: oklch(40% 0.2 295 / 0.18);
+  --color-purple-faint: oklch(40% 0.2 295 / 0.07);
+
+  /* Text */
+  --color-text: oklch(22% 0.02 295);
+  --color-text-sub: oklch(42% 0.025 295);
+  --color-text-muted: oklch(58% 0.02 295);
+}

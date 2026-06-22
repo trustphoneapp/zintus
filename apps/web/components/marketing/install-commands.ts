@@ -1,11 +1,7 @@
-export const REPO_INSTALL_COMMAND =
-  "git clone https://github.com/zintus/zintus.git && cd zintus && bun install";
+export const NPM_INSTALL_COMMAND = "npm install -g zintus";
 
-export const INSTALL_SNIPPETS = {
-  repo: REPO_INSTALL_COMMAND,
-  cli: "bun run dev:cli -- --help",
-  gateway: "bun run dev:gateway",
-  web: "bun run dev:web",
-} as const;
-
-export type InstallSnippetKey = keyof typeof INSTALL_SNIPPETS;
+export const INSTALL_STEPS = [
+  "npm install -g zintus",
+  "zintus init",
+  "zintus chat",
+] as const;

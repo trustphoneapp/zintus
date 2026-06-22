@@ -22,7 +22,8 @@ const features = [
   {
     icon: MonitorSmartphone,
     title: "Works everywhere",
-    body: "Use it in your browser, on the desktop app, on your phone, or right in the terminal — same chat, same keys.",
+    body: "Use it in your browser, right in the terminal, or with the CLI — and soon on a native desktop app — same chat, same keys.",
+    badge: "Desktop: coming soon",
   },
 ];
 
@@ -37,7 +38,10 @@ export function Features() {
         <div className="m-feature-grid">
           {features.map((feature, index) => (
             <Reveal key={feature.title} delay={index * 0.08}>
-              <article className="m-panel">
+              <article className="m-panel" style={{ position: "relative" }}>
+                {feature.badge ? (
+                  <span className="m-coming-soon-pill">{feature.badge}</span>
+                ) : null}
                 <feature.icon size={18} />
                 <h3>{feature.title}</h3>
                 <p>{feature.body}</p>

@@ -38,7 +38,7 @@ const syne = Syne({
 export const metadata: Metadata = {
   title: "Zintus — Use the best free AIs from one place",
   description:
-    "Zintus connects you to 12 free AI services in one chat. Ask once and it automatically picks a fast, available model — and switches when one runs out. Free and open source.",
+    "Zintus connects you to 12 free AI services in one chat. Ask once and it automatically picks a fast, available model — and switches when one runs out. Free to use, bring your own API keys.",
 };
 
 export default function RootLayout({

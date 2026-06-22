@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { fetchGatewayHealth, GATEWAY_URL } from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
+import { ThemeToggle } from "@/components/marketing/ThemeToggle";
 import { Sidebar } from "./Sidebar";
 import { GatewayOfflineBanner } from "./GatewayOfflineBanner";
 
@@ -49,6 +50,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div className="app-root">
       <header className="app-topbar">
         <span className="app-topbar-title">{TITLES[pathname] ?? "Zintus"}</span>
+        <div className="app-topbar-actions">
+          <ThemeToggle />
+        </div>
       </header>
 
       {checked && !gatewayConnected && (

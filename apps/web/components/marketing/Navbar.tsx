@@ -3,6 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { Menu, X } from "lucide-react";
+import { ZintusLogo } from "@/components/ZintusLogo";
 import { ThemeToggle } from "./ThemeToggle";
 
 const navItems = [
@@ -11,6 +12,7 @@ const navItems = [
   { label: "Supported AIs", href: "#providers" },
   { label: "FAQ", href: "#faq" },
   { label: "Install", href: "#install" },
+  { label: "Docs", href: "/docs" },
 ];
 
 export function Navbar() {
@@ -20,8 +22,7 @@ export function Navbar() {
     <header className="m-nav-wrap">
       <div className="m-shell m-nav">
         <Link className="m-brand" href="/">
-          <span className="m-brand-mark">M</span>
-          <span>Zintus</span>
+          <ZintusLogo size="sm" showWordmark />
         </Link>
         <nav className="m-nav-links">
           {navItems.map((item) => (

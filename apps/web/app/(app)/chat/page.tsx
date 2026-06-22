@@ -23,18 +23,23 @@ export default function ChatPage() {
   const { settings, hydrate } = useSettingsStore();
   const { keys, unlock } = useProviderStatusStore();
   const {
-    messages,
     threadId,
+    activeThreadId,
     selectedProvider,
     gatewayConnected,
     appendMessage,
     updateMessage,
+    patchMessage,
     setThreadId,
     setActiveProvider,
     pushTerminalLine,
     loadLastTrace,
     dropLastAssistant,
   } = useAppStore();
+  const messages = useAppStore(
+    (state) =>
+      state.threads.find((t) => t.id === state.activeThreadId)?.messages ?? [],
+  );
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -45,6 +50,15 @@ export default function ChatPage() {
     hydrate();
     void unlock();
   }, [hydrate, unlock]);
+
+  // Switching to a different thread (via the sidebar) should drop any
+  // in-flight stream from the previous thread and reset composer state —
+  // otherwise a still-streaming response could land on the wrong thread.
+  useEffect(() => {
+    abortRef.current?.abort();
+    setLoading(false);
+    setInput("");
+  }, [activeThreadId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -81,18 +95,11 @@ export default function ChatPage() {
 
         setActiveProvider(result.providerId);
         setThreadId(result.threadId);
-        useAppStore.setState((state) => ({
-          messages: state.messages.map((message) =>
-            message.id === assistantId
-              ? {
-                  ...message,
-                  providerId: result.providerId,
-                  model: result.model,
-                  compileTokens: result.compileTokens,
-                }
-              : message,
-          ),
-        }));
+        patchMessage(assistantId, {
+          providerId: result.providerId,
+          model: result.model,
+          compileTokens: result.compileTokens,
+        });
 
         pushTerminalLine({
           text: `→ routed to ${result.providerId} (${result.model}) via ${result.source}`,
@@ -116,6 +123,7 @@ export default function ChatPage() {
     [
       keys,
       loadLastTrace,
+      patchMessage,
       pushTerminalLine,
       selectedProvider,
       setActiveProvider,
@@ -164,11 +172,11 @@ export default function ChatPage() {
     const assistant = createAssistantPlaceholder();
     appendMessage(assistant);
 
-    const priorMessages = useAppStore
-      .getState()
-      .messages.filter(
-        (message) => message.id !== assistant.id && message.content,
-      )
+    const s = useAppStore.getState();
+    const priorMessages = (
+      s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? []
+    )
+      .filter((message) => message.id !== assistant.id && message.content)
       .map((message) => ({ role: message.role, content: message.content }));
 
     const sendMessages: ChatMessage[] =

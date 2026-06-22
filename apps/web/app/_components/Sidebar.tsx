@@ -1,9 +1,11 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { getGatewayUrl } from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
+import { ZintusLogo } from "@/components/ZintusLogo";
 import { Icon } from "./Icons";
 
 const SECTIONS: Array<{
@@ -27,6 +29,143 @@ const SECTIONS: Array<{
   },
 ];
 
+function ThreadRow({
+  id,
+  title,
+  active,
+  onSwitch,
+}: {
+  id: string;
+  title: string;
+  active: boolean;
+  onSwitch: () => void;
+}) {
+  const renameThread = useAppStore((state) => state.renameThread);
+  const deleteThread = useAppStore((state) => state.deleteThread);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+    function onClick(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  function commitRename() {
+    renameThread(id, draft);
+    setEditing(false);
+  }
+
+  function cancelRename() {
+    setDraft(title);
+    setEditing(false);
+  }
+
+  if (editing) {
+    return (
+      <div className="sidebar-thread editing">
+        <input
+          ref={inputRef}
+          className="sidebar-thread-input"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitRename();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              cancelRename();
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="sidebar-thread-action"
+          aria-label="Save name"
+          onClick={commitRename}
+        >
+          <Icon name="check" size={13} />
+        </button>
+        <button
+          type="button"
+          className="sidebar-thread-action"
+          aria-label="Cancel rename"
+          onClick={cancelRename}
+        >
+          <Icon name="x" size={13} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`sidebar-thread${active ? " active" : ""}`}>
+      <button type="button" className="sidebar-thread-button" onClick={onSwitch}>
+        <span className="sidebar-thread-title">{title}</span>
+      </button>
+      <div className="sidebar-thread-menu" ref={menuRef}>
+        <button
+          type="button"
+          className="sidebar-thread-action"
+          aria-label="Thread options"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((value) => !value)}
+        >
+          <Icon name="more-horizontal" size={14} />
+        </button>
+        {menuOpen ? (
+          <div className="sidebar-thread-dropdown" role="menu">
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                setEditing(true);
+              }}
+            >
+              <Icon name="pencil" size={13} />
+              Rename
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="danger"
+              onClick={() => {
+                setMenuOpen(false);
+                if (window.confirm(`Delete "${title}"? This can't be undone.`)) {
+                  deleteThread(id);
+                }
+              }}
+            >
+              <Icon name="trash" size={13} />
+              Delete
+            </button>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function Sidebar({
   collapsed,
   onToggle,
@@ -39,12 +178,19 @@ export function Sidebar({
   const pathname = usePathname();
   const router = useRouter();
   const newChat = useAppStore((state) => state.newChat);
+  const switchThread = useAppStore((state) => state.switchThread);
+  const threads = useAppStore((state) => state.threads);
+  const activeThreadId = useAppStore((state) => state.activeThreadId);
+
+  const sortedThreads = [...threads]
+    .filter((t) => t.messages.length > 0)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
 
   return (
     <aside className={`app-sidebar${collapsed ? " collapsed" : ""}`}>
       <div className="sidebar-header">
         <div className="sidebar-logo">
-          <Icon name="layers" size={14} />
+          <ZintusLogo size="sm" showWordmark={false} />
         </div>
         {!collapsed ? <span className="sidebar-brand">Zintus</span> : null}
         <button
@@ -95,6 +241,26 @@ export function Sidebar({
             })}
           </div>
         ))}
+
+        {!collapsed && sortedThreads.length > 0 ? (
+          <div className="sidebar-section">
+            <span className="sidebar-section-label">Recents</span>
+            <div className="sidebar-threads">
+              {sortedThreads.map((thread) => (
+                <ThreadRow
+                  key={thread.id}
+                  id={thread.id}
+                  title={thread.title}
+                  active={thread.id === activeThreadId && pathname === "/chat"}
+                  onSwitch={() => {
+                    switchThread(thread.id);
+                    router.push("/chat");
+                  }}
+                />
+              ))}
+            </div>
+          </div>
+        ) : null}
       </nav>
 
       {!collapsed ? (

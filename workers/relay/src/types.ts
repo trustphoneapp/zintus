@@ -4,6 +4,7 @@ export interface Env {
   KV: KVNamespace;
   RELAY_AUTH_SECRET: string;
   RELAY_BASE_URL: string;
+  COOKIE_DOMAIN: string;
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   RESEND_API_KEY: string;
