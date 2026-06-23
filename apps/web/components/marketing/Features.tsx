@@ -1,29 +1,44 @@
 "use client";
 
-import { Infinity as InfinityIcon, Lock, MonitorSmartphone, Wallet } from "lucide-react";
+import { Zap, Key, Wifi, BarChart2, Terminal, ShieldCheck } from "lucide-react";
 import { Reveal } from "./Reveal";
 
-const features = [
+const FEATURES = [
   {
-    icon: InfinityIcon,
-    title: "Keep chatting when one runs out",
-    body: "Free AIs run out of usage quickly. Zintus watches all 12 and switches automatically when another provider has quota left.",
+    icon: Zap,
+    color: "#f59e0b",
+    title: "< 5ms routing",
+    body: "In-process quota check. Picks the fastest available provider without an extra network hop.",
   },
   {
-    icon: Wallet,
-    title: "Spend nothing to start",
-    body: "It uses the free tiers of each service. No subscription, no credit card — bring the free keys you already have.",
+    icon: Key,
+    color: "#7c3aed",
+    title: "Your keys. Your device.",
+    body: "API keys stored in OS keychain via keyring. Zero-knowledge relay — Zintus never sees them.",
   },
   {
-    icon: Lock,
-    title: "Your keys stay private",
-    body: "API keys are saved securely on your own device, never on our servers. You stay in full control.",
+    icon: Wifi,
+    color: "#22c55e",
+    title: "Offline fallback",
+    body: "When all cloud providers are exhausted, Ollama takes over. Always have a response.",
   },
   {
-    icon: MonitorSmartphone,
-    title: "Works everywhere",
-    body: "Use it in your browser, right in the terminal, or with the CLI — and soon on a native desktop app — same chat, same keys.",
-    badge: "Desktop: coming soon",
+    icon: BarChart2,
+    color: "#3b82f6",
+    title: "Quota tracking",
+    body: "Real-time RPM/TPM windows per provider. Auto-switches before you hit a wall.",
+  },
+  {
+    icon: Terminal,
+    color: "#c4b5fd",
+    title: "CLI + Web + Desktop",
+    body: "Terminal-first CLI, browser-based web chat, and a native Tauri desktop app — one config.",
+  },
+  {
+    icon: ShieldCheck,
+    color: "#34d399",
+    title: "OWASP LLM01 hardened",
+    body: "Context blocks delivered as user-role untrusted data. Prompt injection mitigated by design.",
   },
 ];
 
@@ -32,20 +47,57 @@ export function Features() {
     <section className="m-section" id="features">
       <div className="m-shell">
         <Reveal>
-          <p className="m-eyebrow">Why people use it</p>
-          <h2 className="m-title">All the free AI, none of the hassle</h2>
+          <p className="m-eyebrow">Features</p>
+          <h2 className="m-title">Everything a developer needs.</h2>
+          <p className="m-subtitle" style={{ marginBottom: "2.5rem" }}>
+            Built for the terminal. Works everywhere. No config files, no cloud dependency.
+          </p>
         </Reveal>
-        <div className="m-feature-grid">
-          {features.map((feature, index) => (
-            <Reveal key={feature.title} delay={index * 0.08}>
-              <article className="m-panel" style={{ position: "relative" }}>
-                {feature.badge ? (
-                  <span className="m-coming-soon-pill">{feature.badge}</span>
-                ) : null}
-                <feature.icon size={18} />
-                <h3>{feature.title}</h3>
-                <p>{feature.body}</p>
-              </article>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, 1fr)",
+            gap: "1px",
+            background: "rgba(124,58,237,0.12)",
+            border: "1px solid rgba(124,58,237,0.12)",
+            borderRadius: 16,
+            overflow: "hidden",
+          }}
+        >
+          {FEATURES.map((feature, i) => (
+            <Reveal key={feature.title} delay={i * 0.06}>
+              <div
+                className="glass-card"
+                style={{ borderRadius: 0, border: "none", padding: "1.75rem" }}
+              >
+                <div
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 10,
+                    background: `${feature.color}18`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    marginBottom: "1rem",
+                  }}
+                >
+                  <feature.icon size={20} color={feature.color} />
+                </div>
+                <h3
+                  style={{
+                    fontSize: "0.95rem",
+                    fontWeight: 700,
+                    color: "#f1f5f9",
+                    marginBottom: "0.5rem",
+                  }}
+                >
+                  {feature.title}
+                </h3>
+                <p style={{ fontSize: "0.85rem", color: "#64748b", lineHeight: 1.7 }}>
+                  {feature.body}
+                </p>
+              </div>
             </Reveal>
           ))}
         </div>

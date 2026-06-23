@@ -32,9 +32,12 @@ export default function LoginPage() {
   }
 
   function buildGoogleUrl(): string {
-    const params = new URLSearchParams({ redirect_to: redirectTo });
-    if (isCli && cliState) params.set("state", cliState);
-    return `${googleSignInUrl(redirectTo)}&${params.toString()}`;
+    // googleSignInUrl() already adds redirect_to — only append additional params.
+    const base = googleSignInUrl(redirectTo);
+    if (isCli && cliState) {
+      return `${base}&state=${encodeURIComponent(cliState)}`;
+    }
+    return base;
   }
 
   if (status === "sent") {

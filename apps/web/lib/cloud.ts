@@ -4,7 +4,7 @@
  */
 
 const RELAY_URL = (
-  process.env.NEXT_PUBLIC_RELAY_URL ?? ""
+  process.env.NEXT_PUBLIC_RELAY_URL ?? "https://relay.zintus.ai"
 ).replace(/\/$/, "");
 
 function relayFetch(

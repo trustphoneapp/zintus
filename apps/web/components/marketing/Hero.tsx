@@ -1,70 +1,124 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
-import { motion } from "framer-motion";
-import { ArrowRight, Check, Copy, Sparkles } from "lucide-react";
-import { GalaxyBackground } from "@/components/GalaxyBackground";
-import { ZintusLogo } from "@/components/ZintusLogo";
-import { NPM_INSTALL_COMMAND } from "./install-commands";
+import { ArrowRight, Check, Copy, Zap } from "lucide-react";
+
+const INSTALL_CMD = "npm install -g zintus";
+
+const TERMINAL_LINES = [
+  { delay: 0,    type: "prompt", text: "zintus chat" },
+  { delay: 600,  type: "route",  text: "→ routing across 12 providers..." },
+  { delay: 1200, type: "ok",     text: "✓ cerebras/llama-3.3-70b  [42ms]" },
+  { delay: 1600, type: "muted",  text: "  tokens: 1,247 · quota: 847K/1M remaining" },
+  { delay: 2200, type: "ok",     text: "✓ response streamed in 1.2s" },
+];
 
 export function Hero() {
   const [copied, setCopied] = useState(false);
+  const [visibleLines, setVisibleLines] = useState(0);
 
-  async function copyInstallCommand() {
-    await navigator.clipboard.writeText(NPM_INSTALL_COMMAND);
+  useEffect(() => {
+    const timers = TERMINAL_LINES.map((line, i) =>
+      window.setTimeout(() => setVisibleLines(i + 1), line.delay + 400)
+    );
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
+  async function copyCmd() {
+    await navigator.clipboard.writeText(INSTALL_CMD);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   }
 
   return (
-    <section className="m-hero">
-      <GalaxyBackground />
+    <section className="hero-v2">
       <div className="m-shell">
-        <motion.div
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
-          className="m-hero-inner"
-        >
-          <div style={{ display: "flex", justifyContent: "center" }}>
-            <ZintusLogo size="lg" showWordmark />
+        <div className="hero-v2-inner">
+          {/* Badge */}
+          <div className="hero-v2-eyebrow">
+            <span className="badge-pill">
+              <Zap size={11} />
+              12 free AI providers · zero markup
+            </span>
           </div>
-          <div className="m-hero-pill">
-            <Sparkles size={14} />
-            12 free AI models, one simple chat
-          </div>
-          <h1>Use the best free AIs, all from one place.</h1>
-          <p>
-            Zintus connects you to 12 free AI services at once. Ask a question and it
-            automatically picks one that&apos;s fast and available. If one runs out, it
-            switches to another — so you can keep chatting.
+
+          {/* Headline */}
+          <h1>
+            The open AI router.<br />
+            <em>Route smarter. Pay nothing.</em>
+          </h1>
+
+          {/* Subheadline */}
+          <p className="hero-v2-sub">
+            Zintus routes every prompt across Cerebras, Groq, Gemini, DeepSeek and 8 more —
+            picking the fastest provider with quota left. Your keys, your device, zero markup.
           </p>
-          <div className="m-hero-actions">
-            <Link href="/chat" className="m-primary-btn">
-              Try it now
+
+          {/* CTAs */}
+          <div className="hero-v2-actions">
+            <Link href="/chat" className="hero-v2-btn-primary">
+              Start for free
               <ArrowRight size={16} />
             </Link>
-            <a href="#how-it-works" className="m-secondary-btn">
-              See how it works
+            <Link href="/docs" className="hero-v2-btn-secondary">
+              Read the docs
+            </Link>
+            <a href="/pricing" className="hero-v2-btn-secondary">
+              View pricing
             </a>
           </div>
-          <div className="m-hero-note">
-            Free to use. Bring your own keys.
+
+          {/* Terminal */}
+          <div className="hero-v2-terminal">
+            <div className="hero-v2-terminal-bar">
+              <span className="hero-v2-terminal-dot" style={{ background: "#ef4444" }} />
+              <span className="hero-v2-terminal-dot" style={{ background: "#f59e0b" }} />
+              <span className="hero-v2-terminal-dot" style={{ background: "#22c55e" }} />
+              <span style={{ marginLeft: 8, fontSize: 11, color: "#4a3070", fontFamily: "monospace" }}>zintus — terminal</span>
+            </div>
+            <div className="hero-v2-terminal-body">
+              {/* Static install line */}
+              <div>
+                <span className="t-prompt">$ </span>
+                <span className="t-cmd">{INSTALL_CMD}</span>
+              </div>
+              <div style={{ marginBottom: 8 }}>
+                <span className="t-ok">✓ zintus@2.0.0 installed</span>
+              </div>
+              {/* Animated lines */}
+              {TERMINAL_LINES.slice(0, visibleLines).map((line, i) => (
+                <div key={i}>
+                  {line.type === "prompt" ? (
+                    <><span className="t-prompt">$ </span><span className="t-cmd">{line.text}</span></>
+                  ) : line.type === "route" ? (
+                    <span className="t-route">{line.text}</span>
+                  ) : line.type === "ok" ? (
+                    <span className="t-ok">{line.text}</span>
+                  ) : (
+                    <span className="t-muted">{line.text}</span>
+                  )}
+                </div>
+              ))}
+              {visibleLines < TERMINAL_LINES.length ? (
+                <span className="t-prompt" style={{ animation: "none" }}>▋</span>
+              ) : null}
+            </div>
           </div>
-          <div className="m-command-strip">
-            <span className="m-command-label">Developer?</span>
-            <code>{NPM_INSTALL_COMMAND}</code>
+
+          {/* Copy install */}
+          <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 12, color: "#4a3070" }}>or install via npm:</span>
             <button
               type="button"
-              aria-label="Copy install command"
-              onClick={() => void copyInstallCommand()}
+              onClick={() => void copyCmd()}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(124,58,237,0.1)", border: "1px solid rgba(124,58,237,0.25)", borderRadius: 6, padding: "5px 12px", cursor: "pointer", color: "#c4b5fd", fontSize: 13, fontFamily: "monospace" }}
             >
-              {copied ? <Check size={15} /> : <Copy size={15} />}
-              {copied ? "Copied" : "Copy"}
+              <code>{INSTALL_CMD}</code>
+              {copied ? <Check size={13} color="#34d399" /> : <Copy size={13} />}
             </button>
           </div>
-        </motion.div>
+        </div>
       </div>
     </section>
   );

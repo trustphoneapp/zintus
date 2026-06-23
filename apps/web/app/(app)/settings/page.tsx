@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useSettingsStore } from "@/lib/store";
 import { ROUTING_STRATEGIES } from "@/lib/settings";
 import { PROVIDER_BY_ID, PROVIDERS } from "@/lib/providers";
+import { signOut } from "@/lib/cloud";
 import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
 
 const CONTEXT_MODES: Array<{
@@ -119,6 +120,20 @@ export default function SettingsPage() {
         <p>Zintus v0.1.0</p>
         <p className="muted">Client-side free-tier orchestrator</p>
         <p className="muted">Run gateway: <code>bun run dev:gateway</code></p>
+      </div>
+
+      <div className="settings-card">
+        <h2>Account</h2>
+        <button
+          className="auth-submit-btn"
+          style={{ background: "#ef4444" }}
+          onClick={async () => {
+            await signOut();
+            window.location.href = "/login";
+          }}
+        >
+          Sign out
+        </button>
       </div>
 
       {saved ? <p className="status-banner">Settings saved.</p> : null}

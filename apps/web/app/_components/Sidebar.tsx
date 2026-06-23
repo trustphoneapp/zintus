@@ -48,6 +48,15 @@ function ThreadRow({
   const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Keep draft in sync with the title prop when not actively editing,
+  // so auto-naming (which fires on appendMessage) is reflected when the
+  // user later opens the rename input.
+  useEffect(() => {
+    if (!editing) {
+      setDraft(title);
+    }
+  }, [title, editing]);
+
   useEffect(() => {
     if (!menuOpen) {
       return;

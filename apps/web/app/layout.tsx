@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono, Lora, Plus_Jakarta_Sans, Syne } from "next/font/
 import "@zintus/ui/globals.css";
 import "./globals.css";
 import { ThemeProvider } from "@/components/marketing/ThemeProvider";
+import { GalaxyBackground } from "./components/GalaxyBackground";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -53,6 +54,7 @@ export default function RootLayout({
       className={`${inter.variable} ${plusJakartaSans.variable} ${jetbrainsMono.variable} ${lora.variable} ${syne.variable}`}
     >
       <body className={plusJakartaSans.className}>
+        <GalaxyBackground />
         <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>

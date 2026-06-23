@@ -29,7 +29,13 @@ export function InstallSection() {
         <Reveal delay={0.08}>
           <div className="m-terminal">
             <div className="m-terminal-header">
-              <span style={{ fontSize: 11, color: "var(--marketing-muted)", letterSpacing: "0.05em" }}>
+              <span
+                style={{
+                  fontSize: 11,
+                  color: "var(--marketing-muted)",
+                  letterSpacing: "0.05em",
+                }}
+              >
                 TERMINAL
               </span>
               <button
@@ -43,8 +49,19 @@ export function InstallSection() {
               </button>
             </div>
             <pre>
-              <code>
-                {INSTALL_STEPS.map((step) => `$ ${step}`).join("\n")}
+              <code
+                style={{
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: "0.9rem",
+                  display: "block",
+                }}
+              >
+                {INSTALL_STEPS.map((step, i) => (
+                  <div key={i}>
+                    <span style={{ color: "#7c3aed" }}>$ </span>
+                    <span style={{ color: "#c4b5fd" }}>{step}</span>
+                  </div>
+                ))}
               </code>
             </pre>
           </div>
