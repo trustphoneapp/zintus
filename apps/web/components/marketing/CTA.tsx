@@ -53,12 +53,11 @@ export function CTA() {
                     gap: 8,
                     padding: "13px 28px",
                     borderRadius: 10,
-                    background: "#7c3aed",
+                    background: "var(--marketing-accent)",
                     color: "#fff",
                     fontSize: 15,
                     fontWeight: 600,
                     textDecoration: "none",
-                    boxShadow: "0 0 30px rgba(124,58,237,0.45)",
                   }}
                 >
                   Start routing free
@@ -73,11 +72,11 @@ export function CTA() {
                     padding: "12px 24px",
                     borderRadius: 10,
                     background: "transparent",
-                    color: "#94a3b8",
+                    color: "var(--marketing-muted)",
                     fontSize: 15,
                     fontWeight: 500,
                     textDecoration: "none",
-                    border: "1px solid rgba(255,255,255,0.1)",
+                    border: "1px solid var(--marketing-border)",
                   }}
                 >
                   See pricing

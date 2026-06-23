@@ -110,7 +110,7 @@ function PricingInner() {
 
   const cardBase: React.CSSProperties = {
     background: "var(--marketing-surface)",
-    border: "1px solid #2e1065",
+    border: "1px solid var(--marketing-accent-dim)",
     borderRadius: "12px",
     padding: "2rem",
     display: "flex",
@@ -122,7 +122,7 @@ function PricingInner() {
 
   const growthCard: React.CSSProperties = {
     ...cardBase,
-    borderColor: "#7c3aed",
+    borderColor: "var(--marketing-accent)",
     position: "relative",
   };
 
@@ -183,7 +183,7 @@ function PricingInner() {
                 top: "-0.75rem",
                 left: "50%",
                 transform: "translateX(-50%)",
-                background: "#7c3aed",
+                background: "var(--marketing-accent)",
                 color: "#fff",
                 fontSize: "0.7rem",
                 fontWeight: 700,
@@ -257,7 +257,7 @@ function PricingInner() {
           <div
             style={{
               background: "var(--marketing-surface)",
-              border: "1px solid #2e1065",
+              border: "1px solid var(--marketing-accent-dim)",
               borderRadius: "12px",
               padding: "1.25rem 2rem",
               display: "flex",
@@ -320,7 +320,7 @@ function PricingInner() {
                       style={{
                         textAlign: h === "Feature" ? "left" : "center",
                         padding: "0.75rem 1rem",
-                        borderBottom: "1px solid #2e1065",
+                        borderBottom: "1px solid var(--marketing-accent-dim)",
                         color: "var(--marketing-text)",
                         fontWeight: 600,
                         whiteSpace: "nowrap",
