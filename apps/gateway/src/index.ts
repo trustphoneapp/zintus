@@ -63,7 +63,14 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
-    fetch: createGatewayHandler({ engine, config, log }),
+    fetch: createGatewayHandler({
+      engine,
+      config,
+      log,
+      // Real, in-flight-aware quota signal for Tokzen's adaptive dial (was
+      // always the hardcoded 1.0 default before this was wired).
+      getQuotaRemaining: (provider) => engine.getProviderQuotaRemaining(provider),
+    }),
   });
 
   watchPolicy((next) => {

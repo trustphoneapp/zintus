@@ -98,6 +98,9 @@ export interface Engine {
   getCompileTrace(traceId: string): CompileTraceRow | null;
   getProviderStatus(): Promise<ProviderStatus[]>;
   getSavings(): { byProvider: Record<string, number>; total: number };
+  /** In-flight-aware quota remaining (0..1) for a provider — feeds Tokzen's
+   *  adaptive compression dial. */
+  getProviderQuotaRemaining(provider: ProviderId): number;
   updatePolicy(policy: PolicyConfig): void;
   probeProviders(): Promise<Array<{ providerId: ProviderId; ok: boolean }>>;
   listThreads(): Thread[];
@@ -305,6 +308,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
 
     getSavings() {
       return router.getSavings();
+    },
+
+    getProviderQuotaRemaining(provider) {
+      return router.getProviderQuotaRemaining(provider);
     },
 
     updatePolicy(policy) {

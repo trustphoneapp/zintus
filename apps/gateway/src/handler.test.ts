@@ -22,6 +22,7 @@ function fakeEngine(overrides: Partial<Engine> = {}): Engine {
       return [];
     },
     getSavings: () => ({ byProvider: {}, total: 0 }),
+    getProviderQuotaRemaining: () => 1.0,
     updatePolicy: () => {},
     probeProviders: async () => [],
     listThreads: () => [],
