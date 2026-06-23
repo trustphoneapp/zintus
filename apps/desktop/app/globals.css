@@ -178,6 +178,35 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* Hover feedback (calm 120ms) for the globally-styled buttons. Icon-chrome
+   buttons opt out via .app-icon-btn and get their own subtler treatment;
+   inline-styled buttons (provider rail) keep their own background. */
+button:not(.secondary):not(.app-icon-btn):not(:disabled) {
+  transition: background 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
+  background: var(--color-purple-bright);
+}
+
+/* Transparent icon/nav chrome: hover lifts to the elevated surface. */
+.app-icon-btn {
+  background: transparent;
+  transition: background 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.app-icon-btn:hover {
+  background: var(--color-elevated);
+}
+.app-nav-link {
+  background: transparent;
+  transition: background 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.app-nav-link:hover {
+  background: var(--color-elevated);
+}
+.app-nav-link.active {
+  background: var(--color-purple-faint);
+}
+
 .output {
   white-space: pre-wrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

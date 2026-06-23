@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
 import { useChatStore } from "@/lib/store";
+import { Tooltip } from "./ui/tooltip";
 
 const NAV = [
   { href: "/chat", label: "Chat" },
@@ -68,27 +69,29 @@ export function AppShell({ children }: { children: ReactNode }) {
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <button
-            type="button"
-            aria-label="Toggle sidebar"
-            onClick={toggleSidebar}
-            style={{
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              padding: "4px 6px",
-              color: "var(--color-text-sub)",
-              display: "flex",
-              alignItems: "center",
-              borderRadius: 6,
-            }}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <line x1="3" y1="6" x2="21" y2="6" />
-              <line x1="3" y1="12" x2="21" y2="12" />
-              <line x1="3" y1="18" x2="21" y2="18" />
-            </svg>
-          </button>
+          <Tooltip content={collapsed ? "Expand sidebar" : "Collapse sidebar"} side="bottom">
+            <button
+              type="button"
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              onClick={toggleSidebar}
+              className="app-icon-btn"
+              style={{
+                border: "none",
+                cursor: "pointer",
+                padding: "4px 6px",
+                color: "var(--color-text-sub)",
+                display: "flex",
+                alignItems: "center",
+                borderRadius: 6,
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <line x1="3" y1="6" x2="21" y2="6" />
+                <line x1="3" y1="12" x2="21" y2="12" />
+                <line x1="3" y1="18" x2="21" y2="18" />
+              </svg>
+            </button>
+          </Tooltip>
           <span style={{ fontSize: 20, fontWeight: 700, color: "var(--color-purple-light)" }}>
             Zintus
           </span>
@@ -100,12 +103,12 @@ export function AppShell({ children }: { children: ReactNode }) {
               <Link
                 key={item.href}
                 href={item.href}
+                className={`app-nav-link${active ? " active" : ""}`}
                 style={{
                   padding: "6px 12px",
                   borderRadius: 8,
                   fontSize: 14,
                   color: active ? "var(--color-text)" : "var(--color-text-sub)",
-                  background: active ? "var(--color-purple-faint)" : "transparent",
                 }}
               >
                 {item.label}
@@ -126,7 +129,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             fontSize: 13,
             background: "var(--color-surface)",
             color: "var(--color-text-sub)",
-            borderBottom: "1px solid var(--color-red, #ef4444)",
+            // Calm hairline — the red status dot carries the alert.
+            borderBottom: "1px solid color-mix(in srgb, var(--color-red) 40%, var(--color-border))",
           }}
         >
           <span
@@ -135,7 +139,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               width: 8,
               height: 8,
               borderRadius: "50%",
-              background: "var(--color-red, #ef4444)",
+              background: "var(--color-red)",
             }}
           />
           <span>
@@ -144,7 +148,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               style={{
                 padding: "1px 6px",
                 borderRadius: 4,
-                background: "var(--color-bg, #0b0f14)",
+                background: "var(--color-bg)",
                 color: "var(--color-text)",
               }}
             >
@@ -171,32 +175,34 @@ export function AppShell({ children }: { children: ReactNode }) {
           }}
         >
           {/* New chat button */}
-          <button
-            type="button"
-            onClick={newChat}
-            title="New chat"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: collapsed ? 0 : 8,
-              padding: collapsed ? "10px 14px" : "10px 12px",
-              margin: "8px 6px 4px",
-              border: "1px solid var(--color-border)",
-              borderRadius: 8,
-              background: "transparent",
-              color: "var(--color-text-sub)",
-              fontSize: 13,
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flexShrink: 0 }}>
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            {!collapsed && <span>New chat</span>}
-          </button>
+          <Tooltip content="New chat" side={collapsed ? "right" : "bottom"}>
+            <button
+              type="button"
+              onClick={newChat}
+              aria-label="New chat"
+              className="app-icon-btn"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: collapsed ? 0 : 8,
+                padding: collapsed ? "10px 14px" : "10px 12px",
+                margin: "8px 6px 4px",
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                color: "var(--color-text-sub)",
+                fontSize: 13,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flexShrink: 0 }}>
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              {!collapsed && <span>New chat</span>}
+            </button>
+          </Tooltip>
 
           {/* Thread list when expanded */}
           {!collapsed && (
