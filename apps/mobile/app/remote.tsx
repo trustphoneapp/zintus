@@ -21,6 +21,7 @@ import {
   sendCloudControl,
   cloudSignOut,
   mobileLoginUrl,
+  RELAY_URL,
   type CloudSession,
   type SessionStatus,
 } from "@/lib/cloud";
@@ -96,6 +97,49 @@ export default function RemoteScreen() {
       },
     ]);
   }
+
+  // SSE live feed for the currently-selected session.
+  useEffect(() => {
+    if (!selectedId || screen !== "detail") return;
+
+    // Use global EventSource if available (React Native Hermes) — graceful no-op otherwise.
+    const ES = typeof EventSource !== "undefined" ? EventSource : null;
+    if (!ES) return;
+
+    const token = (() => {
+      try {
+        const { getCloudSessionToken } = require("@/lib/cloud") as typeof import("@/lib/cloud");
+        return getCloudSessionToken();
+      } catch { return null; }
+    })();
+
+    const url = `${RELAY_URL}/api/sessions/${selectedId}/stream`;
+    const es = new ES(url, {
+      // Pass session cookie as a custom header — React Native EventSource implementations
+      // may support this; standard browser EventSource does not.
+      headers: token ? { Cookie: `zintus_session=${token}` } : undefined,
+    } as EventSourceInit);
+
+    es.addEventListener("status", (e) => {
+      try {
+        const data = JSON.parse((e as MessageEvent).data as string) as SessionStatus;
+        setSessionStatus(data);
+        setStatusOffline(false);
+      } catch {}
+    });
+
+    es.addEventListener("gateway_offline", () => {
+      setStatusOffline(true);
+    });
+
+    es.addEventListener("gateway_online", () => {
+      setStatusOffline(false);
+    });
+
+    return () => {
+      es.close();
+    };
+  }, [selectedId, screen]);
 
   async function openSession(id: string) {
     setSelectedId(id);

@@ -1,7 +1,7 @@
 import "../global.css";
 
 import { useEffect } from "react";
-import { Linking } from "react-native";
+import * as Linking from "expo-linking";
 import { Tabs } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -10,12 +10,45 @@ import { ensureNotificationPermissions } from "@/lib/notifications";
 import { COLORS } from "@/lib/theme";
 import * as WebBrowser from "expo-web-browser";
 
+async function handleDeepLink(url: string | null): Promise<void> {
+  if (!url) return;
+  try {
+    const parsed = Linking.parse(url);
+    // zintus://auth?token=...
+    if (parsed.hostname === "auth") {
+      const { exchangeDeepLinkToken } = await import("@/lib/cloud");
+      const token = parsed.queryParams?.["token"] as string | undefined;
+      if (token) {
+        await exchangeDeepLinkToken(token);
+      }
+    }
+  } catch {
+    // Deep-link parse errors are non-fatal
+  }
+}
+
 export default function RootLayout() {
   useEffect(() => {
     void ensureNotificationPermissions();
     // Complete any in-progress expo-web-browser auth sessions.
     void WebBrowser.warmUpAsync();
-    return () => { void WebBrowser.coolDownAsync(); };
+
+    // Cold-start deep link: app opened via URL while not running.
+    // 300ms delay ensures the component tree is ready before handling.
+    const coldStartTimer = setTimeout(() => {
+      void Linking.getInitialURL().then(handleDeepLink);
+    }, 300);
+
+    // Warm-start deep link: app already running, URL received.
+    const sub = Linking.addEventListener("url", ({ url }) => {
+      void handleDeepLink(url);
+    });
+
+    return () => {
+      clearTimeout(coldStartTimer);
+      sub.remove();
+      void WebBrowser.coolDownAsync();
+    };
   }, []);
 
   return (
