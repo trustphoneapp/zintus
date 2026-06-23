@@ -51,23 +51,34 @@ export function Hero() {
 
           {/* Subheadline */}
           <p className="hero-v2-sub">
-            Zintus routes every prompt across Cerebras, Groq, Gemini, DeepSeek and 8 more —
-            picking the fastest provider with quota left. Your keys, your device, zero markup.
+            12 free AI providers in one chat. Zintus picks the fastest one with quota
+            left — and switches automatically when one runs out. Your keys stay on
+            your device. We never see them.
           </p>
 
           {/* CTAs */}
           <div className="hero-v2-actions">
             <Link href="/chat" className="hero-v2-btn-primary">
-              Start for free
+              Try it free
               <ArrowRight size={16} />
             </Link>
             <Link href="/docs" className="hero-v2-btn-secondary">
               Read the docs
             </Link>
-            <a href="/pricing" className="hero-v2-btn-secondary">
-              View pricing
-            </a>
           </div>
+
+          {/* Reassurance line */}
+          <p style={{ marginTop: 14, fontSize: 13, color: "#6b5494" }}>
+            No credit card · No signup required · Start chatting instantly
+          </p>
+
+          {/* Pricing clarity */}
+          <p style={{ marginTop: 6, fontSize: 13, color: "#94a3b8" }}>
+            Free forever with your own API keys ·{" "}
+            <Link href="/pricing" style={{ color: "#c4b5fd", textDecoration: "none" }}>
+              Managed keys from $15/mo →
+            </Link>
+          </p>
 
           {/* Terminal */}
           <div className="hero-v2-terminal">
