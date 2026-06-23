@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
+import { Tooltip } from "@/components/ui/Tooltip";
 
 export function ThemeToggle() {
   const { resolvedTheme, setTheme } = useTheme();
@@ -16,14 +17,15 @@ export function ThemeToggle() {
   const label = isDark ? "Switch to light mode" : "Switch to dark mode";
 
   return (
-    <button
-      type="button"
-      className="theme-toggle"
-      aria-label={label}
-      title={label}
-      onClick={() => setTheme(isDark ? "light" : "dark")}
-    >
-      {isDark ? <Sun size={16} /> : <Moon size={16} />}
-    </button>
+    <Tooltip content={label} side="bottom">
+      <button
+        type="button"
+        className="theme-toggle"
+        aria-label={label}
+        onClick={() => setTheme(isDark ? "light" : "dark")}
+      >
+        {isDark ? <Sun size={16} /> : <Moon size={16} />}
+      </button>
+    </Tooltip>
   );
 }

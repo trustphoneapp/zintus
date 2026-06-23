@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { fetchGatewayHealth, GATEWAY_URL } from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
 import { ThemeToggle } from "@/components/marketing/ThemeToggle";
+import { Tooltip } from "@/components/ui/Tooltip";
 import { Sidebar } from "./Sidebar";
 import { GatewayOfflineBanner } from "./GatewayOfflineBanner";
 
@@ -54,24 +55,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-root">
       <header className="app-topbar">
-        <button
-          type="button"
-          aria-label="Toggle sidebar"
-          onClick={() => {
-            setCollapsed((value) => {
-              const next = !value;
-              localStorage.setItem("zintus:sidebar", next ? "collapsed" : "open");
-              return next;
-            });
-          }}
-          style={{ background: "none", border: "none", cursor: "pointer", padding: "4px 6px", color: "inherit", display: "flex", alignItems: "center" }}
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <line x1="3" y1="6" x2="21" y2="6" />
-            <line x1="3" y1="12" x2="21" y2="12" />
-            <line x1="3" y1="18" x2="21" y2="18" />
-          </svg>
-        </button>
+        <Tooltip content={collapsed ? "Expand sidebar" : "Collapse sidebar"} side="bottom">
+          <button
+            type="button"
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            onClick={() => {
+              setCollapsed((value) => {
+                const next = !value;
+                localStorage.setItem("zintus:sidebar", next ? "collapsed" : "open");
+                return next;
+              });
+            }}
+            style={{ background: "none", border: "none", cursor: "pointer", padding: "4px 6px", color: "inherit", display: "flex", alignItems: "center" }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+        </Tooltip>
         <span className="app-topbar-title">{TITLES[pathname] ?? "Zintus"}</span>
         <div className="app-topbar-actions">
           <ThemeToggle />

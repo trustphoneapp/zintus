@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageBubble } from "@/app/_components/MessageBubble";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
 import { Icon } from "@/app/_components/Icons";
+import { Tooltip } from "@/components/ui/Tooltip";
 import {
   createAssistantPlaceholder,
   createUserMessage,
@@ -360,23 +361,25 @@ export default function ChatPage() {
         >
           <div className="chat-composer-top">
             <ProviderPicker />
-            <button
-              type="button"
-              className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
-              onClick={() => {
-                setWebSearchEnabled((v) => {
-                  const next = !v;
-                  if (typeof localStorage !== "undefined") {
-                    localStorage.setItem("zintus:web-search", String(next));
-                  }
-                  return next;
-                });
-              }}
-              title={searchTooltip(selectedProvider)}
-            >
-              <Icon name="globe" size={13} />
-              Search
-            </button>
+            <Tooltip content={`Toggle web search — ${searchTooltip(selectedProvider)}`}>
+              <button
+                type="button"
+                className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
+                aria-pressed={webSearchEnabled}
+                onClick={() => {
+                  setWebSearchEnabled((v) => {
+                    const next = !v;
+                    if (typeof localStorage !== "undefined") {
+                      localStorage.setItem("zintus:web-search", String(next));
+                    }
+                    return next;
+                  });
+                }}
+              >
+                <Icon name="globe" size={13} />
+                Search
+              </button>
+            </Tooltip>
           </div>
           {attachments.length > 0 && (
             <div className="chat-attachments">
@@ -388,16 +391,18 @@ export default function ChatPage() {
                     <Icon name="paperclip" size={12} />
                   )}
                   <span className="chat-attachment-name">{att.name}</span>
-                  <button
-                    type="button"
-                    className="chat-attachment-remove"
-                    onClick={() =>
-                      setAttachments((prev) => prev.filter((a) => a.id !== att.id))
-                    }
-                    aria-label="Remove"
-                  >
-                    <Icon name="x" size={11} />
-                  </button>
+                  <Tooltip content={`Remove ${att.name}`}>
+                    <button
+                      type="button"
+                      className="chat-attachment-remove"
+                      onClick={() =>
+                        setAttachments((prev) => prev.filter((a) => a.id !== att.id))
+                      }
+                      aria-label={`Remove ${att.name}`}
+                    >
+                      <Icon name="x" size={11} />
+                    </button>
+                  </Tooltip>
                 </div>
               ))}
             </div>
@@ -431,36 +436,39 @@ export default function ChatPage() {
               }}
               placeholder="Ask anything — routed automatically across your free providers"
             />
-            <button
-              type="button"
-              className="chat-attach"
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach file"
-              title="Attach file"
-            >
-              <Icon name="paperclip" size={15} />
-            </button>
+            <Tooltip content="Attach file or image">
+              <button
+                type="button"
+                className="chat-attach"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach file or image"
+              >
+                <Icon name="paperclip" size={15} />
+              </button>
+            </Tooltip>
             {loading ? (
-              <button
-                type="button"
-                className="chat-send chat-stop"
-                onClick={stop}
-                aria-label="Stop generating"
-                title="Stop (Esc)"
-              >
-                <Icon name="stop" size={14} />
-              </button>
+              <Tooltip content="Stop generating (Esc)">
+                <button
+                  type="button"
+                  className="chat-send chat-stop"
+                  onClick={stop}
+                  aria-label="Stop generating"
+                >
+                  <Icon name="stop" size={14} />
+                </button>
+              </Tooltip>
             ) : (
-              <button
-                type="button"
-                className="chat-send"
-                disabled={!input.trim()}
-                onClick={() => void send()}
-                aria-label="Send"
-                title="Send (Enter)"
-              >
-                <Icon name="send" size={15} />
-              </button>
+              <Tooltip content="Send message (Enter)">
+                <button
+                  type="button"
+                  className="chat-send"
+                  disabled={!input.trim()}
+                  onClick={() => void send()}
+                  aria-label="Send message"
+                >
+                  <Icon name="send" size={15} />
+                </button>
+              </Tooltip>
             )}
           </div>
         </div>

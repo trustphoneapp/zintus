@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@radix-ui/react-tooltip": "^1.2.10",
     "@zintus/providers": "workspace:*",
     "@zintus/types": "workspace:*",
     "@zintus/ui": "workspace:*",

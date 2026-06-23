@@ -6,6 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { getGatewayUrl } from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
 import { ZintusLogo } from "@/components/ZintusLogo";
+import { Tooltip } from "@/components/ui/Tooltip";
 import { Icon } from "./Icons";
 
 const SECTIONS: Array<{
@@ -105,22 +106,26 @@ function ThreadRow({
             }
           }}
         />
-        <button
-          type="button"
-          className="sidebar-thread-action"
-          aria-label="Save name"
-          onClick={commitRename}
-        >
-          <Icon name="check" size={13} />
-        </button>
-        <button
-          type="button"
-          className="sidebar-thread-action"
-          aria-label="Cancel rename"
-          onClick={cancelRename}
-        >
-          <Icon name="x" size={13} />
-        </button>
+        <Tooltip content="Save name">
+          <button
+            type="button"
+            className="sidebar-thread-action"
+            aria-label="Save name"
+            onClick={commitRename}
+          >
+            <Icon name="check" size={13} />
+          </button>
+        </Tooltip>
+        <Tooltip content="Cancel rename">
+          <button
+            type="button"
+            className="sidebar-thread-action"
+            aria-label="Cancel rename"
+            onClick={cancelRename}
+          >
+            <Icon name="x" size={13} />
+          </button>
+        </Tooltip>
       </div>
     );
   }
@@ -131,16 +136,18 @@ function ThreadRow({
         <span className="sidebar-thread-title">{title}</span>
       </button>
       <div className="sidebar-thread-menu" ref={menuRef}>
-        <button
-          type="button"
-          className="sidebar-thread-action"
-          aria-label="Thread options"
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen((value) => !value)}
-        >
-          <Icon name="more-horizontal" size={14} />
-        </button>
+        <Tooltip content="Rename or delete">
+          <button
+            type="button"
+            className="sidebar-thread-action"
+            aria-label="Thread options"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((value) => !value)}
+          >
+            <Icon name="more-horizontal" size={14} />
+          </button>
+        </Tooltip>
         {menuOpen ? (
           <div className="sidebar-thread-dropdown" role="menu">
             <button
@@ -202,14 +209,16 @@ export function Sidebar({
           <ZintusLogo size="sm" showWordmark={false} />
         </div>
         {!collapsed ? <span className="sidebar-brand">Zintus</span> : null}
-        <button
-          type="button"
-          className="sidebar-toggle"
-          onClick={onToggle}
-          aria-label="Toggle sidebar"
-        >
-          <Icon name="menu" size={16} />
-        </button>
+        <Tooltip content={collapsed ? "Expand sidebar" : "Collapse sidebar"} side="right">
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={onToggle}
+            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            <Icon name="menu" size={16} />
+          </button>
+        </Tooltip>
       </div>
 
       <button
