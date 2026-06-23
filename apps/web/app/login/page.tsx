@@ -55,7 +55,19 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="auth-container">
+    <div className="auth-split">
+      <aside className="auth-value">
+        <h2 className="auth-value-title">Join 500+ developers routing AI for free</h2>
+        <ul className="auth-value-list">
+          <li>✅ 12 free AI providers</li>
+          <li>✅ &lt;5ms smart routing</li>
+          <li>✅ Keys never leave your device</li>
+          <li>✅ 1M+ free tokens per day</li>
+        </ul>
+        <p className="auth-value-note">Start free. No credit card ever required.</p>
+      </aside>
+
+      <div className="auth-container">
       <h1 className="auth-title">Sign in to Zintus</h1>
       {isCli && (
         <p className="auth-badge">CLI login — complete in your browser, then return to the terminal</p>
@@ -114,6 +126,10 @@ export default function LoginPage() {
         Free for personal &amp; internal use — no SaaS bill.{" "}
         <a href="/" className="auth-link">Learn more</a>
       </p>
+      <p className="auth-footer">
+        <a href="/chat" className="auth-link">Try without signing in →</a>
+      </p>
+      </div>
     </div>
   );
 }
