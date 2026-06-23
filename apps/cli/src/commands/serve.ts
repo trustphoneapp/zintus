@@ -16,7 +16,7 @@ export interface ServeOptions {
 
 async function fetchBillingStatus(
   sessionId: string,
-  relayUrl = "https://zintus-relay.yashwanth-surabhi.workers.dev",
+  relayUrl = "https://relay.zintus.ai",
 ): Promise<{
   tier: string;
   tokens_used: number;

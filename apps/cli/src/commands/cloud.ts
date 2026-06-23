@@ -4,7 +4,7 @@ import { join } from "node:path";
 import chalk from "chalk";
 
 const CLOUD_CONFIG_PATH = join(homedir(), ".zintus", "cloud.json");
-const DEFAULT_RELAY_URL = "https://zintus-relay.yashwanth-surabhi.workers.dev";
+const DEFAULT_RELAY_URL = "https://relay.zintus.ai";
 
 export interface CloudConfig {
   session_id: string;

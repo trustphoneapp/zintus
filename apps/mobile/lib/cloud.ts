@@ -9,7 +9,7 @@ const storage = createMMKV({ id: "zintus.config" });
 const SESSION_TOKEN_KEY = "zintus_cloud_cookie";
 
 const RELAY_URL = (
-  process.env.EXPO_PUBLIC_RELAY_URL ?? "https://zintus-relay.yashwanth-surabhi.workers.dev"
+  process.env.EXPO_PUBLIC_RELAY_URL ?? "https://relay.zintus.ai"
 ).replace(/\/$/, "");
 
 // ── Token storage (MMKV, never AsyncStorage) ──────────────────────────────

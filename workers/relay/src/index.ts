@@ -56,7 +56,7 @@ const ALLOWED_ORIGINS = [
   "https://www.zintus.ai",
   "https://zintus.ai",
   "https://relay.zintus.ai",
-  "https://zintus-relay.yashwanth-surabhi.workers.dev",
+  "https://relay.zintus.ai",
   "http://localhost:3000",
   "http://localhost:3001",
 ];
