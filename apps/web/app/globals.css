@@ -300,6 +300,11 @@ code {
   padding-inline: 0;
 }
 
+.sidebar-link:hover {
+  background: var(--color-elevated);
+  color: var(--color-text-sub);
+}
+
 .sidebar-link.active {
   background: var(--color-purple-faint);
   color: var(--color-purple-light);
@@ -384,6 +389,9 @@ code {
 
 .chat-empty h2 {
   margin: 0 0 8px;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .chat-empty p {
@@ -515,6 +523,11 @@ code {
   cursor: pointer;
   background: var(--color-purple-mid);
   color: white;
+  transition: background 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.chat-send:hover:not(:disabled) {
+  background: var(--color-purple);
 }
 
 .chat-send:disabled {
@@ -623,6 +636,11 @@ code {
   text-align: left;
   cursor: pointer;
   color: inherit;
+  transition: border-color 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.provider-card:hover {
+  border-color: var(--color-border-bright);
 }
 
 .provider-card.selected {
@@ -1613,6 +1631,10 @@ select:focus-visible {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
+  transition: background 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sidebar-newchat:hover {
+  background: var(--color-purple);
 }
 .app-sidebar.collapsed .sidebar-newchat {
   justify-content: center;
@@ -2921,7 +2943,7 @@ body:has(.dashboard-container) {
   gap: 5px;
   padding: 3px 8px 3px 5px;
   border-radius: 6px;
-  background: var(--color-elevated, #1a1f2a);
+  background: var(--color-elevated);
   border: 1px solid var(--color-border);
   font-size: 12px;
   color: var(--color-text-muted);

@@ -17,7 +17,9 @@ export function GatewayOfflineBanner({ url }: { url: string }) {
         fontSize: 13,
         background: "var(--color-surface)",
         color: "var(--color-text-sub)",
-        borderBottom: "1px solid var(--color-red)",
+        // Calm hairline — the red status dot carries the alert; a full-width
+        // saturated rule reads as alarm. Soften toward the neutral border.
+        borderBottom: "1px solid color-mix(in oklch, var(--color-red) 40%, var(--color-border))",
       }}
     >
       <span
