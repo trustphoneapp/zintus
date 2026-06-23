@@ -37,9 +37,32 @@ const syne = Syne({
 });
 
 export const metadata: Metadata = {
-  title: "Zintus — Use the best free AIs from one place",
+  metadataBase: new URL("https://www.zintus.ai"),
+  title: "Zintus — Free AI Router | 12 Providers, Zero Markup",
   description:
-    "Zintus connects you to 12 free AI services in one chat. Ask once and it automatically picks a fast, available model — and switches when one runs out. Free to use, bring your own API keys.",
+    "Route prompts across Cerebras, Groq, Gemini, DeepSeek and 8 more free AI providers. Smart quota routing, <5ms latency, your keys on your device. Free forever.",
+  keywords: [
+    "free AI API",
+    "AI router",
+    "BYOK",
+    "Groq free tier",
+    "Gemini free API",
+    "OpenRouter alternative",
+    "free LLM API",
+  ],
+  openGraph: {
+    title: "Zintus — Free AI Router",
+    description:
+      "12 free AI providers. Smart routing. Your keys. Zero markup.",
+    url: "https://www.zintus.ai",
+    siteName: "Zintus",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Zintus — Free AI Router",
+    description: "Route smarter. Pay nothing.",
+  },
 };
 
 export default function RootLayout({

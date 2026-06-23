@@ -28,6 +28,22 @@ const faqs = [
     q: "Is it open source?",
     a: "Zintus is source-available under the Business Source License 1.1 — you can self-host it for personal or internal use at no cost. It's not an OSI open-source license; commercial hosting or resale needs a separate license.",
   },
+  {
+    q: "How is this different from OpenRouter?",
+    a: "OpenRouter is a paid API proxy with a 5% markup on every call. Zintus is a local router — your requests go directly to each provider from your machine, with zero markup and zero middleman. We add smart quota tracking, automatic fallback, and token compression on top.",
+  },
+  {
+    q: "Can I use it with just one API key?",
+    a: "Yes. Even one Gemini key gives you 1,500 free requests/day with Google Search grounding built in. Add more keys over time — each one multiplies your free quota.",
+  },
+  {
+    q: "Is my data private?",
+    a: "Your prompts go directly from your device to the AI provider — Zintus never sees them. API keys are stored in your OS keychain or browser's encrypted storage, not on our servers.",
+  },
+  {
+    q: "Does it work offline?",
+    a: "Yes. When all cloud providers are exhausted, Zintus automatically falls back to Ollama or LM Studio running on your own machine. You always get a response.",
+  },
 ];
 
 export function FAQ() {
