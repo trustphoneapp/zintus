@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
+import { MessageSquarePlus } from "lucide-react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
 import { streamChat, type ChatMessage } from "@/lib/chat-client";
@@ -168,10 +169,40 @@ export function ChatPanel() {
             style={{ display: "flex", flexDirection: "column", gap: 12 }}
           >
             {messages.length === 0 ? (
-              <span className="text-sm" style={{ color: "var(--color-text-muted)" }}>
-                Streamed responses appear here. Cmd+Enter to send. Auto-routes via{" "}
-                {settings.routingStrategy} strategy.
-              </span>
+              <div
+                style={{
+                  margin: "auto",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 8,
+                  textAlign: "center",
+                  padding: "40px 16px",
+                  color: "var(--color-text-muted)",
+                }}
+              >
+                <div
+                  aria-hidden
+                  style={{
+                    display: "grid",
+                    placeItems: "center",
+                    width: 44,
+                    height: 44,
+                    borderRadius: 12,
+                    background: "var(--color-elevated)",
+                    border: "1px solid var(--color-border)",
+                  }}
+                >
+                  <MessageSquarePlus size={20} />
+                </div>
+                <span style={{ fontSize: 15, fontWeight: 600, letterSpacing: "-0.01em", color: "var(--color-text)" }}>
+                  Ask anything
+                </span>
+                <span style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 300 }}>
+                  Responses stream in here. Press ⌘↵ to send — auto-routes via the{" "}
+                  {settings.routingStrategy} strategy.
+                </span>
+              </div>
             ) : (
               messages.map((message) => (
                 <MessageBubble key={message.id} message={message} />
