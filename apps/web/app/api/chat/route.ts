@@ -1,5 +1,3 @@
-import type { ContextMode, ProviderId } from "@zintus/types";
-
 export const runtime = "nodejs";
 
 export async function POST() {
@@ -19,10 +17,3 @@ export async function POST() {
     },
   );
 }
-
-// Keep a typed export so this file stays a valid route module if extended later.
-export type ChatApiBody = {
-  messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
-  provider?: ProviderId;
-  mode?: ContextMode;
-};

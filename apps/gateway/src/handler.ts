@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { listProviders } from "@zintus/providers";
 import type { Engine } from "@zintus/engine";
-import type { ChatMessage, ContextMode, ProviderId } from "@zintus/types";
+import type {
+  ChatMessage,
+  ContextMode,
+  ProviderId,
+  RouteUsage,
+} from "@zintus/types";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
@@ -26,6 +31,42 @@ import {
   type ResearchDepth,
   type DeepResearchDeps,
 } from "@zintus/search";
+
+/**
+ * Paid-frontier reference pricing (Claude Sonnet 4.6, USD per million tokens),
+ * used only to quantify what a request *would* have cost on a paid API — the
+ * "saved vs Claude Sonnet" figure surfaced in the per-response transparency
+ * strip. Zintus routes to free tiers, so the user's actual cost is $0.
+ */
+const CLAUDE_SONNET_INPUT_USD_PER_MTOK = 3;
+const CLAUDE_SONNET_OUTPUT_USD_PER_MTOK = 15;
+
+function savedVsClaudeSonnet(inputTokens: number, outputTokens: number): number {
+  return (
+    (inputTokens * CLAUDE_SONNET_INPUT_USD_PER_MTOK) / 1_000_000 +
+    (outputTokens * CLAUDE_SONNET_OUTPUT_USD_PER_MTOK) / 1_000_000
+  );
+}
+
+/** Per-response metadata event appended to the SSE stream (and JSON responses). */
+function buildUsageMetadata(
+  usage: RouteUsage,
+  strategy: string | undefined,
+): Record<string, unknown> {
+  return {
+    type: "metadata",
+    provider: usage.providerId,
+    model: usage.model,
+    tokens: { input: usage.inputTokens, output: usage.outputTokens },
+    latency_ms: usage.latencyMs,
+    cost_usd: 0,
+    saved_vs_claude_sonnet: savedVsClaudeSonnet(
+      usage.inputTokens,
+      usage.outputTokens,
+    ),
+    routing_strategy: strategy ?? "auto",
+  };
+}
 
 export type LogFn = (
   level: "info" | "warn" | "error",
@@ -331,11 +372,18 @@ export function createGatewayHandler(
       }
     }
 
+    // Captured when the winning provider's stream completes — drives the
+    // per-response transparency strip (provider/model/tokens/latency/savings).
+    let capturedUsage: RouteUsage | undefined;
+
     let result: Awaited<ReturnType<Engine["routeAndStream"]>>;
     try {
       result = await withTimeout(
         engine.routeAndStream({
           signal: upstreamAbort.signal,
+          onUsage: (usage) => {
+            capturedUsage = usage;
+          },
           messages: compressedMessages.length > 0 ? compressedMessages : searchMessages,
           message:
             typeof body.message === "string"
@@ -355,6 +403,9 @@ export function createGatewayHandler(
           virtualKey: body.virtual_key ?? body.virtualKey,
           providerWeights: body.provider_weights ?? body.providerWeights,
           strategy: body.strategy,
+          blockTrainingProviders: body.block_training,
+          allowTrainingProviders: body.allow_training,
+          keys: body.keys,
           diffText: body.diff,
           temperature: body.temperature,
           maxTokens: body.max_tokens,
@@ -414,6 +465,9 @@ export function createGatewayHandler(
               finish_reason: "stop",
             },
           ],
+          ...(capturedUsage
+            ? { metadata: buildUsageMetadata(capturedUsage, body.strategy) }
+            : {}),
         },
         200,
         metaHeaders,
@@ -472,6 +526,25 @@ export function createGatewayHandler(
             };
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
+            );
+          }
+          // Emit per-response metadata (transparency strip) once the stream
+          // completes, when final token counts are known. Wrapped in a valid
+          // chat.completion.chunk envelope (object + empty choices) so generic
+          // OpenAI clients — and the SSE contract — see only chat.completion.chunk
+          // frames; the Zintus web client still discriminates it via type:"metadata".
+          if (capturedUsage) {
+            const usagePayload = {
+              ...buildUsageMetadata(capturedUsage, body.strategy),
+              object: "chat.completion.chunk",
+              model: result.model,
+              provider: result.providerId,
+              thread_id: result.threadId,
+              compile_trace_id: result.compileTraceId,
+              choices: [],
+            };
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(usagePayload)}\n\n`),
             );
           }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));

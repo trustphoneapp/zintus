@@ -8,9 +8,12 @@ import { ThemeToggle } from "@/components/marketing/ThemeToggle";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { Sidebar } from "./Sidebar";
 import { GatewayOfflineBanner } from "./GatewayOfflineBanner";
+import { CommandPalette } from "./CommandPalette";
 
 const TITLES: Record<string, string> = {
   "/chat": "Chat",
+  "/compare": "Compare",
+  "/research": "Research",
   "/terminal": "Terminal",
   "/providers": "Providers",
   "/usage": "Usage",
@@ -54,6 +57,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="app-root">
+      <CommandPalette />
       <header className="app-topbar">
         <Tooltip content={collapsed ? "Expand sidebar" : "Collapse sidebar"} side="bottom">
           <button

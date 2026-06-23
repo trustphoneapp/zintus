@@ -69,7 +69,7 @@ export function Hero() {
 
           {/* Reassurance line */}
           <p style={{ marginTop: 14, fontSize: 13, color: "var(--marketing-muted)" }}>
-            No credit card · No signup required · Start chatting instantly
+            No account required · Keys stay on your device · Start chatting instantly
           </p>
 
           {/* Pricing clarity */}

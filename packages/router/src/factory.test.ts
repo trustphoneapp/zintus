@@ -38,6 +38,8 @@ function createTestRouter(providers: Provider[]) {
     listProviders: () => providers,
     ProviderHttpError,
     estimateUsage,
+    // Match the real trainers used by the privacy filter (see data-policies.ts).
+    trainsOnUserData: (id: ProviderId) => id === "gemini" || id === "cohere",
   }));
 
   return createRouter({
@@ -84,6 +86,119 @@ describe("createRouter failover", () => {
       chunks.push(chunk);
     }
     expect(chunks.join("")).toBe("from groq");
+  });
+
+  test("blockTrainingProviders drops training providers from candidates", async () => {
+    const calls: string[] = [];
+    const router = createTestRouter([
+      stubProvider("gemini", 1, async () => {
+        calls.push("gemini");
+        return { stream: (async function* () { yield { content: "g" }; })() };
+      }),
+      stubProvider("groq", 2, async () => {
+        calls.push("groq");
+        return { stream: (async function* () { yield { content: "ok" }; })() };
+      }),
+    ]);
+
+    const result = await router.routeAndStream({
+      messages,
+      blockTrainingProviders: true,
+    });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(result.providerId).toBe("groq");
+    expect(calls).not.toContain("gemini");
+  });
+
+  test("allowTrainingProviders re-admits a blocked provider", async () => {
+    const router = createTestRouter([
+      stubProvider("gemini", 1, async () => ({
+        stream: (async function* () { yield { content: "g" }; })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({
+      messages,
+      blockTrainingProviders: true,
+      allowTrainingProviders: ["gemini"],
+    });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    // Only gemini exists; the allow-list keeps it, so the request still routes.
+    expect(result.providerId).toBe("gemini");
+  });
+
+  test("BYOK: a per-request key makes a key-less provider eligible and is used", async () => {
+    const dbPath = join(tmpdir(), `zintus-byok-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    let receivedKey: string | undefined;
+    mock.module("@zintus/providers", () => ({
+      listProviders: () => [
+        stubProvider("groq", 1, async (_messages, options) => {
+          receivedKey = options?.apiKey;
+          return { stream: (async function* () { yield { content: "ok" }; })() };
+        }),
+      ],
+      ProviderHttpError,
+      estimateUsage,
+      trainsOnUserData: () => false,
+    }));
+
+    // No server-side key configured for any provider.
+    const router = createRouter({ dbPath, getApiKey: async () => null });
+    const result = await router.routeAndStream({
+      messages,
+      keys: { groq: "byok-key" },
+    });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(result.providerId).toBe("groq");
+    expect(receivedKey).toBe("byok-key");
+  });
+
+  test("no key anywhere → request has no candidates", async () => {
+    const dbPath = join(tmpdir(), `zintus-nokey-${Date.now()}-${Math.random()}.db`);
+    dbPaths.push(dbPath);
+    mock.module("@zintus/providers", () => ({
+      listProviders: () => [
+        stubProvider("groq", 1, async () => ({
+          stream: (async function* () { yield { content: "ok" }; })(),
+        })),
+      ],
+      ProviderHttpError,
+      estimateUsage,
+      trainsOnUserData: () => false,
+    }));
+    const router = createRouter({ dbPath, getApiKey: async () => null });
+    await expect(router.routeAndStream({ messages })).rejects.toThrow(
+      /No providers available/,
+    );
+  });
+
+  test("forwards temperature and maxTokens to the provider", async () => {
+    let temperature: number | undefined;
+    let maxTokens: number | undefined;
+    const router = createTestRouter([
+      stubProvider("groq", 1, async (_messages, options) => {
+        temperature = options?.temperature;
+        maxTokens = options?.maxTokens;
+        return { stream: (async function* () { yield { content: "ok" }; })() };
+      }),
+    ]);
+    const result = await router.routeAndStream({
+      messages,
+      temperature: 0.2,
+      maxTokens: 256,
+    });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(temperature).toBe(0.2);
+    expect(maxTokens).toBe(256);
   });
 
   test("retries groq 8B model before failing over", async () => {

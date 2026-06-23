@@ -1,5 +1,5 @@
 import type { AppConfig, ContextMode, ProviderId } from "@zintus/types";
-import { fetchGatewayHealth, streamGatewayChat } from "./gateway";
+import { fetchGatewayHealth, streamGatewayChat, type ChatMeta } from "./gateway";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -12,6 +12,7 @@ export interface StreamChatResult {
   threadId?: string;
   traceId?: string;
   compileTokens?: number;
+  meta?: ChatMeta;
   source: "gateway";
 }
 
@@ -28,6 +29,7 @@ export async function streamChat(params: {
   apiKeys?: Partial<Record<ProviderId, string>>;
   settings?: AppConfig;
   webSearch?: boolean;
+  temperature?: number;
   images?: Array<{ data: string; mimeType: string; name: string }>;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
@@ -48,6 +50,10 @@ export async function streamChat(params: {
     mode: params.mode ?? params.settings?.contextMode,
     threadId: params.threadId,
     webSearch: params.webSearch,
+    blockTraining: params.settings?.blockTrainingProviders,
+    allowTraining: params.settings?.allowTrainingProviders,
+    keys: params.apiKeys,
+    temperature: params.temperature,
     images: params.images,
     signal: params.signal,
     onChunk: params.onChunk,

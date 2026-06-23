@@ -10,6 +10,57 @@ export function gatewayAuthHeaders(): Record<string, string> {
   return GATEWAY_TOKEN ? { Authorization: `Bearer ${GATEWAY_TOKEN}` } : {};
 }
 
+/** True when the gateway runs on this machine (safe to pass BYOK keys to). */
+function isLoopbackGateway(): boolean {
+  try {
+    const host = new URL(GATEWAY_URL).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read a Server-Sent-Events response, invoking `onData` with each parsed
+ * `data:` JSON payload. Hardened vs the SSE spec: handles CRLF/CR/LF line
+ * terminators, skips unparseable/partial frames, and always releases the reader
+ * lock so the socket is torn down promptly on completion, error, or abort.
+ */
+async function readSseData(
+  response: Response,
+  onData: (payload: unknown) => void,
+): Promise<void> {
+  if (!response.body) {
+    throw new Error("Gateway returned no response body");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r\n|\r|\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(payload);
+        } catch {
+          continue; // skip malformed/partial frames
+        }
+        onData(parsed);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export interface GatewayProviderStatus {
   id: ProviderId;
   available: boolean;
@@ -172,13 +223,76 @@ export async function fetchGatewayThreads(): Promise<
   }
 }
 
+export interface ResearchSource {
+  title: string;
+  url: string;
+  content: string;
+  score?: number;
+}
+
+/** Mirrors @zintus/search DeepResearchEvent (parsed from the /v1/research SSE). */
+export type ResearchEvent =
+  | { type: "queries"; queries: string[] }
+  | { type: "search_start"; index: number; query: string }
+  | { type: "search_complete"; index: number; results: ResearchSource[] }
+  | { type: "synthesizing"; sourceCount: number }
+  | { type: "answer_chunk"; text: string }
+  | { type: "done"; sources: ResearchSource[] }
+  | { type: "error"; message: string };
+
+export type ResearchDepth = "quick" | "standard" | "deep";
+
+export async function streamResearch(params: {
+  query: string;
+  depth: ResearchDepth;
+  signal?: AbortSignal;
+  onEvent: (event: ResearchEvent) => void;
+}): Promise<void> {
+  const response = await fetch(`${GATEWAY_URL}/v1/research`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+    body: JSON.stringify({ query: params.query, depth: params.depth }),
+    signal: params.signal,
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: { message?: string };
+    } | null;
+    throw new Error(body?.error?.message ?? `Research error ${response.status}`);
+  }
+  // The endpoint sends both `event: <type>` and `data: <json>`; the JSON
+  // carries its own `type`, so we only consume the data lines.
+  await readSseData(response, (payload) => {
+    params.onEvent(payload as ResearchEvent);
+  });
+}
+
 interface GatewayChunk {
   id?: string;
+  type?: string;
   provider?: ProviderId;
   model?: string;
   thread_id?: string;
   choices?: Array<{ delta?: { content?: string } }>;
   error?: { message?: string };
+  // metadata-event fields (type === "metadata")
+  tokens?: { input?: number; output?: number };
+  latency_ms?: number;
+  cost_usd?: number;
+  saved_vs_claude_sonnet?: number;
+  routing_strategy?: string;
+}
+
+/** Per-response transparency metadata (parsed from the SSE metadata event). */
+export interface ChatMeta {
+  provider: ProviderId;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  costUsd: number;
+  savedUsd: number;
+  routingStrategy: string;
 }
 
 export async function streamGatewayChat(params: {
@@ -190,6 +304,10 @@ export async function streamGatewayChat(params: {
   threadId?: string;
   webSearch?: boolean;
   searchDepth?: "basic" | "standard" | "deep";
+  blockTraining?: boolean;
+  allowTraining?: ProviderId[];
+  keys?: Partial<Record<ProviderId, string>>;
+  temperature?: number;
   images?: Array<{ data: string; mimeType: string; name: string }>;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
@@ -199,6 +317,7 @@ export async function streamGatewayChat(params: {
   threadId?: string;
   traceId?: string;
   compileTokens?: number;
+  meta?: ChatMeta;
 }> {
   const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
     method: "POST",
@@ -214,6 +333,17 @@ export async function streamGatewayChat(params: {
       search: params.webSearch
         ? { enabled: true, depth: params.searchDepth ?? "standard" }
         : undefined,
+      block_training: params.blockTraining,
+      allow_training: params.allowTraining,
+      temperature: params.temperature,
+      // BYOK keys are only ever sent to a LOCAL gateway — never across the
+      // network (would leak keys in a plaintext body to a remote host).
+      keys:
+        isLoopbackGateway() &&
+        params.keys &&
+        Object.keys(params.keys).length > 0
+          ? params.keys
+          : undefined,
       images: params.images ?? [],
     }),
     signal: params.signal,
@@ -226,17 +356,11 @@ export async function streamGatewayChat(params: {
     throw new Error(body?.error?.message ?? `Gateway error ${response.status}`);
   }
 
-  if (!response.body) {
-    throw new Error("Gateway returned no response body");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   let provider: ProviderId | undefined;
   let model = "unknown";
   let resolvedThreadId = params.threadId;
   let traceId: string | undefined;
+  let meta: ChatMeta | undefined;
   const compileTokensHeader = response.headers.get("X-Compile-Tokens");
   const compileTokens =
     compileTokensHeader && Number.isFinite(Number(compileTokensHeader))
@@ -244,42 +368,37 @@ export async function streamGatewayChat(params: {
       : undefined;
   let output = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
+  await readSseData(response, (payload) => {
+    const chunk = payload as GatewayChunk;
+    if (chunk.error?.message) {
+      throw new Error(chunk.error.message);
     }
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) {
-        continue;
-      }
-      const payload = line.slice(6).trim();
-      if (payload === "[DONE]") {
-        continue;
-      }
-
-      const chunk = JSON.parse(payload) as GatewayChunk;
-      if (chunk.error?.message) {
-        throw new Error(chunk.error.message);
-      }
-
-      traceId = chunk.id ?? traceId;
-      provider = chunk.provider ?? provider;
-      model = chunk.model ?? model;
-      resolvedThreadId = chunk.thread_id ?? resolvedThreadId;
-
-      const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta) {
-        output += delta;
-        params.onChunk(output);
-      }
+    if (chunk.type === "metadata" && chunk.provider) {
+      meta = {
+        provider: chunk.provider,
+        model: chunk.model ?? model,
+        inputTokens: chunk.tokens?.input ?? 0,
+        outputTokens: chunk.tokens?.output ?? 0,
+        latencyMs: chunk.latency_ms ?? 0,
+        costUsd: chunk.cost_usd ?? 0,
+        savedUsd: chunk.saved_vs_claude_sonnet ?? 0,
+        routingStrategy: chunk.routing_strategy ?? "auto",
+      };
+      return;
     }
-  }
+
+    traceId = chunk.id ?? traceId;
+    provider = chunk.provider ?? provider;
+    model = chunk.model ?? model;
+    resolvedThreadId = chunk.thread_id ?? resolvedThreadId;
+
+    const delta = chunk.choices?.[0]?.delta?.content;
+    if (delta) {
+      output += delta;
+      params.onChunk(output);
+    }
+  });
 
   if (!provider) {
     throw new Error("Gateway stream ended without provider metadata");
@@ -291,5 +410,6 @@ export async function streamGatewayChat(params: {
     threadId: resolvedThreadId,
     traceId,
     compileTokens,
+    meta,
   };
 }

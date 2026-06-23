@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { ProviderId } from "@zintus/types";
-import type { GatewayProviderStatus, GatewaySavings } from "./gateway";
+import type { ChatMeta, GatewayProviderStatus, GatewaySavings } from "./gateway";
 
 export interface UiMessage {
   id: string;
@@ -10,6 +10,8 @@ export interface UiMessage {
   providerId?: ProviderId;
   model?: string;
   compileTokens?: number;
+  /** Per-response transparency metadata (tokens, latency, savings). */
+  meta?: ChatMeta;
   time: string;
 }
 
@@ -25,6 +27,8 @@ export interface Thread {
   activeProvider: ProviderId | null;
   /** Gateway-assigned thread id used for server-side context continuity. */
   gatewayThreadId?: string;
+  /** Incognito threads are never persisted to disk (see persist partialize). */
+  incognito?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -43,7 +47,7 @@ interface AppState {
   terminalLines: TerminalLine[];
   appendMessage: (message: UiMessage) => void;
   updateMessage: (id: string, content: string) => void;
-  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens">>) => void;
+  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens" | "meta">>) => void;
   setThreadId: (threadId?: string) => void;
   setActiveProvider: (providerId: ProviderId | null) => void;
   setSelectedProvider: (providerId: ProviderId | null) => void;
@@ -55,7 +59,7 @@ interface AppState {
   pushTerminalLine: (line: TerminalLine) => void;
   loadLastTrace: () => Promise<void>;
   clearTerminal: () => void;
-  newChat: () => void;
+  newChat: (incognito?: boolean) => void;
   dropLastAssistant: () => void;
   switchThread: (id: string) => void;
   renameThread: (id: string, title: string) => void;
@@ -73,14 +77,15 @@ function makeThreadId(): string {
   return `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function createThread(): Thread {
+function createThread(incognito = false): Thread {
   const now = Date.now();
   return {
     id: makeThreadId(),
-    title: "New chat",
+    title: incognito ? "Incognito chat" : "New chat",
     messages: [],
     activeProvider: null,
     gatewayThreadId: undefined,
+    incognito,
     createdAt: now,
     updatedAt: now,
   };
@@ -228,8 +233,8 @@ export const useAppStore = create<AppState>()(
         set({
           terminalLines: [{ text: "Zintus Terminal — cleared", tone: "muted" }],
         }),
-      newChat: () => {
-        const thread = createThread();
+      newChat: (incognito = false) => {
+        const thread = createThread(incognito);
         set((state) => ({
           threads: [thread, ...state.threads],
           activeThreadId: thread.id,
@@ -308,17 +313,22 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: "zintus-chat-threads",
-      partialize: (state) => ({
-        threads: state.threads,
-        activeThreadId: state.activeThreadId,
-      }),
+      // Incognito threads never touch disk. If the active thread is incognito,
+      // fall back to the newest persisted thread so reload lands somewhere valid.
+      partialize: (state) => {
+        const threads = state.threads.filter((t) => !t.incognito);
+        const activeThreadId = threads.some((t) => t.id === state.activeThreadId)
+          ? state.activeThreadId
+          : (threads[0]?.id ?? state.activeThreadId);
+        return { threads, activeThreadId };
+      },
     },
   ),
 );
 
 export function createUserMessage(content: string): UiMessage {
   return {
-    id: `${Date.now()}-user`,
+    id: crypto.randomUUID(),
     role: "user",
     content,
     time: nowLabel(),
@@ -327,7 +337,7 @@ export function createUserMessage(content: string): UiMessage {
 
 export function createAssistantPlaceholder(): UiMessage {
   return {
-    id: `${Date.now()}-assistant`,
+    id: crypto.randomUUID(),
     role: "assistant",
     content: "",
     time: nowLabel(),

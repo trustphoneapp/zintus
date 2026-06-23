@@ -1,14 +1,42 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { ProviderId } from "@zintus/types";
+import type { ProviderId, RoutingStrategy } from "@zintus/types";
 import { PROVIDERS } from "@/lib/providers";
 import { useAppStore } from "@/lib/app-store";
 import { getRemainingQuotaPercent } from "@/lib/quota";
-import { useProviderStatusStore } from "@/lib/store";
+import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
 import { Icon } from "./Icons";
 
 type ProviderStatus = "active" | "idle" | "disconnected" | "local";
+
+/**
+ * Auto-routing modes, surfaced first in the picker. Each maps to a real router
+ * strategy that is already wired end-to-end (settings.routingStrategy →
+ * gateway body.strategy). Selecting one clears any specific-provider override.
+ */
+const STRATEGY_OPTIONS: Array<{
+  strategy: RoutingStrategy;
+  icon: string;
+  label: string;
+}> = [
+  { strategy: "fastest", icon: "⚡", label: "Auto (fastest)" },
+  { strategy: "economy", icon: "💰", label: "Economy (cheapest)" },
+  { strategy: "capability", icon: "🧠", label: "Quality (best model)" },
+];
+
+function strategyLabel(strategy: RoutingStrategy): string {
+  return (
+    STRATEGY_OPTIONS.find((option) => option.strategy === strategy)?.label ??
+    "Auto"
+  );
+}
+
+function strategyIcon(strategy: RoutingStrategy): string {
+  return (
+    STRATEGY_OPTIONS.find((option) => option.strategy === strategy)?.icon ?? "⚡"
+  );
+}
 
 function resolveStatus(
   id: ProviderId,
@@ -43,12 +71,14 @@ export function ProviderPicker() {
     setSelectedProvider,
   } = useAppStore();
   const { providers: vaultProviders, unlock } = useProviderStatusStore();
+  const { settings, hydrate, update } = useSettingsStore();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    hydrate();
     void unlock();
-  }, [unlock]);
+  }, [hydrate, unlock]);
 
   useEffect(() => {
     if (!open) {
@@ -111,25 +141,38 @@ export function ProviderPicker() {
             style={{ background: selected.color }}
           />
         ) : (
-          <Icon name="zap" size={13} />
+          <span aria-hidden>{strategyIcon(settings.routingStrategy)}</span>
         )}
-        <span>{selected ? selected.name : "Auto-route"}</span>
+        <span>
+          {selected ? selected.name : strategyLabel(settings.routingStrategy)}
+        </span>
         <Icon name="chevron-down" size={12} />
       </button>
 
       {open ? (
         <div className="composer-picker-menu" role="listbox">
-          <button
-            type="button"
-            className={`composer-picker-option${selectedProvider == null ? " active" : ""}`}
-            onClick={() => {
-              setSelectedProvider(null);
-              setOpen(false);
-            }}
-          >
-            <Icon name="zap" size={13} />
-            <span>Auto-route</span>
-          </button>
+          <div className="composer-picker-section">Routing</div>
+          {STRATEGY_OPTIONS.map((option) => (
+            <button
+              key={option.strategy}
+              type="button"
+              className={`composer-picker-option${
+                selectedProvider == null &&
+                settings.routingStrategy === option.strategy
+                  ? " active"
+                  : ""
+              }`}
+              onClick={() => {
+                update({ routingStrategy: option.strategy });
+                setSelectedProvider(null);
+                setOpen(false);
+              }}
+            >
+              <span aria-hidden>{option.icon}</span>
+              <span>{option.label}</span>
+            </button>
+          ))}
+          <div className="composer-picker-section">Providers</div>
           {rows.map((row) => (
             <button
               key={row.id}

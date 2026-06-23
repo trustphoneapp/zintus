@@ -11,6 +11,7 @@ const LINKS = {
   ],
   Developers: [
     { label: "Docs", href: "/docs" },
+    { label: "Developers", href: "/developers" },
     { label: "GitHub", href: "https://github.com/trustphoneapp/zintus" },
     { label: "CLI Install", href: "#install" },
     { label: "API Reference", href: "/docs" },

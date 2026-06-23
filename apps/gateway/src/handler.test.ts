@@ -233,6 +233,65 @@ describe("gateway handler", () => {
     expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
+  test("emits a per-response metadata event with savings before [DONE]", async () => {
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-1",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "Hi";
+            // The winning provider's usage fires when its stream completes.
+            request.onUsage?.({
+              providerId: "groq",
+              model: "llama-3.3-70b-versatile",
+              inputTokens: 100,
+              outputTokens: 200,
+              latencyMs: 42,
+            });
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hi" }],
+          strategy: "fastest",
+        }),
+      }),
+    );
+    const text = await res.text();
+    const metaLine = text
+      .split("\n")
+      .find((line) => line.includes('"type":"metadata"'));
+    expect(metaLine).toBeDefined();
+    const meta = JSON.parse(metaLine!.replace("data: ", "")) as {
+      provider: string;
+      model: string;
+      tokens: { input: number; output: number };
+      cost_usd: number;
+      saved_vs_claude_sonnet: number;
+      routing_strategy: string;
+    };
+    expect(meta.provider).toBe("groq");
+    expect(meta.tokens.output).toBe(200);
+    expect(meta.cost_usd).toBe(0);
+    expect(meta.routing_strategy).toBe("fastest");
+    // 100 * $3/MTok + 200 * $15/MTok = 0.0003 + 0.003 = 0.0033
+    expect(meta.saved_vs_claude_sonnet).toBeCloseTo(0.0033, 6);
+    // Metadata must precede the stream terminator.
+    expect(text.indexOf('"type":"metadata"')).toBeLessThan(
+      text.indexOf("[DONE]"),
+    );
+  });
+
   test("returns a single JSON completion when stream:false", async () => {
     const handler = makeHandler();
     const res = await handler(

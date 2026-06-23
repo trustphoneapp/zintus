@@ -78,6 +78,13 @@ export const ChatCompletionRequestSchema = z.object({
   temperature: z.number().optional(),
   max_tokens: z.number().int().positive().optional(),
   diff: z.string().optional(),
+  // Privacy mode: drop providers that may train on user data, with an allow-list
+  // of providers the user explicitly permits even so.
+  block_training: z.boolean().optional(),
+  allow_training: z.array(ProviderIdSchema).optional(),
+  // Per-request BYOK keys (provider -> key) for the LOCAL gateway only. Never
+  // logged, never persisted, never forwarded to the relay.
+  keys: z.record(ProviderIdSchema, z.string()).optional(),
   search: SearchOptionsSchema.optional(),
 });
 

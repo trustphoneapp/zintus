@@ -11,12 +11,14 @@ import { Icon } from "./Icons";
 
 const SECTIONS: Array<{
   label: string;
-  items: Array<{ href: string; icon: "chat" | "layers" | "activity" | "terminal" | "settings"; label: string }>;
+  items: Array<{ href: string; icon: "chat" | "compare" | "globe" | "layers" | "activity" | "terminal" | "settings"; label: string }>;
 }> = [
   {
     label: "Main",
     items: [
       { href: "/chat", icon: "chat", label: "Chat" },
+      { href: "/compare", icon: "compare", label: "Compare" },
+      { href: "/research", icon: "globe", label: "Research" },
       { href: "/providers", icon: "layers", label: "Providers" },
       { href: "/usage", icon: "activity", label: "Usage" },
     ],
@@ -198,9 +200,19 @@ export function Sidebar({
   const threads = useAppStore((state) => state.threads);
   const activeThreadId = useAppStore((state) => state.activeThreadId);
 
+  const [search, setSearch] = useState("");
   const sortedThreads = [...threads]
-    .filter((t) => t.messages.length > 0)
+    .filter((t) => t.messages.length > 0 && !t.incognito)
     .sort((a, b) => b.updatedAt - a.updatedAt);
+
+  const query = search.trim().toLowerCase();
+  const visibleThreads = query
+    ? sortedThreads.filter(
+        (t) =>
+          t.title.toLowerCase().includes(query) ||
+          t.messages.some((m) => m.content.toLowerCase().includes(query)),
+      )
+    : sortedThreads;
 
   return (
     <aside className={`app-sidebar${collapsed ? " collapsed" : ""}`}>
@@ -263,8 +275,18 @@ export function Sidebar({
         {!collapsed && sortedThreads.length > 0 ? (
           <div className="sidebar-section">
             <span className="sidebar-section-label">Recents</span>
+            <input
+              type="search"
+              className="sidebar-search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search conversations…"
+            />
             <div className="sidebar-threads">
-              {sortedThreads.map((thread) => (
+              {visibleThreads.length === 0 ? (
+                <p className="sidebar-search-empty">No matches</p>
+              ) : null}
+              {visibleThreads.map((thread) => (
                 <ThreadRow
                   key={thread.id}
                   id={thread.id}

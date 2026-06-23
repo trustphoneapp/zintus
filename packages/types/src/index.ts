@@ -20,6 +20,7 @@ export type {
   RouteRequest,
   RouteResponse,
   RouteStreamResult,
+  RouteUsage,
 } from "./route.js";
 export type {
   CacheHints,

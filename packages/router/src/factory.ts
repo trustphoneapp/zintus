@@ -14,6 +14,7 @@ import {
   estimateUsage,
   listProviders,
   ProviderHttpError,
+  trainsOnUserData,
 } from "@zintus/providers";
 import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
@@ -186,6 +187,33 @@ export function createRouter(config: RouterConfig = {}): Router {
     );
   }
 
+  // BYOK: a per-request key (provider -> key) takes precedence over the
+  // gateway's configured key for this request only. Local providers need none.
+  // Memoized per request so eligibility checks and the winning stream call
+  // don't hit the OS keychain twice for the same provider.
+  const keyResolutionCache = new WeakMap<
+    RouteRequest,
+    Map<ProviderId, Promise<string | null>>
+  >();
+  function keyFor(
+    providerId: ProviderId,
+    request: RouteRequest,
+  ): Promise<string | null> {
+    let cache = keyResolutionCache.get(request);
+    if (!cache) {
+      cache = new Map();
+      keyResolutionCache.set(request, cache);
+    }
+    let pending = cache.get(providerId);
+    if (!pending) {
+      pending = Promise.resolve(
+        request.keys?.[providerId] ?? resolveKey(providerId),
+      );
+      cache.set(providerId, pending);
+    }
+    return pending;
+  }
+
   async function buildStatus(): Promise<ProviderStatus[]> {
     const now = Date.now();
     const allProviders = listProviders();
@@ -230,11 +258,12 @@ export function createRouter(config: RouterConfig = {}): Router {
   async function isEligible(
     provider: Provider,
     now: number,
+    request: RouteRequest,
   ): Promise<boolean> {
     const hasKey =
       provider.id === "ollama" || provider.id === "lmstudio"
         ? true
-        : Boolean(await resolveKey(provider.id));
+        : Boolean(await keyFor(provider.id, request));
     if (!hasKey) {
       return false;
     }
@@ -286,7 +315,7 @@ export function createRouter(config: RouterConfig = {}): Router {
       const candidates: Provider[] = [];
       for (const id of groupOrder) {
         const provider = byId.get(id);
-        if (provider && (await isEligible(provider, now))) {
+        if (provider && (await isEligible(provider, now, request))) {
           candidates.push(provider);
         }
       }
@@ -298,7 +327,7 @@ export function createRouter(config: RouterConfig = {}): Router {
     if (effStrategy === "weighted" || weightMap) {
       const eligible: Provider[] = [];
       for (const provider of allProviders) {
-        if (await isEligible(provider, now)) {
+        if (await isEligible(provider, now, request)) {
           eligible.push(provider);
         }
       }
@@ -329,14 +358,14 @@ export function createRouter(config: RouterConfig = {}): Router {
 
     if (config.defaultProvider) {
       const preferred = ordered.find((p) => p.id === config.defaultProvider);
-      if (preferred && (await isEligible(preferred, now))) {
+      if (preferred && (await isEligible(preferred, now, request))) {
         return [preferred];
       }
     }
 
     const candidates = [];
     for (const provider of ordered) {
-      if (await isEligible(provider, now)) {
+      if (await isEligible(provider, now, request)) {
         candidates.push(provider);
       }
     }
@@ -425,7 +454,20 @@ export function createRouter(config: RouterConfig = {}): Router {
       const groupActive = Boolean(groupOrder?.length);
       const requestedModel = groupActive ? undefined : request.model;
 
-      const candidates = await selectCandidates(request, groupOrder);
+      let candidates = await selectCandidates(request, groupOrder);
+
+      // Privacy mode: drop providers that may train on user data, keeping any the
+      // user explicitly allowed. Skip the filter if it would strand the request.
+      if (request.blockTrainingProviders) {
+        const allowed = new Set(request.allowTrainingProviders ?? []);
+        const filtered = candidates.filter(
+          (candidate) =>
+            allowed.has(candidate.id) || !trainsOnUserData(candidate.id),
+        );
+        if (filtered.length > 0) {
+          candidates = filtered;
+        }
+      }
 
       if (candidates.length === 0) {
         throw new Error(
@@ -478,7 +520,10 @@ export function createRouter(config: RouterConfig = {}): Router {
           halfOpenProbes.delete(provider.id);
         };
 
-        const apiKey = (await resolveKey(provider.id)) ?? undefined;
+        // keyFor() prefers per-request BYOK keys (request.keys) then falls back to
+        // the gateway's configured resolveKey — merges the per-request-keys feature
+        // with the quota-reservation admission gate above.
+        const apiKey = (await keyFor(provider.id, request)) ?? undefined;
         const modelsToTry =
           provider.id === "groq"
             ? [requestedModel ?? GROQ_MODEL_70B, GROQ_MODEL_8B]
@@ -498,6 +543,8 @@ export function createRouter(config: RouterConfig = {}): Router {
               model,
               apiKey,
               webSearch: request.webSearch,
+              temperature: request.temperature,
+              maxTokens: request.maxTokens,
               cacheHints: request.cachedContentHandle
                 ? { cachedContentHandle: request.cachedContentHandle }
                 : undefined,
@@ -557,17 +604,25 @@ export function createRouter(config: RouterConfig = {}): Router {
                 // local estimate only when the provider did not report any.
                 const usage =
                   reportedUsage ?? estimateUsage(request.messages, outputText);
+                const completionLatencyMs = Date.now() - attemptStarted;
                 ledger.recordUsage(provider.id, {
                   status: "success",
                   tokensIn: usage.inputTokens,
                   tokensOut: usage.outputTokens,
-                  latencyMs: Date.now() - attemptStarted,
+                  latencyMs: completionLatencyMs,
                   model,
                 });
                 if (vKey) {
                   ledger.recordVirtualKeyUsage(vKey, usage.inputTokens, usage.outputTokens);
                 }
                 ledger.clearCooldown(provider.id);
+                request.onUsage?.({
+                  providerId: provider.id,
+                  model,
+                  inputTokens: usage.inputTokens,
+                  outputTokens: usage.outputTokens,
+                  latencyMs: completionLatencyMs,
+                });
               } catch (streamError: unknown) {
                 const usage =
                   reportedUsage ?? estimateUsage(request.messages, outputText);
