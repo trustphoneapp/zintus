@@ -17,6 +17,9 @@ describe("llm-memory", () => {
         getSavings() {
           return { byProvider: {}, total: 0 };
         },
+        getProviderQuotaRemaining() {
+          return 1.0;
+        },
         updatePolicy() {},
         async probeProviders() {
           return [];

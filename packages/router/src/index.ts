@@ -1,6 +1,8 @@
 export type { Router, RouterConfig, RouteAttemptEvent } from "./factory.js";
 export { createRouter } from "./factory.js";
 export { QuotaLedger } from "./quota-ledger.js";
+export { InFlightReservations } from "./inflight.js";
+export type { InFlightCounts, CommittedUsage } from "./inflight.js";
 export { providers, usageLog } from "./schema.js";
 export {
   PROVIDER_LIMITS,

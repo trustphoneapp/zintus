@@ -17,6 +17,7 @@ import {
 } from "@zintus/providers";
 import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
+import { InFlightReservations } from "./inflight.js";
 import { sortProviders } from "./priority.js";
 import { QuotaLedger } from "./quota-ledger.js";
 import {
@@ -79,6 +80,10 @@ export interface Router {
   /** Background health probe: validate each keyed provider's key and record a
    *  failure (feeding health-aware routing) when a provider is unreachable. */
   probeProviders(): Promise<Array<{ providerId: ProviderId; ok: boolean }>>;
+  /** Fraction of quota remaining (0..1) for a provider, accounting for both
+   *  completed usage and currently in-flight requests. Feeds Tokzen's adaptive
+   *  compression dial (replaces the previously-hardcoded 1.0). */
+  getProviderQuotaRemaining(provider: ProviderId): number;
 }
 
 const DEFAULT_DB_PATH = join(homedir(), ".zintus", "quota.db");
@@ -126,6 +131,52 @@ export function createRouter(config: RouterConfig = {}): Router {
 
   const cooldownRetries = new Map<ProviderId, number>();
   const stickySessions = new Map<string, ProviderId>();
+
+  // In-flight reservation tracker — closes the concurrent-overshoot race: the
+  // ledger only records usage after a response drains, so a burst of concurrent
+  // requests would otherwise all pass the pre-dispatch check before any of them
+  // debits the counters. See inflight.ts.
+  const reservations = new InFlightReservations();
+  const OUTPUT_RESERVE_TOKENS = 1024;
+
+  /** Estimated tokens a request will consume (input estimate + output budget). */
+  function estimateReserveTokens(request: RouteRequest): number {
+    const { inputTokens } = estimateUsage(request.messages, "");
+    const output =
+      request.maxTokens && request.maxTokens > 0
+        ? request.maxTokens
+        : OUTPUT_RESERVE_TOKENS;
+    return inputTokens + output;
+  }
+
+  /**
+   * Synchronous admit-or-reject for one dispatch against a provider, gating on
+   * completed (daily + rolling 60s) usage plus currently in-flight reservations.
+   * No `await` inside, so the read-decide-reserve is atomic on the event loop.
+   */
+  function tryReserveProvider(
+    id: ProviderId,
+    estTokens: number,
+    now: number,
+  ): boolean {
+    const limits = ledger.getLimits(id);
+    const row = ledger.maybeResetDailyCounters(id, now);
+    const recent =
+      limits.requestsPerMinute != null || limits.tokensPerMinute != null
+        ? ledger.countRecentUsage(id, 60_000, now)
+        : { requests: 0, tokens: 0 };
+    return reservations.tryReserve(
+      id,
+      estTokens,
+      {
+        dailyRequests: row.requestsToday,
+        dailyTokens: row.tokensToday,
+        minuteRequests: recent.requests,
+        minuteTokens: recent.tokens,
+      },
+      limits,
+    );
+  }
 
   async function buildStatus(): Promise<ProviderStatus[]> {
     const now = Date.now();
@@ -294,6 +345,31 @@ export function createRouter(config: RouterConfig = {}): Router {
       return ledger.savingsUsd();
     },
 
+    getProviderQuotaRemaining(provider) {
+      const now = Date.now();
+      // Daily budget remaining (0..1), the tightest of request/token ratios.
+      const base = ledger.remainingRatio(provider, now);
+      // Also factor rolling-minute pressure INCLUDING in-flight reservations, so
+      // the signal drops during a burst before the daily counter would notice.
+      const limits = ledger.getLimits(provider);
+      const inflight = reservations.current(provider);
+      let minuteRatio = 1;
+      if (limits.requestsPerMinute != null) {
+        const recent = ledger.countRecentUsage(provider, 60_000, now);
+        const used = recent.requests + inflight.requests;
+        minuteRatio = Math.max(0, 1 - used / limits.requestsPerMinute);
+      }
+      if (limits.tokensPerMinute != null) {
+        const recent = ledger.countRecentUsage(provider, 60_000, now);
+        const used = recent.tokens + inflight.tokens;
+        minuteRatio = Math.min(
+          minuteRatio,
+          Math.max(0, 1 - used / limits.tokensPerMinute),
+        );
+      }
+      return Math.max(0, Math.min(base, minuteRatio));
+    },
+
     updatePolicy(policy) {
       applyPolicy(policy);
     },
@@ -360,7 +436,23 @@ export function createRouter(config: RouterConfig = {}): Router {
           ]
         : candidates;
 
+      const estTokens = estimateReserveTokens(request);
+
       for (const provider of prioritizedCandidates) {
+        // Reserve quota synchronously BEFORE dispatch. Under a concurrent burst
+        // this is the real admission gate: a saturated provider is skipped here
+        // instead of overshooting its rate limit. Released on every terminal
+        // path below (success drain, model/provider failover, throw, abort).
+        if (!tryReserveProvider(provider.id, estTokens, Date.now())) {
+          continue;
+        }
+        let reservationReleased = false;
+        const releaseReservation = (): void => {
+          if (reservationReleased) return;
+          reservationReleased = true;
+          reservations.release(provider.id, estTokens);
+        };
+
         const apiKey = (await resolveKey(provider.id)) ?? undefined;
         const modelsToTry =
           provider.id === "groq"
@@ -466,6 +558,11 @@ export function createRouter(config: RouterConfig = {}): Router {
                   ledger.recordVirtualKeyUsage(vKey, usage.inputTokens, usage.outputTokens);
                 }
                 throw streamError;
+              } finally {
+                // Release the reservation once the stream is fully drained, errors,
+                // or is abandoned (the consumer's `.return()` on early break runs
+                // this finally) — so a dropped response can never leak a slot.
+                releaseReservation();
               }
             };
 
@@ -532,10 +629,15 @@ export function createRouter(config: RouterConfig = {}): Router {
             }
 
             // More models left to try for this same provider — do that before
-            // giving up on the provider entirely.
+            // giving up on the provider entirely. The reservation is intentionally
+            // kept: it's the same in-flight request continuing to the next model.
             if (shouldFailover && !isLastModel) {
               continue;
             }
+
+            // Giving up on this provider (failover or hard error) — the request
+            // is no longer in flight against it, so release before moving on.
+            releaseReservation();
 
             if (shouldFailover) {
               const retries = (cooldownRetries.get(provider.id) ?? 0) + 1;
