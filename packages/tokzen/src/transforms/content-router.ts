@@ -89,3 +89,78 @@ export async function routeAndCompress(
       return noop();
   }
 }
+
+/** Min tokens before a user/tool message's structured content is compressed.
+ *  Higher than MIN_COMPRESS_TOKENS so short conversational messages stay verbatim. */
+export const USER_CONTENT_MIN_TOKENS = 500;
+
+/** Structured content worth compressing inside user/tool messages. Prose is
+ *  excluded on purpose — a user's actual question must never be summarized away. */
+const USER_COMPRESSIBLE: ReadonlySet<ContentType> = new Set([
+  "json",
+  "code",
+  "log",
+  "diff",
+]);
+
+/**
+ * Compress large STRUCTURED content a user (or tool) pasted, while preserving the
+ * surrounding conversational text. Compresses each fenced ```block``` over the
+ * threshold; with no fences, compresses the whole message only when it is itself
+ * large AND structured (code/json/log/diff). Returns the original otherwise.
+ */
+export async function compressUserContent(
+  content: string,
+  ctx: CompressContext,
+  minTokens = USER_CONTENT_MIN_TOKENS,
+): Promise<CompressResult> {
+  const totalTokens = countTokensFast(content);
+  const noop: CompressResult = {
+    content,
+    originalTokens: totalTokens,
+    compressedTokens: totalTokens,
+    ratio: 1,
+    transforms: [],
+    ccrHashes: [],
+    cacheHit: false,
+  };
+
+  // 1) Fenced blocks: compress each large block, keep surrounding prose verbatim.
+  const blocks = [...content.matchAll(/```([\w.+-]*)\n([\s\S]*?)```/g)];
+  if (blocks.length > 0) {
+    const sub: CompressResult[] = [];
+    let out = "";
+    let last = 0;
+    for (const m of blocks) {
+      const idx = m.index ?? 0;
+      out += content.slice(last, idx);
+      const body = m[2] ?? "";
+      if (countTokensFast(body) >= minTokens) {
+        const r = await routeAndCompress(body, ctx);
+        sub.push(r);
+        out += "```" + (m[1] ?? "") + "\n" + r.content + "\n```";
+      } else {
+        out += m[0];
+      }
+      last = idx + m[0].length;
+    }
+    out += content.slice(last);
+    if (sub.length === 0) return noop;
+    const compressedTokens = countTokensFast(out);
+    return {
+      content: out,
+      originalTokens: totalTokens,
+      compressedTokens,
+      ratio: totalTokens === 0 ? 1 : compressedTokens / totalTokens,
+      transforms: [...new Set(sub.flatMap((r) => r.transforms))],
+      ccrHashes: [...new Set(sub.flatMap((r) => r.ccrHashes))],
+      cacheHit: false,
+    };
+  }
+
+  // 2) No fences: compress the whole message only if large AND structured.
+  if (totalTokens >= minTokens && USER_COMPRESSIBLE.has(detectContentType(content))) {
+    return routeAndCompress(content, ctx);
+  }
+  return noop;
+}

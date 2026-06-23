@@ -9,8 +9,8 @@ const CTX: CompressContext = {
 };
 
 describe("Pipeline", () => {
-  it("never modifies user messages", async () => {
-    const userContent = `{"key": "value", "data": ${JSON.stringify(Array.from({ length: 30 }, (_, i) => ({ id: i, name: `item-${i}`, value: Math.random() })))}}`;
+  it("leaves short conversational user messages unchanged", async () => {
+    const userContent = "Can you explain what a closure is in JavaScript?";
     const messages: Message[] = [
       { role: "system", content: "You are helpful." },
       { role: "user", content: userContent },
@@ -18,6 +18,35 @@ describe("Pipeline", () => {
     const result = await compress({ messages }, CTX);
     const userMsg = result.messages.find((m) => m.role === "user");
     expect(userMsg?.content).toBe(userContent);
+  });
+
+  it("compresses large structured content pasted in a user message", async () => {
+    // ~240 lines of TypeScript (well over the 500-token user threshold).
+    const tsFile = Array.from(
+      { length: 40 },
+      (_, i) => `export function handler${i}(input: Request${i}): Response${i} {
+  const parsed = parseRequest(input);
+  if (parsed.error) {
+    logger.error("handler${i} failed", parsed.error);
+    throw new HandlerError("bad input for handler${i}", parsed.error);
+  }
+  const records = parsed.data.map((row) => normalizeRow(row, ${i}));
+  const filtered = records.filter((r) => r.score > threshold${i});
+  return { status: 200, body: filtered, handledBy: "handler${i}" };
+}`,
+    ).join("\n\n");
+
+    const messages: Message[] = [
+      { role: "user", content: `Please review this file:\n\n${tsFile}` },
+    ];
+    const result = await compress({ messages }, CTX);
+    const userMsg = result.messages.find((m) => m.role === "user");
+
+    // The user message must be compressed (shorter) and the prose preface kept.
+    expect(userMsg).toBeDefined();
+    expect(userMsg!.content.length).toBeLessThan(tsFile.length);
+    expect(userMsg!.content).toContain("Please review this file");
+    expect(result.totalResult.ratio).toBeLessThan(1);
   });
 
   it("applies compression to assistant messages", async () => {

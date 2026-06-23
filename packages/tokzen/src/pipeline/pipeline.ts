@@ -1,7 +1,11 @@
 // MIT License — see LICENSE file
 import { countTokensFast } from "../tokenizer/count.js";
 import { alignCache } from "../transforms/cache-aligner.js";
-import { routeAndCompress } from "../transforms/content-router.js";
+import {
+  routeAndCompress,
+  compressUserContent,
+  USER_CONTENT_MIN_TOKENS,
+} from "../transforms/content-router.js";
 import { manageContext } from "../transforms/context-manager.js";
 import { injectRetrieveTool, type ToolDefinition } from "../ccr/tool.js";
 import type { CompressContext, CompressResult, Message } from "./types.js";
@@ -41,7 +45,8 @@ const MIN_COMPRESS_TOKENS = 200;
  * CacheAligner → ContentRouter → ContextManager → CacheHints
  *
  * Rules enforced:
- * - NEVER compress user messages
+ * - User/tool messages: compress only large STRUCTURED pasted content
+ *   (code/json/log/diff ≥ 500 tokens); never short conversational text
  * - NEVER compress content under 200 tokens
  * - NEVER throw — returns original on any error
  * - Only apply CCR to messages older than the previous 2 turns
@@ -72,8 +77,21 @@ export async function compress(
     // NEVER compress user messages
     const finalMessages: Message[] = [];
     for (const msg of processedMessages) {
+      // User/tool messages: compress only large STRUCTURED pasted content
+      // (code/json/log/diff ≥ USER_CONTENT_MIN_TOKENS), preserving the user's
+      // conversational text. Short messages pass through untouched.
       if (msg.role === "user" || msg.role === "tool") {
-        finalMessages.push(msg);
+        if (countTokensFast(msg.content) < USER_CONTENT_MIN_TOKENS) {
+          finalMessages.push(msg);
+          continue;
+        }
+        try {
+          const userResult = await compressUserContent(msg.content, ctx);
+          finalMessages.push({ ...msg, content: userResult.content });
+          if (userResult.transforms.length > 0) results.push(userResult);
+        } catch {
+          finalMessages.push(msg);
+        }
         continue;
       }
       if (msg.role === "system" && msg === processedMessages[0]) {
