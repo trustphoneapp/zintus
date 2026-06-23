@@ -63,7 +63,13 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
-    fetch: createGatewayHandler({ engine, config, log }),
+    fetch: createGatewayHandler({
+      engine,
+      config,
+      log,
+      // Feed real free-tier quota into Tokzen's quota-aware compression dial.
+      getQuotaRemaining: (provider) => engine.getQuotaRemaining(provider),
+    }),
   });
 
   watchPolicy((next) => {

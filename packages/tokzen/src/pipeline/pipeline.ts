@@ -8,7 +8,12 @@ import {
 } from "../transforms/content-router.js";
 import { manageContext } from "../transforms/context-manager.js";
 import { injectRetrieveTool, type ToolDefinition } from "../ccr/tool.js";
+import { QuotaController } from "../quota/controller.js";
 import type { CompressContext, CompressResult, Message } from "./types.js";
+
+/** Token-budget multiplier per quota level — tighter budgets compress harder
+ *  (diffs drop more hunks, prose keeps fewer sentences) as quota runs low. */
+const LEVEL_BUDGET_SCALE: Record<number, number> = { 1: 1, 2: 0.7, 3: 0.45, 4: 0.3 };
 
 export interface CompressInput {
   messages: Message[];
@@ -59,6 +64,20 @@ export async function compress(
     const { messages, systemPrompt } = input;
     const results: CompressResult[] = [];
     let processedSystemPrompt = systemPrompt;
+
+    // Quota dial: derive the aggressiveness level from remaining quota and tighten
+    // the token budget as quota drops. Compressors read ctx.level (prose gate) and
+    // ctx.tokenBudget (sampling/hunk-drop aggressiveness), so this actually changes
+    // compressor output — more compression as quota runs low.
+    const level = QuotaController.getLevel(ctx.quotaRemaining ?? 1);
+    ctx = {
+      ...ctx,
+      level,
+      tokenBudget:
+        ctx.tokenBudget != null
+          ? Math.round(ctx.tokenBudget * (LEVEL_BUDGET_SCALE[level] ?? 1))
+          : ctx.tokenBudget,
+    };
 
     // Stage 1: CacheAligner on system prompt
     if (systemPrompt && countTokensFast(systemPrompt) >= MIN_COMPRESS_TOKENS) {

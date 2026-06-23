@@ -107,6 +107,24 @@ describe("Pipeline", () => {
     }
   });
 
+  it("compresses more aggressively as quota drops (quota dial)", async () => {
+    const prose =
+      "The system processes incoming requests through several distinct stages before responding. ".repeat(
+        40,
+      );
+    const messages: Message[] = [
+      { role: "user", content: "Summarize the design." },
+      { role: "assistant", content: prose },
+    ];
+    const high = await compress({ messages }, { ...CTX, quotaRemaining: 1.0 });
+    const low = await compress({ messages }, { ...CTX, quotaRemaining: 0.1 });
+    const highAssistant = high.messages.find((m) => m.role === "assistant")!.content;
+    const lowAssistant = low.messages.find((m) => m.role === "assistant")!.content;
+    // Full quota (level 1): prose left intact. Low quota (level 4): summarized.
+    expect(highAssistant).toBe(prose);
+    expect(lowAssistant.length).toBeLessThan(prose.length);
+  });
+
   it("returns result with ratio between 0 and 1", async () => {
     const messages: Message[] = [
       { role: "system", content: "Be helpful." },

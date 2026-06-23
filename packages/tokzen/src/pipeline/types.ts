@@ -7,6 +7,9 @@ export interface CompressContext {
   tokenBudget?: number;
   /** 0.0–1.0; used by quota controller to dial aggressiveness */
   quotaRemaining?: number;
+  /** Aggressiveness level (1=lightest … 4=most aggressive), derived from
+   *  quotaRemaining by the pipeline and read by the content router. */
+  level?: 1 | 2 | 3 | 4;
   /** For CCR BM25 retrieval */
   query?: string;
   sessionId?: string;

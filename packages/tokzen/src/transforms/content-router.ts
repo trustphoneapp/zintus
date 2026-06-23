@@ -84,7 +84,9 @@ export async function routeAndCompress(
     case "code":
       return compressCode(content, ctx);
     case "prose":
-      return compressProse(content, ctx);
+      // Quota dial: only summarize prose under quota pressure (level 3–4).
+      // At high quota (level 1–2) prose is left intact.
+      return (ctx.level ?? 4) >= 3 ? compressProse(content, ctx) : noop();
     case "unknown":
       return noop();
   }

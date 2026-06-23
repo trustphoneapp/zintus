@@ -98,6 +98,9 @@ export interface Engine {
   getCompileTrace(traceId: string): CompileTraceRow | null;
   getProviderStatus(): Promise<ProviderStatus[]>;
   getSavings(): { byProvider: Record<string, number>; total: number };
+  /** Remaining free-tier quota ratio (0–1) for a provider — feeds Tokzen's
+   *  quota-aware compression dial in the gateway. */
+  getQuotaRemaining(provider: ProviderId): number;
   updatePolicy(policy: PolicyConfig): void;
   probeProviders(): Promise<Array<{ providerId: ProviderId; ok: boolean }>>;
   listThreads(): Thread[];
@@ -305,6 +308,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
 
     getSavings() {
       return router.getSavings();
+    },
+
+    getQuotaRemaining(provider) {
+      return router.getQuotaRemaining(provider);
     },
 
     updatePolicy(policy) {

@@ -79,6 +79,9 @@ export interface Router {
   /** Background health probe: validate each keyed provider's key and record a
    *  failure (feeding health-aware routing) when a provider is unreachable. */
   probeProviders(): Promise<Array<{ providerId: ProviderId; ok: boolean }>>;
+  /** Remaining free-tier quota ratio (0–1) for a provider, from the ledger.
+   *  Feeds Tokzen's quota-aware compression dial. */
+  getQuotaRemaining(provider: ProviderId): number;
 }
 
 const DEFAULT_DB_PATH = join(homedir(), ".zintus", "quota.db");
@@ -292,6 +295,10 @@ export function createRouter(config: RouterConfig = {}): Router {
 
     getSavings() {
       return ledger.savingsUsd();
+    },
+
+    getQuotaRemaining(provider) {
+      return ledger.remainingRatio(provider);
     },
 
     updatePolicy(policy) {
