@@ -10,16 +10,6 @@ Cross-platform AI router — routes chat requests across 12 providers (Cerebras,
 
 **Who it's *not* for:** enterprises needing multi-tenant SaaS, RBAC/SSO, 100+ providers, SOC2, or a hosted gateway. For those, use LiteLLM/Portkey. This project deliberately does **not** chase that lane.
 
-### Honest comparison (this lane only)
-
-| Capability | Zintus | LiteLLM | OpenRouter | Open WebUI |
-|---|---|---|---|---|
-| Free-tier quota tracking + transparent remaining bars | ✅ daily + per-minute (TPM/RPM) | partial | ❌ (paid credits) | ❌ |
-| Same-model multi-provider failover ("model groups") | ✅ via `policy.json` | ✅ | ✅ | ❌ |
-| Latency-aware `fastest` routing | ✅ p95 over recent successes | ✅ | ✅ (sort) | ❌ |
-| Estimated $ saved vs. paid APIs | ✅ (estimate, in `/health` + usage UI) | ❌ | ❌ | ❌ |
-| Local-first BYOK, no SaaS | ✅ OS keychain / browser vault | self-host proxy | ❌ hosted | ✅ |
-
 Notes: grades reflect *this lane only*. LiteLLM/Portkey/OpenRouter are stronger on breadth (provider count, enterprise features). "$ saved" is a deliberately conservative estimate (see `PAID_EQUIVALENT_USD_PER_MTOK`), not a billing guarantee.
 
 ### Provable savings
