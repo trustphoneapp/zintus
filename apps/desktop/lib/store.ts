@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@zintus/types";
 import { loadConfig, saveConfig } from "./config";
 import { fetchProviderSnapshot, type DesktopProviderInfo } from "./providers";
@@ -33,15 +34,26 @@ export interface ChatMessageUi {
   model?: string;
 }
 
+export interface Thread {
+  id: string;
+  title: string;
+  messages: ChatMessageUi[];
+  updatedAt: number;
+}
+
 interface ChatState {
   prompt: string;
-  messages: ChatMessageUi[];
+  threads: Thread[];
+  activeThreadId: string;
   loading: boolean;
   setPrompt: (prompt: string) => void;
   appendMessage: (message: ChatMessageUi) => void;
   updateMessage: (id: string, partial: Partial<ChatMessageUi>) => void;
   setLoading: (loading: boolean) => void;
   resetMessages: () => void;
+  newChat: () => void;
+  switchThread: (id: string) => void;
+  deleteThread: (id: string) => void;
 }
 
 function createMessageId(): string {
@@ -50,6 +62,20 @@ function createMessageId(): string {
   }
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+function createThreadId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+const DEFAULT_THREAD: Thread = {
+  id: "default",
+  title: "New chat",
+  messages: [],
+  updatedAt: Date.now(),
+};
 
 export const useSettingsStore = create<SettingsState>((set) => ({
   settings: DEFAULT_CONFIG,
@@ -85,22 +111,98 @@ export const useProviderStatusStore = create<ProviderStatusState>((set) => ({
   setActiveProvider: (activeProvider) => set({ activeProvider }),
 }));
 
-export const useChatStore = create<ChatState>((set) => ({
-  prompt: "",
-  messages: [],
-  loading: false,
-  setPrompt: (prompt) => set({ prompt }),
-  appendMessage: (message) =>
-    set((state) => ({ messages: [...state.messages, message] })),
-  updateMessage: (id, partial) =>
-    set((state) => ({
-      messages: state.messages.map((message) =>
-        message.id === id ? { ...message, ...partial } : message,
-      ),
-    })),
-  setLoading: (loading) => set({ loading }),
-  resetMessages: () => set({ messages: [] }),
-}));
+export const useChatStore = create<ChatState>()(
+  persist(
+    (set, get) => ({
+      prompt: "",
+      threads: [{ ...DEFAULT_THREAD, updatedAt: Date.now() }],
+      activeThreadId: "default",
+      loading: false,
+      setPrompt: (prompt) => set({ prompt }),
+      appendMessage: (message) =>
+        set((state) => {
+          const activeId = state.activeThreadId;
+          return {
+            threads: state.threads.map((thread) => {
+              if (thread.id !== activeId) return thread;
+              // Auto-derive title from first user message
+              const isFirst = thread.messages.length === 0 && message.role === "user";
+              const title = isFirst
+                ? message.content.slice(0, 48) || thread.title
+                : thread.title;
+              return {
+                ...thread,
+                title,
+                messages: [...thread.messages, message],
+                updatedAt: Date.now(),
+              };
+            }),
+          };
+        }),
+      updateMessage: (id, partial) =>
+        set((state) => {
+          const activeId = state.activeThreadId;
+          return {
+            threads: state.threads.map((thread) => {
+              if (thread.id !== activeId) return thread;
+              return {
+                ...thread,
+                messages: thread.messages.map((message) =>
+                  message.id === id ? { ...message, ...partial } : message,
+                ),
+                updatedAt: Date.now(),
+              };
+            }),
+          };
+        }),
+      setLoading: (loading) => set({ loading }),
+      resetMessages: () =>
+        set((state) => ({
+          threads: state.threads.map((thread) =>
+            thread.id === state.activeThreadId
+              ? { ...thread, messages: [], updatedAt: Date.now() }
+              : thread,
+          ),
+        })),
+      newChat: () => {
+        const id = createThreadId();
+        set((state) => ({
+          threads: [
+            { id, title: "New chat", messages: [], updatedAt: Date.now() },
+            ...state.threads,
+          ],
+          activeThreadId: id,
+        }));
+      },
+      switchThread: (id) => set({ activeThreadId: id }),
+      deleteThread: (id) => {
+        const state = get();
+        const remaining = state.threads.filter((t) => t.id !== id);
+        const nextActive =
+          state.activeThreadId === id
+            ? (remaining[0]?.id ?? createThreadId())
+            : state.activeThreadId;
+        // If no threads remain, create a fresh one
+        if (remaining.length === 0) {
+          const newId = createThreadId();
+          set({
+            threads: [{ id: newId, title: "New chat", messages: [], updatedAt: Date.now() }],
+            activeThreadId: newId,
+          });
+        } else {
+          set({ threads: remaining, activeThreadId: nextActive });
+        }
+      },
+    }),
+    {
+      name: "zintus:desktop-threads",
+      partialize: (state) => ({
+        threads: state.threads,
+        activeThreadId: state.activeThreadId,
+      }),
+    },
+  ),
+);
 
 export function createChatMessage(
   role: ChatMessageUi["role"],

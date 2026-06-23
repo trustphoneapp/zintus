@@ -27,13 +27,16 @@ export function ChatPanel() {
   } = useProviderStatusStore();
   const {
     prompt,
-    messages,
+    threads,
+    activeThreadId,
     loading,
     setPrompt,
     appendMessage,
     updateMessage,
     setLoading,
   } = useChatStore();
+
+  const messages = threads.find((t) => t.id === activeThreadId)?.messages ?? [];
 
   const abortRef = useRef<AbortController | null>(null);
   const outputRef = useRef<HTMLDivElement>(null);

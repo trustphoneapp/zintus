@@ -18,7 +18,9 @@ type IconName =
   | "pencil"
   | "trash"
   | "check"
-  | "x";
+  | "x"
+  | "paperclip"
+  | "globe";
 
 const paths: Record<IconName, ReactNode> = {
   send: (
@@ -103,6 +105,16 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
+    </>
+  ),
+  paperclip: (
+    <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+  ),
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="10" />
+      <line x1="2" y1="12" x2="22" y2="12" />
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
     </>
   ),
 };

@@ -19,6 +19,39 @@ const PROMPT_CARDS = [
   { title: "Summarize a doc", body: "Condense long text into key points" },
 ];
 
+const TEXT_EXTENSIONS = new Set([
+  ".txt", ".md", ".ts", ".js", ".tsx", ".jsx", ".py",
+  ".json", ".sh", ".yaml", ".toml", ".rs", ".go", ".css",
+]);
+
+interface Attachment {
+  id: string;
+  name: string;
+  type: "image" | "text";
+  content: string;
+  mimeType: string;
+}
+
+/**
+ * Which web-search strategy the gateway will use for the selected provider —
+ * surfaced as the toggle's tooltip so the cost/path is clear before sending.
+ * Mirrors getSearchStrategy() in @zintus/search.
+ */
+function searchTooltip(provider: string | null): string {
+  switch (provider) {
+    case "groq":
+      return "Using Groq Compound (free)";
+    case "gemini":
+      return "Using Google Search grounding (free)";
+    case "openrouter":
+      return "Using OpenRouter web search (free)";
+    case null:
+      return "Web search on — provider (and strategy) chosen at routing time";
+    default:
+      return "Requires TAVILY_API_KEY on the gateway, or Tavily/Serper fallback";
+  }
+}
+
 export default function ChatPage() {
   const { settings, hydrate } = useSettingsStore();
   const { keys, unlock } = useProviderStatusStore();
@@ -46,6 +79,18 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  // File attachments
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Web search toggle (persisted to localStorage)
+  const [webSearchEnabled, setWebSearchEnabled] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:web-search") === "true";
+    }
+    return false;
+  });
+
   useEffect(() => {
     hydrate();
     void unlock();
@@ -64,11 +109,46 @@ export default function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const handleFiles = useCallback((files: FileList | File[]) => {
+    const fileArray = Array.from(files);
+    for (const file of fileArray) {
+      const ext = "." + (file.name.split(".").pop()?.toLowerCase() ?? "");
+      const isImage = file.type.startsWith("image/");
+      const isText = TEXT_EXTENSIONS.has(ext);
+
+      if (!isImage && !isText) continue;
+
+      const id = crypto.randomUUID();
+      const reader = new FileReader();
+
+      if (isImage) {
+        reader.onload = (e) => {
+          const content = e.target?.result as string;
+          setAttachments((prev) => [
+            ...prev,
+            { id, name: file.name, type: "image", content, mimeType: file.type },
+          ]);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        reader.onload = (e) => {
+          const content = e.target?.result as string;
+          setAttachments((prev) => [
+            ...prev,
+            { id, name: file.name, type: "text", content, mimeType: file.type || "text/plain" },
+          ]);
+        };
+        reader.readAsText(file);
+      }
+    }
+  }, []);
+
   const streamAssistant = useCallback(
     async (
       assistantId: string,
       sendMessages: ChatMessage[],
       promptForLog: string,
+      sendImages: Array<{ data: string; mimeType: string; name: string }>,
     ) => {
       setLoading(true);
       setActiveProvider(null);
@@ -89,6 +169,8 @@ export default function ChatPage() {
           threadId,
           apiKeys: keys,
           settings,
+          webSearch: webSearchEnabled,
+          images: sendImages,
           signal: controller.signal,
           onChunk: (text) => updateMessage(assistantId, text),
         });
@@ -131,6 +213,7 @@ export default function ChatPage() {
       settings,
       threadId,
       updateMessage,
+      webSearchEnabled,
     ],
   );
 
@@ -139,23 +222,45 @@ export default function ChatPage() {
       return;
     }
     const prompt = input.trim();
+
+    // Build user content with attachments
+    let textPrefix = "";
+    const imageNotes: string[] = [];
+    const sendImages: Array<{ data: string; mimeType: string; name: string }> = [];
+
+    for (const att of attachments) {
+      if (att.type === "text") {
+        const ext = att.name.split(".").pop() ?? "txt";
+        textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
+      } else {
+        imageNotes.push(`[Image: ${att.name} — see attached]`);
+        const base64 = att.content.includes(",") ? (att.content.split(",")[1] ?? att.content) : att.content;
+        sendImages.push({ data: base64, mimeType: att.mimeType, name: att.name });
+      }
+    }
+
+    const userContent = (
+      textPrefix + prompt.trim() + (imageNotes.length ? "\n\n" + imageNotes.join("\n") : "")
+    ).trim();
+
     const history: ChatMessage[] = [
       ...messages.map((message) => ({
         role: message.role,
         content: message.content,
       })),
-      { role: "user", content: prompt },
+      { role: "user", content: userContent },
     ];
 
-    appendMessage(createUserMessage(prompt));
+    appendMessage(createUserMessage(userContent));
     const assistant = createAssistantPlaceholder();
     appendMessage(assistant);
     setInput("");
+    setAttachments([]);
 
     const sendMessages: ChatMessage[] =
-      threadId == null ? history : [{ role: "user", content: prompt }];
-    await streamAssistant(assistant.id, sendMessages, prompt);
-  }, [appendMessage, input, loading, messages, streamAssistant, threadId]);
+      threadId == null ? history : [{ role: "user", content: userContent }];
+    await streamAssistant(assistant.id, sendMessages, prompt, sendImages);
+  }, [appendMessage, attachments, input, loading, messages, streamAssistant, threadId]);
 
   const regenerate = useCallback(async () => {
     if (loading) {
@@ -183,7 +288,7 @@ export default function ChatPage() {
       threadId == null
         ? priorMessages
         : [{ role: "user", content: lastUser.content }];
-    await streamAssistant(assistant.id, sendMessages, lastUser.content);
+    await streamAssistant(assistant.id, sendMessages, lastUser.content, []);
   }, [appendMessage, dropLastAssistant, loading, messages, streamAssistant, threadId]);
 
   const stop = useCallback(() => {
@@ -245,11 +350,67 @@ export default function ChatPage() {
       </div>
 
       <div className="chat-composer-wrap">
-        <div className={`chat-composer${input ? " focused" : ""}`}>
+        <div
+          className={`chat-composer${input ? " focused" : ""}`}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            handleFiles(e.dataTransfer.files);
+          }}
+        >
           <div className="chat-composer-top">
             <ProviderPicker />
+            <button
+              type="button"
+              className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
+              onClick={() => {
+                setWebSearchEnabled((v) => {
+                  const next = !v;
+                  if (typeof localStorage !== "undefined") {
+                    localStorage.setItem("zintus:web-search", String(next));
+                  }
+                  return next;
+                });
+              }}
+              title={searchTooltip(selectedProvider)}
+            >
+              <Icon name="globe" size={13} />
+              Search
+            </button>
           </div>
+          {attachments.length > 0 && (
+            <div className="chat-attachments">
+              {attachments.map((att) => (
+                <div key={att.id} className="chat-attachment-chip">
+                  {att.type === "image" ? (
+                    <img src={att.content} alt={att.name} className="chat-attachment-thumb" />
+                  ) : (
+                    <Icon name="paperclip" size={12} />
+                  )}
+                  <span className="chat-attachment-name">{att.name}</span>
+                  <button
+                    type="button"
+                    className="chat-attachment-remove"
+                    onClick={() =>
+                      setAttachments((prev) => prev.filter((a) => a.id !== att.id))
+                    }
+                    aria-label="Remove"
+                  >
+                    <Icon name="x" size={11} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="chat-composer-row">
+            <input
+              type="file"
+              ref={fileInputRef}
+              accept="image/*,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
+              multiple
+              style={{ display: "none" }}
+              onChange={(e) => e.target.files && handleFiles(e.target.files)}
+            />
             <textarea
               ref={inputRef}
               rows={1}
@@ -263,8 +424,22 @@ export default function ChatPage() {
                   stop();
                 }
               }}
+              onPaste={(e) => {
+                if (e.clipboardData.files.length > 0) {
+                  handleFiles(e.clipboardData.files);
+                }
+              }}
               placeholder="Ask anything — routed automatically across your free providers"
             />
+            <button
+              type="button"
+              className="chat-attach"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Attach file"
+              title="Attach file"
+            >
+              <Icon name="paperclip" size={15} />
+            </button>
             {loading ? (
               <button
                 type="button"

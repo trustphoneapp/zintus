@@ -27,6 +27,8 @@ export async function streamChat(params: {
   threadId?: string;
   apiKeys?: Partial<Record<ProviderId, string>>;
   settings?: AppConfig;
+  webSearch?: boolean;
+  images?: Array<{ data: string; mimeType: string; name: string }>;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<StreamChatResult> {
@@ -45,6 +47,8 @@ export async function streamChat(params: {
     strategy: params.settings?.routingStrategy,
     mode: params.mode ?? params.settings?.contextMode,
     threadId: params.threadId,
+    webSearch: params.webSearch,
+    images: params.images,
     signal: params.signal,
     onChunk: params.onChunk,
   });

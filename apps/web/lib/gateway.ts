@@ -181,6 +181,9 @@ export async function streamGatewayChat(params: {
   strategy?: RoutingStrategy;
   mode?: ContextMode;
   threadId?: string;
+  webSearch?: boolean;
+  searchDepth?: "basic" | "standard" | "deep";
+  images?: Array<{ data: string; mimeType: string; name: string }>;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<{
@@ -200,6 +203,11 @@ export async function streamGatewayChat(params: {
       strategy: params.strategy,
       mode: params.mode,
       thread_id: params.threadId,
+      // Matches the gateway's body.search contract (@zintus/search strategies).
+      search: params.webSearch
+        ? { enabled: true, depth: params.searchDepth ?? "standard" }
+        : undefined,
+      images: params.images ?? [],
     }),
     signal: params.signal,
   });

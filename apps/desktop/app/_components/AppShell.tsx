@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
+import { useChatStore } from "@/lib/store";
 
 const NAV = [
   { href: "/chat", label: "Chat" },
@@ -17,6 +18,18 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [online, setOnline] = useState(true);
   const [checked, setChecked] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("zintus:desktop-sidebar") === "collapsed";
+    }
+    return false;
+  });
+
+  const { threads, activeThreadId, switchThread, newChat } = useChatStore();
+
+  const recentThreads = [...threads]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, 10);
 
   useEffect(() => {
     let active = true;
@@ -34,6 +47,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const toggleSidebar = () => {
+    setCollapsed((v) => {
+      const next = !v;
+      localStorage.setItem("zintus:desktop-sidebar", next ? "collapsed" : "open");
+      return next;
+    });
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}>
       <header
@@ -46,9 +67,32 @@ export function AppShell({ children }: { children: ReactNode }) {
           background: "var(--color-surface)",
         }}
       >
-        <span style={{ fontSize: 20, fontWeight: 700, color: "var(--color-purple-light)" }}>
-          Zintus
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            type="button"
+            aria-label="Toggle sidebar"
+            onClick={toggleSidebar}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: "4px 6px",
+              color: "var(--color-text-sub)",
+              display: "flex",
+              alignItems: "center",
+              borderRadius: 6,
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </svg>
+          </button>
+          <span style={{ fontSize: 20, fontWeight: 700, color: "var(--color-purple-light)" }}>
+            Zintus
+          </span>
+        </div>
         <nav style={{ display: "flex", gap: 4 }}>
           {NAV.map((item) => {
             const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -112,8 +156,96 @@ export function AppShell({ children }: { children: ReactNode }) {
           </span>
         </div>
       )}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-        {children}
+      <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+        {/* Left sidebar */}
+        <aside
+          style={{
+            width: collapsed ? 52 : 200,
+            flexShrink: 0,
+            display: "flex",
+            flexDirection: "column",
+            background: "var(--color-surface)",
+            borderRight: "1px solid var(--color-border)",
+            transition: "width 0.2s ease",
+            overflow: "hidden",
+          }}
+        >
+          {/* New chat button */}
+          <button
+            type="button"
+            onClick={newChat}
+            title="New chat"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: collapsed ? 0 : 8,
+              padding: collapsed ? "10px 14px" : "10px 12px",
+              margin: "8px 6px 4px",
+              border: "1px solid var(--color-border)",
+              borderRadius: 8,
+              background: "transparent",
+              color: "var(--color-text-sub)",
+              fontSize: 13,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flexShrink: 0 }}>
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            {!collapsed && <span>New chat</span>}
+          </button>
+
+          {/* Thread list when expanded */}
+          {!collapsed && (
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                padding: "4px 6px",
+                display: "flex",
+                flexDirection: "column",
+                gap: 2,
+              }}
+            >
+              {recentThreads.map((thread) => {
+                const isActive = thread.id === activeThreadId;
+                return (
+                  <button
+                    key={thread.id}
+                    type="button"
+                    onClick={() => switchThread(thread.id)}
+                    title={thread.title}
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      textAlign: "left",
+                      padding: "6px 8px",
+                      border: "none",
+                      borderRadius: 6,
+                      background: isActive ? "var(--color-purple-faint)" : "transparent",
+                      color: isActive ? "var(--color-text)" : "var(--color-text-sub)",
+                      fontSize: 12,
+                      cursor: "pointer",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {thread.title.length > 36 ? thread.title.slice(0, 36) + "…" : thread.title}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+
+        {/* Main content */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+          {children}
+        </div>
       </div>
     </div>
   );
