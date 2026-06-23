@@ -30,7 +30,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
-import type { Env, GatewaySessionRow, UserRow } from "./types.js";
+import type { Env, GatewaySessionRow, UserRow, SubscriptionRow } from "./types.js";
 import {
   sha256Hex,
   issueSessionToken,
@@ -41,6 +41,9 @@ import {
   clearSessionCookie,
   type SessionPayload,
 } from "./auth.js";
+import { createCheckoutSession, createPortalSession, handleStripeWebhook } from "./billing.js";
+import { enforceQuota, recordUsage } from "./middleware/quota.js";
+import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 
 // Re-export the Durable Object class for wrangler to find.
 export { GatewaySession } from "./GatewaySession.js";
@@ -48,6 +51,119 @@ export { GatewaySession } from "./GatewaySession.js";
 const app = new Hono<{ Bindings: Env }>();
 
 // ── Security headers + CORS ────────────────────────────────────────────────
+
+const ALLOWED_ORIGINS = [
+  "https://www.zintus.ai",
+  "https://zintus.ai",
+  "https://relay.zintus.ai",
+  "https://zintus-relay.yashwanth-surabhi.workers.dev",
+  "http://localhost:3000",
+  "http://localhost:3001",
+];
+
+const ALLOWED_REDIRECT_ORIGINS = [
+  "https://www.zintus.ai",
+  "https://zintus.ai",
+  "http://localhost:3000",
+  "http://localhost:3001",
+];
+
+function validateRedirectTo(url: string | null | undefined): string {
+  const DEFAULT = "https://www.zintus.ai/dashboard";
+  if (!url) return DEFAULT;
+  try {
+    const parsed = new URL(url);
+    return ALLOWED_REDIRECT_ORIGINS.some(
+      (a) => parsed.origin === new URL(a).origin
+    )
+      ? url
+      : DEFAULT;
+  } catch {
+    return DEFAULT;
+  }
+}
+
+function decodeBase64url(str: string): string {
+  return atob(
+    str
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(Math.ceil(str.length / 4) * 4, "=")
+  );
+}
+
+interface GoogleClaims {
+  email: string;
+  email_verified?: boolean;
+  iss: string;
+  aud: string;
+  exp: number;
+  sub: string;
+}
+
+async function verifyGoogleJWT(
+  token: string,
+  expectedAud: string
+): Promise<GoogleClaims | null> {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const header = JSON.parse(decodeBase64url(parts[0]!)) as {
+      kid?: string;
+      alg?: string;
+    };
+    // Pin algorithm — never trust header.alg per RFC 8725
+    if (header.alg !== "RS256") return null;
+    const jwksRes = await fetch(
+      "https://www.googleapis.com/oauth2/v3/certs"
+    );
+    if (!jwksRes.ok) return null;
+    const jwks = (await jwksRes.json()) as {
+      keys: Array<{ kid: string } & JsonWebKey>;
+    };
+    const jwk = jwks.keys.find((k) => k.kid === header.kid);
+    if (!jwk) return null;
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      jwk as JsonWebKey,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+    const signingInput = new TextEncoder().encode(
+      `${parts[0]}.${parts[1]}`
+    );
+    const sigBytes = Uint8Array.from(
+      atob(
+        parts[2]!.replace(/-/g, "+").replace(/_/g, "/")
+          .padEnd(Math.ceil(parts[2]!.length / 4) * 4, "=")
+      ),
+      (c) => c.charCodeAt(0)
+    );
+    const valid = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      key,
+      sigBytes,
+      signingInput
+    );
+    if (!valid) return null;
+    const claims = JSON.parse(
+      decodeBase64url(parts[1]!)
+    ) as GoogleClaims;
+    const now = Math.floor(Date.now() / 1000);
+    if (claims.exp < now) return null;
+    if (claims.aud !== expectedAud) return null;
+    if (
+      claims.iss !== "https://accounts.google.com" &&
+      claims.iss !== "accounts.google.com"
+    )
+      return null;
+    if (!claims.email) return null;
+    return claims;
+  } catch {
+    return null;
+  }
+}
 
 app.use("*", async (c, next) => {
   await next();
@@ -60,7 +176,8 @@ app.use("*", async (c, next) => {
 app.use(
   "*",
   cors({
-    origin: (origin) => origin ?? "*",
+    origin: (origin) =>
+      origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
     allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     credentials: true,
@@ -156,7 +273,7 @@ app.post("/api/auth/magic-link", async (c) => {
   // Store a short-lived token in KV (15 min).
   const token = crypto.randomUUID() + "-" + crypto.randomUUID();
   const hash = await sha256Hex(token);
-  const redirectTo = c.req.query("redirect_to") ?? "https://www.zintus.ai/dashboard";
+  const redirectTo = validateRedirectTo(c.req.query("redirect_to"));
   await c.env.KV.put(
     `ml:${hash}`,
     JSON.stringify({ email, redirect_to: redirectTo }),
@@ -165,7 +282,7 @@ app.post("/api/auth/magic-link", async (c) => {
 
   const verifyUrl = `${c.env.RELAY_BASE_URL}/api/auth/verify?token=${token}`;
 
-  await fetch("https://api.resend.com/emails", {
+  const emailRes = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${c.env.RESEND_API_KEY}`,
@@ -181,10 +298,13 @@ app.post("/api/auth/magic-link", async (c) => {
         <p style="color:#888;font-size:13px;">If you didn't request this, you can ignore this email.</p>
       `,
     }),
-  }).catch(() => {
-    // Log but don't fail — Resend errors shouldn't expose internals.
-    void ip;
   });
+
+  void ip; // used for rate limiting above
+
+  if (!emailRes.ok) {
+    return c.json({ error: "Failed to send email" }, 502);
+  }
 
   return c.json({ ok: true });
 });
@@ -211,7 +331,7 @@ app.get("/api/auth/verify", async (c) => {
   return new Response(null, {
     status: 302,
     headers: {
-      Location: redirect_to,
+      Location: validateRedirectTo(redirect_to),
       "Set-Cookie": cookieValue,
     },
   });
@@ -221,7 +341,7 @@ app.get("/api/auth/verify", async (c) => {
 
 app.get("/api/auth/google", async (c) => {
   const state = crypto.randomUUID();
-  const redirectTo = c.req.query("redirect_to") ?? "https://www.zintus.ai/dashboard";
+  const redirectTo = validateRedirectTo(c.req.query("redirect_to"));
   await c.env.KV.put(
     `oauth:${state}`,
     JSON.stringify({ redirect_to: redirectTo }),
@@ -268,21 +388,19 @@ app.get("/api/auth/google/callback", async (c) => {
   if (!tokenRes.ok) return c.json({ error: "Token exchange failed" }, 502);
   const tokens = (await tokenRes.json()) as { id_token?: string };
 
-  // Decode the id_token (no verify needed — came from Google).
-  const parts = tokens.id_token?.split(".") ?? [];
-  if (parts.length < 2) return c.json({ error: "Invalid id_token" }, 502);
-  const claims = JSON.parse(atob(parts[1]!.replace(/-/g, "+").replace(/_/g, "/"))) as {
-    email?: string;
-  };
-  if (!claims.email) return c.json({ error: "No email in token" }, 502);
+  // Verify the id_token with RS256 signature via Google JWKS.
+  if (!tokens.id_token) return c.json({ error: "Missing id_token" }, 502);
+  const claims = await verifyGoogleJWT(tokens.id_token, c.env.GOOGLE_CLIENT_ID);
+  if (!claims) return c.json({ error: "Invalid or expired id_token" }, 502);
+  const email = claims.email;
 
-  const user = await findOrCreateUser(c.env.DB, claims.email);
+  const user = await findOrCreateUser(c.env.DB, email);
   const cookieValue = await createUserSession(c.env.KV, c.env.DB, user, c.env.COOKIE_DOMAIN);
 
   return new Response(null, {
     status: 302,
     headers: {
-      Location: redirect_to,
+      Location: validateRedirectTo(redirect_to),
       "Set-Cookie": cookieValue,
     },
   });
@@ -438,13 +556,16 @@ app.delete("/api/sessions/:id", async (c) => {
     return c.json({ error: "Not found" }, 404);
   }
 
-  // Invalidate relay_token in KV (all entries for this session expire naturally,
-  // but we proactively mark offline so the DO knows it's gone).
+  // Force-disconnect closes WS connections, revokes relay_token, and marks offline.
   const doId = c.env.GATEWAY_SESSION.idFromName(sessionId);
   const stub = c.env.GATEWAY_SESSION.get(doId);
-  await stub.fetch(
-    new Request(`http://do/offline?session_id=${sessionId}`, { method: "POST" }),
-  );
+  try {
+    await stub.fetch(
+      new Request(`http://do/force-disconnect?session_id=${sessionId}`, { method: "POST" }),
+    );
+  } catch {
+    // Best effort — continue with delete even if DO is unreachable
+  }
 
   await c.env.DB.prepare("DELETE FROM gateway_sessions WHERE id = ?")
     .bind(sessionId)
@@ -541,6 +662,181 @@ app.get("/api/auth/mobile-redirect", async (c) => {
     { expirationTtl: 60 },
   );
   return Response.redirect(`zintus://auth?token=${otp}`, 302);
+});
+
+// ── Billing routes ────────────────────────────────────────────────────────
+
+app.post('/api/billing/checkout', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const { tier, ref } = await c.req.json<{ tier: 'starter' | 'growth' | 'scale'; ref?: string }>();
+  if (!['starter', 'growth', 'scale'].includes(tier)) {
+    return c.json({ error: 'Invalid tier' }, 400);
+  }
+
+  const user = await c.env.DB.prepare('SELECT email FROM zintus_users WHERE id = ?')
+    .bind(session.user_id).first<{ email: string }>();
+  if (!user) return c.json({ error: 'User not found' }, 404);
+
+  try {
+    const url = await createCheckoutSession(session.user_id, user.email, tier, ref ?? null, c.env);
+    return c.json({ url });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+app.get('/api/billing/status', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const sub = await c.env.DB.prepare(
+    'SELECT * FROM subscriptions WHERE user_id = ? AND status IN (?, ?)'
+  ).bind(session.user_id, 'active', 'past_due').first<SubscriptionRow>();
+
+  const referralCode = await getOrCreateReferralCode(session.user_id, c.env);
+
+  const periodKey = new Date().toISOString().slice(0, 7);
+  const tokensUsed = parseInt(await c.env.KV.get(`quota:${session.user_id}:${periodKey}`) ?? '0', 10);
+
+  return c.json({
+    tier: sub?.tier ?? 'free',
+    status: sub?.status ?? 'active',
+    tokens_used: tokensUsed,
+    tokens_limit: sub?.tokens_limit ?? null,
+    period_end: sub?.current_period_end ?? null,
+    referral_code: referralCode,
+  });
+});
+
+app.post('/api/billing/portal', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const sub = await c.env.DB.prepare(
+    'SELECT stripe_customer_id FROM subscriptions WHERE user_id = ?'
+  ).bind(session.user_id).first<{ stripe_customer_id: string | null }>();
+
+  if (!sub?.stripe_customer_id) return c.json({ error: 'No billing account' }, 404);
+
+  const url = await createPortalSession(sub.stripe_customer_id, c.env);
+  return c.json({ url });
+});
+
+app.post('/api/billing/webhook', async (c) => {
+  return handleStripeWebhook(c.req.raw, c.env);
+});
+
+// ── Usage routes ──────────────────────────────────────────────────────────
+
+app.get('/api/usage/current', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const periodKey = new Date().toISOString().slice(0, 7);
+  const used = parseInt(await c.env.KV.get(`quota:${session.user_id}:${periodKey}`) ?? '0', 10);
+
+  const sub = await c.env.DB.prepare(
+    'SELECT tokens_limit, current_period_end FROM subscriptions WHERE user_id = ? AND status = ?'
+  ).bind(session.user_id, 'active').first<{ tokens_limit: number | null; current_period_end: number | null }>();
+
+  return c.json({
+    tokens_used: used,
+    tokens_limit: sub?.tokens_limit ?? null,
+    period: periodKey,
+    percent_used: sub?.tokens_limit ? Math.round((used / sub.tokens_limit) * 100) : null,
+    period_end: sub?.current_period_end ?? null,
+  });
+});
+
+app.get('/api/usage/history', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const rows = await c.env.DB.prepare(`
+    SELECT date(created_at, 'unixepoch') as day, SUM(total_tokens) as tokens
+    FROM usage_log
+    WHERE user_id = ? AND created_at >= unixepoch() - 60*60*24*30
+    GROUP BY day ORDER BY day ASC
+  `).bind(session.user_id).all<{ day: string; tokens: number }>();
+
+  return c.json({ history: rows.results });
+});
+
+app.post('/api/usage/report', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const { provider, model, input_tokens, output_tokens } = await c.req.json<{
+    provider: string; model: string; input_tokens: number; output_tokens: number;
+  }>();
+
+  await recordUsage(session.user_id, provider, model, input_tokens, output_tokens, c.env);
+  return c.json({ ok: true });
+});
+
+// ── Referral routes ───────────────────────────────────────────────────────
+
+app.get('/api/referral/code', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const code = await getOrCreateReferralCode(session.user_id, c.env);
+  const link = `https://www.zintus.ai/r/${code}`;
+
+  const earnings = await c.env.DB.prepare(
+    'SELECT COALESCE(SUM(commission_cents),0) as total FROM referrals WHERE referrer_id=? AND status=?'
+  ).bind(session.user_id, 'confirmed').first<{ total: number }>();
+
+  return c.json({ code, link, earnings_cents: earnings?.total ?? 0 });
+});
+
+app.get('/api/referral/stats', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  const stats = await c.env.DB.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END) as confirmed,
+      SUM(CASE WHEN status='pending'   THEN 1 ELSE 0 END) as pending,
+      COALESCE(SUM(CASE WHEN status='confirmed' THEN commission_cents ELSE 0 END),0) as earned_cents
+    FROM referrals WHERE referrer_id=?
+  `).bind(session.user_id).first<{ total: number; confirmed: number; pending: number; earned_cents: number }>();
+
+  return c.json(stats ?? { total: 0, confirmed: 0, pending: 0, earned_cents: 0 });
+});
+
+app.get('/api/referral/resolve', async (c) => {
+  const code = c.req.query('code') ?? '';
+  const userId = await resolveReferralCode(code, c.env);
+  return c.json({ valid: !!userId });
+});
+
+// ── Referral short-link redirect ──────────────────────────────────────────
+
+app.get('/r/:code', async (c) => {
+  const code = c.req.param('code');
+  const userId = await resolveReferralCode(code, c.env);
+  if (!userId) return c.redirect('https://www.zintus.ai/pricing', 302);
+
+  const cookieDomain = c.env.COOKIE_DOMAIN ?? '';
+  const cookieStr = [
+    `zintus_ref=${code}`,
+    'Max-Age=2592000', // 30 days
+    'Path=/',
+    'SameSite=Lax',
+    ...(cookieDomain ? [`Domain=${cookieDomain}`] : []),
+  ].join('; ');
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: `https://www.zintus.ai/pricing?ref=${code}`,
+      'Set-Cookie': cookieStr,
+    },
+  });
 });
 
 export default app;

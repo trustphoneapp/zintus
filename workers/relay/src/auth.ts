@@ -67,13 +67,20 @@ export async function revokeRelayToken(
   await kv.delete(kvRelayKey(hash));
 }
 
-/** Verify that raw_secret hashes to the stored hash. */
+/** Verify that raw_secret hashes to the stored hash (timing-safe). */
 export async function verifyGatewaySecret(
   rawSecret: string,
   storedHash: string,
 ): Promise<boolean> {
   const hash = await sha256Hex(rawSecret);
-  return hash === storedHash;
+  const a = new TextEncoder().encode(hash);
+  const b = new TextEncoder().encode(storedHash);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a[i]! ^ b[i]!;
+  }
+  return diff === 0;
 }
 
 /** Hash a gateway_secret for storage in D1. */
@@ -154,7 +161,7 @@ export function buildSessionCookie(token: string, cookieDomain: string): string 
     `Max-Age=${maxAge}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=None",
+    "SameSite=Lax",
     "Secure",
     ...(cookieDomain ? [`Domain=${cookieDomain}`] : []),
   ].join("; ");
@@ -167,7 +174,7 @@ export function clearSessionCookie(cookieDomain: string): string {
     "Max-Age=0",
     "Path=/",
     "HttpOnly",
-    "SameSite=None",
+    "SameSite=Lax",
     "Secure",
     ...(cookieDomain ? [`Domain=${cookieDomain}`] : []),
   ].join("; ");

@@ -79,6 +79,31 @@ export class GatewaySession {
       });
     }
 
+    if (method === "POST" && path === "/force-disconnect") {
+      // Close all gateway WebSocket connections
+      for (const ws of this.state.getWebSockets("gateway")) {
+        try {
+          ws.close(1000, "session deleted");
+        } catch {
+          // ignore
+        }
+      }
+      // Revoke relay token from KV
+      const tokenHash = await this.state.storage.get<string>("current_relay_token_hash");
+      if (tokenHash) {
+        await this.state.storage.delete("current_relay_token_hash");
+        await this.env.KV.delete(`relay:${tokenHash}`);
+      }
+      // Mark session offline in D1
+      const sessionId = url.searchParams.get("session_id") ?? "";
+      if (sessionId) {
+        await this.markOffline(sessionId);
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -228,6 +253,9 @@ export class GatewaySession {
 
     const relayToken = await issueRelayToken(this.env.KV, sessionId);
     const tokenHash = await sha256Hex(relayToken);
+
+    // Persist token hash so force-disconnect can revoke it atomically via DO storage.
+    await this.state.storage.put("current_relay_token_hash", tokenHash);
 
     const next: WsAttachment = {
       session_id: sessionId,

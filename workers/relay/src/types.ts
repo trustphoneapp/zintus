@@ -8,6 +8,19 @@ export interface Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   RESEND_API_KEY: string;
+  // Stripe
+  STRIPE_SECRET_KEY: string;
+  STRIPE_WEBHOOK_SECRET: string;
+  // Managed key encryption
+  KEY_ENCRYPTION_SECRET: string;
+  // Zintus master API keys for Pro tier
+  ZINTUS_GROQ_KEY: string;
+  ZINTUS_DEEPSEEK_KEY: string;
+  ZINTUS_GEMINI_KEY: string;
+  ZINTUS_CEREBRAS_KEY: string;
+  ZINTUS_OPENROUTER_KEY: string;
+  ZINTUS_COHERE_KEY: string;
+  ZINTUS_MISTRAL_KEY: string;
 }
 
 /** Attached to every accepted WebSocket (survives DO hibernation). */
@@ -38,4 +51,21 @@ export interface UserSessionRow {
   user_id: string;
   created_at: number;
   expires_at: number;
+}
+
+export interface SubscriptionRow {
+  id: string;
+  user_id: string;
+  tier: 'free' | 'starter' | 'growth' | 'scale';
+  stripe_customer_id: string | null;
+  stripe_subscription_id: string | null;
+  status: 'active' | 'past_due' | 'cancelled';
+  current_period_end: number | null;
+  tokens_used_this_period: number;
+  tokens_limit: number | null;
+}
+
+export interface ReferralCodeRow {
+  code: string;
+  user_id: string;
 }
