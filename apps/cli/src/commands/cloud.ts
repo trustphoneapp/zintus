@@ -15,6 +15,18 @@ export interface CloudConfig {
 // ── Persist / read cloud.json ─────────────────────────────────────────────
 
 export async function loadCloudConfig(): Promise<CloudConfig | null> {
+  // Env vars take precedence over the file so CI/container deployments work
+  // without writing ~/.zintus/cloud.json to disk.
+  const envSessionId = process.env.ZINTUS_SESSION_ID;
+  const envGatewaySecret = process.env.ZINTUS_GATEWAY_SECRET;
+  if (envSessionId && envGatewaySecret) {
+    return {
+      session_id: envSessionId,
+      gateway_secret: envGatewaySecret,
+      relay_url: process.env.ZINTUS_RELAY_URL ?? DEFAULT_RELAY_URL,
+    };
+  }
+
   try {
     const raw = await readFile(CLOUD_CONFIG_PATH, "utf-8");
     return JSON.parse(raw) as CloudConfig;
