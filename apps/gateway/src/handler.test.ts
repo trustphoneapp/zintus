@@ -276,12 +276,20 @@ describe("gateway handler", () => {
     expect(res.status).toBe(404);
   });
 
-  test("GET /metrics is public and reflects handled requests", async () => {
+  test("GET /metrics is auth-gated when GATEWAY_TOKEN is set", async () => {
     const handler = makeHandler({ token: "secret" });
     await handler(new Request("http://x/health")); // one request recorded
-    const res = await handler(new Request("http://x/metrics"));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { requestsTotal: number };
+    // Without auth → 401
+    const unauthed = await handler(new Request("http://x/metrics"));
+    expect(unauthed.status).toBe(401);
+    // With auth → 200
+    const authed = await handler(
+      new Request("http://x/metrics", {
+        headers: { authorization: "Bearer secret" },
+      }),
+    );
+    expect(authed.status).toBe(200);
+    const body = (await authed.json()) as { requestsTotal: number };
     expect(body.requestsTotal).toBeGreaterThanOrEqual(1);
   });
 

@@ -93,6 +93,10 @@ async function handleTool(
     totalCompressedTokens += r.compressedTokens;
     if (r.cacheHit) cacheHits++;
     totalRequests++;
+    // Track transform/content-type counts
+    for (const transform of r.transforms) {
+      contentTypeCounts[transform] = (contentTypeCounts[transform] ?? 0) + 1;
+    }
     return result;
   }
 

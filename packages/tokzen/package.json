@@ -6,21 +6,22 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts",
-      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
     "./ml": {
-      "types": "./src/ml/llmlingua.ts",
-      "default": "./src/ml/llmlingua.ts",
-      "import": "./dist/ml/llmlingua.mjs",
+      "types": "./dist/ml/llmlingua.d.ts",
+      "import": "./dist/ml/llmlingua.js",
       "require": "./dist/ml/llmlingua.cjs"
     }
   },
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "files": ["dist", "grammars"],
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "tokzen-mcp": "./dist/mcp/server.js"
+  },
+  "files": ["dist", "grammars", "src/mcp"],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsup",

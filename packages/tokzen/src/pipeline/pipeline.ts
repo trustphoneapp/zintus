@@ -3,17 +3,21 @@ import { countTokensFast } from "../tokenizer/count.js";
 import { alignCache } from "../transforms/cache-aligner.js";
 import { routeAndCompress } from "../transforms/content-router.js";
 import { manageContext } from "../transforms/context-manager.js";
+import { injectRetrieveTool, type ToolDefinition } from "../ccr/tool.js";
 import type { CompressContext, CompressResult, Message } from "./types.js";
 
 export interface CompressInput {
   messages: Message[];
   systemPrompt?: string;
+  tools?: ToolDefinition[];
 }
 
 export interface CompressOutput {
   messages: Message[];
   systemPrompt?: string;
   totalResult: CompressResult;
+  /** Enriched tools array (with tokzen_retrieve injected) if CCR was applied. */
+  tools?: ToolDefinition[];
 }
 
 function mergeResults(results: CompressResult[]): CompressResult {
@@ -103,7 +107,13 @@ export async function compress(
           cacheHit: false,
         };
 
-    return { messages: finalMessages, systemPrompt: processedSystemPrompt, totalResult };
+    // Inject tokzen_retrieve tool if CCR hashes were produced
+    const outputTools =
+      totalResult.ccrHashes && totalResult.ccrHashes.length > 0
+        ? injectRetrieveTool(input.tools)
+        : undefined;
+
+    return { messages: finalMessages, systemPrompt: processedSystemPrompt, totalResult, tools: outputTools };
   } catch {
     // NEVER throw — return original on any error
     const originalTokens = countTokensFast(input.messages.map((m) => m.content).join(" "));

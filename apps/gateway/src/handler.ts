@@ -335,8 +335,12 @@ export function createGatewayHandler(
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
 
-    // Public, unauthenticated operational endpoints.
+    // Metrics endpoint — auth-gated only when GATEWAY_TOKEN is set.
     if (url.pathname === "/metrics") {
+      if (config.token && !isAuthorized(request)) {
+        log("warn", "auth.rejected", { requestId, path: url.pathname });
+        return json(request, { error: { message: "Unauthorized" } }, 401);
+      }
       const wantsText = (request.headers.get("accept") ?? "").includes("text/plain");
       if (wantsText) {
         return new Response(metrics.toPrometheus(), {

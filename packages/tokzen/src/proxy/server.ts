@@ -110,15 +110,19 @@ export function createProxy(config: ProxyConfig = {}) {
         body: JSON.stringify(upstreamBody),
       });
 
-      // Record rate-limit headers for quota tracking
+      // Record rate-limit headers for quota tracking (support both OpenAI and Anthropic formats)
       const rlHeaders: Record<string, string | null> = {};
-      for (const [k] of [
-        ["x-ratelimit-remaining-requests"],
-        ["x-ratelimit-remaining-tokens"],
-        ["x-ratelimit-limit-requests"],
-        ["x-ratelimit-limit-tokens"],
+      for (const k of [
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-limit-requests",
+        "x-ratelimit-limit-tokens",
+        "anthropic-ratelimit-requests-remaining",
+        "anthropic-ratelimit-tokens-remaining",
+        "anthropic-ratelimit-requests-limit",
+        "anthropic-ratelimit-tokens-limit",
       ]) {
-        if (k) rlHeaders[k] = upstreamResponse.headers.get(k);
+        rlHeaders[k] = upstreamResponse.headers.get(k);
       }
       quotaController.recordResponseHeaders(rlHeaders);
 
