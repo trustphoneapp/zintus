@@ -1,4 +1,3 @@
-import { Comparison } from "@/components/marketing/Comparison";
 import { CTA } from "@/components/marketing/CTA";
 import { FAQ } from "@/components/marketing/FAQ";
 import { Features } from "@/components/marketing/Features";
@@ -23,7 +22,6 @@ export default function HomePage() {
       <Stats />
       <HowItWorks />
       <Features />
-      <Comparison />
       <PlatformSection />
       <ProviderGrid />
       <InstallSection />
