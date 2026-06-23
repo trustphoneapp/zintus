@@ -65,10 +65,13 @@ describe("compressCode", () => {
     expect(result.ratio).toBeLessThan(1);
   });
 
-  it("stores original in CCR", async () => {
+  it("elides bodies with an honest marker (no false retrieve promise)", async () => {
     const result = await compressCode(TS_CODE);
-    expect(result.ccrHashes).toHaveLength(1);
-    expect(result.content).toContain("retrieve(");
+    // Lossy-but-honest: no CCR hash, and no retrieve() round-trip is promised
+    // (the gateway has no tool-calling path to satisfy one).
+    expect(result.ccrHashes).toHaveLength(0);
+    expect(result.content).not.toContain("retrieve(");
+    expect(result.content).toContain("bodies elided");
   });
 
   it("returns original on error without throwing", async () => {

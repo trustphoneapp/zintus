@@ -67,7 +67,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       engine,
       config,
       log,
-      // Feed real free-tier quota into Tokzen's quota-aware compression dial.
+      // Real, in-flight-aware free-tier quota signal for Tokzen's quota-aware
+      // compression dial (was always the hardcoded 1.0 default before wiring).
       getQuotaRemaining: (provider) => engine.getQuotaRemaining(provider),
     }),
   });

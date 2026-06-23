@@ -98,7 +98,8 @@ export interface Engine {
   getCompileTrace(traceId: string): CompileTraceRow | null;
   getProviderStatus(): Promise<ProviderStatus[]>;
   getSavings(): { byProvider: Record<string, number>; total: number };
-  /** Remaining free-tier quota ratio (0–1) for a provider — feeds Tokzen's
+  /** Remaining free-tier quota ratio (0..1) for a provider — in-flight-aware
+   *  (daily budget ∧ rolling-minute incl. reservations). Feeds Tokzen's
    *  quota-aware compression dial in the gateway. */
   getQuotaRemaining(provider: ProviderId): number;
   updatePolicy(policy: PolicyConfig): void;
