@@ -1,5 +1,6 @@
 import type { ProviderId } from "./provider-id.js";
 import type { ContextMode, RoutingStrategy } from "./config.js";
+import type { TraceAttempt } from "./trace.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -23,6 +24,8 @@ export interface RouteRequest {
   strategy?: RoutingStrategy | "weighted";
   temperature?: number;
   maxTokens?: number;
+  /** Per-request attempt callback. Fires for each provider attempt. */
+  onAttempt?: (event: TraceAttempt) => void;
 }
 
 export interface RouteResponse {

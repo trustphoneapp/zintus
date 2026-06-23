@@ -1,6 +1,6 @@
 import type { ProviderId } from "./provider-id.js";
 
-export type RoutingStrategy = "fastest" | "capability" | "economy";
+export type RoutingStrategy = "fastest" | "capability" | "economy" | "quality" | "balanced";
 export type ContextMode = "fast" | "smart" | "deep";
 
 export interface AppConfig {

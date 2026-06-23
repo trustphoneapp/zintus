@@ -192,10 +192,6 @@ export function createEngine(config: EngineConfig = {}): Engine {
     listProviders().map((p) => [p.id, p.defaultModel]),
   );
 
-  let activeTraceId: string | null = null;
-  const activeAttempts: TraceAttempt[] = [];
-  const traceStartedAt = { value: 0 };
-
   const resolveApiKey =
     config.getApiKey ??
     (async (providerId: ProviderId) => {
@@ -209,21 +205,6 @@ export function createEngine(config: EngineConfig = {}): Engine {
     ...config,
     dbPath: config.dbPath ?? DEFAULT_QUOTA_PATH,
     getApiKey: resolveApiKey,
-    onAttempt: (event) => {
-      const attempt: TraceAttempt = {
-        providerId: event.providerId,
-        model: event.model,
-        status: event.status,
-        latencyMs: event.latencyMs,
-        errorCode: event.errorCode,
-        errorMessage: event.errorMessage,
-      };
-      activeAttempts.push(attempt);
-      if (persistTraces && activeTraceId) {
-        conversations.recordAttempt(activeTraceId, attempt);
-      }
-      config.onAttempt?.(event);
-    },
   });
 
   function updateMemoryAfterTurn(
@@ -424,9 +405,8 @@ export function createEngine(config: EngineConfig = {}): Engine {
       }
 
       const traceId = randomUUID();
-      activeTraceId = traceId;
-      activeAttempts.length = 0;
-      traceStartedAt.value = Date.now();
+      const attempts: TraceAttempt[] = [];
+      const traceStartedAt = Date.now();
 
       if (persistTraces) {
         conversations.startTrace(traceId);
@@ -506,6 +486,13 @@ export function createEngine(config: EngineConfig = {}): Engine {
           ? `${threadId}:${request.provider ?? "auto"}`
           : undefined,
         stickySessionTtlMs: 30 * 60 * 1000,
+        onAttempt: (event) => {
+          attempts.push(event);
+          if (persistTraces) {
+            conversations.recordAttempt(traceId, event);
+          }
+          config.onAttempt?.(event);
+        },
       });
 
       const wrappedStream = async function* (): AsyncGenerator<string> {
@@ -543,26 +530,23 @@ export function createEngine(config: EngineConfig = {}): Engine {
         } finally {
           const completedAt = new Date();
           const trace: Omit<RequestTrace, "traceId" | "attempts"> = {
-            startedAt: new Date(traceStartedAt.value),
+            startedAt: new Date(traceStartedAt),
             completedAt,
             winner: {
               providerId: result.providerId,
               model: result.model,
             },
-            totalLatencyMs: completedAt.getTime() - traceStartedAt.value,
+            totalLatencyMs: completedAt.getTime() - traceStartedAt,
           };
           if (persistTraces) {
             conversations.completeTrace(traceId, trace);
           }
-          // OpenTelemetry export (no-op unless OTEL_EXPORTER_OTLP_ENDPOINT set).
           exportRequestTrace({
-            trace: { traceId, attempts: [...activeAttempts], ...trace },
+            trace: { traceId, attempts: [...attempts], ...trace },
             cacheHit: "miss",
             compileTokens: compileTokenEstimate,
-            failoverCount: activeAttempts.filter((a) => a.status === "fail")
-              .length,
+            failoverCount: attempts.filter((a) => a.status === "fail").length,
           });
-          activeTraceId = null;
         }
       };
 
@@ -575,9 +559,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
         compileTraceId,
         compileTokenEstimate,
         cacheHit: "miss",
-        failoverCount: activeAttempts.filter(
-          (attempt) => attempt.status === "fail",
-        ).length,
+        failoverCount: attempts.filter((a) => a.status === "fail").length,
       };
     },
 

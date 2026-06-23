@@ -8,7 +8,7 @@ export const groqProvider = createOpenAiCompatProvider({
   name: "Groq",
   color: "#F59E0B",
   priority: 2,
-  keyRegex: /^gsk_[a-zA-Z0-9]{50,}/,
+  keyRegex: /^gsk_[a-zA-Z0-9]{50,}$/,
   defaultModel: GROQ_MODEL_70B,
   baseUrl: "https://api.groq.com/openai/v1",
   includeRateLimit: true,

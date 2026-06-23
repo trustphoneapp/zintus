@@ -405,12 +405,14 @@ export function createRouter(config: RouterConfig = {}): Router {
                 }, request.stickySessionTtlMs).unref?.();
               }
             }
-            config.onAttempt?.({
+            const successEvt = {
               providerId: provider.id,
               model,
-              status: "success",
+              status: "success" as const,
               latencyMs: Date.now() - attemptStarted,
-            });
+            };
+            request.onAttempt?.(successEvt);
+            config.onAttempt?.(successEvt);
 
             const textStream = async function* (): AsyncGenerator<string> {
               let reportedUsage: TokenUsage | undefined;
@@ -477,22 +479,35 @@ export function createRouter(config: RouterConfig = {}): Router {
 
             const status =
               error instanceof ProviderHttpError ? error.status : undefined;
-            config.onAttempt?.({
+            const failEvt = {
               providerId: provider.id,
               model,
-              status: "fail",
+              status: "fail" as const,
               latencyMs: Date.now() - attemptStarted,
               errorCode: status,
               errorMessage: lastError.message,
-            });
+            };
+            request.onAttempt?.(failEvt);
+            config.onAttempt?.(failEvt);
             // Failover is governed by the policy's fallback actions. Default is
             // next_provider for both 429 and 5xx; a policy may set "fail" to make
             // a given error class abort instead of trying the next provider.
             const isRateLimit = status === 429;
             const is5xx = status != null && status >= 500;
+            // Treat network-level errors (TypeError: fetch failed, connection refused, etc.)
+            // as transient 503s — they should trigger failover to the next provider.
+            const isNetworkError =
+              !(error instanceof ProviderHttpError) &&
+              error instanceof Error &&
+              (error.name === "TypeError" ||
+                error.message.includes("fetch failed") ||
+                error.message.includes("ECONNREFUSED") ||
+                error.message.includes("ENOTFOUND") ||
+                error.message.includes("network"));
             const shouldFailover =
               (isRateLimit && on429 === "next_provider") ||
-              (is5xx && on5xx === "next_provider");
+              (is5xx && on5xx === "next_provider") ||
+              (isNetworkError && on5xx === "next_provider");
             // True once we have exhausted every model we were willing to try for
             // this provider (Groq tries 70B then 8B; OpenRouter tries its free
             // models; everyone else has a single model). Only then do we cool the

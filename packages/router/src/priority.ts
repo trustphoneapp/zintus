@@ -92,6 +92,42 @@ export function sortProviders(
           CAPABILITY_RANK[a.id] - CAPABILITY_RANK[b.id] ||
           byUserPriority(a, b, providerPriority),
       );
+    case "quality": {
+      // Largest context window first (proxied by capability rank DESC),
+      // then lowest latency P95 as tie-break.
+      const cap = (id: Provider["id"]) => CAPABILITY_RANK[id] ?? 50;
+      const latScore = (id: Provider["id"]) =>
+        latencyP95?.(id) ?? UNKNOWN_LATENCY_MS;
+      return [...providers].sort(
+        (a, b) =>
+          cap(a.id) - cap(b.id) ||
+          latScore(a.id) - latScore(b.id) ||
+          byUserPriority(a, b, providerPriority),
+      );
+    }
+    case "balanced": {
+      // Weighted score: 40% capability, 30% economy (cost), 30% speed (latency).
+      // All normalized to 0-1 range; lower score wins.
+      const maxCap = Math.max(...providers.map((p) => CAPABILITY_RANK[p.id] ?? 50));
+      const costs = providers.map((p) => costPerMillion?.(p.id) ?? 0);
+      const maxCost = Math.max(...costs, 1);
+      const latencies = providers.map(
+        (p) => latencyP95?.(p.id) ?? UNKNOWN_LATENCY_MS,
+      );
+      const maxLat = Math.max(...latencies, 1);
+
+      const score = (p: Provider) => {
+        const capNorm = (CAPABILITY_RANK[p.id] ?? 50) / maxCap;
+        const costNorm = (costPerMillion?.(p.id) ?? 0) / maxCost;
+        const latNorm = (latencyP95?.(p.id) ?? UNKNOWN_LATENCY_MS) / maxLat;
+        return 0.4 * capNorm + 0.3 * costNorm + 0.3 * latNorm;
+      };
+
+      return [...providers].sort(
+        (a, b) =>
+          score(a) - score(b) || byUserPriority(a, b, providerPriority),
+      );
+    }
     case "fastest":
     default: {
       // Real latency routing: order by lowest measured p95 over recent

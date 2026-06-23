@@ -11,7 +11,7 @@ export const openrouterProvider = createOpenAiCompatProvider({
   name: "OpenRouter",
   color: "#A855F7",
   priority: 4,
-  keyRegex: /^sk-or-[a-zA-Z0-9-]{40,}/,
+  keyRegex: /^sk-or-[a-zA-Z0-9-]{40,}$/,
   defaultModel: "meta-llama/llama-3.3-70b-instruct:free",
   baseUrl: "https://openrouter.ai/api/v1",
 });
@@ -41,7 +41,7 @@ export const deepseekProvider = createOpenAiCompatProvider({
   name: "DeepSeek",
   color: "#EC4899",
   priority: 7,
-  keyRegex: /^sk-[a-zA-Z0-9]{32,}/,
+  keyRegex: /^sk-[a-zA-Z0-9]{32,}$/,
   defaultModel: "deepseek-chat",
   baseUrl: "https://api.deepseek.com/v1",
 });
