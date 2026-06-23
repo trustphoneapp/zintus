@@ -6,6 +6,7 @@
     { "path": "./packages/keychain" },
     { "path": "./packages/cache" },
     { "path": "./packages/router" },
+    { "path": "./packages/search" },
     { "path": "./packages/memory" },
     { "path": "./packages/codebase-indexer" },
     { "path": "./packages/context-compiler" },

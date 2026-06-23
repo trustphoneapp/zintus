@@ -88,6 +88,7 @@
         "@zintus/engine": "workspace:*",
         "@zintus/providers": "workspace:*",
         "@zintus/router": "workspace:*",
+        "@zintus/search": "workspace:*",
         "@zintus/types": "workspace:*",
         "tokzen": "workspace:*",
       },
@@ -249,24 +250,37 @@
         "@zintus/keychain": "workspace:*",
         "@zintus/providers": "workspace:*",
         "@zintus/types": "workspace:*",
-        "drizzle-orm": "^0.45.0",
+        "drizzle-orm": "0.45.2",
       },
       "devDependencies": {
         "@types/bun": "latest",
-        "drizzle-kit": "^0.31.0",
+        "drizzle-kit": "0.31.10",
+      },
+    },
+    "packages/search": {
+      "name": "@zintus/search",
+      "version": "0.0.1",
+      "dependencies": {
+        "@zintus/types": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
       },
     },
     "packages/tokzen": {
       "name": "tokzen",
       "version": "0.1.0",
+      "bin": {
+        "tokzen-mcp": "./dist/mcp/server.js",
+      },
       "dependencies": {
-        "@anthropic-ai/sdk": "^0.105.0",
-        "gpt-tokenizer": "^3.4.0",
+        "@anthropic-ai/sdk": "0.105.0",
+        "gpt-tokenizer": "3.4.0",
       },
       "devDependencies": {
         "@types/bun": "latest",
-        "tsup": "^8.5.1",
-        "web-tree-sitter": "^0.25.10",
+        "tsup": "8.5.1",
+        "web-tree-sitter": "0.25.10",
       },
       "peerDependencies": {
         "@atjsh/llmlingua-2": "*",
@@ -1086,6 +1100,8 @@
     "@zintus/relay-worker": ["@zintus/relay-worker@workspace:workers/relay"],
 
     "@zintus/router": ["@zintus/router@workspace:packages/router"],
+
+    "@zintus/search": ["@zintus/search@workspace:packages/search"],
 
     "@zintus/types": ["@zintus/types@workspace:packages/types"],
 
