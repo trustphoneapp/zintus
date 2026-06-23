@@ -52,9 +52,11 @@ export function TerminalPane() {
         fontSize: 13,
         lineHeight: 1.6,
         theme: {
+          // xterm needs literal colors (it can't read CSS vars). These mirror the
+          // monochrome desktop palette — no off-palette purple cursor.
           background: "#0D0B14",
           foreground: "#F1EEF8",
-          cursor: "#A855F7",
+          cursor: "#e2e8f0",
           cursorAccent: "#0D0B14",
         },
       });
