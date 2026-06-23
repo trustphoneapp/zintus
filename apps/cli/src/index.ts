@@ -126,13 +126,24 @@ program
   .option("--host <host>", "Interface to bind (default 127.0.0.1)")
   .option("--port <port>", "Port to listen on (default 8788)")
   .option("--cloud", "Connect to Zintus Cloud relay (requires: zintus cloud login)")
-  .action(async (options: { host?: string; port?: string; cloud?: boolean }) => {
+  .option("--remote", "Alias for --cloud: connect to Zintus Cloud relay")
+  .option("--managed, --pro", "Check Pro tier billing status on startup")
+  .action(async (options: { host?: string; port?: string; cloud?: boolean; remote?: boolean; managed?: boolean }) => {
     const { runServe } = await import("./commands/serve.js");
     const port = options.port == null ? undefined : Number(options.port);
     if (port != null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
       throw new Error("Invalid --port. Expected an integer 1–65535.");
     }
-    await runServe({ host: options.host, port, cloud: options.cloud });
+    await runServe({ host: options.host, port, cloud: options.cloud || options.remote, managed: options.managed });
+  });
+
+program
+  .command("remote")
+  .description("Show cloud remote URL and QR code for mobile access")
+  .option("--qr", "Display QR code (requires qrcode-terminal)")
+  .action(async (options: { qr?: boolean }) => {
+    const { runRemote } = await import("./commands/remote.js");
+    await runRemote(options);
   });
 
 const cloud = program

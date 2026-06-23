@@ -5,7 +5,7 @@ import { isProviderId, PROVIDER_IDS } from "@zintus/types";
 
 const VALIDATE_URL =
   process.env.ZINTUS_VALIDATE_URL ??
-  "http://localhost:8787/validate";
+  "https://relay.zintus.ai/validate";
 
 import type { ProviderId } from "@zintus/types";
 

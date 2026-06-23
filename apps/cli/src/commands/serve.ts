@@ -8,7 +8,70 @@ export interface ServeOptions {
   port?: number;
   /** Connect to Zintus Cloud relay using credentials in ~/.zintus/cloud.json. */
   cloud?: boolean;
+  /** Force Pro managed key mode check on startup (alias: --pro). */
+  managed?: boolean;
 }
+
+// ── Pro billing helpers ───────────────────────────────────────────────────
+
+async function fetchBillingStatus(
+  sessionId: string,
+  relayUrl = "https://zintus-relay.yashwanth-surabhi.workers.dev",
+): Promise<{
+  tier: string;
+  tokens_used: number;
+  tokens_limit: number | null;
+} | null> {
+  try {
+    const res = await fetch(`${relayUrl.replace(/\/$/, "")}/api/billing/status`, {
+      headers: { Cookie: `zintus_session=${sessionId}` },
+    });
+    if (!res.ok) return null;
+    return res.json() as Promise<{
+      tier: string;
+      tokens_used: number;
+      tokens_limit: number | null;
+    }>;
+  } catch {
+    return null;
+  }
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return String(n);
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+async function printBillingStatus(sessionId: string, relayUrl?: string): Promise<void> {
+  const status = await fetchBillingStatus(sessionId, relayUrl);
+  if (status?.tier && status.tier !== "free") {
+    console.error(chalk.cyan(`✓ Pro tier: ${capitalize(status.tier)}`));
+    if (status.tokens_limit) {
+      const pct = Math.round((status.tokens_used / status.tokens_limit) * 100);
+      console.error(
+        chalk.dim(
+          `  ${fmtTokens(status.tokens_used)} / ${fmtTokens(status.tokens_limit)} tokens used (${pct}%)`,
+        ),
+      );
+      if (pct >= 80) {
+        console.error(
+          chalk.yellow(
+            `  ⚠ 80%+ quota used — upgrade at https://zintus.ai/pricing`,
+          ),
+        );
+      }
+    }
+  } else {
+    console.error(chalk.dim("  BYOK mode — keys read from OS keychain"));
+  }
+}
+
+// ── Cloud relay ───────────────────────────────────────────────────────────
 
 async function startCloudRelay(gatewayUrl: string): Promise<void> {
   const config = await loadCloudConfig();
@@ -76,6 +139,18 @@ export async function runServe(options?: ServeOptions): Promise<void> {
       chalk.dim("  Tip: add ") +
         chalk.bold("--cloud") +
         chalk.dim(" to connect to zintus.app/dashboard"),
+    );
+  }
+
+  // Pro managed key mode: fetch billing tier if cloud-connected (or --managed forced).
+  const cloudConfig = await loadCloudConfig();
+  if (cloudConfig?.session_id) {
+    await printBillingStatus(cloudConfig.session_id, cloudConfig.relay_url);
+  } else if (options?.managed) {
+    console.error(
+      chalk.yellow(
+        "  ⚠ --managed flag set but not logged in. Run: zintus cloud login",
+      ),
     );
   }
 
