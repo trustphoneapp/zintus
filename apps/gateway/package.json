@@ -20,6 +20,7 @@
     "@zintus/engine": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/router": "workspace:*",
+    "@zintus/search": "workspace:*",
     "@zintus/types": "workspace:*",
     "tokzen": "workspace:*"
   },

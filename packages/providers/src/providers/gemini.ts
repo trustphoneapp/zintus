@@ -123,6 +123,8 @@ export const geminiProvider: Provider = {
       body: JSON.stringify({
         ...splitGeminiMessages(messages),
         cachedContent: options.cacheHints?.cachedContentHandle,
+        // Native Google Search grounding (free on 2.5 Flash) when requested.
+        ...(options.webSearch ? { tools: [{ googleSearch: {} }] } : {}),
         generationConfig: {
           temperature: options.temperature,
           maxOutputTokens: options.maxTokens,

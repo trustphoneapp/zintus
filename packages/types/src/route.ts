@@ -24,6 +24,8 @@ export interface RouteRequest {
   strategy?: RoutingStrategy | "weighted";
   temperature?: number;
   maxTokens?: number;
+  /** Request provider-native web search (Gemini grounding / OpenRouter tool). */
+  webSearch?: boolean;
   /** Per-request attempt callback. Fires for each provider attempt. */
   onAttempt?: (event: TraceAttempt) => void;
 }

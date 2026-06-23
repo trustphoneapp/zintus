@@ -29,6 +29,7 @@ export interface MetricsSnapshot {
   errorsTotal: number;
   latencyMs: { count: number; sum: number; max: number; avg: number };
   tokzen: TokzenMetricsSnapshot;
+  searchByStrategy: Record<string, number>;
 }
 
 export interface Metrics {
@@ -36,6 +37,7 @@ export interface Metrics {
   recordChat(providerId: string): void;
   recordError(): void;
   recordTokzenSavings(originalTokens: number, compressedTokens: number, ratio: number, provider?: string): void;
+  recordSearch(strategy: string): void;
   snapshot(): MetricsSnapshot;
   toPrometheus(): string;
 }
@@ -60,6 +62,7 @@ export function createMetrics(now: () => number = Date.now): Metrics {
   let tokzenCacheHits = 0;
   let tokzenRequests = 0;
   const tokzenByProvider: Record<string, number> = {};
+  const searchByStrategy: Record<string, number> = {};
 
   function snapshot(): MetricsSnapshot {
     return {
@@ -81,6 +84,7 @@ export function createMetrics(now: () => number = Date.now): Metrics {
         cacheHitRate: tokzenRequests === 0 ? 0 : tokzenCacheHits / tokzenRequests,
         compressionsByProvider: { ...tokzenByProvider },
       },
+      searchByStrategy: { ...searchByStrategy },
     };
   }
 
@@ -119,6 +123,9 @@ export function createMetrics(now: () => number = Date.now): Metrics {
         tokzenByProvider[provider] = (tokzenByProvider[provider] ?? 0) + 1;
       }
     },
+    recordSearch(strategy) {
+      searchByStrategy[strategy] = (searchByStrategy[strategy] ?? 0) + 1;
+    },
     snapshot,
     toPrometheus() {
       const s = snapshot();
@@ -154,6 +161,12 @@ export function createMetrics(now: () => number = Date.now): Metrics {
         "# HELP tokzen_cache_hit_rate Fraction of requests where compression reduced tokens.",
         "# TYPE tokzen_cache_hit_rate gauge",
         `tokzen_cache_hit_rate ${s.tokzen.cacheHitRate.toFixed(4)}`,
+        "# HELP zintus_gateway_search_total Web searches by strategy.",
+        "# TYPE zintus_gateway_search_total counter",
+        ...Object.entries(s.searchByStrategy).map(
+          ([strategy, count]) =>
+            `zintus_gateway_search_total{strategy="${strategy}"} ${count}`,
+        ),
       ];
       return lines.join("\n") + "\n";
     },

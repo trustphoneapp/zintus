@@ -5,6 +5,12 @@ export interface StreamChatOptions {
   temperature?: number;
   maxTokens?: number;
   cacheHints?: CacheHints;
+  /**
+   * Request provider-native web search for this turn. Providers that support it
+   * (Gemini grounding, OpenRouter web_search) add the relevant tool; others
+   * ignore it. Groq's native search is selected via the model name instead.
+   */
+  webSearch?: boolean;
 }
 
 /**

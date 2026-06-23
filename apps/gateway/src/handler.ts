@@ -9,6 +9,17 @@ import {
 } from "./auth.js";
 import { createMetrics, type Metrics } from "./metrics.js";
 import { compress } from "tokzen";
+import {
+  getSearchStrategy,
+  groqCompoundModel,
+  runFallbackSearch,
+  injectSearchResults,
+  extractSearchQuery,
+  deepResearch,
+  type SearchDepth,
+  type ResearchDepth,
+  type DeepResearchDeps,
+} from "@zintus/search";
 
 export type LogFn = (
   level: "info" | "warn" | "error",
@@ -151,6 +162,11 @@ export function createGatewayHandler(
       temperature?: number;
       max_tokens?: number;
       diff?: string;
+      search?: {
+        enabled?: boolean;
+        depth?: SearchDepth;
+        maxResults?: number;
+      };
     };
     try {
       body = JSON.parse(raw);
@@ -167,6 +183,54 @@ export function createGatewayHandler(
       );
     }
 
+    // Web search: apply the provider-appropriate strategy BEFORE Tokzen runs,
+    // so any injected search context gets compressed like everything else.
+    //   groq        → switch model to a compound model (native, free)
+    //   gemini/openrouter → native tool flag threaded to the provider
+    //   everyone else     → external Tavily/Serper results injected as context
+    let searchMessages = messages;
+    let nativeWebSearch = false;
+    let effectiveModel = body.model;
+    if (body.search?.enabled) {
+      const searchProvider = body.provider;
+      const strategy = getSearchStrategy(searchProvider);
+      const depth: SearchDepth = body.search.depth ?? "standard";
+      if (strategy === "groq-compound") {
+        effectiveModel = groqCompoundModel(depth);
+      } else if (
+        strategy === "gemini-grounding" ||
+        strategy === "openrouter-tool"
+      ) {
+        nativeWebSearch = true;
+      } else {
+        const query = extractSearchQuery(messages);
+        if (query) {
+          try {
+            const outcome = await runFallbackSearch(
+              query,
+              { enabled: true, depth, maxResults: body.search.maxResults },
+              {
+                tavilyApiKey: config.tavilyApiKey,
+                serperApiKey: config.serperApiKey,
+              },
+            );
+            searchMessages = injectSearchResults(messages, outcome.results);
+            log("info", "search.fallback", {
+              requestId,
+              servedBy: outcome.servedBy,
+              results: outcome.results.length,
+            });
+          } catch (error) {
+            log("warn", "search.failed", {
+              requestId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+      metrics.recordSearch(strategy);
+    }
+
     // Tokzen: compress system + assistant messages before routing
     const selectedProvider = body.provider;
     const quotaRemaining = selectedProvider ? (getQuotaRemaining?.(selectedProvider) ?? 1.0) : 1.0;
@@ -175,7 +239,7 @@ export function createGatewayHandler(
       : selectedProvider === "gemini" ? "gemini" as const
       : "openai" as const;
     const tokzenResult = await compress(
-      { messages: messages.map((m) => ({ ...m, role: m.role as "system" | "user" | "assistant" | "tool" })) },
+      { messages: searchMessages.map((m) => ({ ...m, role: m.role as "system" | "user" | "assistant" | "tool" })) },
       {
         provider: tokzenProvider,
         model: body.model ?? "unknown",
@@ -199,7 +263,7 @@ export function createGatewayHandler(
     try {
       result = await withTimeout(
         engine.routeAndStream({
-          messages: compressedMessages.length > 0 ? compressedMessages : messages,
+          messages: compressedMessages.length > 0 ? compressedMessages : searchMessages,
           message:
             typeof body.message === "string"
               ? { role: "user", content: body.message }
@@ -209,10 +273,11 @@ export function createGatewayHandler(
                     content: body.message.content,
                   }
                 : undefined,
-          model: body.model,
+          model: effectiveModel,
           provider: body.provider,
           mode: body.mode,
           threadId: body.thread_id,
+          webSearch: nativeWebSearch,
           stream: body.stream !== false,
           virtualKey: body.virtual_key ?? body.virtualKey,
           providerWeights: body.provider_weights ?? body.providerWeights,
@@ -322,6 +387,143 @@ export function createGatewayHandler(
         ...(result.compileTokenEstimate == null
           ? {}
           : { "X-Compile-Tokens": String(result.compileTokenEstimate) }),
+        ...corsHeaders(request),
+      },
+    });
+  }
+
+  /**
+   * Deep research: decompose → parallel web search → synthesize, streamed as
+   * SSE progress events. Requires an external search key (Tavily/Serper) since
+   * it runs multiple provider-agnostic searches.
+   */
+  async function handleResearch(
+    request: Request,
+    requestId: string,
+  ): Promise<Response> {
+    const body = (await request.json().catch(() => ({}))) as {
+      query?: string;
+      depth?: ResearchDepth;
+    };
+    const query = body.query?.trim();
+    if (!query) {
+      return json(request, { error: { message: "query is required" } }, 400);
+    }
+    const depth: ResearchDepth = body.depth ?? "standard";
+
+    const searchEnv = {
+      tavilyApiKey: config.tavilyApiKey,
+      serperApiKey: config.serperApiKey,
+    };
+    if (!searchEnv.tavilyApiKey && !searchEnv.serperApiKey) {
+      return json(
+        request,
+        {
+          error: {
+            message:
+              "Deep research requires TAVILY_API_KEY or SERPER_API_KEY to be configured on the gateway.",
+          },
+        },
+        400,
+      );
+    }
+
+    async function collectText(messages: ChatMessage[]): Promise<string> {
+      const result = await engine.routeAndStream({ messages, stream: true });
+      let text = "";
+      for await (const chunk of result.stream) {
+        text += chunk;
+      }
+      return text;
+    }
+
+    const deps: DeepResearchDeps = {
+      decompose: async (q, count) => {
+        const text = await collectText([
+          {
+            role: "user",
+            content:
+              `Break this research question into exactly ${count} focused, distinct web-search queries. ` +
+              `Return ONLY a JSON array of strings, no prose.\n\nQuestion: ${q}`,
+          },
+        ]);
+        try {
+          const start = text.indexOf("[");
+          const end = text.lastIndexOf("]");
+          if (start !== -1 && end > start) {
+            const parsed = JSON.parse(text.slice(start, end + 1)) as unknown;
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              return parsed.slice(0, count).map((item) => String(item));
+            }
+          }
+        } catch {
+          // fall through to single-query fallback
+        }
+        return [q];
+      },
+      search: async (q) => {
+        const outcome = await runFallbackSearch(
+          q,
+          { enabled: true, depth: "basic", maxResults: 5 },
+          searchEnv,
+        );
+        return outcome.results;
+      },
+      synthesize: async function* (q, context) {
+        const result = await engine.routeAndStream({
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a research assistant. Synthesize a thorough, well-structured answer " +
+                "from the provided sources. Cite sources inline as [1], [2], [3].",
+            },
+            { role: "user", content: `Sources:\n${context}\n\nQuestion: ${q}` },
+          ],
+          stream: true,
+        });
+        for await (const chunk of result.stream) {
+          yield chunk;
+        }
+      },
+    };
+
+    metrics.recordSearch("deep-research");
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const encoder = new TextEncoder();
+        try {
+          for await (const event of deepResearch(query, { depth }, deps)) {
+            controller.enqueue(
+              encoder.encode(
+                `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+              ),
+            );
+          }
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Research failed";
+          metrics.recordError();
+          onError?.(error, { requestId, path: "/v1/research" });
+          log("error", "research.failed", { requestId, error: message });
+          controller.enqueue(
+            encoder.encode(
+              `event: error\ndata: ${JSON.stringify({ type: "error", message })}\n\n`,
+            ),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
         ...corsHeaders(request),
       },
     });
@@ -507,6 +709,18 @@ export function createGatewayHandler(
         metrics.recordError();
         onError?.(error, { requestId, path: url.pathname });
         log("error", "chat.failed", { requestId, error: message });
+        return json(request, { error: { message } }, 400);
+      }
+    }
+
+    if (url.pathname === "/v1/research" && request.method === "POST") {
+      try {
+        return await handleResearch(request, requestId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Request failed";
+        metrics.recordError();
+        onError?.(error, { requestId, path: url.pathname });
+        log("error", "research.failed", { requestId, error: message });
         return json(request, { error: { message } }, 400);
       }
     }

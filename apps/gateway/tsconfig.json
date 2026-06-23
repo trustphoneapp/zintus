@@ -9,6 +9,7 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../../packages/types" },
-    { "path": "../../packages/engine" }
+    { "path": "../../packages/engine" },
+    { "path": "../../packages/search" }
   ]
 }

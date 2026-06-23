@@ -14,6 +14,7 @@ export const openrouterProvider = createOpenAiCompatProvider({
   keyRegex: /^sk-or-[a-zA-Z0-9-]{40,}$/,
   defaultModel: "meta-llama/llama-3.3-70b-instruct:free",
   baseUrl: "https://openrouter.ai/api/v1",
+  supportsNativeWebSearch: true,
 });
 
 export const cohereProvider = createOpenAiCompatProvider({

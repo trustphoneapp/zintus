@@ -67,6 +67,10 @@ export interface GatewayConfig {
   maxMessages?: number;
   /** Abort a chat request that takes longer than this to start streaming (408). */
   requestTimeoutMs?: number;
+  /** Tavily API key — enables web search on providers without native support. */
+  tavilyApiKey?: string;
+  /** Serper API key — automatic fallback when Tavily quota is exhausted. */
+  serperApiKey?: string;
 }
 
 function parsePositiveInt(
@@ -124,5 +128,7 @@ export function buildGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
       60_000,
       "GATEWAY_REQUEST_TIMEOUT_MS",
     ),
+    tavilyApiKey: env.TAVILY_API_KEY?.trim() || undefined,
+    serperApiKey: env.SERPER_API_KEY?.trim() || undefined,
   };
 }

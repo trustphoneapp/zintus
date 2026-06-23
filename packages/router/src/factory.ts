@@ -380,6 +380,7 @@ export function createRouter(config: RouterConfig = {}): Router {
             const result = await provider.streamChat(request.messages, {
               model,
               apiKey,
+              webSearch: request.webSearch,
               cacheHints: request.cachedContentHandle
                 ? { cachedContentHandle: request.cachedContentHandle }
                 : undefined,

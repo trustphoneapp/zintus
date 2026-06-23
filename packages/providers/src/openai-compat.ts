@@ -22,6 +22,8 @@ export interface OpenAiCompatConfig {
   baseUrl: string;
   includeRateLimit?: boolean;
   validatePath?: string;
+  /** Provider supports OpenRouter-style `openrouter:web_search` tool calls. */
+  supportsNativeWebSearch?: boolean;
 }
 
 export function createOpenAiCompatProvider(
@@ -37,6 +39,7 @@ export function createOpenAiCompatProvider(
     baseUrl,
     includeRateLimit = false,
     validatePath = "/models",
+    supportsNativeWebSearch = false,
   } = config;
 
   return {
@@ -75,6 +78,11 @@ export function createOpenAiCompatProvider(
           // record real token counts instead of estimating. Providers that do
           // not support this field ignore it.
           stream_options: { include_usage: true },
+          // OpenRouter native web search when requested (Exa fallback under the
+          // hood). Other OpenAI-compatible providers don't set this.
+          ...(options.webSearch && supportsNativeWebSearch
+            ? { tools: [{ type: "openrouter:web_search", engine: "auto" }] }
+            : {}),
           temperature: options.temperature,
           max_tokens: options.maxTokens,
         }),
