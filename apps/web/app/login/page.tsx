@@ -109,7 +109,14 @@ export default function LoginPage() {
           disabled={status === "sending"}
           className="auth-input"
           autoComplete="email"
+          aria-describedby="magic-link-hint"
         />
+        <p
+          id="magic-link-hint"
+          style={{ fontSize: "12px", color: "var(--color-text-muted)", margin: "2px 0 0" }}
+        >
+          We&apos;ll email you a one-click sign-in link — no password needed.
+        </p>
         {status === "error" && (
           <p className="auth-error">{errorMsg}</p>
         )}

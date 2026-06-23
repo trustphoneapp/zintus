@@ -126,7 +126,7 @@ export default function SettingsPage() {
         <h2>Account</h2>
         <button
           className="auth-submit-btn"
-          style={{ background: "#ef4444" }}
+          style={{ background: "var(--color-red)" }}
           onClick={async () => {
             await signOut();
             window.location.href = "/login";
