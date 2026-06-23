@@ -5,14 +5,27 @@ import { ZintusLogo } from "@/components/ZintusLogo";
 const LINKS = {
   Product: [
     { label: "Pricing", href: "/pricing" },
-    { label: "Docs", href: "/docs" },
+    { label: "Changelog", href: "/changelog" },
     { label: "Chat", href: "/chat" },
-    { label: "Changelog", href: "#" },
+    { label: "Desktop App", href: "#install" },
+  ],
+  Developers: [
+    { label: "Docs", href: "/docs" },
+    { label: "GitHub", href: "https://github.com/trustphoneapp/zintus" },
+    { label: "CLI Install", href: "#install" },
+    { label: "API Reference", href: "/docs" },
+  ],
+  Company: [
+    { label: "About", href: "/about" },
+    { label: "Blog", href: "/blog" },
+    { label: "Contact", href: "/contact" },
+    { label: "Twitter/X", href: "https://x.com" },
   ],
   Legal: [
-    { label: "Security", href: "#" },
-    { label: "Privacy", href: "#" },
-    { label: "License (BUSL-1.1)", href: "#" },
+    { label: "Privacy", href: "/privacy" },
+    { label: "Security", href: "/security" },
+    { label: "License (BUSL-1.1)", href: "/docs" },
+    { label: "Terms", href: "/privacy" },
   ],
 };
 
@@ -26,16 +39,8 @@ export function Footer() {
       }}
     >
       <div className="m-shell">
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr auto auto",
-            gap: "3rem",
-            alignItems: "start",
-            marginBottom: "2.5rem",
-          }}
-        >
-          <div>
+        <div className="m-footer-grid">
+          <div style={{ minWidth: 220 }}>
             <ZintusLogo size="sm" showWordmark />
             <p
               style={{
@@ -46,8 +51,8 @@ export function Footer() {
                 lineHeight: 1.7,
               }}
             >
-              Open-source AI router. BYOK. Zero markup. Routes intelligently across 12 free
-              providers.
+              Source-available AI router. BYOK. Zero markup. Routes intelligently
+              across 12 free providers.
             </p>
           </div>
           {Object.entries(LINKS).map(([section, links]) => (
@@ -88,15 +93,20 @@ export function Footer() {
           style={{
             borderTop: "1px solid rgba(124,58,237,0.08)",
             paddingTop: "1.5rem",
+            marginTop: "2.5rem",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            flexWrap: "wrap",
+            gap: "0.75rem",
           }}
         >
           <span style={{ fontSize: 12, color: "#4a3070" }}>
-            © 2026 Zintus · Business Source License 1.1
+            © 2026 Zintus · YS Ventures LLC · Business Source License 1.1
           </span>
-          <span style={{ fontSize: 12, color: "#4a3070" }}>YS Ventures LLC</span>
+          <span style={{ fontSize: 12, color: "#4a3070" }}>
+            Made with ❤️ in Pittsburgh, PA
+          </span>
         </div>
       </div>
     </footer>
