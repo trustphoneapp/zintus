@@ -36,14 +36,25 @@
     "web-tree-sitter": "^0.25.10"
   },
   "peerDependenciesMeta": {
-    "web-tree-sitter": { "optional": true },
-    "@toon-format/toon": { "optional": true },
-    "drain3-js": { "optional": true },
-    "@atjsh/llmlingua-2": { "optional": true },
-    "@huggingface/transformers": { "optional": true }
+    "web-tree-sitter": {
+      "optional": true
+    },
+    "@toon-format/toon": {
+      "optional": true
+    },
+    "drain3-js": {
+      "optional": true
+    },
+    "@atjsh/llmlingua-2": {
+      "optional": true
+    },
+    "@huggingface/transformers": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "tree-sitter-wasms": "0.1.13",
     "tsup": "8.5.1",
     "web-tree-sitter": "0.25.10"
   }

@@ -249,24 +249,28 @@
         "@zintus/keychain": "workspace:*",
         "@zintus/providers": "workspace:*",
         "@zintus/types": "workspace:*",
-        "drizzle-orm": "^0.45.0",
+        "drizzle-orm": "0.45.2",
       },
       "devDependencies": {
         "@types/bun": "latest",
-        "drizzle-kit": "^0.31.0",
+        "drizzle-kit": "0.31.10",
       },
     },
     "packages/tokzen": {
       "name": "tokzen",
       "version": "0.1.0",
+      "bin": {
+        "tokzen-mcp": "./dist/mcp/server.js",
+      },
       "dependencies": {
-        "@anthropic-ai/sdk": "^0.105.0",
-        "gpt-tokenizer": "^3.4.0",
+        "@anthropic-ai/sdk": "0.105.0",
+        "gpt-tokenizer": "3.4.0",
       },
       "devDependencies": {
         "@types/bun": "latest",
-        "tsup": "^8.5.1",
-        "web-tree-sitter": "^0.25.10",
+        "tree-sitter-wasms": "0.1.13",
+        "tsup": "8.5.1",
+        "web-tree-sitter": "0.25.10",
       },
       "peerDependencies": {
         "@atjsh/llmlingua-2": "*",
@@ -1966,6 +1970,8 @@
     "toqr": ["toqr@0.1.1", "", {}, "sha512-FWAPzCIHZHnrE/5/w9MPk0kK25hSQSH2IKhYh9PyjS3SG/+IEMvlwIHbhz+oF7xl54I+ueZlVnMjyzdSwLmAwA=="],
 
     "tree-kill": ["tree-kill@1.2.2", "", { "bin": { "tree-kill": "cli.js" } }, "sha512-L0Orpi8qGpRG//Nd+H90vFB+3iHnue1zSSGmNOOCh1GLJ7rUKVwV2HvijphGQS2UmhUZewS9VgvxYIdgr+fG1A=="],
+
+    "tree-sitter-wasms": ["tree-sitter-wasms@0.1.13", "", { "dependencies": { "tree-sitter-wasms": "^0.1.11" } }, "sha512-wT+cR6DwaIz80/vho3AvSF0N4txuNx/5bcRKoXouOfClpxh/qqrF4URNLQXbbt8MaAxeksZcZd1j8gcGjc+QxQ=="],
 
     "ts-algebra": ["ts-algebra@2.0.0", "", {}, "sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw=="],
 
