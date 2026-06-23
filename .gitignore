@@ -13,3 +13,5 @@ target/
 *.log
 .wrangler/
 .dev.vars
+.dev.vars
+workers/relay/.dev.vars
