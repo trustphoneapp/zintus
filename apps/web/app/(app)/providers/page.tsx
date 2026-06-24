@@ -1,73 +1,70 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { QuotaBar } from "@/app/_components/QuotaBar";
-import { useAppStore } from "@/lib/app-store";
+import { PROVIDER_METADATA } from "@zintus/providers";
+import type { ProviderId } from "@zintus/types";
 import { hasEncryptedKeys } from "@/lib/crypto";
-import { PROVIDER_BY_ID, PROVIDERS } from "@/lib/providers";
-import { getRemainingQuotaPercent } from "@/lib/quota";
 import { useProviderStatusStore } from "@/lib/store";
+import {
+  pushKeyToGateway,
+  removeKeyFromGateway,
+  fetchGatewayStatus,
+  type LocalRuntimes,
+} from "@/lib/gateway-key-push";
+
+/** Provider ids that are local runtimes (no key, auto-detected on the host). */
+const LOCAL_RUNTIME_IDS: ProviderId[] = ["ollama", "lmstudio"];
+
+/** BYOK providers (everything that takes a pasted API key). */
+const BYOK_IDS = (Object.keys(PROVIDER_METADATA) as ProviderId[]).filter(
+  (id) => !LOCAL_RUNTIME_IDS.includes(id),
+);
+
+const SECURITY_MESSAGE =
+  "Stored in your browser's encrypted vault · synced to your home gateway via encrypted relay · never sent to Zintus";
+
+interface AddKeyState {
+  provider: ProviderId;
+  update: boolean;
+}
 
 export default function ProvidersPage() {
-  const { gatewayConnected, gatewayHealthLoaded, gatewayProviders } =
-    useAppStore();
-  const {
-    providers,
-    selected,
-    passphrase,
-    statusMessage,
-    validating,
-    keys,
-    setPassphrase,
-    setSelected,
-    unlock,
-    saveKey,
-    removeKey,
-    validateKey,
-  } = useProviderStatusStore();
-  const [draftKey, setDraftKey] = useState("");
-  const [saving, setSaving] = useState(false);
+  const { passphrase, keys, setPassphrase, unlock } = useProviderStatusStore();
 
+  const [localRuntimes, setLocalRuntimes] = useState<LocalRuntimes | null>(null);
+  const [hasGateway, setHasGateway] = useState(false);
+  const [addKey, setAddKey] = useState<AddKeyState | null>(null);
+
+  // Unlock the local vault whenever the passphrase changes.
   useEffect(() => {
     void unlock();
   }, [passphrase, unlock]);
 
-  const rows = PROVIDERS.map((provider) => {
-    const gateway = gatewayProviders.find((item) => item.id === provider.id);
-    const vault = providers.find((item) => item.id === provider.id);
-    const hasKey = gatewayConnected
-      ? Boolean(gateway?.hasKey)
-      : Boolean(vault?.hasKey) ||
-        provider.id === "ollama" ||
-        provider.id === "lmstudio";
-    const available = gatewayConnected
-      ? Boolean(gateway?.available)
-      : Boolean(vault?.enabled);
-    const inCooldown = gatewayConnected ? Boolean(gateway?.inCooldown) : false;
-    const quota = gatewayConnected
-      ? getRemainingQuotaPercent({
-          hasKey,
-          available,
-          quotaUsed: gateway?.quotaUsed,
-          quotaLimit: gateway?.quotaLimit,
-        })
-      : hasKey
-        ? 100
-        : 0;
-
-    return {
-      ...provider,
-      hasKey,
-      available,
-      inCooldown,
-      quota,
+  // Poll the resolved gateway status for localRuntimes + key-push capability.
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const result = await fetchGatewayStatus();
+      if (cancelled) return;
+      if (result) {
+        setHasGateway(true);
+        setLocalRuntimes(result.status.localRuntimes ?? null);
+      } else {
+        setHasGateway(false);
+        setLocalRuntimes(null);
+      }
+    }
+    void load();
+    const interval = setInterval(() => void load(), 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
     };
-  });
-
-  const showSkeleton = gatewayConnected && !gatewayHealthLoaded;
+  }, []);
 
   return (
     <div className="screen providers-screen">
+      {/* Vault passphrase — required to encrypt/decrypt local keys. */}
       <div className="vault-card">
         <label>
           Vault passphrase
@@ -80,145 +77,256 @@ export default function ProvidersPage() {
             }
           />
         </label>
-        <p className="vault-hint">
-          Stored in browser with AES-256-GCM. For OS keychain routing, use{" "}
-          <code>zintus keys set</code> and run the gateway.
-        </p>
+        <p className="vault-hint">{SECURITY_MESSAGE}</p>
       </div>
 
-      <div className="providers-grid">
-        {showSkeleton
-          ? PROVIDERS.map((provider) => (
-              <div
-                key={provider.id}
-                className="provider-card provider-card-skeleton"
-                aria-hidden="true"
-              >
-                <div className="provider-card-top">
-                  <div>
-                    <div className="skeleton-line skeleton-line-title" />
-                    <div className="skeleton-line skeleton-line-sub" />
-                  </div>
-                  <div className="skeleton-line skeleton-line-badge" />
-                </div>
-                <div className="skeleton-line skeleton-line-bar" />
-              </div>
-            ))
-          : rows.map((provider) => {
-              const pct = provider.quota ?? 0;
-              const selectedCard = selected === provider.id;
-
+      {/* ── On your system (local runtimes) ─────────────────────────────── */}
+      {hasGateway && (
+        <section className="byok-section">
+          <h2 className="byok-section-title">On your system</h2>
+          <p className="byok-section-sub">
+            Local runtimes detected on your home machine — free, fully offline.
+          </p>
+          <div className="byok-list">
+            {LOCAL_RUNTIME_IDS.map((id) => {
+              const meta = PROVIDER_METADATA[id];
+              const runtime =
+                id === "ollama"
+                  ? localRuntimes?.ollama
+                  : localRuntimes?.lmstudio;
+              const detected = Boolean(runtime?.detected);
               return (
-                <button
-                  key={provider.id}
-                  type="button"
-                  className={`provider-card${selectedCard ? " selected" : ""}`}
-                  onClick={() => setSelected(provider.id)}
-                >
-                  <div className="provider-card-top">
+                <div key={id} className="byok-row">
+                  <div className="byok-row-main">
+                    <span
+                      className={`byok-dot ${detected ? "byok-dot--on" : "byok-dot--off"}`}
+                      aria-hidden="true"
+                    />
                     <div>
-                      <div className="provider-card-title">
+                      <div className="byok-row-title">
                         <span
                           className="provider-swatch"
-                          style={{ background: provider.color }}
+                          style={{ background: meta.color }}
                         />
-                        <span>{provider.name}</span>
+                        {meta.name}
                       </div>
-                      <span className="provider-card-model">
-                        {PROVIDER_BY_ID[provider.id].name}
-                      </span>
-                    </div>
-                    <div className="provider-card-badges">
-                      {provider.inCooldown ? (
-                        <span className="provider-chip cooldown">cooldown</span>
-                      ) : null}
-                      <span
-                        className={`provider-badge${provider.hasKey ? " ok" : ""}`}
-                      >
-                        {provider.hasKey ? "configured" : "no key"}
-                      </span>
+                      <p className="byok-row-desc">{meta.description}</p>
+                      {detected && runtime?.models && runtime.models.length > 0 && (
+                        <p className="byok-row-models">
+                          {runtime.models.slice(0, 4).join(", ")}
+                          {runtime.models.length > 4
+                            ? ` +${runtime.models.length - 4} more`
+                            : ""}
+                        </p>
+                      )}
                     </div>
                   </div>
-                  {provider.hasKey ? (
-                    <>
-                      <div className="provider-card-quota-label">
-                        <span>Daily quota</span>
-                        <span>
-                          {provider.quota == null
-                            ? "quota —"
-                            : `${pct}% remaining`}
-                        </span>
-                      </div>
-                      <QuotaBar value={pct} color={provider.color} />
-                    </>
-                  ) : (
-                    <div className="provider-connect">+ Connect API Key</div>
-                  )}
-                </button>
+                  <span
+                    className={`byok-status ${detected ? "byok-status--on" : "byok-status--off"}`}
+                  >
+                    {detected ? "Detected" : "Not detected"}
+                  </span>
+                </div>
               );
             })}
-      </div>
+          </div>
+        </section>
+      )}
 
-      <div className="vault-card">
-        <h2>{PROVIDER_BY_ID[selected].name}</h2>
-        <label>
+      {/* ── Connect a provider (BYOK) ───────────────────────────────────── */}
+      <section className="byok-section">
+        <h2 className="byok-section-title">Connect a provider (BYOK)</h2>
+        <p className="byok-section-sub">
+          Bring your own key. It is encrypted in your browser and pushed to your
+          gateway over an encrypted relay.
+        </p>
+        <div className="byok-list">
+          {BYOK_IDS.map((id) => {
+            const meta = PROVIDER_METADATA[id];
+            const configured = Boolean(keys[id]);
+            return (
+              <div key={id} className="byok-row">
+                <div className="byok-row-main">
+                  <span
+                    className={`byok-dot ${configured ? "byok-dot--on" : "byok-dot--off"}`}
+                    aria-hidden="true"
+                  />
+                  <div>
+                    <div className="byok-row-title">
+                      <span
+                        className="provider-swatch"
+                        style={{ background: meta.color }}
+                      />
+                      {meta.name}
+                    </div>
+                    <p className="byok-row-desc">{meta.description}</p>
+                    <span
+                      className={`byok-policy ${meta.trainsOnData ? "byok-policy--warn" : "byok-policy--safe"}`}
+                      title={meta.dataPolicy}
+                    >
+                      {meta.trainsOnData ? "May train on data" : "No training on data"}
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="byok-action"
+                  onClick={() => setAddKey({ provider: id, update: configured })}
+                >
+                  {configured ? "Update key" : "Add key"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {addKey && (
+        <AddKeyModal
+          provider={addKey.provider}
+          update={addKey.update}
+          passphrase={passphrase}
+          onClose={() => setAddKey(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── AddKey modal ─────────────────────────────────────────────────────────────
+
+function AddKeyModal({
+  provider,
+  update,
+  passphrase,
+  onClose,
+}: {
+  provider: ProviderId;
+  update: boolean;
+  passphrase: string;
+  onClose: () => void;
+}) {
+  const { unlock, removeKey: removeFromVaultUi } = useProviderStatusStore();
+  const meta = PROVIDER_METADATA[provider];
+  const [draftKey, setDraftKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    if (!passphrase) {
+      setError("Enter a vault passphrase first.");
+      return;
+    }
+    const key = draftKey.trim();
+    if (!key) {
+      setError("Paste your API key first.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await pushKeyToGateway(provider, key, passphrase);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error ?? "Failed to add key.");
+      return;
+    }
+    // Refresh the local vault view so the dot/label flip to "configured".
+    await unlock();
+    onClose();
+  }
+
+  async function handleRemove() {
+    if (!passphrase) {
+      setError("Enter a vault passphrase first.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await removeKeyFromGateway(provider, passphrase);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.error ?? "Failed to remove key.");
+      return;
+    }
+    // Keep the in-memory store consistent with the vault we just edited.
+    await removeFromVaultUi(provider);
+    await unlock();
+    onClose();
+  }
+
+  return (
+    <div className="byok-modal-backdrop" onClick={onClose}>
+      <div className="byok-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="byok-modal-head">
+          <span
+            className="provider-swatch"
+            style={{ background: meta.color }}
+          />
+          <h2 className="byok-modal-title">
+            {update ? "Update" : "Add"} {meta.name} key
+          </h2>
+        </div>
+        <p className="byok-modal-free">{meta.freeTier}</p>
+
+        <label className="byok-modal-label">
           API key
           <input
             type="password"
             value={draftKey}
-            onChange={(event) => setDraftKey(event.target.value)}
-            placeholder="sk-..."
+            onChange={(e) => setDraftKey(e.target.value)}
+            placeholder={meta.keyPrefix ? `${meta.keyPrefix}…` : "API key"}
+            autoFocus
           />
         </label>
-        <div className="actions">
-          <button
-            type="button"
-            onClick={() => void validateKey(selected, draftKey.trim())}
-            disabled={validating || saving || !draftKey.trim()}
-          >
-            {validating ? (
-              <>
-                <span className="btn-spinner" aria-hidden="true" />
-                Validating…
-              </>
-            ) : (
-              "Validate"
-            )}
-          </button>
-          <button
-            type="button"
-            disabled={saving || validating || !draftKey.trim()}
-            onClick={() => {
-              setSaving(true);
-              void saveKey(selected, draftKey.trim())
-                .then(() => setDraftKey(""))
-                .finally(() => setSaving(false));
-            }}
-          >
-            {saving ? (
-              <>
-                <span className="btn-spinner" aria-hidden="true" />
-                Saving…
-              </>
-            ) : (
-              "Save encrypted"
-            )}
-          </button>
-          {keys[selected] ? (
+
+        <a
+          href={meta.keyUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="byok-modal-getkey"
+        >
+          Get free key →
+        </a>
+
+        <p className="byok-modal-policy" title={meta.dataPolicy}>
+          {meta.dataPolicy}
+        </p>
+
+        <p className="byok-modal-security">{SECURITY_MESSAGE}</p>
+
+        {error && <p className="byok-modal-error">{error}</p>}
+
+        <div className="byok-modal-actions">
+          {update && (
             <button
               type="button"
-              className="secondary"
-              disabled={saving || validating}
-              onClick={() => void removeKey(selected)}
+              className="byok-modal-btn byok-modal-btn--danger"
+              disabled={busy}
+              onClick={() => void handleRemove()}
             >
-              Remove key
+              Remove
             </button>
-          ) : null}
+          )}
+          <div className="byok-modal-actions-right">
+            <button
+              type="button"
+              className="byok-modal-btn"
+              disabled={busy}
+              onClick={onClose}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="byok-modal-btn byok-modal-btn--primary"
+              disabled={busy}
+              onClick={() => void handleSave()}
+            >
+              {busy ? "Saving…" : "Save"}
+            </button>
+          </div>
         </div>
-        <p className="vault-hint">Stored locally — never sent to any server except the provider.</p>
       </div>
-
-      {statusMessage ? <p className="status-banner">{statusMessage}</p> : null}
     </div>
   );
 }
