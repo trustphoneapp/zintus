@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   ScrollView,
   Text,
@@ -9,16 +10,25 @@ import {
 import BottomSheet from "@gorhom/bottom-sheet";
 import { useFocusEffect } from "expo-router";
 import { listProviders } from "@zintus/providers";
+import { PROVIDER_METADATA } from "@zintus/providers";
 import type { ProviderId } from "@zintus/types";
 import { ProviderSheet } from "@/components/ProviderSheet";
 import { QuotaBar } from "@/components/QuotaBar";
 import { loadSelectedProvider, saveSelectedProvider } from "@/lib/config";
-import { deleteApiKey, hasApiKey } from "@/lib/keys";
+import { hasApiKey } from "@/lib/keys";
 import { getQuotaSnapshot } from "@/lib/quota";
 import {
   fetchGatewayHealth,
   type GatewayProviderStatus,
 } from "@/lib/gateway";
+import {
+  fetchSessionStatus,
+  type LocalRuntimes,
+} from "@/lib/cloud";
+import {
+  removeKeyFromGateway,
+  resolveSessionId,
+} from "@/lib/gateway-key-push";
 
 interface ProviderRowState {
   providerId: ProviderId;
@@ -39,6 +49,8 @@ export default function ProvidersScreen() {
     ProviderId,
     GatewayProviderStatus | undefined
   > | null>(null);
+  // null = gateway offline / no status → hide "On your system" section entirely.
+  const [localRuntimes, setLocalRuntimes] = useState<LocalRuntimes | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -71,6 +83,18 @@ export default function ProvidersScreen() {
             ) as Record<ProviderId, GatewayProviderStatus | undefined>)
           : null,
       );
+
+      // Local runtimes are reported by the cloud gateway status (not the local
+      // health endpoint). Resolve the current session and read localRuntimes.
+      try {
+        const sessionId = await resolveSessionId();
+        const status = sessionId
+          ? await fetchSessionStatus(sessionId)
+          : null;
+        setLocalRuntimes(status?.localRuntimes ?? null);
+      } catch {
+        setLocalRuntimes(null);
+      }
     } finally {
       setLoading(false);
     }
@@ -97,23 +121,52 @@ export default function ProvidersScreen() {
         {loading ? (
           <ActivityIndicator color="#f4f6f8" />
         ) : (
-          listProviders().map((provider) => {
+          listProviders()
+            .filter(
+              (provider) =>
+                provider.id !== "ollama" && provider.id !== "lmstudio",
+            )
+            .map((provider) => {
             const row = rowMap[provider.id];
             const live = gatewayStatus?.[provider.id];
+            const meta = PROVIDER_METADATA[provider.id];
             return (
               <View
                 key={provider.id}
                 className="rounded-xl border border-slate-800 bg-panel p-4"
               >
                 <View className="mb-3 flex-row items-center justify-between">
-                  <View>
+                  <View className="flex-1 pr-3">
                     <Text className="text-lg font-semibold text-ink">
-                      {provider.name}
+                      {meta?.name ?? provider.name}
                     </Text>
+                    {meta ? (
+                      <Text className="text-xs text-muted">
+                        {meta.description}
+                      </Text>
+                    ) : null}
                     <Text className="text-xs text-muted">
                       {row?.hasKey ? "Key configured" : "No key"}
                       {row?.inCooldown ? " · cooldown" : ""}
                     </Text>
+                    {meta ? (
+                      <View className="mt-1 flex-row flex-wrap gap-1">
+                        <Text className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-muted">
+                          {meta.freeTier}
+                        </Text>
+                        <Text
+                          className={`rounded px-1.5 py-0.5 text-[10px] ${
+                            meta.trainsOnData
+                              ? "bg-amber-500/15 text-amber-500"
+                              : "bg-emerald-500/15 text-emerald-400"
+                          }`}
+                        >
+                          {meta.trainsOnData
+                            ? "May train on data"
+                            : "No training on data"}
+                        </Text>
+                      </View>
+                    ) : null}
                     {live ? (
                       <Text
                         className={`text-xs ${
@@ -162,13 +215,11 @@ export default function ProvidersScreen() {
                       {row?.hasKey ? "Update key" : "Add key"}
                     </Text>
                   </Pressable>
-                  {row?.hasKey &&
-                  provider.id !== "ollama" &&
-                  provider.id !== "lmstudio" ? (
+                  {row?.hasKey ? (
                     <Pressable
                       className="items-center rounded-lg border border-slate-600 px-4 py-2.5"
                       onPress={async () => {
-                        await deleteApiKey(provider.id);
+                        await removeKeyFromGateway(provider.id);
                         await refresh();
                       }}
                     >
@@ -180,6 +231,62 @@ export default function ProvidersScreen() {
             );
           })
         )}
+
+        {/* "On your system" — driven by the gateway's reported localRuntimes.
+            Hidden entirely when the gateway is offline / no status. */}
+        {!loading && localRuntimes ? (
+          <View className="mt-4 gap-2">
+            <Text className="text-sm font-semibold text-ink">
+              On your system
+            </Text>
+            <Text className="text-xs text-muted">
+              Local runtimes detected on your gateway machine. Prompts never
+              leave your device.
+            </Text>
+            {(["ollama", "lmstudio"] as const).map((id) => {
+              const meta = PROVIDER_METADATA[id];
+              const runtime = localRuntimes[id];
+              const detected = runtime?.detected ?? false;
+              const modelCount = runtime?.models?.length ?? 0;
+              return (
+                <View
+                  key={id}
+                  className="rounded-xl border border-slate-800 bg-panel p-4"
+                >
+                  <View className="flex-row items-center justify-between">
+                    <View className="flex-1 pr-3">
+                      <Text className="text-base font-semibold text-ink">
+                        {meta.name}
+                      </Text>
+                      {detected ? (
+                        <Text className="text-xs text-emerald-400">
+                          {`● detected${
+                            modelCount > 0 ? ` · ${modelCount} models` : ""
+                          }`}
+                        </Text>
+                      ) : (
+                        <Pressable
+                          onPress={() => void Linking.openURL(meta.keyUrl)}
+                        >
+                          <Text className="text-xs text-muted">
+                            {`○ not detected · `}
+                            <Text className="text-accent-bright underline">
+                              install
+                            </Text>
+                          </Text>
+                        </Pressable>
+                      )}
+                    </View>
+                    <View
+                      className="h-3 w-3 rounded-full"
+                      style={{ backgroundColor: meta.color }}
+                    />
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
       </ScrollView>
 
       <ProviderSheet

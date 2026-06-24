@@ -80,6 +80,16 @@ export async function fetchCloudSessions(): Promise<CloudSession[]> {
   return sessions;
 }
 
+export interface LocalRuntimeStatus {
+  detected: boolean;
+  models?: string[];
+}
+
+export interface LocalRuntimes {
+  ollama?: LocalRuntimeStatus;
+  lmstudio?: LocalRuntimeStatus;
+}
+
 export interface SessionStatus {
   ok?: boolean;
   online?: boolean;
@@ -91,6 +101,10 @@ export interface SessionStatus {
     remainingRatio?: number;
   }>;
   savings?: { estimatedUsdSaved?: number };
+  /** Gateway's x25519 public key (raw 32B, base64) for E2E BYOK key push. */
+  gatewayPublicKey?: string;
+  /** Local runtimes detected on the gateway host (ollama/lmstudio). */
+  localRuntimes?: LocalRuntimes;
 }
 
 export async function fetchSessionStatus(sessionId: string): Promise<SessionStatus | null> {
