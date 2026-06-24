@@ -7,10 +7,14 @@ import { listProviders } from "@zintus/providers";
 import type { ProviderId } from "@zintus/types";
 import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
-import { deleteApiKey, getApiKey, setApiKey } from "@/lib/keys";
+import { getApiKey } from "@/lib/keys";
 import { getQuotaSnapshot } from "@/lib/quota";
 import { validateProviderKey } from "@/lib/validate";
 import { notifyStreamError } from "@/lib/notifications";
+import {
+  pushKeyToGateway,
+  removeKeyFromGateway,
+} from "@/lib/gateway-key-push";
 
 interface ProviderSheetProps {
   sheetRef: React.RefObject<BottomSheet | null>;
@@ -73,7 +77,8 @@ export function ProviderSheet({
     try {
       const trimmed = apiKey.trim();
       if (!trimmed) {
-        await deleteApiKey(selectedProvider);
+        // Empty key → remove everywhere (gateway + local).
+        await removeKeyFromGateway(selectedProvider);
         sheetRef.current?.close();
         await onSaved?.();
         return;
@@ -87,7 +92,14 @@ export function ProviderSheet({
         return;
       }
 
-      await setApiKey(selectedProvider, trimmed);
+      // Encrypt-and-push to the gateway over the relay; this also mirrors the
+      // key into local secure storage on success.
+      const result = await pushKeyToGateway(selectedProvider, trimmed);
+      if (!result.success) {
+        await notifyStreamError(result.error ?? "Failed to push key to gateway");
+        return;
+      }
+
       sheetRef.current?.close();
       await onSaved?.();
     } finally {

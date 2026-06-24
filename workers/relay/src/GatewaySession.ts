@@ -32,6 +32,52 @@ function parseGatewayMsg(raw: string): GatewayMsg | null {
   }
 }
 
+// Provider ids must stay in sync with packages/types provider-id.ts. The relay
+// has no @zintus/types dependency, so the list is inlined for shape validation.
+const VALID_PROVIDER_IDS = new Set<string>([
+  "cerebras",
+  "groq",
+  "gemini",
+  "openrouter",
+  "cohere",
+  "mistral",
+  "deepseek",
+  "fireworks",
+  "xai",
+  "huggingface",
+  "lmstudio",
+  "ollama",
+]);
+
+/**
+ * Validate BYOK key-push control payloads. Returns an error string (→ 400) or
+ * null to allow forwarding. The relay forwards opaque ciphertext and MUST NOT
+ * decrypt or inspect `encryptedKey`.
+ */
+function validateControlPayload(action: string, value: unknown): string | null {
+  if (action === "set_key") {
+    const v = (value ?? {}) as { provider?: unknown; encryptedKey?: unknown };
+    if (typeof v.provider !== "string" || !VALID_PROVIDER_IDS.has(v.provider)) {
+      return "Invalid or missing provider";
+    }
+    if (typeof v.encryptedKey !== "string" || v.encryptedKey.length === 0) {
+      return "Invalid or missing encryptedKey";
+    }
+    return null;
+  }
+
+  if (action === "remove_key") {
+    const v = (value ?? {}) as { provider?: unknown };
+    if (typeof v.provider !== "string" || !VALID_PROVIDER_IDS.has(v.provider)) {
+      return "Invalid or missing provider";
+    }
+    return null;
+  }
+
+  // All other (existing) actions pass through unchanged.
+  return null;
+}
+
 export class GatewaySession {
   private state: DurableObjectState;
   private env: Env;
@@ -289,6 +335,17 @@ export class GatewaySession {
       body = (await request.json()) as typeof body;
     } catch {
       return new Response("Bad JSON", { status: 400 });
+    }
+
+    // Payload validation for BYOK key-push control actions. The relay NEVER
+    // decrypts or inspects `encryptedKey` — it only checks shape, then forwards
+    // the message verbatim.
+    const validationError = validateControlPayload(body.action, body.value);
+    if (validationError) {
+      return new Response(JSON.stringify({ error: validationError }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     const gws = this.state.getWebSockets("gateway");

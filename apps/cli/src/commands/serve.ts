@@ -1,7 +1,13 @@
 import chalk from "chalk";
-import { startGateway } from "@zintus/gateway";
+import {
+  startGateway,
+  startCloudConnection,
+  getOrCreateGatewayKeypair,
+  decryptKeyPayload,
+  detectLocalRuntimes,
+} from "@zintus/gateway";
+import { isValidProvider, setKey, removeKey } from "@zintus/keychain";
 import { loadCloudConfig } from "./cloud.js";
-import { startCloudConnection } from "@zintus/gateway";
 
 export interface ServeOptions {
   host?: string;
@@ -84,13 +90,67 @@ async function startCloudRelay(gatewayUrl: string): Promise<void> {
     return;
   }
 
+  // Gateway E2E keypair — its public key is advertised to clients so they can
+  // encrypt BYOK API keys to it; the private key never leaves this machine.
+  const keypair = getOrCreateGatewayKeypair();
+
   startCloudConnection({
     sessionId: config.session_id,
     gatewaySecret: config.gateway_secret,
     relayUrl: config.relay_url,
     getStatus: async () => {
       const res = await fetch(`${gatewayUrl}/health`).catch(() => null);
-      return res?.ok ? res.json() : { ok: false };
+      const health = (res?.ok ? await res.json() : { ok: false }) as Record<
+        string,
+        unknown
+      >;
+      return {
+        ...health,
+        gatewayPublicKey: keypair.publicKeyBase64,
+        localRuntimes: await detectLocalRuntimes(),
+      };
+    },
+    onControl: async (action, value) => {
+      // BYOK key-push: clients send key material encrypted to the gateway's
+      // public key; the relay forwards it opaquely. We decrypt here, write to
+      // the OS keychain, and the engine picks it up on the next request (keys
+      // are read fresh from the keychain per request — no in-memory reload).
+      if (action === "set_key") {
+        const v = (value ?? {}) as {
+          provider?: unknown;
+          encryptedKey?: unknown;
+        };
+        if (
+          typeof v.provider !== "string" ||
+          !isValidProvider(v.provider) ||
+          typeof v.encryptedKey !== "string"
+        ) {
+          console.error(chalk.yellow("cloud: set_key — invalid payload"));
+          return;
+        }
+        let key: string;
+        try {
+          key = decryptKeyPayload(v.encryptedKey);
+        } catch {
+          // Never log key material or decryption internals.
+          console.error(chalk.yellow("cloud: set_key — decryption failed"));
+          return;
+        }
+        await setKey(v.provider, key);
+        console.error(chalk.dim(`cloud: set_key applied for ${v.provider}`));
+        return;
+      }
+
+      if (action === "remove_key") {
+        const v = (value ?? {}) as { provider?: unknown };
+        if (typeof v.provider !== "string" || !isValidProvider(v.provider)) {
+          console.error(chalk.yellow("cloud: remove_key — invalid payload"));
+          return;
+        }
+        await removeKey(v.provider);
+        console.error(chalk.dim(`cloud: remove_key applied for ${v.provider}`));
+        return;
+      }
     },
     log: (level, msg) => {
       if (level === "error") {

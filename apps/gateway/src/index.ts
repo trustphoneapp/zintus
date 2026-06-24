@@ -1,4 +1,10 @@
 export { startCloudConnection, type CloudOptions, type CloudConnection } from "./cloud.js";
+export {
+  getOrCreateGatewayKeypair,
+  decryptKeyPayload,
+  type GatewayKeypair,
+} from "./crypto.js";
+export { detectLocalRuntimes, type LocalRuntimes } from "./local-runtimes.js";
 import { createEngine } from "@zintus/engine";
 import { loadPolicy, watchPolicy } from "@zintus/router";
 import { DEFAULT_CONFIG } from "@zintus/types";
