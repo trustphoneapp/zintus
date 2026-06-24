@@ -130,6 +130,18 @@ export class MemoryStore {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+      -- thread_id is the WHERE/filter column on every read path (listFacts,
+      -- listChunks, listTraces, fact upserts). Without these indexes those are
+      -- full table scans that degrade linearly as memory grows. thread_state is
+      -- already covered by its PRIMARY KEY. IF NOT EXISTS keeps init() idempotent.
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_thread_id
+        ON memory_facts (thread_id);
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_thread_key
+        ON memory_facts (thread_id, key);
+      CREATE INDEX IF NOT EXISTS idx_memory_chunks_thread_id
+        ON memory_chunks (thread_id);
+      CREATE INDEX IF NOT EXISTS idx_compile_traces_thread_id
+        ON compile_traces (thread_id);
     `);
     try {
       this.db.$client.exec(`

@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Engine } from "@zintus/engine";
 import type { GatewayConfig } from "./auth.js";
-import { createGatewayHandler } from "./handler.js";
+import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
+import { createRateLimiter } from "./rate-limit.js";
 
 function fakeEngine(overrides: Partial<Engine> = {}): Engine {
   const base: Engine = {
@@ -43,6 +44,7 @@ function fakeEngine(overrides: Partial<Engine> = {}): Engine {
 function makeHandler(
   config: Partial<GatewayConfig> = {},
   engine = fakeEngine(),
+  extraDeps: Partial<GatewayHandlerDeps> = {},
 ) {
   const full: GatewayConfig = {
     port: 8788,
@@ -51,7 +53,7 @@ function makeHandler(
     corsOrigins: "*",
     ...config,
   };
-  return createGatewayHandler({ engine, config: full });
+  return createGatewayHandler({ engine, config: full, ...extraDeps });
 }
 
 describe("gateway handler", () => {
@@ -62,6 +64,113 @@ describe("gateway handler", () => {
     const body = (await res.json()) as { ok: boolean; auth: string };
     expect(body.ok).toBe(true);
     expect(body.auth).toBe("required");
+  });
+
+  test("GET /health reports 503 while draining", async () => {
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), {
+      getDraining: () => true,
+    });
+    const res = await handler(new Request("http://x/health"));
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { ok: boolean; status?: string };
+    expect(body.ok).toBe(false);
+    expect(body.status).toBe("draining");
+  });
+
+  test("GET /health no longer leaks provider topology", async () => {
+    const handler = makeHandler({ token: "secret" });
+    const res = await handler(new Request("http://x/health"));
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.providers).toBeUndefined();
+    expect(body.savings).toBeUndefined();
+  });
+
+  test("GET /v1/status requires auth and returns provider topology", async () => {
+    const handler = makeHandler({ token: "secret" });
+    // Unauthenticated → 401
+    const unauth = await handler(
+      new Request("http://x/v1/status", { method: "GET" }),
+    );
+    expect(unauth.status).toBe(401);
+    // Authenticated → topology + savings
+    const res = await handler(
+      new Request("http://x/v1/status", {
+        method: "GET",
+        headers: { authorization: "Bearer secret" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { providers: unknown[]; savings: unknown };
+    expect(Array.isArray(body.providers)).toBe(true);
+    expect(body.savings).toBeDefined();
+  });
+
+  test("rejects a structurally invalid chat body with 400 + issues", async () => {
+    const handler = makeHandler({ token: "secret" });
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer secret",
+          "content-type": "application/json",
+        },
+        // content must be a string; provider must be a known id.
+        body: JSON.stringify({
+          messages: [{ role: "user", content: 123 }],
+          provider: "not-a-real-provider",
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error: { message: string; issues?: unknown[] };
+    };
+    expect(body.error.message).toBe("Invalid request body");
+    expect(Array.isArray(body.error.issues)).toBe(true);
+  });
+
+  test("rejects an invalid research body with 400 + issues (zod)", async () => {
+    const handler = makeHandler({ token: "secret" });
+    const res = await handler(
+      new Request("http://x/v1/research", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer secret",
+          "content-type": "application/json",
+        },
+        // depth must be one of quick|standard|deep.
+        body: JSON.stringify({ query: "hi", depth: "ludicrous" }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toBe("Invalid request body");
+  });
+
+  test("rate limiter returns 429 with Retry-After once budget is exhausted", async () => {
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), {
+      rateLimiter: createRateLimiter({ limit: 1, windowMs: 60_000 }),
+    });
+    const make = () =>
+      handler(
+        new Request("http://x/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer secret",
+            "x-forwarded-for": "1.2.3.4",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            messages: [{ role: "user", content: "hi" }],
+            stream: false,
+          }),
+        }),
+      );
+    const first = await make();
+    expect(first.status).toBe(200);
+    const second = await make();
+    expect(second.status).toBe(429);
+    expect(second.headers.get("Retry-After")).toBeTruthy();
   });
 
   test("returns 401 on protected route without a token", async () => {

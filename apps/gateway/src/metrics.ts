@@ -27,6 +27,7 @@ export interface MetricsSnapshot {
   chatCompletionsTotal: number;
   chatByProvider: Record<string, number>;
   errorsTotal: number;
+  rateLimitedTotal: number;
   latencyMs: { count: number; sum: number; max: number; avg: number };
   tokzen: TokzenMetricsSnapshot;
   searchByStrategy: Record<string, number>;
@@ -36,6 +37,7 @@ export interface Metrics {
   recordRequest(status: number, latencyMs: number): void;
   recordChat(providerId: string): void;
   recordError(): void;
+  recordRateLimited(): void;
   recordTokzenSavings(originalTokens: number, compressedTokens: number, ratio: number, provider?: string): void;
   recordSearch(strategy: string): void;
   snapshot(): MetricsSnapshot;
@@ -51,6 +53,7 @@ export function createMetrics(now: () => number = Date.now): Metrics {
   let chatCompletionsTotal = 0;
   const chatByProvider: Record<string, number> = {};
   let errorsTotal = 0;
+  let rateLimitedTotal = 0;
   let latencyCount = 0;
   let latencySum = 0;
   let latencyMax = 0;
@@ -72,6 +75,7 @@ export function createMetrics(now: () => number = Date.now): Metrics {
       chatCompletionsTotal,
       chatByProvider: { ...chatByProvider },
       errorsTotal,
+      rateLimitedTotal,
       latencyMs: {
         count: latencyCount,
         sum: latencySum,
@@ -111,6 +115,9 @@ export function createMetrics(now: () => number = Date.now): Metrics {
     recordError() {
       errorsTotal += 1;
     },
+    recordRateLimited() {
+      rateLimitedTotal += 1;
+    },
     recordTokzenSavings(originalTokens, compressedTokens, ratio, provider) {
       tokzenRequests += 1;
       tokzenTokensSaved += Math.max(0, originalTokens - compressedTokens);
@@ -146,6 +153,9 @@ export function createMetrics(now: () => number = Date.now): Metrics {
         "# HELP zintus_gateway_errors_total Total request errors.",
         "# TYPE zintus_gateway_errors_total counter",
         `zintus_gateway_errors_total ${s.errorsTotal}`,
+        "# HELP zintus_gateway_rate_limited_total Total requests rejected by the rate limiter.",
+        "# TYPE zintus_gateway_rate_limited_total counter",
+        `zintus_gateway_rate_limited_total ${s.rateLimitedTotal}`,
         "# HELP zintus_gateway_request_latency_ms_max Max request latency (ms).",
         "# TYPE zintus_gateway_request_latency_ms_max gauge",
         `zintus_gateway_request_latency_ms_max ${s.latencyMs.max}`,

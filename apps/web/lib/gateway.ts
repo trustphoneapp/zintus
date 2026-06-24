@@ -35,10 +35,17 @@ export function getGatewayUrl(): string {
   return GATEWAY_URL;
 }
 
+/**
+ * Full gateway snapshot (provider inventory + savings). Sourced from the
+ * auth-gated `/v1/status`: the public `/health` is intentionally minimal
+ * (`{ ok, auth }`) and no longer exposes provider topology. Sends the bearer
+ * token when one is configured; a 401/offline gateway returns null.
+ */
 export async function fetchGatewayHealth(): Promise<GatewayHealth | null> {
   try {
-    const response = await fetch(`${GATEWAY_URL}/health`, {
+    const response = await fetch(`${GATEWAY_URL}/v1/status`, {
       cache: "no-store",
+      headers: { ...gatewayAuthHeaders() },
     });
     if (!response.ok) {
       return null;

@@ -1,13 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { listProviders } from "@zintus/providers";
 import type { Engine } from "@zintus/engine";
-import type { ChatMessage, ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
+import type { ChatMessage, ContextMode, ProviderId } from "@zintus/types";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
   type GatewayConfig,
 } from "./auth.js";
 import { createMetrics, type Metrics } from "./metrics.js";
+import type { RateLimiter } from "./rate-limit.js";
+import {
+  ChatCompletionRequestSchema,
+  ResearchRequestSchema,
+  formatIssues,
+} from "@zintus/schemas";
 import { compress } from "tokzen";
 import {
   getSearchStrategy,
@@ -74,6 +80,18 @@ export interface GatewayHandlerDeps {
   metrics?: Metrics;
   /** Optional quota-remaining getter for Tokzen dial (0.0–1.0). */
   getQuotaRemaining?: (provider: ProviderId) => number;
+  /**
+   * Returns true once graceful shutdown has begun. While draining, /health
+   * reports 503 so load balancers / clients stop routing new traffic here while
+   * in-flight streams finish.
+   */
+  getDraining?: () => boolean;
+  /**
+   * Optional per-client rate limiter applied to the expensive POST endpoints
+   * (/v1/chat/completions, /v1/research). When omitted, no limiting is applied
+   * (preserves prior behaviour; enabled from index.ts via GATEWAY_RATELIMIT_RPM).
+   */
+  rateLimiter?: RateLimiter;
 }
 
 /**
@@ -89,6 +107,8 @@ export function createGatewayHandler(
   const onError = deps.onError;
   const metrics = deps.metrics ?? createMetrics();
   const getQuotaRemaining = deps.getQuotaRemaining;
+  const getDraining = deps.getDraining;
+  const rateLimiter = deps.rateLimiter;
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxMessages = config.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -131,6 +151,33 @@ export function createGatewayHandler(
     return bearerAuthorized(request.headers.get("authorization"), config.token);
   }
 
+  /**
+   * Apply the optional rate limiter to a request. Returns a 429 Response when the
+   * caller is over budget, or null to proceed. No-op when no limiter is injected.
+   */
+  function enforceRateLimit(
+    request: Request,
+    requestId: string,
+    path: string,
+  ): Response | null {
+    if (!rateLimiter) {
+      return null;
+    }
+    const verdict = rateLimiter.check(rateLimiter.keyFor(request));
+    if (verdict.ok) {
+      return null;
+    }
+    const retryAfterSec = Math.ceil(verdict.retryAfterMs / 1000);
+    metrics.recordRateLimited();
+    log("warn", "ratelimit.exceeded", { requestId, path });
+    return json(
+      request,
+      { error: { message: "Rate limit exceeded", type: "rate_limit_error" } },
+      429,
+      { "Retry-After": String(retryAfterSec) },
+    );
+  }
+
   async function handleChatCompletions(
     request: Request,
     requestId: string,
@@ -146,33 +193,29 @@ export function createGatewayHandler(
       return json(request, { error: { message: "Request body too large" } }, 413);
     }
 
-    let body: {
-      messages?: Array<{ role: string; content: string }>;
-      message?: { role?: string; content: string } | string;
-      model?: string;
-      stream?: boolean;
-      provider?: ProviderId;
-      thread_id?: string;
-      mode?: ContextMode;
-      virtual_key?: string;
-      virtualKey?: string;
-      provider_weights?: Record<string, number>;
-      providerWeights?: Record<string, number>;
-      strategy?: RoutingStrategy | "weighted";
-      temperature?: number;
-      max_tokens?: number;
-      diff?: string;
-      search?: {
-        enabled?: boolean;
-        depth?: SearchDepth;
-        maxResults?: number;
-      };
-    };
+    let parsedJson: unknown;
     try {
-      body = JSON.parse(raw);
+      parsedJson = JSON.parse(raw);
     } catch {
       return json(request, { error: { message: "Invalid JSON body" } }, 400);
     }
+    // Schema-validate the body (zod) instead of trusting an inline cast. Unknown
+    // keys are stripped; malformed types get a 400 with field-level issues
+    // rather than partial/surprising downstream handling.
+    const parsed = ChatCompletionRequestSchema.safeParse(parsedJson);
+    if (!parsed.success) {
+      return json(
+        request,
+        {
+          error: {
+            message: "Invalid request body",
+            issues: formatIssues(parsed.error),
+          },
+        },
+        400,
+      );
+    }
+    const body = parsed.data;
 
     const messages = parseMessages(body);
     if (messages.length > maxMessages) {
@@ -259,10 +302,28 @@ export function createGatewayHandler(
       selectedProvider,
     );
 
+    // Per-request abort controller. Aborting it tears down the upstream
+    // provider fetch (signal is threaded RouteRequest -> router -> provider),
+    // which both releases the in-flight quota reservation and closes the
+    // socket. Two things trip it: (1) the client disconnecting, and (2) the
+    // connect/start timeout below — previously withTimeout only rejected,
+    // leaving the upstream connection to hang indefinitely.
+    const upstreamAbort = new AbortController();
+    if (request.signal) {
+      if (request.signal.aborted) {
+        upstreamAbort.abort();
+      } else {
+        request.signal.addEventListener("abort", () => upstreamAbort.abort(), {
+          once: true,
+        });
+      }
+    }
+
     let result: Awaited<ReturnType<Engine["routeAndStream"]>>;
     try {
       result = await withTimeout(
         engine.routeAndStream({
+          signal: upstreamAbort.signal,
           messages: compressedMessages.length > 0 ? compressedMessages : searchMessages,
           message:
             typeof body.message === "string"
@@ -294,6 +355,9 @@ export function createGatewayHandler(
       );
     } catch (error) {
       if (error instanceof RequestTimeoutError) {
+        // Abort the (still-pending) upstream connect so the socket and the
+        // in-flight reservation are released rather than leaked.
+        upstreamAbort.abort();
         log("warn", "chat.timeout", { requestId });
         return json(request, { error: { message: error.message } }, 408);
       }
@@ -376,6 +440,11 @@ export function createGatewayHandler(
           controller.close();
         }
       },
+      // Client disconnected mid-stream: abort the upstream fetch so we stop
+      // pulling (and paying quota for) tokens nobody is reading.
+      cancel() {
+        upstreamAbort.abort();
+      },
     });
 
     return new Response(stream, {
@@ -401,10 +470,22 @@ export function createGatewayHandler(
     request: Request,
     requestId: string,
   ): Promise<Response> {
-    const body = (await request.json().catch(() => ({}))) as {
-      query?: string;
-      depth?: ResearchDepth;
-    };
+    const parsedBody = ResearchRequestSchema.safeParse(
+      await request.json().catch(() => null),
+    );
+    if (!parsedBody.success) {
+      return json(
+        request,
+        {
+          error: {
+            message: "Invalid request body",
+            issues: formatIssues(parsedBody.error),
+          },
+        },
+        400,
+      );
+    }
+    const body = parsedBody.data;
     const query = body.query?.trim();
     if (!query) {
       return json(request, { error: { message: "query is required" } }, 400);
@@ -428,8 +509,26 @@ export function createGatewayHandler(
       );
     }
 
+    // Propagate a client disconnect to the (multiple) upstream calls research
+    // makes, so abandoning a research request cancels the in-flight provider
+    // fetches instead of running them to completion.
+    const researchAbort = new AbortController();
+    if (request.signal) {
+      if (request.signal.aborted) {
+        researchAbort.abort();
+      } else {
+        request.signal.addEventListener("abort", () => researchAbort.abort(), {
+          once: true,
+        });
+      }
+    }
+
     async function collectText(messages: ChatMessage[]): Promise<string> {
-      const result = await engine.routeAndStream({ messages, stream: true });
+      const result = await engine.routeAndStream({
+        messages,
+        stream: true,
+        signal: researchAbort.signal,
+      });
       let text = "";
       for await (const chunk of result.stream) {
         text += chunk;
@@ -552,12 +651,39 @@ export function createGatewayHandler(
       return json(request, metrics.snapshot());
     }
 
+    // Public liveness probe — intentionally minimal. It must NOT leak provider
+    // inventory, key presence, live quota, or savings to unauthenticated
+    // callers (that lets an attacker map the operator's setup and time quota
+    // exhaustion). The full operational snapshot lives at the auth-gated
+    // /v1/status below. Keep the response shape `{ ok: true }`-compatible so the
+    // gateway-smoke probe (curl -sf /health) still passes.
     if (url.pathname === "/health") {
+      const draining = getDraining?.() ?? false;
+      return json(
+        request,
+        {
+          ok: !draining,
+          auth: config.token ? "required" : "disabled",
+          ...(draining ? { status: "draining" } : {}),
+        },
+        draining ? 503 : 200,
+      );
+    }
+
+    // Everything below requires authorization (when a token is configured).
+    if (!isAuthorized(request)) {
+      log("warn", "auth.rejected", { requestId, path: url.pathname });
+      return json(request, { error: { message: "Unauthorized" } }, 401);
+    }
+
+    // Authenticated operational snapshot: provider inventory, key presence, live
+    // quota, cooldown state, and provable savings. Moved here (behind auth) from
+    // the public /health to close the topology-disclosure leak.
+    if (url.pathname === "/v1/status" && request.method === "GET") {
       const statuses = await engine.getProviderStatus();
       const savings = engine.getSavings();
       return json(request, {
         ok: true,
-        auth: config.token ? "required" : "disabled",
         providers: statuses.map((status) => ({
           id: status.id,
           available: status.available,
@@ -575,12 +701,6 @@ export function createGatewayHandler(
           note: "estimate vs. paid-API list pricing",
         },
       });
-    }
-
-    // Everything below requires authorization (when a token is configured).
-    if (!isAuthorized(request)) {
-      log("warn", "auth.rejected", { requestId, path: url.pathname });
-      return json(request, { error: { message: "Unauthorized" } }, 401);
     }
 
     if (url.pathname === "/v1/models" && request.method === "GET") {
@@ -702,6 +822,10 @@ export function createGatewayHandler(
     }
 
     if (url.pathname === "/v1/chat/completions" && request.method === "POST") {
+      const limited = enforceRateLimit(request, requestId, url.pathname);
+      if (limited) {
+        return limited;
+      }
       try {
         return await handleChatCompletions(request, requestId);
       } catch (error) {
@@ -714,6 +838,10 @@ export function createGatewayHandler(
     }
 
     if (url.pathname === "/v1/research" && request.method === "POST") {
+      const limited = enforceRateLimit(request, requestId, url.pathname);
+      if (limited) {
+        return limited;
+      }
       try {
         return await handleResearch(request, requestId);
       } catch (error) {

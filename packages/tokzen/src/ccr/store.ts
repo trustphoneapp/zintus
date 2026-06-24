@@ -20,8 +20,14 @@ function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
+/** Base dir for tokzen on-disk state. TOKZEN_HOME overrides it (test isolation
+ *  / read-only-home environments); defaults to ~/.tokzen. */
+function tokzenHome(): string {
+  return process.env.TOKZEN_HOME?.trim() || join(homedir(), ".tokzen");
+}
+
 export function createCCRStore(dbPath?: string): CCRStore {
-  const resolvedPath = dbPath ?? join(homedir(), ".tokzen", "ccr.db");
+  const resolvedPath = dbPath ?? join(tokzenHome(), "ccr.db");
   mkdirSync(dirname(resolvedPath), { recursive: true });
 
   const db = new Database(resolvedPath);

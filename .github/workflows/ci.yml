@@ -16,6 +16,33 @@ jobs:
       - run: bun install
       - run: bun run typecheck
 
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history; fetch it all so secrets in older commits
+          # are caught, not just the tip.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      # Dependency audit. Currently non-gating (continue-on-error) while the
+      # known transitive highs (undici via wrangler, xmldom via expo) are worked
+      # down; flip to gating by removing continue-on-error once `bun audit
+      # --audit-level=high` is clean.
+      - name: Dependency audit (high+)
+        continue-on-error: true
+        run: bun audit --audit-level=high
+      # Secret scanning across the full history. Fails the job on any finding.
+      # v3 runs on Node 24 (v2 is deprecated with Node 20 EOL). Free for
+      # personal/public repos; org repos need a GITLEAKS_LICENSE secret.
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
   test:
     runs-on: ubuntu-latest
     needs: typecheck
@@ -23,6 +50,9 @@ jobs:
     # fallback so keychain-backed modules don't throw at import/use during tests.
     env:
       CI_KEYCHAIN: memory
+      # Isolate tokzen's on-disk CCR/eval-cache to a writable workspace path so
+      # the suite never depends on a writable $HOME (hermetic on any runner).
+      TOKZEN_HOME: ${{ github.workspace }}/.tokzen-ci
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -46,6 +76,7 @@ jobs:
           - apps/desktop
           - apps/mobile
           - workers/validate-key
+          - workers/relay
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2

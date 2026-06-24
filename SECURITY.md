@@ -13,6 +13,7 @@ before deploying anything beyond your own machine.
 | Web | browser `localStorage`, AES-256-GCM + PBKDF2(600k) | browser | passphrase |
 | Gateway (Bun) | reads keys from the host keychain at runtime | configurable | bearer token |
 | validate-key worker | none (validates a key passed in the request) | public edge | rate limit |
+| Cloud relay worker | BYOK: opaque ciphertext (cannot read). Managed (Pro): AES-256-GCM, **operator-decryptable** | public edge | JWT + KV rate limit |
 
 ## API key storage
 
@@ -33,11 +34,42 @@ before deploying anything beyond your own machine.
   interface (`0.0.0.0`/`::`) unless `GATEWAY_TOKEN` is set.
 - When `GATEWAY_TOKEN` is set, every endpoint except `/health` requires
   `Authorization: Bearer <token>` (compared in constant time).
+- `/health` is intentionally minimal — `{ ok, auth }` only. It does **not**
+  expose provider inventory, key presence, live quota, or savings to
+  unauthenticated callers. That operational snapshot lives at the auth-gated
+  `GET /v1/status`.
 - CORS defaults to `*`; restrict it with `GATEWAY_CORS_ORIGIN` for browser
   deployments.
+- Optional per-client rate limiting on `/v1/chat/completions` and `/v1/research`
+  via `GATEWAY_RATELIMIT_RPM` (requests/min). Off by default; set it when the
+  gateway is network-exposed so a stolen token cannot burn provider quota
+  unthrottled. Keyed by the bearer token by default (unspoofable);
+  `X-Forwarded-For` is honoured only when `GATEWAY_TRUST_PROXY=1` (i.e. behind a
+  reverse proxy that overwrites that header) — otherwise a client could forge a
+  fresh IP per request to evade an IP-keyed limit.
+- On `SIGTERM`/`SIGINT` the gateway drains in-flight streams, reports `/health`
+  as `503 draining`, closes the cloud relay connection, and clears background
+  timers before exiting (bounded by `GATEWAY_DRAIN_TIMEOUT_MS`, default 10s).
+- Provider HTTP calls are cancellable: a client disconnect or the request
+  timeout aborts the upstream fetch, releasing the in-flight quota reservation
+  instead of leaking the connection.
 - The gateway can spend any provider quota/credits associated with the keys in
   the host keychain. Anyone who can reach it and present the token can use those
   keys. Scope the token and network accordingly.
+
+## Cloud relay (Pro tier)
+
+- **BYOK is zero-knowledge.** Clients encrypt key material to the home gateway's
+  public key; the relay forwards the opaque ciphertext and never holds the
+  plaintext or the key that decrypts it (`GatewaySession.ts`).
+- **Managed keys are NOT zero-knowledge.** For the Pro tier, provider keys are
+  encrypted server-side with AES-256-GCM (key derived from
+  `KEY_ENCRYPTION_SECRET` via HKDF-SHA256) and decrypted inside the relay worker
+  to call providers on the user's behalf. The relay therefore holds both the
+  ciphertext and the secret that decrypts it — anyone with worker-env access
+  (the platform, a compromised deploy, or an insider) can read managed keys.
+  - **Recommendation:** use BYOK for high-value keys. Treat managed keys as a
+    convenience tier with operator-level trust, not as zero-knowledge custody.
 
 ## validate-key worker
 

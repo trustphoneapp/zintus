@@ -3,7 +3,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const CACHE_DIR = join(homedir(), ".tokzen", "eval-cache");
+// TOKZEN_HOME overrides the base dir (test isolation / read-only-home envs).
+const TOKZEN_HOME = process.env.TOKZEN_HOME?.trim() || join(homedir(), ".tokzen");
+const CACHE_DIR = join(TOKZEN_HOME, "eval-cache");
 
 export interface GSM8KSample {
   question: string;
