@@ -52,6 +52,12 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      # Per-package tsc needs referenced projects' built outputs: tokzen ships a
+      # ./dist build (tsup), and the workspace packages use composite project
+      # references (tsc -b builds their dist/*.d.ts) — without these, isolated
+      # typecheck fails with TS2307 (tokzen) / TS6305 (composite refs).
+      - run: bun run --filter tokzen build
+      - run: bunx tsc -b tsconfig.build.json
       - run: cd ${{ matrix.app }} && bun run typecheck
 
   packages:
@@ -68,6 +74,10 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      # Build referenced project outputs first (see apps job): tokzen ./dist +
+      # composite refs, else isolated typecheck fails with TS2307 / TS6305.
+      - run: bun run --filter tokzen build
+      - run: bunx tsc -b tsconfig.build.json
       - run: cd ${{ matrix.pkg }} && bun run typecheck
 
   cli-smoke:
