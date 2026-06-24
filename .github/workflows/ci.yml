@@ -29,6 +29,9 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      # tokzen resolves to ./dist (a build artifact, gitignored). Build it so
+      # gateway code importing "tokzen" loads at runtime in tests.
+      - run: bun run --filter tokzen build
       - run: bun run test
 
   apps:
@@ -76,6 +79,7 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      - run: bun run --filter tokzen build
       - run: cd apps/cli && bun run dev -- --help
 
   gateway-smoke:
@@ -87,6 +91,7 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      - run: bun run --filter tokzen build
       - name: Start gateway
         run: bun run apps/gateway/src/index.ts &
         env:
