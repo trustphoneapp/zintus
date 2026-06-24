@@ -13,6 +13,7 @@
   "dependencies": {
     "@expo/vector-icons": "^15.1.1",
     "@gorhom/bottom-sheet": "^5.2.14",
+    "@zintus/crypto-e2e": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/router": "workspace:*",
     "@zintus/types": "workspace:*",
@@ -30,6 +31,7 @@
     "react-native": "0.85.0",
     "react-native-css-interop": "^0.2.5",
     "react-native-gesture-handler": "^3.0.1",
+    "react-native-get-random-values": "~1.11.0",
     "react-native-mmkv": "^4.3.1",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",

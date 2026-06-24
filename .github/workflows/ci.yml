@@ -19,12 +19,19 @@ jobs:
   test:
     runs-on: ubuntu-latest
     needs: typecheck
+    # No OS Secret Service on the headless runner — use the in-memory keychain
+    # fallback so keychain-backed modules don't throw at import/use during tests.
+    env:
+      CI_KEYCHAIN: memory
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
       - run: bun install
+      # tokzen resolves to ./dist (a build artifact, gitignored). Build it so
+      # gateway code importing "tokzen" loads at runtime in tests.
+      - run: bun run --filter tokzen build
       - run: bun run test
 
   apps:
@@ -45,6 +52,12 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      # Per-package tsc needs referenced projects' built outputs: tokzen ships a
+      # ./dist build (tsup), and the workspace packages use composite project
+      # references (tsc -b builds their dist/*.d.ts) — without these, isolated
+      # typecheck fails with TS2307 (tokzen) / TS6305 (composite refs).
+      - run: bun run --filter tokzen build
+      - run: bunx tsc -b tsconfig.build.json
       - run: cd ${{ matrix.app }} && bun run typecheck
 
   packages:
@@ -61,6 +74,10 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      # Build referenced project outputs first (see apps job): tokzen ./dist +
+      # composite refs, else isolated typecheck fails with TS2307 / TS6305.
+      - run: bun run --filter tokzen build
+      - run: bunx tsc -b tsconfig.build.json
       - run: cd ${{ matrix.pkg }} && bun run typecheck
 
   cli-smoke:
@@ -72,6 +89,7 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      - run: bun run --filter tokzen build
       - run: cd apps/cli && bun run dev -- --help
 
   gateway-smoke:
@@ -83,6 +101,7 @@ jobs:
         with:
           bun-version: latest
       - run: bun install
+      - run: bun run --filter tokzen build
       - name: Start gateway
         run: bun run apps/gateway/src/index.ts &
         env:

@@ -124,20 +124,27 @@ export class CodeIndex {
     if (!this.sqliteVecAvailable) {
       return;
     }
-    const row = this.sqlite
-      .query(
-        "SELECT value FROM code_chunk_vectors_meta WHERE key = 'dimensions' LIMIT 1",
-      )
-      .get() as { value: string } | null;
-    if (!row) {
-      return;
-    }
-    const dimensions = Number.parseInt(row.value, 10);
-    if (!Number.isFinite(dimensions) || dimensions <= 0) {
-      return;
-    }
-    if (this.ensureVectorTable(dimensions)) {
-      this.backfillVectorTable(dimensions);
+    // Best-effort: a vec0 operation can throw on some platforms/SQLite builds
+    // (e.g. headless Linux CI). The index works without the indexed path, so a
+    // failure here must never crash the constructor — just disable the indexed path.
+    try {
+      const row = this.sqlite
+        .query(
+          "SELECT value FROM code_chunk_vectors_meta WHERE key = 'dimensions' LIMIT 1",
+        )
+        .get() as { value: string } | null;
+      if (!row) {
+        return;
+      }
+      const dimensions = Number.parseInt(row.value, 10);
+      if (!Number.isFinite(dimensions) || dimensions <= 0) {
+        return;
+      }
+      if (this.ensureVectorTable(dimensions)) {
+        this.backfillVectorTable(dimensions);
+      }
+    } catch {
+      this.sqliteVecAvailable = false;
     }
   }
 
@@ -169,19 +176,31 @@ export class CodeIndex {
     if (!this.sqliteVecAvailable || this.sqliteVecDimensions !== dimensions) {
       return;
     }
-    const rows = this.sqlite
-      .query("SELECT id, embedding FROM code_chunks")
-      .all() as Array<{ id: number; embedding: Uint8Array | null }>;
-    const statement = this.sqlite.query(
-      "INSERT OR REPLACE INTO code_chunk_vectors(rowid, embedding) VALUES (?, ?)",
-    );
-    for (const row of rows) {
-      const embedding = decodeEmbedding(row.embedding);
-      if (!embedding || embedding.length !== dimensions) {
-        continue;
+    try {
+      const rows = this.sqlite
+        .query("SELECT id, embedding FROM code_chunks")
+        .all() as Array<{ id: number; embedding: Uint8Array | null }>;
+      // vec0 does not honor INSERT OR REPLACE on the rowid PK (it raises a UNIQUE
+      // constraint on some builds, e.g. Linux CI). DELETE-then-INSERT is the
+      // supported upsert idiom for a vec0 row by rowid.
+      const del = this.sqlite.query(
+        "DELETE FROM code_chunk_vectors WHERE rowid = ?",
+      );
+      const statement = this.sqlite.query(
+        "INSERT INTO code_chunk_vectors(rowid, embedding) VALUES (?, ?)",
+      );
+      for (const row of rows) {
+        const embedding = decodeEmbedding(row.embedding);
+        if (!embedding || embedding.length !== dimensions) {
+          continue;
+        }
+        const rowId = this.resolveVectorRowId(row.id);
+        del.run(rowId);
+        statement.run(rowId, JSON.stringify(embedding));
       }
-      const rowId = this.resolveVectorRowId(row.id);
-      statement.run(rowId, JSON.stringify(embedding));
+    } catch {
+      // Indexed vec0 path unavailable on this platform — fall back to scan.
+      this.sqliteVecAvailable = false;
     }
   }
 
@@ -213,8 +232,14 @@ export class CodeIndex {
     }
     try {
       const rowId = this.resolveVectorRowId(chunkId);
+      // vec0 does not honor INSERT OR REPLACE on the rowid PK (UNIQUE constraint
+      // on some builds, e.g. Linux CI) — DELETE-then-INSERT is the supported
+      // upsert idiom for a vec0 row by rowid.
       this.sqlite
-        .query("INSERT OR REPLACE INTO code_chunk_vectors(rowid, embedding) VALUES (?, ?)")
+        .query("DELETE FROM code_chunk_vectors WHERE rowid = ?")
+        .run(rowId);
+      this.sqlite
+        .query("INSERT INTO code_chunk_vectors(rowid, embedding) VALUES (?, ?)")
         .run(rowId, JSON.stringify(embedding));
     } catch {
       this.sqliteVecAvailable = false;

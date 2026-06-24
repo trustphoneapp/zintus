@@ -1,3 +1,7 @@
+// MUST be imported once, before any crypto usage. Polyfills crypto.getRandomValues
+// for Hermes/React Native so @noble (via @zintus/crypto-e2e) has a CSPRNG.
+import "react-native-get-random-values";
+
 import "../global.css";
 
 import { useEffect } from "react";
