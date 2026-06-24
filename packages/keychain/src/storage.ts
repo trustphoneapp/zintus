@@ -5,17 +5,67 @@ import { isProviderId, PROVIDER_IDS } from "@zintus/types";
 const SERVICE = "zintus";
 const MANIFEST_ACCOUNT = "__manifest__";
 
-function manifestEntry(): Entry {
-  return new Entry(SERVICE, MANIFEST_ACCOUNT);
+// ── Backend selection ───────────────────────────────────────────────────────
+// The OS keychain backend can be absent — most often on headless Linux with no
+// Secret Service (gnome-keyring/KWallet) running, or in CI/containers, where
+// constructing/accessing an `Entry` throws. In those environments we fall back
+// to a process-local in-memory store so the keychain API stays usable (e.g. the
+// full test suite passes on a headless runner) without ever touching the OS.
+//
+// Enabled when CI_KEYCHAIN=memory, or whenever a generic CI=true is set (GitHub
+// Actions and most CIs set this automatically). Local/production runs keep using
+// the real OS keychain and its original error semantics.
+const memoryStore = new Map<string, string>();
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return value !== undefined && value !== "" && value !== "false" && value !== "0";
 }
 
-function providerEntry(providerId: string): Entry {
-  return new Entry(SERVICE, providerId);
+function useMemoryBackend(): boolean {
+  return process.env.CI_KEYCHAIN === "memory" || isTruthyEnv(process.env.CI);
+}
+
+let warnedMemory = false;
+function warnMemoryOnce(): void {
+  if (warnedMemory) return;
+  warnedMemory = true;
+  console.warn(
+    "[keychain] OS Secret Service unavailable / CI detected — using an " +
+      "in-memory keychain fallback (keys are not persisted).",
+  );
+}
+
+// Backend-aware primitives. In memory mode they never construct an `Entry`, so
+// they cannot throw on a headless runner; otherwise they hit the real keychain.
+function kcGet(account: string): string | null {
+  if (useMemoryBackend()) {
+    warnMemoryOnce();
+    return memoryStore.get(account) ?? null;
+  }
+  return new Entry(SERVICE, account).getPassword() ?? null;
+}
+
+function kcSet(account: string, value: string): void {
+  if (useMemoryBackend()) {
+    warnMemoryOnce();
+    memoryStore.set(account, value);
+    return;
+  }
+  new Entry(SERVICE, account).setPassword(value);
+}
+
+function kcDelete(account: string): void {
+  if (useMemoryBackend()) {
+    warnMemoryOnce();
+    memoryStore.delete(account);
+    return;
+  }
+  new Entry(SERVICE, account).deletePassword();
 }
 
 function readManifest(): string[] {
   try {
-    const raw = manifestEntry().getPassword();
+    const raw = kcGet(MANIFEST_ACCOUNT);
     if (!raw) {
       return [];
     }
@@ -39,7 +89,8 @@ function keychainError(error: unknown): Error {
   return new Error(
     "OS keychain is unavailable. On macOS/Windows it should work out of the " +
       "box; on headless Linux start a Secret Service (e.g. `gnome-keyring` + " +
-      "`dbus`), or run the gateway/CLI on a machine that has one. " +
+      "`dbus`), set CI_KEYCHAIN=memory for an in-memory fallback, or run the " +
+      "gateway/CLI on a machine that has one. " +
       `Cause: ${cause}`,
   );
 }
@@ -48,7 +99,7 @@ function keychainError(error: unknown): Error {
 // scanning known provider ids, so a manifest write must never break `setKey`.
 function writeManifest(ids: string[]): void {
   try {
-    manifestEntry().setPassword(JSON.stringify(Array.from(new Set(ids))));
+    kcSet(MANIFEST_ACCOUNT, JSON.stringify(Array.from(new Set(ids))));
   } catch {
     // ignore — listKeys() falls back to scanning PROVIDER_IDS
   }
@@ -60,7 +111,7 @@ export async function setKey(providerId: ProviderId, key: string): Promise<void>
   }
 
   try {
-    providerEntry(providerId).setPassword(key);
+    kcSet(providerId, key);
   } catch (error) {
     throw keychainError(error);
   }
@@ -76,7 +127,7 @@ export async function getKey(providerId: ProviderId): Promise<string | null> {
   }
 
   try {
-    return providerEntry(providerId).getPassword() ?? null;
+    return kcGet(providerId);
   } catch {
     return null;
   }
@@ -88,7 +139,7 @@ export async function deleteKey(providerId: ProviderId): Promise<void> {
   }
 
   try {
-    providerEntry(providerId).deletePassword();
+    kcDelete(providerId);
   } catch {
     // Entry may already be absent.
   }
@@ -109,15 +160,14 @@ export async function listKeys(): Promise<ProviderId[]> {
   return Array.from(new Set([...manifest, ...discovered.filter(Boolean)])) as ProviderId[];
 }
 
-/** Set/get/delete a sentinel key to confirm the OS keychain is accessible. */
+/** Set/get/delete a sentinel key to confirm the keychain backend is accessible. */
 export function probeKeychain(): { ok: boolean; error?: string } {
   const PROBE_ACCOUNT = "__doctor_probe__";
   const PROBE_VALUE = "zintus-probe";
   try {
-    const entry = new Entry(SERVICE, PROBE_ACCOUNT);
-    entry.setPassword(PROBE_VALUE);
-    const got = entry.getPassword();
-    entry.deletePassword();
+    kcSet(PROBE_ACCOUNT, PROBE_VALUE);
+    const got = kcGet(PROBE_ACCOUNT);
+    kcDelete(PROBE_ACCOUNT);
     if (got !== PROBE_VALUE) {
       return { ok: false, error: "Keychain read-back mismatch" };
     }

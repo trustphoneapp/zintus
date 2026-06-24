@@ -19,6 +19,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     needs: typecheck
+    # No OS Secret Service on the headless runner — use the in-memory keychain
+    # fallback so keychain-backed code paths don't throw during tests.
+    env:
+      CI_KEYCHAIN: memory
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
