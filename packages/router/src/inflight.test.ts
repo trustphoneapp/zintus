@@ -90,3 +90,49 @@ describe("InFlightReservations", () => {
     }
   });
 });
+
+describe("InFlightReservations — zero-quota boundaries", () => {
+  test("requestsPerDay: 0 rejects the very first reservation (count is always +1)", () => {
+    const r = new InFlightReservations();
+    // reqDay = 0 committed + 0 in-flight + 1 = 1 > 0 → rejected even for a tiny request.
+    expect(r.tryReserve("groq", 1, ZERO, { requestsPerDay: 0 })).toBe(false);
+    expect(r.current("groq")).toEqual({ requests: 0, tokens: 0 });
+  });
+
+  test("requestsPerMinute: 0 rejects the first reservation", () => {
+    const r = new InFlightReservations();
+    expect(r.tryReserve("groq", 1, ZERO, { requestsPerMinute: 0 })).toBe(false);
+  });
+
+  test("tokensPerDay: 0 rejects any non-zero token estimate", () => {
+    const r = new InFlightReservations();
+    expect(r.tryReserve("groq", 1, ZERO, { tokensPerDay: 0 })).toBe(false);
+    expect(r.tryReserve("groq", 5000, ZERO, { tokensPerDay: 0 })).toBe(false);
+  });
+
+  test("tokensPerMinute: 0 rejects any non-zero token estimate", () => {
+    const r = new InFlightReservations();
+    expect(r.tryReserve("groq", 1, ZERO, { tokensPerMinute: 0 })).toBe(false);
+  });
+
+  test("a fully-zeroed provider can never reserve", () => {
+    const r = new InFlightReservations();
+    const zeroLimits: ProviderLimits = {
+      requestsPerDay: 0,
+      tokensPerDay: 0,
+      requestsPerMinute: 0,
+      tokensPerMinute: 0,
+    };
+    expect(r.tryReserve("groq", 100, ZERO, zeroLimits)).toBe(false);
+    expect(r.current("groq").tokens).toBe(0);
+  });
+
+  test("EDGE: a zero-token request slips past a token-only zero cap (no request cap set)", () => {
+    // Documents the real semantics: tokDay = 0+0+0 = 0, `0 > 0` is false, and
+    // with no request limit configured the reservation is admitted. A request
+    // limit (even 0) is what actually blocks a zero-token request.
+    const r = new InFlightReservations();
+    expect(r.tryReserve("groq", 0, ZERO, { tokensPerDay: 0 })).toBe(true);
+    expect(r.tryReserve("groq", 0, ZERO, { tokensPerDay: 0, requestsPerDay: 0 })).toBe(false);
+  });
+});

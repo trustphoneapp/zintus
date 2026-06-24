@@ -64,3 +64,73 @@ describe("crypto-e2e round-trip", () => {
     expect(() => decryptKeyPayload(encrypted, wrong.priv)).toThrow();
   });
 });
+
+describe("crypto-e2e key shapes", () => {
+  it("round-trips a 2000-character key", () => {
+    const { pubB64, priv } = gatewayKeypair();
+    const apiKey = "k".repeat(2000);
+    expect(decryptKeyPayload(encryptForGateway(apiKey, pubB64), priv)).toBe(apiKey);
+  });
+
+  it("round-trips a unicode key (multi-byte, >= 8 chars)", () => {
+    const { pubB64, priv } = gatewayKeypair();
+    const apiKey = "鍵こんにちは🔑key";
+    expect(decryptKeyPayload(encryptForGateway(apiKey, pubB64), priv)).toBe(apiKey);
+  });
+
+  it("enforces the >=8-char floor on the DECRYPTED key (not on encrypt)", () => {
+    const { pubB64, priv } = gatewayKeypair();
+    // Encryption of a short key succeeds; decryption rejects it as implausible.
+    const sevenChars = encryptForGateway("abc1234", pubB64);
+    expect(() => decryptKeyPayload(sevenChars, priv)).toThrow(/short/);
+    // The empty string therefore does NOT round-trip — it throws on decrypt.
+    expect(() => decryptKeyPayload(encryptForGateway("", pubB64), priv)).toThrow(/short/);
+    // Exactly 8 chars is the smallest key that survives the round-trip.
+    expect(decryptKeyPayload(encryptForGateway("abc12345", pubB64), priv)).toBe("abc12345");
+  });
+});
+
+describe("crypto-e2e tampering & malformed envelopes", () => {
+  function envelope(plaintext: string): {
+    pubB64: string;
+    priv: Uint8Array;
+    payload: { v: number; epk: string; iv: string; ct: string };
+    reseal: (p: object) => string;
+  } {
+    const { pubB64, priv } = gatewayKeypair();
+    const encrypted = encryptForGateway(plaintext, pubB64);
+    const payload = JSON.parse(Buffer.from(encrypted, "base64").toString("utf8")) as {
+      v: number;
+      epk: string;
+      iv: string;
+      ct: string;
+    };
+    const reseal = (p: object) => Buffer.from(JSON.stringify(p), "utf8").toString("base64");
+    return { pubB64, priv, payload, reseal };
+  }
+
+  it("rejects a tampered IV (GCM tag mismatch)", () => {
+    const { priv, payload, reseal } = envelope("sk-real-key-abcdef");
+    const iv = Buffer.from(payload.iv, "base64");
+    iv[0] = iv[0]! ^ 0xff;
+    expect(() => decryptKeyPayload(reseal({ ...payload, iv: iv.toString("base64") }), priv)).toThrow();
+  });
+
+  it("rejects a tampered ephemeral public key (wrong shared secret)", () => {
+    const { priv, payload, reseal } = envelope("sk-real-key-abcdef");
+    const epk = Buffer.from(payload.epk, "base64");
+    epk[0] = epk[0]! ^ 0xff; // still 32 bytes → derives a different secret → GCM fails
+    expect(() => decryptKeyPayload(reseal({ ...payload, epk: epk.toString("base64") }), priv)).toThrow();
+  });
+
+  it("rejects an unsupported payload version", () => {
+    const { priv, payload, reseal } = envelope("sk-real-key-abcdef");
+    expect(() => decryptKeyPayload(reseal({ ...payload, v: 999 }), priv)).toThrow(/version/);
+  });
+
+  it("rejects a malformed (non-JSON) envelope", () => {
+    const { priv } = gatewayKeypair();
+    const garbage = Buffer.from("this is not a json envelope", "utf8").toString("base64");
+    expect(() => decryptKeyPayload(garbage, priv)).toThrow();
+  });
+});
