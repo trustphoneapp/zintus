@@ -2,6 +2,11 @@ import { describe, expect, mock, test, afterEach } from "bun:test";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+// Captured before any mock.module() runs, so we can restore the real module in
+// teardown. Bun's mock.restore() does NOT undo mock.module(), so without this the
+// "@zintus/providers" mock leaks process-globally into later test files and
+// shadows their imports (e.g. token-estimate.test.ts saw this stub's estimateUsage).
+import * as realProviders from "@zintus/providers";
 import type { ChatMessage, Provider, ProviderId } from "@zintus/types";
 import { createRouter } from "./factory.js";
 import { QuotaLedger } from "./quota-ledger.js";
@@ -57,6 +62,9 @@ function createTestRouterWithLedger(providers: Provider[]) {
 }
 
 afterEach(() => {
+  // Re-register the real module to undo the mock.module() leak (mock.restore()
+  // alone does not), so no later test file inherits this stub.
+  mock.module("@zintus/providers", () => realProviders);
   mock.restore();
   for (const path of dbPaths.splice(0)) {
     try {
