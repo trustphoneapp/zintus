@@ -1,4 +1,5 @@
-import { Entry } from "@napi-rs/keyring";
+import { createRequire } from "node:module";
+import type { Entry as KeyringEntry } from "@napi-rs/keyring";
 import type { ProviderId } from "@zintus/types";
 import { isProviderId, PROVIDER_IDS } from "@zintus/types";
 
@@ -6,23 +7,40 @@ const SERVICE = "zintus";
 const MANIFEST_ACCOUNT = "__manifest__";
 
 // ── Backend selection ───────────────────────────────────────────────────────
-// The OS keychain backend can be absent — most often on headless Linux with no
-// Secret Service (gnome-keyring/KWallet) running, or in CI/containers, where
-// constructing/accessing an `Entry` throws. In those environments we fall back
-// to a process-local in-memory store so the keychain API stays usable (e.g. the
-// full test suite passes on a headless runner) without ever touching the OS.
-//
-// Enabled when CI_KEYCHAIN=memory, or whenever a generic CI=true is set (GitHub
-// Actions and most CIs set this automatically). Local/production runs keep using
-// the real OS keychain and its original error semantics.
+// The OS keychain relies on @napi-rs/keyring (a native module) plus an OS Secret
+// Service. On headless Linux / CI either can be missing: the native binding can
+// fail to load at *import* time, or the Secret Service is absent so reads/writes
+// *throw*. Previously this crashed whole modules (and, when imported by a test,
+// errored the entire test file). We now:
+//   (a) lazy-load the native binding via createRequire — a top-level static
+//       import would execute on module eval and crash it if the binding fails;
+//   (b) probe the backend once and fall back to a process-local in-memory store
+//       when the keychain is unavailable, or when CI_KEYCHAIN=memory / CI is set.
+// Local/production with a working keychain keep real, persistent storage and the
+// original error semantics.
+
 const memoryStore = new Map<string, string>();
 
 function isTruthyEnv(value: string | undefined): boolean {
   return value !== undefined && value !== "" && value !== "false" && value !== "0";
 }
 
-function useMemoryBackend(): boolean {
+function forceMemory(): boolean {
   return process.env.CI_KEYCHAIN === "memory" || isTruthyEnv(process.env.CI);
+}
+
+// Lazy, cached native-binding load. `undefined` = not tried yet, `null` = failed.
+let entryCtor: typeof KeyringEntry | null | undefined;
+function loadEntryCtor(): typeof KeyringEntry | null {
+  if (entryCtor !== undefined) return entryCtor;
+  try {
+    const require = createRequire(import.meta.url);
+    entryCtor = (require("@napi-rs/keyring") as typeof import("@napi-rs/keyring"))
+      .Entry;
+  } catch {
+    entryCtor = null; // native binding unavailable (e.g. headless Linux/CI)
+  }
+  return entryCtor;
 }
 
 let warnedMemory = false;
@@ -30,42 +48,68 @@ function warnMemoryOnce(): void {
   if (warnedMemory) return;
   warnedMemory = true;
   console.warn(
-    "[keychain] OS Secret Service unavailable / CI detected — using an " +
-      "in-memory keychain fallback (keys are not persisted).",
+    "[keychain] OS keychain unavailable — using an in-memory fallback " +
+      "(keys are not persisted). On a desktop this should not happen; on " +
+      "headless Linux start a Secret Service or set CI_KEYCHAIN=memory.",
   );
 }
 
-// Backend-aware primitives. In memory mode they never construct an `Entry`, so
-// they cannot throw on a headless runner; otherwise they hit the real keychain.
-function kcGet(account: string): string | null {
-  if (useMemoryBackend()) {
+// One-time decision: real OS keychain vs in-memory fallback.
+let memoryDecision: boolean | undefined;
+function usingMemory(): boolean {
+  if (memoryDecision !== undefined) return memoryDecision;
+
+  if (forceMemory()) {
+    memoryDecision = true;
     warnMemoryOnce();
-    return memoryStore.get(account) ?? null;
+    return true;
   }
-  return new Entry(SERVICE, account).getPassword() ?? null;
+
+  const Ctor = loadEntryCtor();
+  if (!Ctor) {
+    memoryDecision = true;
+    warnMemoryOnce();
+    return true;
+  }
+
+  // Probe: reading a missing account returns null on a healthy backend, but
+  // throws when the Secret Service is dead. Decide once for the whole process.
+  try {
+    new Ctor(SERVICE, "__probe__").getPassword();
+    memoryDecision = false;
+  } catch {
+    memoryDecision = true;
+    warnMemoryOnce();
+  }
+  return memoryDecision;
 }
 
-function kcSet(account: string, value: string): void {
-  if (useMemoryBackend()) {
-    warnMemoryOnce();
+function backendGet(account: string): string | null {
+  if (usingMemory()) {
+    return memoryStore.get(account) ?? null;
+  }
+  return new (loadEntryCtor() as typeof KeyringEntry)(SERVICE, account).getPassword() ?? null;
+}
+
+function backendSet(account: string, value: string): void {
+  if (usingMemory()) {
     memoryStore.set(account, value);
     return;
   }
-  new Entry(SERVICE, account).setPassword(value);
+  new (loadEntryCtor() as typeof KeyringEntry)(SERVICE, account).setPassword(value);
 }
 
-function kcDelete(account: string): void {
-  if (useMemoryBackend()) {
-    warnMemoryOnce();
+function backendDelete(account: string): void {
+  if (usingMemory()) {
     memoryStore.delete(account);
     return;
   }
-  new Entry(SERVICE, account).deletePassword();
+  new (loadEntryCtor() as typeof KeyringEntry)(SERVICE, account).deletePassword();
 }
 
 function readManifest(): string[] {
   try {
-    const raw = kcGet(MANIFEST_ACCOUNT);
+    const raw = backendGet(MANIFEST_ACCOUNT);
     if (!raw) {
       return [];
     }
@@ -99,7 +143,7 @@ function keychainError(error: unknown): Error {
 // scanning known provider ids, so a manifest write must never break `setKey`.
 function writeManifest(ids: string[]): void {
   try {
-    kcSet(MANIFEST_ACCOUNT, JSON.stringify(Array.from(new Set(ids))));
+    backendSet(MANIFEST_ACCOUNT, JSON.stringify(Array.from(new Set(ids))));
   } catch {
     // ignore — listKeys() falls back to scanning PROVIDER_IDS
   }
@@ -111,7 +155,7 @@ export async function setKey(providerId: ProviderId, key: string): Promise<void>
   }
 
   try {
-    kcSet(providerId, key);
+    backendSet(providerId, key);
   } catch (error) {
     throw keychainError(error);
   }
@@ -127,7 +171,7 @@ export async function getKey(providerId: ProviderId): Promise<string | null> {
   }
 
   try {
-    return kcGet(providerId);
+    return backendGet(providerId);
   } catch {
     return null;
   }
@@ -139,7 +183,7 @@ export async function deleteKey(providerId: ProviderId): Promise<void> {
   }
 
   try {
-    kcDelete(providerId);
+    backendDelete(providerId);
   } catch {
     // Entry may already be absent.
   }
@@ -165,9 +209,9 @@ export function probeKeychain(): { ok: boolean; error?: string } {
   const PROBE_ACCOUNT = "__doctor_probe__";
   const PROBE_VALUE = "zintus-probe";
   try {
-    kcSet(PROBE_ACCOUNT, PROBE_VALUE);
-    const got = kcGet(PROBE_ACCOUNT);
-    kcDelete(PROBE_ACCOUNT);
+    backendSet(PROBE_ACCOUNT, PROBE_VALUE);
+    const got = backendGet(PROBE_ACCOUNT);
+    backendDelete(PROBE_ACCOUNT);
     if (got !== PROBE_VALUE) {
       return { ok: false, error: "Keychain read-back mismatch" };
     }
