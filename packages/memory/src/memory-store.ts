@@ -472,20 +472,27 @@ export class MemoryStore {
     if (!this.sqliteVecAvailable) {
       return;
     }
-    const row = this.sqlite
-      .query(
-        "SELECT value FROM memory_chunk_vectors_meta WHERE key = 'dimensions' LIMIT 1",
-      )
-      .get() as { value: string } | null;
-    if (!row) {
-      return;
-    }
-    const dimensions = Number.parseInt(row.value, 10);
-    if (!Number.isFinite(dimensions) || dimensions <= 0) {
-      return;
-    }
-    if (this.ensureVectorTable(dimensions)) {
-      this.backfillVectorTable(dimensions);
+    // Best-effort: a vec0 operation can throw on some platforms/SQLite builds
+    // (e.g. headless Linux CI). Memory works without the indexed path, so a
+    // failure here must never crash init() — just disable the indexed path.
+    try {
+      const row = this.sqlite
+        .query(
+          "SELECT value FROM memory_chunk_vectors_meta WHERE key = 'dimensions' LIMIT 1",
+        )
+        .get() as { value: string } | null;
+      if (!row) {
+        return;
+      }
+      const dimensions = Number.parseInt(row.value, 10);
+      if (!Number.isFinite(dimensions) || dimensions <= 0) {
+        return;
+      }
+      if (this.ensureVectorTable(dimensions)) {
+        this.backfillVectorTable(dimensions);
+      }
+    } catch {
+      this.sqliteVecAvailable = false;
     }
   }
 
@@ -517,16 +524,21 @@ export class MemoryStore {
     if (!this.sqliteVecAvailable || this.sqliteVecDimensions !== dimensions) {
       return;
     }
-    const rows = this.db.select().from(schema.memoryChunks).all();
-    const statement = this.sqlite.query(
-      "INSERT OR REPLACE INTO memory_chunk_vectors(rowid, embedding) VALUES (?, ?)",
-    );
-    for (const row of rows) {
-      const embedding = decodeEmbedding(row.embedding);
-      if (!embedding || embedding.length !== dimensions) {
-        continue;
+    try {
+      const rows = this.db.select().from(schema.memoryChunks).all();
+      const statement = this.sqlite.query(
+        "INSERT OR REPLACE INTO memory_chunk_vectors(rowid, embedding) VALUES (?, ?)",
+      );
+      for (const row of rows) {
+        const embedding = decodeEmbedding(row.embedding);
+        if (!embedding || embedding.length !== dimensions) {
+          continue;
+        }
+        statement.run(row.id, JSON.stringify(embedding));
       }
-      statement.run(row.id, JSON.stringify(embedding));
+    } catch {
+      // Indexed vec0 path unavailable on this platform — fall back to scan.
+      this.sqliteVecAvailable = false;
     }
   }
 

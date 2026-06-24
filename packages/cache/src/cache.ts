@@ -231,20 +231,28 @@ export class ResponseCache {
     if (!this.sqliteVecAvailable) {
       return;
     }
-    const row = this.sqlite
-      .query(
-        "SELECT value FROM chat_cache_vectors_meta WHERE key = 'dimensions' LIMIT 1",
-      )
-      .get() as { value: string } | null;
-    if (!row) {
-      return;
-    }
-    const dimensions = Number.parseInt(row.value, 10);
-    if (!Number.isFinite(dimensions) || dimensions <= 0) {
-      return;
-    }
-    if (this.ensureVectorTable(dimensions)) {
-      this.backfillVectorTable(dimensions);
+    // The whole vector-index restore is best-effort: on some platforms/SQLite
+    // builds (e.g. headless Linux CI) a vec0 operation can throw. The cache is
+    // fully functional via the linear-scan fallback, so a failure here must
+    // never crash the constructor — just disable the indexed path.
+    try {
+      const row = this.sqlite
+        .query(
+          "SELECT value FROM chat_cache_vectors_meta WHERE key = 'dimensions' LIMIT 1",
+        )
+        .get() as { value: string } | null;
+      if (!row) {
+        return;
+      }
+      const dimensions = Number.parseInt(row.value, 10);
+      if (!Number.isFinite(dimensions) || dimensions <= 0) {
+        return;
+      }
+      if (this.ensureVectorTable(dimensions)) {
+        this.backfillVectorTable(dimensions);
+      }
+    } catch {
+      this.sqliteVecAvailable = false;
     }
   }
 
@@ -276,17 +284,22 @@ export class ResponseCache {
     if (!this.sqliteVecAvailable || this.sqliteVecDimensions !== dimensions) {
       return;
     }
-    const rows = this.db.select().from(schema.chatCache).all();
-    const statement = this.sqlite.query(
-      "INSERT OR REPLACE INTO chat_cache_vectors(rowid, embedding) VALUES (?, ?)",
-    );
-    for (const row of rows) {
-      const embedding = decodeEmbedding(row.embedding);
-      if (!embedding || embedding.length !== dimensions) {
-        continue;
+    try {
+      const rows = this.db.select().from(schema.chatCache).all();
+      const statement = this.sqlite.query(
+        "INSERT OR REPLACE INTO chat_cache_vectors(rowid, embedding) VALUES (?, ?)",
+      );
+      for (const row of rows) {
+        const embedding = decodeEmbedding(row.embedding);
+        if (!embedding || embedding.length !== dimensions) {
+          continue;
+        }
+        const rowId = this.resolveVectorRowId(row.id);
+        statement.run(rowId, JSON.stringify(embedding));
       }
-      const rowId = this.resolveVectorRowId(row.id);
-      statement.run(rowId, JSON.stringify(embedding));
+    } catch {
+      // Indexed vec0 path unavailable on this platform — fall back to scan.
+      this.sqliteVecAvailable = false;
     }
   }
 
