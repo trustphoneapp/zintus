@@ -3,7 +3,7 @@
  * Calls the relay worker at NEXT_PUBLIC_RELAY_URL (or same-origin /api/relay).
  */
 
-const RELAY_URL = (
+export const RELAY_URL = (
   process.env.NEXT_PUBLIC_RELAY_URL ?? "https://relay.zintus.ai"
 ).replace(/\/$/, "");
 

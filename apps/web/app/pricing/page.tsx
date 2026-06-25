@@ -18,7 +18,7 @@ const MANAGED_KEYS_AVAILABLE = false;
 
 /* ─── data ───────────────────────────────────────────────── */
 const FREE_FEATURES = [
-  "8 providers via your own keys",
+  "12 providers via your own keys",
   "Keys stored in OS keychain",
   "Smart quota routing",
   "Ollama offline fallback",
