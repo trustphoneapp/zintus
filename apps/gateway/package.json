@@ -24,11 +24,13 @@
     "@zintus/keychain": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/router": "workspace:*",
+    "@zintus/schemas": "workspace:*",
     "@zintus/search": "workspace:*",
     "@zintus/types": "workspace:*",
     "tokzen": "workspace:*"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@zintus/test-utils": "workspace:*"
   }
 }

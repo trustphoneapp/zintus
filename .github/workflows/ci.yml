@@ -16,6 +16,41 @@ jobs:
       - run: bun install
       - run: bun run typecheck
 
+  security:
+    runs-on: ubuntu-latest
+    # gitleaks-action lists the PR's commits via the API, which needs
+    # pull-requests:read. This repo's default GITHUB_TOKEN is contents-read-only,
+    # so grant the scopes explicitly (contents:read is still needed for checkout).
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks scans history; fetch it all so secrets in older commits
+          # are caught, not just the tip.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      # Dependency audit. Currently non-gating (continue-on-error) while the
+      # known transitive highs (undici via wrangler, xmldom via expo) are worked
+      # down; flip to gating by removing continue-on-error once `bun audit
+      # --audit-level=high` is clean.
+      - name: Dependency audit (high+)
+        continue-on-error: true
+        run: bun audit --audit-level=high
+      # Secret scanning across the full history. Fails the job on any finding.
+      # v3 runs on Node 24 (v2 is deprecated with Node 20 EOL). Free for
+      # personal/public repos. GITHUB_TOKEN is required to scan PRs (gitleaks
+      # >= 8.24.3) — it is auto-provided to Actions, no secret setup needed.
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
   test:
     runs-on: ubuntu-latest
     needs: typecheck
@@ -23,16 +58,53 @@ jobs:
     # fallback so keychain-backed modules don't throw at import/use during tests.
     env:
       CI_KEYCHAIN: memory
+      # Isolate tokzen's on-disk CCR/eval-cache to a writable workspace path so
+      # the suite never depends on a writable $HOME (hermetic on any runner).
+      TOKZEN_HOME: ${{ github.workspace }}/.tokzen-ci
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      # Cache the bun install store — the real CI cost is the cold install
+      # (~30-60s), not the ~4s test run, so caching beats parallelizing the suite.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
       - run: bun install
       # tokzen resolves to ./dist (a build artifact, gitignored). Build it so
       # gateway code importing "tokzen" loads at runtime in tests.
       - run: bun run --filter tokzen build
       - run: bun run test
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: typecheck
+    env:
+      CI_KEYCHAIN: memory
+      TOKZEN_HOME: ${{ github.workspace }}/.tokzen-ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install
+      - run: bun run --filter tokzen build
+      # bun+vitest lcov merge with per-prefix gate (scripts/coverage.ts).
+      - run: bun run test:coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-lcov
+          path: coverage/lcov.info
+          if-no-files-found: warn
 
   apps:
     runs-on: ubuntu-latest
@@ -46,6 +118,7 @@ jobs:
           - apps/desktop
           - apps/mobile
           - workers/validate-key
+          - workers/relay
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -119,3 +192,28 @@ jobs:
         run: bun run smoke:gateway
         env:
           GATEWAY_URL: http://localhost:8788
+
+  # Production build verification — only on main (not PRs), since it builds
+  # deployable artifacts (the audit flagged that `build` only typechecked).
+  build-apps:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install
+      # tokzen ships a real dist (tsup) — verify it builds, then the composite
+      # project build produces every workspace package's declaration outputs.
+      - run: bun run --filter tokzen build
+      - run: bunx tsc -b tsconfig.build.json
+      # Gateway Docker image builds (self-host artifact).
+      - name: Build gateway Docker image
+        run: docker build -t zintus-gateway:ci .

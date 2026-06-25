@@ -30,6 +30,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
+import { MagicLinkRequestSchema } from "@zintus/schemas";
 import type { Env, GatewaySessionRow, UserRow, SubscriptionRow } from "./types.js";
 import {
   sha256Hex,
@@ -259,10 +260,15 @@ app.get("/health", (c) => c.json({ ok: true }));
 // ── AUTH — magic link ─────────────────────────────────────────────────────
 
 app.post("/api/auth/magic-link", async (c) => {
-  const { email } = (await c.req.json<{ email?: string }>()) ?? {};
-  if (!email || !email.includes("@")) {
+  // Validate the public email input with a shared schema (RFC-ish email, length
+  // bound) instead of a bare `.includes("@")` check on an untyped cast.
+  const parsed = MagicLinkRequestSchema.safeParse(
+    await c.req.json().catch(() => null),
+  );
+  if (!parsed.success) {
     return c.json({ error: "Valid email required" }, 400);
   }
+  const { email } = parsed.data;
 
   const ip = c.req.header("cf-connecting-ip") ?? "unknown";
   const rlKey = `rl:ml:${email.toLowerCase()}`;

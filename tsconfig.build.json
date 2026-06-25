@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/types" },
+    { "path": "./packages/schemas" },
     { "path": "./packages/crypto-e2e" },
     { "path": "./packages/providers" },
     { "path": "./packages/keychain" },
@@ -15,6 +16,8 @@
     { "path": "./packages/tokzen" },
     { "path": "./apps/cli" },
     { "path": "./apps/gateway" },
-    { "path": "./workers/validate-key" }
+    { "path": "./packages/test-utils" },
+    { "path": "./workers/validate-key" },
+    { "path": "./workers/relay" }
   ]
 }

@@ -36,9 +36,30 @@ function candidateGatewayUrls(): string[] {
   return Array.from(new Set(urls));
 }
 
-async function fetchHealthFromUrl(url: string): Promise<GatewayHealth | null> {
+/** Liveness probe on the public /health ({ ok, auth }), no auth required. */
+async function isGatewayLive(url: string): Promise<boolean> {
   try {
     const response = await fetch(`${url}/health`, { cache: "no-store" });
+    if (!response.ok) {
+      return false;
+    }
+    const body = (await response.json()) as { ok?: boolean };
+    return body.ok === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Full snapshot from the auth-gated /v1/status (provider inventory + savings).
+ * /health no longer carries this. Sends the bearer token when configured.
+ */
+async function fetchStatusFromUrl(url: string): Promise<GatewayHealth | null> {
+  try {
+    const response = await fetch(`${url}/v1/status`, {
+      cache: "no-store",
+      headers: { ...gatewayAuthHeaders() },
+    });
     if (!response.ok) {
       return null;
     }
@@ -54,8 +75,7 @@ export function getGatewayUrl(): string {
 
 export async function resolveGatewayUrl(): Promise<string | null> {
   for (const url of candidateGatewayUrls()) {
-    const health = await fetchHealthFromUrl(url);
-    if (health?.ok) {
+    if (await isGatewayLive(url)) {
       return url;
     }
   }
@@ -67,10 +87,18 @@ export async function fetchGatewayHealth(): Promise<{
   health: GatewayHealth;
 } | null> {
   for (const url of candidateGatewayUrls()) {
-    const health = await fetchHealthFromUrl(url);
-    if (health?.ok) {
-      return { url, health };
+    // Liveness first (unauthenticated, cheap), then the authed detail snapshot.
+    if (!(await isGatewayLive(url))) {
+      continue;
     }
+    const status = await fetchStatusFromUrl(url);
+    // Live but status unavailable (e.g. 401 from a token mismatch): surface as
+    // not-ready rather than fabricating an "online, zero providers" snapshot —
+    // matches the web/mobile clients, which return null on a non-OK /v1/status.
+    if (!status) {
+      return null;
+    }
+    return { url, health: status };
   }
   return null;
 }

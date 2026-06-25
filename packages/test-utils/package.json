@@ -1,0 +1,31 @@
+{
+  "name": "@zintus/test-utils",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./bun": {
+      "types": "./src/bun.ts",
+      "default": "./src/bun.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zintus/crypto-e2e": "workspace:*",
+    "@zintus/engine": "workspace:*",
+    "@zintus/gateway": "workspace:*",
+    "@zintus/providers": "workspace:*",
+    "@zintus/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

@@ -1,0 +1,20 @@
+title = "Zintus gitleaks config"
+
+[allowlist]
+  description = "Test fixtures and example values"
+  paths = [
+    '''.*\.test\.ts$''',
+    '''.*\.test\.tsx$''',
+    '''.*\.spec\.ts$''',
+    '''test-utils''',
+    '''__tests__''',
+    '''fixtures''',
+    '''.env.example''',
+  ]
+  regexes = [
+    '''whsec_test_''',
+    '''gsk_test_''',
+    '''sk-test-''',
+    '''test_secret''',
+    '''example_key''',
+  ]

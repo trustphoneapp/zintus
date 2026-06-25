@@ -132,6 +132,12 @@ export function createRouter(config: RouterConfig = {}): Router {
 
   const cooldownRetries = new Map<ProviderId, number>();
   const stickySessions = new Map<string, ProviderId>();
+  // Circuit-breaker half-open gate. A provider with recent errors (recovering,
+  // but still below ERROR_STREAK_THRESHOLD so it remains eligible) admits only
+  // ONE in-flight probe at a time — a concurrent burst can't all rush a
+  // provider that may still be down. Healthy providers (zero recent errors) are
+  // never gated. Membership = "a probe is currently in flight to this provider".
+  const halfOpenProbes = new Set<ProviderId>();
 
   // In-flight reservation tracker — closes the concurrent-overshoot race: the
   // ledger only records usage after a response drains, so a burst of concurrent
@@ -447,11 +453,28 @@ export function createRouter(config: RouterConfig = {}): Router {
         if (!tryReserveProvider(provider.id, estTokens, Date.now())) {
           continue;
         }
+        // Half-open admission: a recovering provider (has recent errors but is
+        // still eligible) admits a single probe at a time. If one is already in
+        // flight, release this reservation and fail over to the next candidate
+        // rather than piling onto a possibly-still-down provider. The check +
+        // add is synchronous (no await between), so it is race-free.
+        const degraded =
+          ledger.recentErrorCount(provider.id, ERROR_STREAK_WINDOW_MS, Date.now()) > 0;
+        if (degraded) {
+          if (halfOpenProbes.has(provider.id)) {
+            reservations.release(provider.id, estTokens);
+            continue;
+          }
+          halfOpenProbes.add(provider.id);
+        }
         let reservationReleased = false;
         const releaseReservation = (): void => {
           if (reservationReleased) return;
           reservationReleased = true;
           reservations.release(provider.id, estTokens);
+          // Release the half-open probe on every terminal path (success drain,
+          // failover, throw, abort), so the next request can probe the provider.
+          halfOpenProbes.delete(provider.id);
         };
 
         const apiKey = (await resolveKey(provider.id)) ?? undefined;
@@ -477,6 +500,7 @@ export function createRouter(config: RouterConfig = {}): Router {
               cacheHints: request.cachedContentHandle
                 ? { cachedContentHandle: request.cachedContentHandle }
                 : undefined,
+              signal: request.signal,
             });
 
             if (provider.id === "groq" && result.rateLimit) {

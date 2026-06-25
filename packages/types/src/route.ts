@@ -28,6 +28,12 @@ export interface RouteRequest {
   webSearch?: boolean;
   /** Per-request attempt callback. Fires for each provider attempt. */
   onAttempt?: (event: TraceAttempt) => void;
+  /**
+   * Abort signal propagated to the provider fetch. Lets a connect/idle timeout
+   * or a client disconnect cancel an in-flight upstream request instead of
+   * leaking the socket and holding the in-flight quota reservation open.
+   */
+  signal?: AbortSignal;
 }
 
 export interface RouteResponse {

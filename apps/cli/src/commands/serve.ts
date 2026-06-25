@@ -2,9 +2,11 @@ import chalk from "chalk";
 import {
   startGateway,
   startCloudConnection,
+  installShutdownHandlers,
   getOrCreateGatewayKeypair,
   decryptKeyPayload,
   detectLocalRuntimes,
+  type CloudConnection,
 } from "@zintus/gateway";
 import { isValidProvider, setKey, removeKey } from "@zintus/keychain";
 import { loadCloudConfig } from "./cloud.js";
@@ -79,7 +81,9 @@ async function printBillingStatus(sessionId: string, relayUrl?: string): Promise
 
 // ── Cloud relay ───────────────────────────────────────────────────────────
 
-async function startCloudRelay(gatewayUrl: string): Promise<void> {
+async function startCloudRelay(
+  gatewayUrl: string,
+): Promise<CloudConnection | undefined> {
   const config = await loadCloudConfig();
   if (!config) {
     console.error(
@@ -87,19 +91,29 @@ async function startCloudRelay(gatewayUrl: string): Promise<void> {
         "  ⚠ Not connected to Zintus Cloud. Run: zintus cloud login",
       ),
     );
-    return;
+    return undefined;
   }
 
   // Gateway E2E keypair — its public key is advertised to clients so they can
   // encrypt BYOK API keys to it; the private key never leaves this machine.
   const keypair = getOrCreateGatewayKeypair();
 
-  startCloudConnection({
+  const cloud = startCloudConnection({
     sessionId: config.session_id,
     gatewaySecret: config.gateway_secret,
     relayUrl: config.relay_url,
     getStatus: async () => {
-      const res = await fetch(`${gatewayUrl}/health`).catch(() => null);
+      // Provider inventory + savings now live behind the auth-gated /v1/status
+      // (the public /health is minimal). We run in the same process as the
+      // gateway, so authenticate with the configured GATEWAY_TOKEN to fetch the
+      // full snapshot the dashboard/mobile remote view renders.
+      const gatewayToken = process.env.GATEWAY_TOKEN?.trim();
+      const authHeaders: Record<string, string> = gatewayToken
+        ? { Authorization: `Bearer ${gatewayToken}` }
+        : {};
+      const res = await fetch(`${gatewayUrl}/v1/status`, {
+        headers: authHeaders,
+      }).catch(() => null);
       const health = (res?.ok ? await res.json() : { ok: false }) as Record<
         string,
         unknown
@@ -167,6 +181,8 @@ async function startCloudRelay(gatewayUrl: string): Promise<void> {
     chalk.green("✓ Zintus Cloud relay started — ") +
       chalk.dim(`${config.relay_url.replace(/^https?:\/\//, "")}/dashboard`),
   );
+
+  return cloud;
 }
 
 /**
@@ -192,8 +208,9 @@ export async function runServe(options?: ServeOptions): Promise<void> {
     ),
   );
 
+  let cloud: CloudConnection | undefined;
   if (options?.cloud) {
-    await startCloudRelay(running.url);
+    cloud = await startCloudRelay(running.url);
   } else {
     console.error(
       chalk.dim("  Tip: add ") +
@@ -216,7 +233,12 @@ export async function runServe(options?: ServeOptions): Promise<void> {
 
   console.error(chalk.dim("  Press Ctrl+C to stop."));
 
+  // On SIGTERM/SIGINT, drain in-flight streams and close the cloud relay WS
+  // (its heartbeat/status timers) cleanly before exiting. A second signal
+  // forces an immediate exit.
+  installShutdownHandlers(running, () => cloud?.close());
+
   // Bun.serve keeps the event loop alive; this promise never resolves so the
-  // command stays in the foreground until the process is interrupted.
+  // command stays in the foreground until a signal handler exits the process.
   await new Promise<void>(() => {});
 }

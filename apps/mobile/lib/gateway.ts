@@ -29,15 +29,16 @@ export interface GatewayHealth {
 }
 
 /**
- * Fetch the gateway `/health` snapshot. Returns `null` when the gateway is
- * unreachable or returns a non-OK status, so callers can fall back to the
- * local expo-sqlite quota store while offline.
+ * Fetch the gateway provider/savings snapshot from the auth-gated `/v1/status`
+ * (the public `/health` is minimal and no longer carries provider topology).
+ * Returns `null` when the gateway is unreachable, unauthorized, or returns a
+ * non-OK status, so callers fall back to the local expo-sqlite quota store.
  */
 export async function fetchGatewayHealth(
   signal?: AbortSignal,
 ): Promise<GatewayHealth | null> {
   try {
-    const response = await fetch(`${getGatewayUrl()}/health`, {
+    const response = await fetch(`${getGatewayUrl()}/v1/status`, {
       headers: { ...gatewayAuthHeaders() },
       signal,
     });
