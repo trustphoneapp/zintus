@@ -24,6 +24,12 @@
     "dev:gateway": "bun run --filter @zintus/gateway dev",
     "build": "bun run typecheck"
   },
+  "comment:overrides": "Transitive security pins (bun audit highs). All sit in dev/mobile/CLI tooling (ink, expo, wrangler), NOT the gateway runtime path. Patched versions per GHSA advisories; xmldom kept in expo-compatible 0.8.x.",
+  "overrides": {
+    "ws": ">=8.21.0",
+    "@xmldom/xmldom": "^0.8.12",
+    "undici": ">=7.28.0"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "^22.0.0",
