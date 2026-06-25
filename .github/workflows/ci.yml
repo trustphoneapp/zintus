@@ -214,6 +214,10 @@ jobs:
       # project build produces every workspace package's declaration outputs.
       - run: bun run --filter tokzen build
       - run: bunx tsc -b tsconfig.build.json
+      # Production web build (Next.js). The audit flagged H5: CI only typechecked
+      # apps/web, so a broken `next build` (bad route, server-component misuse)
+      # could ship undetected. Build the real deployable artifact.
+      - run: bun run --filter @zintus/web build
       # The gateway Docker image build + runtime /health smoke moved to the
       # dedicated `docker-smoke` job below so it also runs on PRs (catching a
       # tokzen/dist regression BEFORE merge, not just post-merge on main).
