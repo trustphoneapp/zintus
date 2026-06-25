@@ -37,10 +37,12 @@ jobs:
         run: bun audit --audit-level=high
       # Secret scanning across the full history. Fails the job on any finding.
       # v3 runs on Node 24 (v2 is deprecated with Node 20 EOL). Free for
-      # personal/public repos; org repos need a GITLEAKS_LICENSE secret.
+      # personal/public repos. GITHUB_TOKEN is required to scan PRs (gitleaks
+      # >= 8.24.3) — it is auto-provided to Actions, no secret setup needed.
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v3
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
 
   test:
