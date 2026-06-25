@@ -1,5 +1,7 @@
 export interface Env {
   GATEWAY_SESSION: DurableObjectNamespace;
+  /** Strongly-consistent per-user/period token-usage counter (see QuotaCounter.ts). */
+  QUOTA_COUNTER: DurableObjectNamespace;
   DB: D1Database;
   KV: KVNamespace;
   RELAY_AUTH_SECRET: string;
@@ -11,6 +13,9 @@ export interface Env {
   // Stripe
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
+  // Observability (opt-in; unset → no-op error sink, see observability.ts)
+  SENTRY_DSN?: string;
+  SENTRY_ENVIRONMENT?: string;
 }
 
 /** Attached to every accepted WebSocket (survives DO hibernation). */

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { verifyStripeSignature } from "../src/billing.js";
+import { verifyStripeSignature, handleStripeWebhook } from "../src/billing.js";
+import type { Env } from "../src/types.js";
 
 // The Stripe webhook signature gate. A bypass here = anyone can forge a
 // "checkout.session.completed" and grant themselves a free Pro subscription, so
@@ -60,5 +61,85 @@ describe("verifyStripeSignature", () => {
     const header = await sign(body, SECRET, "1718000000");
     const movedTimestamp = header.replace("t=1718000000", "t=1719999999");
     expect(await verifyStripeSignature(body, movedTimestamp, SECRET)).toBe(false);
+  });
+});
+
+// ── B4: stripe_customer_id is persisted where the reads expect it ────────────
+// The portal path reads `SELECT stripe_customer_id FROM subscriptions`, so the
+// `subscriptions` table is authoritative. The webhook previously also ran
+// `UPDATE zintus_users SET stripe_customer_id=?` against a column that does not
+// exist (silent 0-row write). These tests pin that the customer id + tokens_limit
+// land on `subscriptions`, and that nothing writes to `zintus_users`.
+
+/** Fake D1 that records every executed (sql, args). */
+function recordingDb() {
+  const calls: Array<{ sql: string; args: unknown[] }> = [];
+  return {
+    calls,
+    prepare: (sql: string) => ({
+      bind: (...args: unknown[]) => ({
+        run: async () => {
+          calls.push({ sql, args });
+          return {};
+        },
+        first: async () => null,
+      }),
+    }),
+  };
+}
+
+describe("handleStripeWebhook — checkout.session.completed persistence (B4)", () => {
+  test("writes stripe_customer_id + tokens_limit to subscriptions, never to zintus_users", async () => {
+    const db = recordingDb();
+    const event = {
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          metadata: { user_id: "u1", tier: "growth" },
+          customer: "cus_123",
+          subscription: "sub_123",
+        },
+      },
+    };
+    const payload = JSON.stringify(event);
+    const env = { DB: db, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+
+    const res = await handleStripeWebhook(
+      new Request("https://relay/webhook", {
+        method: "POST",
+        body: payload,
+        headers: { "stripe-signature": await sign(payload) },
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+
+    // No write targets the (non-existent) zintus_users.stripe_customer_id column.
+    expect(db.calls.some((c) => /zintus_users/i.test(c.sql))).toBe(false);
+
+    // The subscriptions upsert carries the customer id and the tier's token cap.
+    const upsert = db.calls.find((c) => /INSERT INTO subscriptions/i.test(c.sql));
+    expect(upsert).toBeDefined();
+    expect(upsert!.sql).toContain("stripe_customer_id");
+    expect(upsert!.sql).toContain("tokens_limit");
+    expect(upsert!.args).toContain("cus_123");
+    expect(upsert!.args).toContain(5_000_000); // growth tier monthly budget
+  });
+
+  test("rejects an unsigned/forged webhook before any DB write", async () => {
+    const db = recordingDb();
+    const env = { DB: db, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    const payload = JSON.stringify({ type: "checkout.session.completed", data: { object: {} } });
+
+    const res = await handleStripeWebhook(
+      new Request("https://relay/webhook", {
+        method: "POST",
+        body: payload,
+        headers: { "stripe-signature": "t=1,v1=deadbeef" },
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(db.calls.length).toBe(0);
   });
 });

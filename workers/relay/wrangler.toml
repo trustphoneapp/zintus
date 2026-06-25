@@ -16,9 +16,22 @@ custom_domain = true
 name = "GATEWAY_SESSION"
 class_name = "GatewaySession"
 
+# Atomic, strongly-consistent per-user/period token-usage counter (B3 quota
+# enforcement). One instance per `user:period`; see src/QuotaCounter.ts.
+[[durable_objects.bindings]]
+name = "QUOTA_COUNTER"
+class_name = "QuotaCounter"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GatewaySession"]
+
+# v2: introduce the QuotaCounter DO. Additive — does not touch the existing
+# GatewaySession binding/class. Deploy applies this automatically on the next
+# `wrangler deploy`.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["QuotaCounter"]
 
 [[d1_databases]]
 binding = "DB"

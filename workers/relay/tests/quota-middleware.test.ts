@@ -1,22 +1,48 @@
 import { describe, expect, test } from "bun:test";
-import { enforceQuota, recordUsage } from "../src/middleware/quota.js";
+import { enforceQuota, recordUsage, billingPeriod } from "../src/middleware/quota.js";
 import type { Env, SubscriptionRow } from "../src/types.js";
 
-// Quota enforcement + usage recording for the relay's managed tiers. Built on a
-// fake KV (in-memory) + fake D1 so the branches run deterministically.
+// Quota enforcement + usage recording for the relay's managed tiers. The token
+// counter is now a strongly-consistent Durable Object (QuotaCounter), so this
+// builds a fake DO namespace that models the runtime's per-object serialisation,
+// plus a fake D1, to exercise the real enforceQuota/recordUsage branches.
 
-function fakeKV() {
-  const store = new Map<string, string>();
+/**
+ * Fake QUOTA_COUNTER namespace. Each named object owns an in-memory total and a
+ * per-name promise chain, so concurrent `/add` calls are serialised exactly like
+ * the real Durable Object runtime (no lost-update race).
+ */
+function fakeQuotaCounter() {
+  const totals = new Map<string, number>();
+  const locks = new Map<string, Promise<unknown>>();
   return {
-    store,
-    get: async (k: string) => store.get(k) ?? null,
-    put: async (k: string, v: string) => {
-      store.set(k, v);
-    },
+    totals,
+    idFromName: (name: string) => ({ name }),
+    get: (id: { name: string }) => ({
+      fetch: (url: string, init?: { method?: string; body?: string }) => {
+        const pathname = new URL(url).pathname;
+        const prev = locks.get(id.name) ?? Promise.resolve();
+        const next = prev.then(async () => {
+          if (pathname === "/add") {
+            const n = parseInt(init?.body ?? "0", 10);
+            const delta = Number.isFinite(n) && n > 0 ? n : 0;
+            const total = (totals.get(id.name) ?? 0) + delta;
+            totals.set(id.name, total);
+            return new Response(JSON.stringify({ total }));
+          }
+          return new Response(JSON.stringify({ total: totals.get(id.name) ?? 0 }));
+        });
+        locks.set(id.name, next.catch(() => undefined));
+        return next;
+      },
+    }),
   };
 }
 
-function fakeEnv(sub: SubscriptionRow | null, kv = fakeKV()): { env: Env; kv: ReturnType<typeof fakeKV> } {
+function fakeEnv(
+  sub: SubscriptionRow | null,
+  counter = fakeQuotaCounter(),
+): { env: Env; counter: ReturnType<typeof fakeQuotaCounter> } {
   const db = {
     prepare: () => ({
       bind: () => ({
@@ -25,11 +51,13 @@ function fakeEnv(sub: SubscriptionRow | null, kv = fakeKV()): { env: Env; kv: Re
       }),
     }),
   };
-  return { env: { DB: db, KV: kv } as unknown as Env, kv };
+  return { env: { DB: db, QUOTA_COUNTER: counter } as unknown as Env, counter };
 }
 
-const sub = (tier: string, used = 0): SubscriptionRow =>
-  ({ user_id: "u1", tier, status: "active", tokens_used_this_period: used } as unknown as SubscriptionRow);
+const sub = (tier: string): SubscriptionRow =>
+  ({ user_id: "u1", tier, status: "active", tokens_used_this_period: 0 } as unknown as SubscriptionRow);
+
+const counterKey = (userId: string) => `${userId}:${billingPeriod()}`;
 
 describe("enforceQuota", () => {
   test("free tier has no token cap -> always allowed", async () => {
@@ -37,48 +65,45 @@ describe("enforceQuota", () => {
     const r = await enforceQuota("u1", env);
     expect(r.tier).toBe("free");
     expect(r.allowed).toBe(true);
+    expect(r.limit).toBeNull();
   });
 
   test("paid tier under the monthly cap is allowed", async () => {
-    const { env } = fakeEnv(sub("starter"));
-    const kv = fakeKV();
-    kv.store.set(`quota:u1:${new Date().toISOString().slice(0, 7)}`, "100000");
-    const { env: env2 } = fakeEnv(sub("starter"), kv);
-    const r = await enforceQuota("u1", env2);
+    const counter = fakeQuotaCounter();
+    counter.totals.set(counterKey("u1"), 100_000);
+    const { env } = fakeEnv(sub("starter"), counter);
+    const r = await enforceQuota("u1", env);
     expect(r.tier).toBe("starter");
     expect(r.allowed).toBe(true); // 100k < 500k
-    void env;
+    expect(r.limit).toBe(500_000);
+    expect(r.used).toBe(100_000);
   });
 
-  test("paid tier at/over the cap is blocked", async () => {
-    const kv = fakeKV();
-    kv.store.set(`quota:u1:${new Date().toISOString().slice(0, 7)}`, "500000");
-    const { env } = fakeEnv(sub("starter"), kv);
+  test("paid tier at/over the cap is blocked (429 path)", async () => {
+    const counter = fakeQuotaCounter();
+    counter.totals.set(counterKey("u1"), 500_000);
+    const { env } = fakeEnv(sub("starter"), counter);
     const r = await enforceQuota("u1", env);
     expect(r.allowed).toBe(false); // 500k not < 500k
+    expect(r.reset).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 });
 
 describe("recordUsage", () => {
-  test("increments the KV usage counter by input+output tokens", async () => {
-    const { env, kv } = fakeEnv(sub("starter"));
+  test("increments the counter by input+output tokens", async () => {
+    const { env, counter } = fakeEnv(sub("starter"));
     await recordUsage("u1", "groq", "llama", 300, 200, env);
-    const key = `quota:u1:${new Date().toISOString().slice(0, 7)}`;
-    expect(kv.store.get(key)).toBe("500");
+    expect(counter.totals.get(counterKey("u1"))).toBe(500);
   });
 
-  test("DOCUMENTS the known non-atomic race: concurrent recordUsage loses increments", async () => {
-    // The KV counter is a read-modify-write with no atomicity (acceptable for
-    // the MVP per the code comment). Concurrent calls all read the same value,
-    // so the final counter UNDER-counts. This test pins that behaviour so a
-    // future "fix" to atomic increments is a conscious change, not a surprise.
-    const { env, kv } = fakeEnv(sub("growth"));
-    const key = `quota:u1:${new Date().toISOString().slice(0, 7)}`;
+  test("concurrent recordUsage is now ATOMIC — no increments lost (DO counter)", async () => {
+    // The previous KV read-modify-write lost concurrent increments. The Durable
+    // Object counter serialises per-object writes, so 5 concurrent +100s sum to
+    // exactly 500. This pins the B3 atomicity fix.
+    const { env, counter } = fakeEnv(sub("growth"));
     await Promise.all(
       Array.from({ length: 5 }, () => recordUsage("u1", "groq", "llama", 100, 0, env)),
     );
-    const final = parseInt(kv.store.get(key) ?? "0", 10);
-    expect(final).toBeLessThan(5 * 100); // increments were lost to the race
-    expect(final).toBeGreaterThan(0);
+    expect(counter.totals.get(counterKey("u1"))).toBe(500);
   });
 });

@@ -46,7 +46,8 @@ import {
 import { createCheckoutSession, createPortalSession, handleStripeWebhook } from "./billing.js";
 import { MANAGED_KEYS_AVAILABLE, MANAGED_KEY_TIERS } from "./tiers.js";
 import { corsOrigin, validateRedirectTo } from "./http-security.js";
-import { enforceQuota, recordUsage } from "./middleware/quota.js";
+import { enforceQuota, recordUsage, getQuotaUsed } from "./middleware/quota.js";
+import { createErrorSink } from "./observability.js";
 import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 import { validateGoogleClaims, type GoogleClaims } from "./google-auth.js";
 import {
@@ -59,8 +60,9 @@ import {
   MAGIC_LINK_IP_WINDOW_SECS,
 } from "./rate-limit.js";
 
-// Re-export the Durable Object class for wrangler to find.
+// Re-export the Durable Object classes for wrangler to find.
 export { GatewaySession } from "./GatewaySession.js";
+export { QuotaCounter } from "./QuotaCounter.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -72,6 +74,21 @@ const app = new Hono<{ Bindings: Env }>();
 app.onError((err, c) => {
   const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
   console.error("relay.error", redactSecrets(detail));
+
+  // Opt-in error sink: when SENTRY_DSN is configured, report the (redacted)
+  // error out-of-band. No-op + zero overhead when unset. Never let reporting
+  // throw — fall through to the generic 500 regardless.
+  const sink = createErrorSink(c.env ?? {});
+  if (sink) {
+    const reported = sink(err, { path: c.req.path, method: c.req.method });
+    try {
+      c.executionCtx.waitUntil(reported);
+    } catch {
+      // No execution context (e.g. unit tests via app.request) — let it run.
+      void reported;
+    }
+  }
+
   return c.json({ error: "Internal server error" }, 500);
 });
 
@@ -595,6 +612,27 @@ app.get("/relay/:sessionId", async (c) => {
 
 // ── RELAY — mobile HTTP (status / control / stream) ───────────────────────
 
+// Control actions that configure BYOK key custody on the home gateway. They
+// perform NO inference, so they consume no tokens and MUST stay usable even when
+// a paid user is over their token budget — otherwise an exhausted user is locked
+// out of switching to their own key until the month rolls over. This is an
+// explicit allow-list: the quota gate is fail-closed, so anything NOT listed here
+// (including an unknown or missing action, or malformed JSON) is treated as
+// token-consuming and gated. Safe because the home gateway dispatches strictly on
+// `action` — a request labelled `set_key` performs key management, not inference,
+// so it cannot be used to slip a token-consuming request past the gate.
+const QUOTA_EXEMPT_ACTIONS = new Set<string>(["set_key", "remove_key"]);
+
+/** True only for known non-token-consuming (key-management) control actions. */
+export function isQuotaExemptControl(bodyText: string): boolean {
+  try {
+    const action = (JSON.parse(bodyText) as { action?: unknown }).action;
+    return typeof action === "string" && QUOTA_EXEMPT_ACTIONS.has(action);
+  } catch {
+    return false; // unparseable → not exempt → gated (gateway will reject it)
+  }
+}
+
 async function relayToSession(
   c: Context<{ Bindings: Env }>,
   sessionId: string,
@@ -621,13 +659,59 @@ async function relayToSession(
     return c.json({ error: "Not found" }, 404);
   }
 
+  // For /control we read the body once here to (a) decide whether the action is
+  // token-consuming and (b) forward it (the request stream can only be consumed
+  // once, so it is buffered into `controlBody`).
+  let controlBody: string | undefined;
+  if (path === "/control") {
+    controlBody = await c.req.text();
+
+    // Quota gate (B3): /control is the user-initiated action that drives token
+    // consumption on the home gateway, so this is the "before serving" point.
+    // /status and /stream are read-only and not gated; key-management actions
+    // (set_key/remove_key) are exempt — see QUOTA_EXEMPT_ACTIONS. Over-budget
+    // users get a clear 429 with reset info + LiteLLM/OpenRouter-style headers,
+    // instead of silently exceeding their tier.
+    //
+    // NOTE: enforcement is only as honest as the home gateway — usage is the
+    // gateway's self-reported figure via POST /api/usage/report, so a modified
+    // gateway could under-report to stay under cap. This is the pre-existing
+    // BYOK trust model (the gateway holds the keys and does the inference), not
+    // a regression introduced by the gate.
+    if (!isQuotaExemptControl(controlBody)) {
+      const q = await enforceQuota(session.user_id, c.env);
+      if (!q.allowed) {
+        const retryAfter = Math.max(1, q.reset - Math.floor(Date.now() / 1000));
+        return c.json(
+          {
+            error: {
+              code: "quota_exceeded",
+              message: `Monthly token budget exceeded for the ${q.tier} tier.`,
+              tier: q.tier,
+              limit: q.limit,
+              used: q.used,
+              reset: q.reset,
+            },
+          },
+          429,
+          {
+            "Retry-After": String(retryAfter),
+            "X-Quota-Limit": String(q.limit ?? ""),
+            "X-Quota-Used": String(q.used),
+            "X-Quota-Reset": String(q.reset),
+          },
+        );
+      }
+    }
+  }
+
   const doId = c.env.GATEWAY_SESSION.idFromName(sessionId);
   const stub = c.env.GATEWAY_SESSION.get(doId);
   return stub.fetch(
     new Request(`http://do${path}`, {
       method: c.req.method,
       headers: c.req.raw.headers,
-      body: path !== "/status" && path !== "/stream" ? c.req.raw.body : undefined,
+      body: path === "/control" ? controlBody : undefined,
     }),
   );
 }
@@ -708,8 +792,7 @@ app.get('/api/billing/status', async (c) => {
 
   const referralCode = await getOrCreateReferralCode(session.user_id, c.env);
 
-  const periodKey = new Date().toISOString().slice(0, 7);
-  const tokensUsed = parseInt(await c.env.KV.get(`quota:${session.user_id}:${periodKey}`) ?? '0', 10);
+  const tokensUsed = await getQuotaUsed(c.env, session.user_id);
 
   return c.json({
     tier: sub?.tier ?? 'free',
@@ -746,7 +829,7 @@ app.get('/api/usage/current', async (c) => {
   if (!session) return c.json({ error: 'Unauthorized' }, 401);
 
   const periodKey = new Date().toISOString().slice(0, 7);
-  const used = parseInt(await c.env.KV.get(`quota:${session.user_id}:${periodKey}`) ?? '0', 10);
+  const used = await getQuotaUsed(c.env, session.user_id);
 
   const sub = await c.env.DB.prepare(
     'SELECT tokens_limit, current_period_end FROM subscriptions WHERE user_id = ? AND status = ?'
