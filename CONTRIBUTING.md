@@ -53,10 +53,27 @@ memory, context-compiler → engine
 4. Confirm `usage` is parsed (most OpenAI-compatible APIs honor
    `stream_options.include_usage`).
 
+## Testing
+
+See **[docs/TESTING.md](docs/TESTING.md)** for the full strategy — in particular
+the two-runner split (`bun test` vs `vitest`, forced by bun's global
+`mock.module` leak) and the merged coverage gate. Key rules:
+
+- **Every PR must include tests for new code.** A new feature requires **unit
+  tests + at least one integration test**.
+- Test what the code **actually does** (real shapes, failure paths), not the
+  theoretical ideal.
+- Shared helpers live in `@zintus/test-utils` (runner-agnostic) and
+  `@zintus/test-utils/bun` (bun-only: SQLite + `createTestGateway`).
+- Register a new test file in the correct batch of the root `package.json`
+  `test` script (glob dirs are automatic; mock-heavy files go in the integration
+  batch). No `.only`/`.skip` in committed tests; no order/shared-state coupling.
+
 ## Before opening a PR
 
 ```bash
 bun run typecheck && bun run test
 ```
 
-Both must pass. Keep changes focused; prefer deleting code over adding it.
+Both must pass. Run `bun run test:coverage` if you touched a gated path. Keep
+changes focused; prefer deleting code over adding it.
