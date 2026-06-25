@@ -18,5 +18,7 @@ workers/relay/.dev.vars
 # Tokzen on-disk CCR/eval-cache during tests (TOKZEN_HOME isolation).
 .tokzen-test/
 .tokzen-ci/
+# Coverage output (merged lcov + per-runner reports).
+coverage/
 # Local agent/editor scratch (worktrees, settings).
 .claude/
