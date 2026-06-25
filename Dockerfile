@@ -19,13 +19,17 @@ WORKDIR /app
 # --------------------------------------------------------------------------
 FROM base AS build
 
-# Install workspace deps (cached unless manifests change). devDeps are included
-# by default, which the tokzen build (tsup) and AST mode (web-tree-sitter) need.
-COPY package.json bun.lock tsconfig*.json ./
-COPY packages ./packages
-COPY apps/gateway ./apps/gateway
-# A sample policy.json may be mounted/overridden at runtime.
-COPY policy.json ./policy.json
+# Copy the whole curated workspace. The .dockerignore strips node_modules, build
+# outputs (dist/.next/.expo), tests, .git and docs, so this is just source +
+# manifests. IMPORTANT: the root bun.lock is WORKSPACE-WIDE — a partial copy
+# (only packages + apps/gateway) leaves the other workspace manifests (apps/web,
+# apps/cli, apps/desktop, apps/mobile, workers/*) missing, so
+# `bun install --frozen-lockfile` sees an inconsistent workspace, tries to
+# rewrite the lockfile, and aborts ("lockfile had changes, but lockfile is
+# frozen"). Copying the full workspace keeps the frozen install identical to the
+# committed lockfile. devDeps are included by default (tokzen's tsup build +
+# web-tree-sitter AST mode need them). policy.json is included at the repo root.
+COPY . .
 RUN bun install --frozen-lockfile
 
 # tokzen's package "exports" resolve to ./dist (a tsup build). That dist is
