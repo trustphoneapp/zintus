@@ -3,19 +3,10 @@
  * Runs with `bun test` — no Worker runtime required.
  */
 import { describe, it, expect } from "bun:test";
+// Import the REAL sha256Hex so this test can't silently drift from production.
+import { sha256Hex } from "../src/auth.js";
 
 // ── Pure helpers we can test without the KV/D1 runtime ────────────────────
-
-/** SHA-256 hex (copy of the production impl to test it in isolation). */
-async function sha256Hex(value: string): Promise<string> {
-  const buf = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(value),
-  );
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 /** Timing-safe comparison (copy of production fix). */
 async function timingSafeEq(a: string, b: string): Promise<boolean> {

@@ -3,45 +3,9 @@
  * Runs with `bun test` — no Worker runtime required.
  */
 import { describe, it, expect } from "bun:test";
-
-// ── validateRedirectTo (copy of production impl) ──────────────────────────
-
-const ALLOWED_REDIRECT_ORIGINS = [
-  "https://www.zintus.ai",
-  "https://zintus.ai",
-  "http://localhost:3000",
-  "http://localhost:3001",
-];
-
-function validateRedirectTo(url: string | null | undefined): string {
-  const DEFAULT = "https://www.zintus.ai/dashboard";
-  if (!url) return DEFAULT;
-  try {
-    const parsed = new URL(url);
-    return ALLOWED_REDIRECT_ORIGINS.some(
-      (a) => parsed.origin === new URL(a).origin,
-    )
-      ? url
-      : DEFAULT;
-  } catch {
-    return DEFAULT;
-  }
-}
-
-// ── CORS origin check (copy of production logic) ───────────────────────────
-
-const ALLOWED_ORIGINS = [
-  "https://www.zintus.ai",
-  "https://zintus.ai",
-  "https://relay.zintus.ai",
-  "https://relay.zintus.ai",
-  "http://localhost:3000",
-  "http://localhost:3001",
-];
-
-function corsOrigin(origin: string | null): string {
-  return origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]!;
-}
+// Import the REAL implementations so these tests can't silently drift from
+// production (previously hand-copied here).
+import { validateRedirectTo, corsOrigin, ALLOWED_ORIGINS } from "../src/http-security.js";
 
 // ── decodeBase64url (copy of production impl) ─────────────────────────────
 

@@ -45,6 +45,7 @@ import {
 } from "./auth.js";
 import { createCheckoutSession, createPortalSession, handleStripeWebhook } from "./billing.js";
 import { MANAGED_KEYS_AVAILABLE, MANAGED_KEY_TIERS } from "./tiers.js";
+import { corsOrigin, validateRedirectTo } from "./http-security.js";
 import { enforceQuota, recordUsage } from "./middleware/quota.js";
 import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 
@@ -66,36 +67,8 @@ app.onError((err, c) => {
 
 // ── Security headers + CORS ────────────────────────────────────────────────
 
-const ALLOWED_ORIGINS = [
-  "https://www.zintus.ai",
-  "https://zintus.ai",
-  "https://relay.zintus.ai",
-  "https://relay.zintus.ai",
-  "http://localhost:3000",
-  "http://localhost:3001",
-];
-
-const ALLOWED_REDIRECT_ORIGINS = [
-  "https://www.zintus.ai",
-  "https://zintus.ai",
-  "http://localhost:3000",
-  "http://localhost:3001",
-];
-
-function validateRedirectTo(url: string | null | undefined): string {
-  const DEFAULT = "https://www.zintus.ai/dashboard";
-  if (!url) return DEFAULT;
-  try {
-    const parsed = new URL(url);
-    return ALLOWED_REDIRECT_ORIGINS.some(
-      (a) => parsed.origin === new URL(a).origin
-    )
-      ? url
-      : DEFAULT;
-  } catch {
-    return DEFAULT;
-  }
-}
+// CORS allow-list + redirect validation live in ./http-security.js so the
+// relay's security tests import the real implementation (no drift).
 
 function decodeBase64url(str: string): string {
   return atob(
@@ -190,8 +163,7 @@ app.use("*", async (c, next) => {
 app.use(
   "*",
   cors({
-    origin: (origin) =>
-      origin && ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
+    origin: (origin) => corsOrigin(origin),
     allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization"],
     credentials: true,
