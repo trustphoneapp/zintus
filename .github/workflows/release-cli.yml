@@ -1,0 +1,97 @@
+name: Release CLI (npm)
+
+# Build + publish the `zintus` CLI to npm on a `cli-v*` tag, e.g.:
+#   git tag cli-v0.0.1 && git push origin cli-v0.0.1
+#
+# The CLI ships as a single bundled file (apps/cli/dist/cli.js) produced by
+# `bun build --target=bun`. All workspace (`@zintus/*`) packages and JS libs are
+# inlined; only the three native/external runtime deps (@napi-rs/keyring,
+# sqlite-vec, ws) are declared in package.json so npm installs the right
+# per-platform binaries for the end user. The published bin runs on the Bun
+# runtime (shebang `#!/usr/bin/env bun`).
+#
+# This workflow only runs on a tag push — opening/merging a PR never publishes.
+on:
+  push:
+    tags:
+      - "cli-v*"
+  # Manual gate run that builds + packs + verifies but never publishes.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance (OIDC)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # setup-node writes the .npmrc that wires NODE_AUTH_TOKEN and the registry
+      # URL (required even though registry.npmjs.org is the default — it triggers
+      # the auth .npmrc) and is what `npm publish --provenance` reads.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      # Install the whole workspace so `bun build` can resolve the `@zintus/*`
+      # source packages it inlines into the bundle.
+      - name: Install workspace
+        run: bun install --frozen-lockfile
+        working-directory: .
+
+      - name: Typecheck CLI
+        run: bun run typecheck
+
+      - name: Build bundle
+        run: bun run build
+
+      # GATE 1: the built bin must actually start. A tag cut from a broken
+      # commit must NOT publish a crash-on-boot CLI.
+      - name: Smoke test (bin runs)
+        run: |
+          out="$(bun dist/cli.js --version)"
+          echo "zintus --version -> $out"
+          test -n "$out"
+
+      # GATE 2: inspect the would-be-published file list. Fail if any source,
+      # test, env, key, or secret-looking file would ship, or if the bundled
+      # bin is missing.
+      - name: Pack + verify contents (no secrets, bin present)
+        run: |
+          # --ignore-scripts: the bundle was already built above; skipping the
+          # prepack hook keeps stdout pure JSON for the inspector below.
+          npm pack --dry-run --json --ignore-scripts > /tmp/pack.json
+          node -e "const f=require('/tmp/pack.json')[0].files.map(x=>x.path); \
+            console.log('=== files to be published ===\n'+f.join('\n')); \
+            const bad=f.filter(p=>/\.env|\.key$|\.pem$|\.test\.|(^|\/)src\/|secret|keychain\.json|\.tsbuildinfo/i.test(p)); \
+            if(bad.length){console.error('REFUSING TO PUBLISH — sensitive/junk files:',bad);process.exit(1);} \
+            if(!f.includes('dist/cli.js')){console.error('bundle dist/cli.js missing');process.exit(1);} \
+            console.log('pack contents OK');"
+
+      # GATE 3: scan the bundle CONTENT (not just filenames). A bundler can
+      # inline an .env/secret into dist/cli.js even when no secret FILE ships, so
+      # filename allow-listing alone isn't enough — grep the built bin for
+      # common live-key shapes and refuse to publish on any hit.
+      - name: Scan bundle for inlined secrets
+        run: |
+          if grep -nE 'sk-ant-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|xoxb-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC )?PRIVATE KEY-----' dist/cli.js; then
+            echo "REFUSING TO PUBLISH — possible secret inlined into dist/cli.js"; exit 1
+          fi
+          echo "bundle content scan OK"
+
+      # Only reached for a real tag push that passed both gates.
+      - name: Publish to npm (provenance)
+        if: github.event_name == 'push'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

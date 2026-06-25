@@ -1,0 +1,45 @@
+Business Source License 1.1
+
+PARAMETERS
+
+Licensor:              YS Ventures LLC
+Licensed Work:         Zintus © 2026 YS Ventures LLC
+Additional Use Grant:  Self-hosting for personal and internal business use is
+                       permitted at no cost. Commercial redistribution, resale,
+                       or offering Zintus as a hosted/managed service to third
+                       parties requires a separate commercial license from
+                       YS Ventures LLC.
+Change Date:           2030-06-20
+Change License:        Apache License, Version 2.0
+
+-----------------------------------------------------------------------------
+
+TERMS
+
+The Business Source License (this document, the "License") is not an Open
+Source license. The Licensed Work is made available under the terms below; on
+the Change Date it converts to the Change License named above.
+
+Licensor grants you the right to copy, modify, create derivative works,
+redistribute, and make non-production use of the Licensed Work. Production use
+of the Licensed Work is permitted only as described in the Additional Use Grant
+above, or otherwise requires a commercial license from the Licensor.
+
+Effective on the Change Date, the Licensor grants you rights under the Change
+License, and the rights granted under this License terminate.
+
+You must conspicuously display this License on each original or modified copy
+of the Licensed Work. If you receive the Licensed Work from a third party, the
+terms and conditions of this License apply to your use of that work.
+
+Any use of the Licensed Work in violation of this License automatically
+terminates your rights under this License for the current and all future
+versions of the Licensed Work.
+
+This License does not grant you any right in any trademark or logo of the
+Licensor. THE LICENSED WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING WITHOUT LIMITATION WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+For the complete, authoritative Business Source License 1.1 terms, see:
+https://mariadb.com/bsl11/
