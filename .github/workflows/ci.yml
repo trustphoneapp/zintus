@@ -217,3 +217,71 @@ jobs:
       # Gateway Docker image builds (self-host artifact).
       - name: Build gateway Docker image
         run: docker build -t zintus-gateway:ci .
+
+  # k6 load smoke against /health (keyless). Thresholds (p95<2s, <5% errors) are
+  # enforced in tests/load/gateway-smoke.js, so the run-k6 step fails on breach.
+  load-test:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - run: bun run --filter tokzen build
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+      - name: Start gateway (background)
+        run: bun run apps/gateway/src/index.ts &
+        env:
+          CI: "true"
+          CI_KEYCHAIN: memory
+          GATEWAY_PORT: "8788"
+      - name: Wait for /health
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8788/health >/dev/null && echo "gateway up" && exit 0
+            sleep 1
+          done
+          echo "gateway did not start"; exit 1
+      - name: Run k6 load test
+        uses: grafana/run-k6-action@v1
+        with:
+          path: tests/load/gateway-smoke.js
+        env:
+          GATEWAY_URL: http://localhost:8788
+
+  # Diff coverage gate — flags untested NEW lines on a PR. Consumes the EXISTING
+  # merged lcov from scripts/coverage.ts (bun+vitest); does not touch that
+  # pipeline. continue-on-error: true = report only, not yet blocking.
+  diff-coverage:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'pull_request'
+    env:
+      CI_KEYCHAIN: memory
+      TOKZEN_HOME: ${{ github.workspace }}/.tokzen-ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — shallow clone breaks the diff
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: bun install --frozen-lockfile
+      - run: bun run --filter tokzen build
+      - name: Generate merged coverage (coverage/lcov.info)
+        run: bun run test:coverage
+      - name: Diff coverage gate (report only)
+        continue-on-error: true
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          pip install diff-cover
+          diff-cover coverage/lcov.info \
+            --compare-branch=origin/main \
+            --fail-under=80
