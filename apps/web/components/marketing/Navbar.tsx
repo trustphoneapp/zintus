@@ -14,12 +14,17 @@ function GithubMark() {
 import { ZintusLogo } from "@/components/ZintusLogo";
 import { ThemeToggle } from "./ThemeToggle";
 
+// Section links are root-relative (`/#id`) so they resolve to the homepage
+// sections from ANY route. A bare `#id` is a same-document fragment: it works on
+// the homepage (which renders those sections) but does nothing on /pricing or
+// /docs, where those ids don't exist — that's the navigation-breaks-after-pricing
+// bug. `/#id` navigates home and scrolls; on the homepage it just scrolls.
 const navItems = [
-  { label: "How it works", href: "#how-it-works" },
-  { label: "Features", href: "#features" },
-  { label: "Supported AIs", href: "#providers" },
-  { label: "FAQ", href: "#faq" },
-  { label: "Install", href: "#install" },
+  { label: "How it works", href: "/#how-it-works" },
+  { label: "Features", href: "/#features" },
+  { label: "Supported AIs", href: "/#providers" },
+  { label: "FAQ", href: "/#faq" },
+  { label: "Install", href: "/#install" },
   { label: "Pricing", href: "/pricing" },
   { label: "Docs", href: "/docs" },
 ];
