@@ -79,4 +79,11 @@ describe("provider factory invariants", () => {
       expect(createProvider(id).id).toBe(id);
     }
   });
+
+  test("createProvider throws for an unknown id (no Anthropic provider)", () => {
+    // Zintus intentionally ships no Anthropic provider; asking for one (or any
+    // unknown id) must fail loudly rather than return undefined.
+    expect(() => createProvider("anthropic" as never)).toThrow(/Unknown provider/);
+    expect(() => createProvider("openai" as never)).toThrow(/Unknown provider/);
+  });
 });
