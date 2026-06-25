@@ -14,7 +14,7 @@ Notes: grades reflect *this lane only*. LiteLLM/Portkey/OpenRouter are stronger 
 
 ### Provable savings
 
-Every free-tier token served is valued at what an equivalent paid API would have charged, summed per provider. The gateway exposes it at `GET /health` (`savings.estimatedUsdSaved`) and the web **Usage** page renders it. It is an *estimate*, labelled as such.
+Every free-tier token served is valued at what an equivalent paid API would have charged, summed per provider. The gateway exposes it at the auth-gated `GET /v1/status` (`savings.estimatedUsdSaved`, plus a focused `GET /v1/savings`) and the web **Usage** page renders it. (`GET /health` is now a minimal, unauthenticated liveness probe — savings and provider topology moved behind auth to avoid disclosure.) It is an *estimate*, labelled as such.
 
 ### Declarative routing (`policy.json`)
 
@@ -51,11 +51,17 @@ cp policy.example.json policy.json
 GATEWAY_TOKEN=$(openssl rand -hex 24) docker compose up -d
 
 # 3. Verify:
-curl -s localhost:8788/health | jq      # { "ok": true, ... "savings": {...} }
+curl -s localhost:8788/health | jq      # { "ok": true, "draining": false }  (minimal liveness)
+# Savings + provider topology are auth-gated:
+curl -s -H "Authorization: Bearer $GATEWAY_TOKEN" localhost:8788/v1/status | jq   # { ... "savings": {...} }
 
 # 4. Add provider keys (free tiers) — either via env on the container,
 #    or mount your CLI keychain dir at /home/bun/.zintus.
 ```
+
+> **Exposing it beyond loopback?** Read [`docs/DEPLOY.md`](docs/DEPLOY.md) first —
+> a network-exposed gateway requires `GATEWAY_TOKEN` and should set
+> `GATEWAY_RATELIMIT_RPM`, TLS, and CORS.
 
 Prebuilt images are published to GHCR on each `v*` tag
 (`ghcr.io/<owner>/zintus-gateway`):
