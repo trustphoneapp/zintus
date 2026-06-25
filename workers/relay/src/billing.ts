@@ -1,5 +1,5 @@
 import type { Env } from './types.js';
-import { STRIPE_PRICES, REFERRAL_RULES } from './tiers.js';
+import { STRIPE_PRICES, REFERRAL_RULES, TIERS, type Tier } from './tiers.js';
 
 export async function createCheckoutSession(
   userId: string, userEmail: string,
@@ -109,18 +109,25 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
 
       if (!userId || !tier) break;
 
-      // Upsert subscription (idempotent via stripe_subscription_id unique constraint)
-      await env.DB.prepare(`
-        INSERT INTO subscriptions (user_id, tier, stripe_customer_id, stripe_subscription_id, status)
-        VALUES (?, ?, ?, ?, 'active')
-        ON CONFLICT(stripe_subscription_id) DO UPDATE
-          SET tier=excluded.tier, status='active', updated_at=unixepoch()
-      `).bind(userId, tier, customerId ?? null, subscriptionId ?? null).run();
+      // tokens_limit is derived from the tier's monthly budget (TIERS) so the
+      // dashboard's /api/usage/current + /api/billing/status report a real cap
+      // immediately after checkout (the audit flagged it was never set).
+      const tokensLimit = TIERS[tier as Tier]?.tokens_per_month ?? null;
 
-      // Update user's stripe_customer_id
-      await env.DB.prepare(
-        'UPDATE zintus_users SET stripe_customer_id=? WHERE id=?'
-      ).bind(customerId, userId).run().catch(() => null); // column may not exist yet — skip
+      // Upsert subscription (idempotent via stripe_subscription_id unique
+      // constraint). The `subscriptions` table is the single source of truth for
+      // stripe_customer_id — the portal path reads it here, so we persist it on
+      // this row only. (The previous `UPDATE zintus_users SET stripe_customer_id`
+      // targeted a column that does not exist on zintus_users and silently
+      // affected 0 rows; it has been removed — B4.)
+      await env.DB.prepare(`
+        INSERT INTO subscriptions (user_id, tier, stripe_customer_id, stripe_subscription_id, status, tokens_limit)
+        VALUES (?, ?, ?, ?, 'active', ?)
+        ON CONFLICT(stripe_subscription_id) DO UPDATE
+          SET tier=excluded.tier, status='active',
+              stripe_customer_id=COALESCE(excluded.stripe_customer_id, subscriptions.stripe_customer_id),
+              tokens_limit=excluded.tokens_limit, updated_at=unixepoch()
+      `).bind(userId, tier, customerId ?? null, subscriptionId ?? null, tokensLimit).run();
 
       // Record referral if code provided (self-referral guard)
       if (referralCode) {
@@ -175,12 +182,26 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
         ? Object.entries(STRIPE_PRICES).find(([, id]) => id === priceId)?.[0]?.replace('_monthly', '')
         : null;
 
+      // Stripe sends the renewed period window on this event; persist it so the
+      // dashboard shows an accurate reset date and the token cap tracks the tier.
+      const periodStart = (obj['current_period_start'] as number | undefined) ?? null;
+      const periodEnd = (obj['current_period_end'] as number | undefined) ?? null;
+      const tokensLimit = newTier ? (TIERS[newTier as Tier]?.tokens_per_month ?? null) : null;
+
       await env.DB.prepare(`
-        UPDATE subscriptions SET status=?, tier=COALESCE(?,tier), updated_at=unixepoch()
+        UPDATE subscriptions
+        SET status=?, tier=COALESCE(?,tier),
+            current_period_start=COALESCE(?,current_period_start),
+            current_period_end=COALESCE(?,current_period_end),
+            tokens_limit=COALESCE(?,tokens_limit),
+            updated_at=unixepoch()
         WHERE stripe_subscription_id=?
       `).bind(
         status === 'active' ? 'active' : status === 'past_due' ? 'past_due' : 'cancelled',
         newTier ?? null,
+        periodStart,
+        periodEnd,
+        tokensLimit,
         subscriptionId,
       ).run();
       break;

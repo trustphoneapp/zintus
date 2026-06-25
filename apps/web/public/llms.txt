@@ -1,0 +1,31 @@
+# Zintus
+
+> Zintus is a free, BYOK (bring-your-own-key) AI router. It routes prompts across
+> 12 free-tier AI providers (Cerebras, Groq, Gemini, DeepSeek and more) with smart
+> quota routing, sub-5ms overhead, and an Ollama offline fallback. On the default
+> BYOK path your API keys stay in your OS keychain on your device and never reach
+> Zintus servers. Available as CLI, Desktop, and Web. Free forever; optional paid
+> tiers (managed keys) are coming soon. License: BUSL-1.1.
+
+## Docs
+
+- [Documentation](https://www.zintus.ai/docs): Setup, configuration, and API reference.
+- [Pricing](https://www.zintus.ai/pricing): Free BYOK tier and (upcoming) managed-key plans.
+- [Changelog](https://www.zintus.ai/changelog): Release notes and version history.
+- [Download](https://www.zintus.ai/download): CLI and Desktop app installation.
+
+## Company
+
+- [About](https://www.zintus.ai/about): What Zintus is and who builds it.
+- [Blog](https://www.zintus.ai/blog): Updates and writing.
+- [Contact](https://www.zintus.ai/contact): Reach the team (hello@zintus.ai).
+
+## Legal & Trust
+
+- [Privacy Policy](https://www.zintus.ai/privacy): What is and is not collected (BYOK is zero-knowledge).
+- [Terms of Service](https://www.zintus.ai/terms): Terms of use.
+- [Security](https://www.zintus.ai/security): Security model and vulnerability reporting (security@zintus.ai).
+
+## Optional
+
+- [GitHub](https://github.com/trustphoneapp/zintus): Source code.

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { sendMagicLink, googleSignInUrl } from "@/lib/cloud";
+import { sendMagicLink, googleSignInUrl, RELAY_URL } from "@/lib/cloud";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -15,8 +15,11 @@ export default function LoginPage() {
   const isCli = searchParams.get("cli") === "true";
   const isMobile = searchParams.get("mobile") === "true";
   const cliState = searchParams.get("state") ?? undefined;
+  // The mobile-redirect handler lives on the relay worker, not the Next.js web
+  // app — point the mobile branch there (default https://relay.zintus.ai) so the
+  // post-OAuth deep-link redirect resolves instead of 404ing on www.
   const redirectTo = isMobile
-    ? "https://www.zintus.ai/api/auth/mobile-redirect"
+    ? `${RELAY_URL}/api/auth/mobile-redirect`
     : "https://www.zintus.ai/dashboard";
 
   async function handleMagicLink(event: React.FormEvent) {

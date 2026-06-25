@@ -1,0 +1,1130 @@
+openapi: 3.1.0
+info:
+  title: Zintus Gateway API
+  version: 0.0.1
+  summary: OpenAI-compatible gateway that routes chat completions and deep research across free-tier LLM providers.
+  description: |
+    OpenAI-compatible API — set your OpenAI client's `base_url` to the Zintus
+    gateway. Zintus routes to its OWN provider fleet; OpenAI is not a backend
+    provider. The real providers are Cerebras, Groq, Gemini, OpenRouter, Cohere,
+    Mistral, DeepSeek, Fireworks AI, xAI Grok, Hugging Face, LM Studio, and
+    Ollama.
+
+    Public HTTP API exposed by the Zintus gateway (`apps/gateway`). The chat
+    surface (`POST /v1/chat/completions`) reuses OpenAI's request/response field
+    NAMES so existing OpenAI/OpenRouter SDKs work unchanged — but only the
+    fields Zintus actually accepts (per the @zintus/schemas zod) are supported;
+    OpenAI-only params are not documented here. Zintus-specific deviations are
+    documented inline (no `created`/`usage`; `id` is a routing trace id; extra
+    `provider`/`thread_id`/`compile_trace_id` fields).
+
+    The operational endpoints — `/health`, `/v1/status`, `/v1/savings`,
+    `/v1/traces*`, and `/metrics` — are Zintus extensions, not part of the
+    OpenAI API.
+
+    Authentication
+    --------------
+    Auth is bearer-token based: `Authorization: Bearer <GATEWAY_TOKEN>`. The
+    token is matched in constant time against the gateway's configured
+    `GATEWAY_TOKEN`.
+
+    - When `GATEWAY_TOKEN` is **set**, every endpoint EXCEPT `GET /health`
+      requires the bearer token. `/health` is always unauthenticated.
+    - When `GATEWAY_TOKEN` is **unset/empty**, the gateway runs open and all
+      endpoints (including `/metrics`) skip the auth check. This is the local
+      /dev posture; production deployments are expected to set a token.
+
+    `GET /metrics` is therefore auth-gated *only when a token is configured*.
+
+    This spec is verified against `apps/gateway/src/handler.ts` and cross-checked
+    by `apps/gateway/src/openapi-spec.test.ts`. Do not hand-edit it out of sync
+    with the handler — the test will fail.
+  license:
+    name: BUSL-1.1
+    url: https://mariadb.com/bsl11/
+servers:
+  - url: http://localhost:8787
+    description: Local gateway (default Bun server port)
+  - url: https://gateway.example.com
+    description: Self-hosted deployment (replace with your host)
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Chat
+    description: OpenAI-compatible chat completions.
+  - name: Research
+    description: Streaming multi-step deep research.
+  - name: Operations
+    description: Health, status, savings, traces, and metrics.
+
+paths:
+  /health:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      summary: Liveness probe (unauthenticated)
+      description: |
+        Minimal, always-public liveness check. Intentionally does NOT leak
+        provider inventory, key presence, live quota, or savings — that lives at
+        the auth-gated `GET /v1/status`. Returns 503 while the process is
+        draining (graceful shutdown) so load balancers stop routing new traffic.
+      security: []
+      responses:
+        "200":
+          description: Process is live and accepting traffic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              examples:
+                authRequired:
+                  value: { ok: true, auth: "required" }
+                authDisabled:
+                  value: { ok: true, auth: "disabled" }
+        "503":
+          description: Process is draining (graceful shutdown in progress).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+              example: { ok: false, auth: "required", status: "draining" }
+
+  /v1/chat/completions:
+    post:
+      tags: [Chat]
+      operationId: createChatCompletion
+      summary: Create a chat completion (streaming or non-streaming)
+      description: |
+        OpenAI-compatible chat completion. Routes the request across configured
+        free-tier providers, optionally compresses context (Tokzen) and injects
+        web-search results before calling the upstream.
+
+        Provide either `messages`, or `message` together with `thread_id`.
+
+        Streaming (default, `stream` != false) returns an SSE
+        `text/event-stream` of `chat.completion.chunk` events terminated by a
+        `data: [DONE]` line. `stream: false` returns a single
+        `chat.completion` JSON object.
+
+        Response metadata is also surfaced as headers: `X-Provider-Used`,
+        `X-Cache-Hit`, `X-Failover-Count`, and (streaming only, when known)
+        `X-Compile-Tokens`.
+
+        Deviations from OpenAI: no `created` and no `usage` fields; `id` is the
+        internal routing trace id (a UUID); extra `provider`, `thread_id`, and
+        `compile_trace_id` fields are included.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+            examples:
+              simple:
+                summary: Minimal non-streaming request
+                value:
+                  model: llama-3.3-70b
+                  stream: false
+                  messages:
+                    - { role: user, content: "Hello!" }
+              withSearch:
+                summary: With web search and a pinned provider
+                value:
+                  provider: groq
+                  search: { enabled: true, depth: standard }
+                  messages:
+                    - { role: user, content: "Latest news on X?" }
+      responses:
+        "200":
+          description: |
+            Either a single completion (when `stream: false`) or an SSE stream
+            of completion chunks (default).
+          headers:
+            X-Provider-Used:
+              schema: { type: string }
+              description: Provider id that served the request.
+            X-Cache-Hit:
+              schema: { type: string }
+              description: Cache outcome (e.g. `miss`, `hit`).
+            X-Failover-Count:
+              schema: { type: string }
+              description: Number of providers tried before success.
+            X-Compile-Tokens:
+              schema: { type: string }
+              description: Estimated compiled context tokens (streaming only, when known).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletion"
+            text/event-stream:
+              x-event-data-schema:
+                $ref: "#/components/schemas/ChatCompletionChunk"
+              schema:
+                type: string
+                description: |
+                  SSE stream. Each event is `data: <ChatCompletionChunk JSON>\n\n`,
+                  terminated by `data: [DONE]\n\n`. On mid-stream failure a
+                  `data: { "error": { "message": "..." } }` event is emitted
+                  before close. The per-event JSON shape is `ChatCompletionChunk`
+                  (see x-event-data-schema / components).
+              example: |
+                data: {"id":"<uuid>","object":"chat.completion.chunk","model":"llama-3.3-70b","provider":"groq","choices":[{"index":0,"delta":{"content":"Hello"}}]}
+
+                data: [DONE]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/research:
+    post:
+      tags: [Research]
+      operationId: createResearch
+      summary: Streaming deep research (decompose → search → synthesize)
+      description: |
+        Decomposes a research question into sub-queries, runs parallel web
+        searches, and synthesizes a cited answer — streamed as SSE progress
+        events. Requires the gateway to be configured with `TAVILY_API_KEY` or
+        `SERPER_API_KEY` (returns 400 otherwise).
+
+        Each SSE event is formatted `event: <type>\ndata: <JSON>\n\n`, where
+        `<type>` is one of `queries`, `search_start`, `search_complete`,
+        `synthesizing`, `answer_chunk`, `done`, `error`. The stream terminates
+        with `data: [DONE]\n\n`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResearchRequest"
+            example:
+              query: "Compare the latest free-tier LLM inference providers"
+              depth: standard
+      responses:
+        "200":
+          description: SSE stream of research progress events.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                event: queries
+                data: {"type":"queries","queries":["...","..."]}
+
+                event: answer_chunk
+                data: {"type":"answer_chunk","text":"..."}
+
+                event: done
+                data: {"type":"done","sources":[{"title":"...","url":"...","content":"..."}]}
+
+                data: [DONE]
+        "400":
+          description: |
+            Invalid body, empty `query`, or no search key configured on the
+            gateway. Body is `{ error: { message } }` (with `issues` for zod
+            validation failures).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/status:
+    get:
+      tags: [Operations]
+      operationId: getStatus
+      summary: Operational snapshot (auth-gated)
+      description: |
+        Authenticated operational snapshot: provider inventory, key presence,
+        cooldown state, live quota usage/limits, and provable savings. Moved
+        behind auth (away from `/health`) to avoid disclosing operator topology.
+      responses:
+        "200":
+          description: Provider topology, quota, and savings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/savings:
+    get:
+      tags: [Operations]
+      operationId: getSavings
+      summary: Provable savings estimate (auth-gated)
+      description: |
+        Estimated USD a paid API would have charged for the free-tier tokens
+        served so far. Labelled an estimate vs. paid-API list pricing.
+      responses:
+        "200":
+          description: Savings estimate.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Savings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/traces:
+    get:
+      tags: [Operations]
+      operationId: listTraces
+      summary: List recent routing traces (auth-gated)
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Max traces to return. Defaults to 20.
+          schema:
+            type: integer
+            minimum: 1
+            default: 20
+      responses:
+        "200":
+          description: Recent routing traces, newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [traces]
+                additionalProperties: false
+                properties:
+                  traces:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RequestTrace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/traces/last:
+    get:
+      tags: [Operations]
+      operationId: getLastTrace
+      summary: Most recent routing trace (auth-gated)
+      responses:
+        "200":
+          description: The last trace, or null if none recorded yet.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trace]
+                additionalProperties: false
+                properties:
+                  trace:
+                    oneOf:
+                      - $ref: "#/components/schemas/RequestTrace"
+                      - type: "null"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/traces/{id}:
+    get:
+      tags: [Operations]
+      operationId: getTrace
+      summary: Fetch a routing trace by id (auth-gated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The requested trace.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trace]
+                additionalProperties: false
+                properties:
+                  trace:
+                    $ref: "#/components/schemas/RequestTrace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            Trace not found. NOTE: on this route `error` is a bare STRING, not
+            an object — `{ "error": "trace not found" }`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StringError"
+              example: { error: "trace not found" }
+
+  /v1/models:
+    get:
+      tags: [Chat]
+      operationId: listModels
+      summary: List available models (OpenAI-compatible, auth-gated)
+      description: |
+        OpenAI-compatible model listing. Each Zintus provider is surfaced as one
+        "model" entry whose `id` is the provider id and `owned_by` is the
+        provider's display name. Useful for SDKs that call `/v1/models` for
+        discovery. (Zintus routes per-provider; this is not a per-model catalog.)
+      responses:
+        "200":
+          description: List of provider-backed models.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelList"
+              example:
+                object: list
+                data:
+                  - { id: groq, object: model, owned_by: Groq }
+                  - { id: gemini, object: model, owned_by: Google Gemini }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/threads:
+    get:
+      tags: [Operations]
+      operationId: listThreads
+      summary: List conversation threads (auth-gated)
+      responses:
+        "200":
+          description: All known conversation threads.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [threads]
+                additionalProperties: false
+                properties:
+                  threads:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Thread"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/threads/{id}/state:
+    get:
+      tags: [Operations]
+      operationId: getThreadState
+      summary: Get a thread's compiled state (auth-gated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: |
+            The thread's persisted state object, or null if the thread has no
+            state. The state is an open key/value record (contents are
+            engine-internal and not part of this contract).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [state]
+                additionalProperties: false
+                properties:
+                  state:
+                    oneOf:
+                      - type: object
+                        additionalProperties: true
+                      - type: "null"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/threads/{id}/compile:
+    post:
+      tags: [Operations]
+      operationId: compileThread
+      summary: Preview a thread's compiled context bundle (auth-gated)
+      description: |
+        Compiles (without sending) the context bundle the engine would build for
+        the next turn on this thread, optionally folding in a pending `message`.
+        Returns the compiled message bundle and a compile trace id.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                message:
+                  oneOf:
+                    - type: string
+                    - type: object
+                      required: [content]
+                      additionalProperties: false
+                      properties:
+                        role: { type: string }
+                        content: { type: string }
+                mode:
+                  type: string
+                  enum: [fast, smart, deep]
+      responses:
+        "200":
+          description: Compiled context preview.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [thread_id, compile_trace_id, bundle]
+                additionalProperties: false
+                properties:
+                  thread_id: { type: string }
+                  compile_trace_id: { type: string }
+                  bundle:
+                    type: object
+                    required: [messages]
+                    additionalProperties: false
+                    properties:
+                      messages:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ChatMessage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/threads/{id}/messages:
+    get:
+      tags: [Operations]
+      operationId: getThreadMessages
+      summary: List a thread's stored messages (auth-gated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The thread's persisted messages.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages]
+                additionalProperties: false
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ThreadMessage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/compile/traces/{id}:
+    get:
+      tags: [Operations]
+      operationId: getCompileTrace
+      summary: Fetch a context-compile trace by id (auth-gated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The compile trace.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trace]
+                additionalProperties: false
+                properties:
+                  trace:
+                    $ref: "#/components/schemas/CompileTrace"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: |
+            Compile trace not found. NOTE: `error` is a bare STRING here —
+            `{ "error": "compile trace not found" }`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StringError"
+              example: { error: "compile trace not found" }
+
+  /metrics:
+    get:
+      tags: [Operations]
+      operationId: getMetrics
+      summary: Metrics (Prometheus text or JSON)
+      description: |
+        Returns Prometheus exposition text when the `Accept` header includes
+        `text/plain`, otherwise a JSON metrics snapshot. Auth-gated ONLY when
+        `GATEWAY_TOKEN` is configured; open otherwise.
+      responses:
+        "200":
+          description: Metrics snapshot.
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Prometheus exposition format (version 0.0.4).
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <GATEWAY_TOKEN>`. Required for all endpoints
+        except `GET /health` whenever the gateway has a `GATEWAY_TOKEN`
+        configured. When no token is configured the gateway runs open and the
+        bearer is not checked.
+
+  responses:
+    BadRequest:
+      description: |
+        Invalid JSON, schema-validation failure, or unsupported message role.
+        Body is `{ error: { message } }`; zod failures add a field-level
+        `issues` array.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            invalidJson:
+              value: { error: { message: "Invalid JSON body" } }
+            zod:
+              value:
+                error:
+                  message: "Invalid request body"
+                  issues:
+                    - { path: "messages.0.content", message: "Expected string" }
+    Unauthorized:
+      description: Missing or invalid bearer token (when a token is configured).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { error: { message: "Unauthorized" } }
+    RequestTimeout:
+      description: Upstream did not start streaming within the request timeout.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { error: { message: "Request timed out while starting the upstream stream" } }
+    PayloadTooLarge:
+      description: Request body exceeds the byte cap, or too many messages.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            tooLarge:
+              value: { error: { message: "Request body too large" } }
+            tooMany:
+              value: { error: { message: "Too many messages (max 200)" } }
+    RateLimited:
+      description: |
+        Per-client rate limit exceeded (only when the gateway is started with
+        `GATEWAY_RATELIMIT_RPM`). Includes a `Retry-After` header in seconds.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+          description: Seconds until the next request is allowed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example: { error: { message: "Rate limit exceeded", type: "rate_limit_error" } }
+
+  schemas:
+    Health:
+      type: object
+      required: [ok, auth]
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+          description: False while draining.
+        auth:
+          type: string
+          enum: [required, disabled]
+          description: Whether a `GATEWAY_TOKEN` is configured.
+        status:
+          type: string
+          enum: [draining]
+          description: Present only while the process is draining.
+
+    ChatRole:
+      type: string
+      enum: [system, user, assistant]
+
+    ChatMessage:
+      type: object
+      required: [role, content]
+      additionalProperties: false
+      properties:
+        role:
+          $ref: "#/components/schemas/ChatRole"
+        content:
+          type: string
+
+    ProviderId:
+      type: string
+      description: Supported provider ids (an unknown value is rejected with 400).
+      enum:
+        - cerebras
+        - groq
+        - gemini
+        - openrouter
+        - cohere
+        - mistral
+        - deepseek
+        - fireworks
+        - xai
+        - huggingface
+        - lmstudio
+        - ollama
+
+    SearchOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        depth:
+          type: string
+          enum: [basic, standard, deep]
+        maxResults:
+          type: integer
+          minimum: 1
+          maximum: 50
+
+    ChatCompletionRequest:
+      type: object
+      description: |
+        Mirrors @zintus/schemas ChatCompletionRequestSchema. Unknown keys are
+        stripped. Provide `messages`, or `message` + `thread_id`.
+      additionalProperties: false
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        message:
+          description: A single message (string or object). Used with `thread_id`.
+          oneOf:
+            - type: string
+            - type: object
+              required: [content]
+              additionalProperties: false
+              properties:
+                role: { type: string }
+                content: { type: string }
+        model:
+          type: string
+          description: |
+            Provider-specific model id (e.g. `llama-3.3-70b-versatile` on Groq,
+            `gemini-2.0-flash` on Gemini). Optional; the router picks a default.
+        stream:
+          type: boolean
+          description: Defaults to true (SSE). Set false for a single JSON response.
+        provider:
+          $ref: "#/components/schemas/ProviderId"
+        thread_id:
+          type: string
+        mode:
+          type: string
+          enum: [fast, smart, deep]
+          description: Context-compilation mode.
+        virtual_key:
+          type: string
+        virtualKey:
+          type: string
+          description: camelCase alias of `virtual_key`.
+        provider_weights:
+          type: object
+          additionalProperties: { type: number }
+        providerWeights:
+          type: object
+          additionalProperties: { type: number }
+          description: camelCase alias of `provider_weights`.
+        strategy:
+          type: string
+          enum: [fastest, capability, economy, quality, balanced, weighted]
+        temperature:
+          type: number
+        max_tokens:
+          type: integer
+          minimum: 1
+        diff:
+          type: string
+          description: Optional diff text for code-aware context compilation.
+        search:
+          $ref: "#/components/schemas/SearchOptions"
+
+    ChatCompletionChoice:
+      type: object
+      required: [index, message, finish_reason]
+      additionalProperties: false
+      properties:
+        index: { type: integer }
+        message:
+          $ref: "#/components/schemas/ChatMessage"
+        finish_reason:
+          type: string
+          example: stop
+
+    ChatCompletion:
+      type: object
+      description: |
+        Non-streaming completion. Deviates from OpenAI: no `created`/`usage`;
+        `id` is a routing trace UUID; extra `provider`/`thread_id`/
+        `compile_trace_id` fields.
+      required: [id, object, model, choices]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Routing trace id (UUID).
+        object:
+          type: string
+          const: chat.completion
+        model:
+          type: string
+        provider:
+          type: string
+        thread_id:
+          type: [string, "null"]
+        compile_trace_id:
+          type: [string, "null"]
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatCompletionChoice"
+
+    ChatCompletionChunk:
+      type: object
+      description: "A single SSE delta event (the JSON after the SSE data: prefix)."
+      required: [id, object, model, choices]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        object:
+          type: string
+          const: chat.completion.chunk
+        model: { type: string }
+        provider: { type: string }
+        thread_id: { type: [string, "null"] }
+        compile_trace_id: { type: [string, "null"] }
+        choices:
+          type: array
+          items:
+            type: object
+            required: [index, delta]
+            additionalProperties: false
+            properties:
+              index: { type: integer }
+              delta:
+                type: object
+                properties:
+                  content: { type: string }
+
+    ResearchRequest:
+      type: object
+      description: Mirrors @zintus/schemas ResearchRequestSchema.
+      additionalProperties: false
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: Required in practice — empty/missing yields 400.
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+        depth:
+          type: string
+          enum: [quick, standard, deep]
+        provider:
+          $ref: "#/components/schemas/ProviderId"
+        model:
+          type: string
+        thread_id:
+          type: string
+
+    ProviderStatus:
+      type: object
+      required: [id, available, hasKey, inCooldown, quotaUsed, quotaLimit]
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/ProviderId"
+        available: { type: boolean }
+        hasKey: { type: boolean }
+        inCooldown: { type: boolean }
+        quotaUsed: { type: integer }
+        quotaLimit:
+          type: [integer, "null"]
+
+    Savings:
+      type: object
+      required: [estimatedUsdSaved, byProvider, note]
+      additionalProperties: false
+      properties:
+        estimatedUsdSaved:
+          type: number
+        byProvider:
+          type: object
+          additionalProperties: { type: number }
+        note:
+          type: string
+          example: "estimate vs. paid-API list pricing"
+
+    Status:
+      type: object
+      required: [ok, providers, savings]
+      additionalProperties: false
+      properties:
+        ok:
+          type: boolean
+        providers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderStatus"
+        savings:
+          $ref: "#/components/schemas/Savings"
+
+    TraceAttempt:
+      type: object
+      required: [providerId, model, status, latencyMs]
+      additionalProperties: false
+      properties:
+        providerId:
+          $ref: "#/components/schemas/ProviderId"
+        model: { type: string }
+        status:
+          type: string
+          enum: [success, fail]
+        latencyMs: { type: number }
+        errorCode: { type: integer }
+        errorMessage: { type: string }
+
+    RequestTrace:
+      type: object
+      required: [traceId, startedAt, attempts]
+      additionalProperties: false
+      properties:
+        traceId: { type: string }
+        startedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        attempts:
+          type: array
+          items:
+            $ref: "#/components/schemas/TraceAttempt"
+        winner:
+          type: object
+          required: [providerId, model]
+          additionalProperties: false
+          properties:
+            providerId:
+              $ref: "#/components/schemas/ProviderId"
+            model: { type: string }
+        totalLatencyMs:
+          type: number
+
+    Model:
+      type: object
+      description: OpenAI-compatible model entry (one per provider).
+      required: [id, object, owned_by]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Provider id (doubles as the model id for routing).
+        object:
+          type: string
+          const: model
+        owned_by:
+          type: string
+          description: Provider display name.
+
+    ModelList:
+      type: object
+      required: [object, data]
+      additionalProperties: false
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Model"
+
+    Thread:
+      type: object
+      required: [id, title, createdAt, updatedAt]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        title: { type: string }
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ThreadMessage:
+      type: object
+      description: A stored thread message (a ChatMessage plus persistence metadata).
+      required: [role, content, id, threadId, createdAt]
+      additionalProperties: false
+      properties:
+        role:
+          $ref: "#/components/schemas/ChatRole"
+        content: { type: string }
+        id: { type: string }
+        threadId: { type: string }
+        providerId: { type: string }
+        model: { type: string }
+        traceId: { type: string }
+        createdAt:
+          type: string
+          format: date-time
+
+    CompileTrace:
+      type: object
+      description: |
+        A persisted context-compile trace row. `trace` is an open JSON record of
+        engine-internal compile details (shape not part of this contract).
+      required: [id, threadId, trace, createdAt]
+      additionalProperties: false
+      properties:
+        id: { type: integer }
+        threadId: { type: string }
+        trace:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+
+    MetricsSnapshot:
+      type: object
+      required:
+        - uptimeSeconds
+        - requestsTotal
+        - requestsByOutcome
+        - chatCompletionsTotal
+        - chatByProvider
+        - errorsTotal
+        - rateLimitedTotal
+        - latencyMs
+        - tokzen
+        - searchByStrategy
+      additionalProperties: false
+      properties:
+        uptimeSeconds: { type: integer }
+        requestsTotal: { type: integer }
+        requestsByOutcome:
+          type: object
+          required: [ok, clientError, serverError]
+          additionalProperties: false
+          properties:
+            ok: { type: integer }
+            clientError: { type: integer }
+            serverError: { type: integer }
+        chatCompletionsTotal: { type: integer }
+        chatByProvider:
+          type: object
+          additionalProperties: { type: integer }
+        errorsTotal: { type: integer }
+        rateLimitedTotal: { type: integer }
+        latencyMs:
+          type: object
+          required: [count, sum, max, avg]
+          additionalProperties: false
+          properties:
+            count: { type: integer }
+            sum: { type: integer }
+            max: { type: integer }
+            avg: { type: integer }
+        tokzen:
+          type: object
+          required:
+            - tokensSavedTotal
+            - avgCompressionRatio
+            - cacheHitRate
+            - compressionsByProvider
+          additionalProperties: false
+          properties:
+            tokensSavedTotal: { type: integer }
+            avgCompressionRatio: { type: number }
+            cacheHitRate: { type: number }
+            compressionsByProvider:
+              type: object
+              additionalProperties: { type: integer }
+        searchByStrategy:
+          type: object
+          additionalProperties: { type: integer }
+
+    Error:
+      type: object
+      description: Standard error envelope used by most endpoints.
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: object
+          required: [message]
+          additionalProperties: false
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              description: Present on rate-limit errors (`rate_limit_error`).
+            issues:
+              type: array
+              description: Field-level zod validation failures (400 only).
+              items:
+                type: object
+                required: [path, message]
+                additionalProperties: false
+                properties:
+                  path: { type: string }
+                  message: { type: string }
+
+    StringError:
+      type: object
+      description: |
+        Legacy/inconsistent error shape on a few routes where `error` is a bare
+        string rather than an object (e.g. trace-not-found, 404 "Not found").
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string

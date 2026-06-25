@@ -114,6 +114,9 @@ program
 
 program
   .command("setup")
+  // `init` is the name used across the marketing site / README / docs; keep it
+  // as an alias so the advertised `zintus init` works (both invoke the wizard).
+  .alias("init")
   .description("First-run wizard: add API keys with validation")
   .action(async () => {
     const { runSetup } = await import("./ui/setup.js");

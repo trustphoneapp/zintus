@@ -89,6 +89,28 @@ describe("validateRedirectTo", () => {
       "https://www.zintus.ai/dashboard",
     );
   });
+
+  // ── Mobile redirect host (bug B8) ──────────────────────────────────────
+  // The mobile sign-in flow redirects back to the relay's own
+  // /api/auth/mobile-redirect to mint the deep-link OTP. That target lives on
+  // relay.zintus.ai (NOT www), so validateRedirectTo must allow the relay host
+  // or the redirect bounces to the dashboard and mobile auth breaks.
+
+  it("allows the relay's own mobile-redirect endpoint", () => {
+    const url = "https://relay.zintus.ai/api/auth/mobile-redirect";
+    expect(validateRedirectTo(url)).toBe(url);
+  });
+
+  it("allows relay host with cli state query param", () => {
+    const url = "https://relay.zintus.ai/api/auth/mobile-redirect?state=abc";
+    expect(validateRedirectTo(url)).toBe(url);
+  });
+
+  it("still blocks a look-alike relay host", () => {
+    expect(validateRedirectTo("https://relay.zintus.ai.evil.com/phish")).toBe(
+      "https://www.zintus.ai/dashboard",
+    );
+  });
 });
 
 // ── CORS origin allowlist tests ───────────────────────────────────────────
