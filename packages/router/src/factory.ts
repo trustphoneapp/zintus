@@ -17,6 +17,7 @@ import {
 } from "@zintus/providers";
 import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
+import { redactSecrets } from "./redact.js";
 import { InFlightReservations } from "./inflight.js";
 import { sortProviders } from "./priority.js";
 import { QuotaLedger } from "./quota-ledger.js";
@@ -608,7 +609,9 @@ export function createRouter(config: RouterConfig = {}): Router {
               status: "fail" as const,
               latencyMs: Date.now() - attemptStarted,
               errorCode: status,
-              errorMessage: lastError.message,
+              // Provider errors can echo the auth header / key (e.g. a 401 body);
+              // redact before it's recorded into the persisted trace.
+              errorMessage: redactSecrets(lastError.message),
             };
             request.onAttempt?.(failEvt);
             config.onAttempt?.(failEvt);

@@ -31,6 +31,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
 import { MagicLinkRequestSchema } from "@zintus/schemas";
+import { redactSecrets } from "./redact.js";
 import type { Env, GatewaySessionRow, UserRow, SubscriptionRow } from "./types.js";
 import {
   sha256Hex,
@@ -50,6 +51,17 @@ import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 export { GatewaySession } from "./GatewaySession.js";
 
 const app = new Hono<{ Bindings: Env }>();
+
+// ── Error handler ──────────────────────────────────────────────────────────
+// Uncaught errors (e.g. `throw new Error("Stripe checkout error: ...")` in
+// billing.ts) must not leak internal detail to the client, and any secret in
+// the message/stack must be scrubbed before the platform captures it. Returns a
+// generic 500; logs the error REDACTED (this is the relay's only error log).
+app.onError((err, c) => {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  console.error("relay.error", redactSecrets(detail));
+  return c.json({ error: "Internal server error" }, 500);
+});
 
 // ── Security headers + CORS ────────────────────────────────────────────────
 
