@@ -13,6 +13,13 @@ export const ALLOWED_ORIGINS = [
 export const ALLOWED_REDIRECT_ORIGINS = [
   "https://www.zintus.ai",
   "https://zintus.ai",
+  // The relay's own host: the mobile sign-in flow finishes OAuth/magic-link on
+  // the relay, then redirects back to the relay's GET /api/auth/mobile-redirect
+  // to mint the deep-link OTP. Without this entry that redirect_to would fail
+  // validation and bounce to the dashboard, breaking mobile auth (bug B8). The
+  // relay only owns its own trusted endpoints here, so this is not an
+  // open-redirect surface.
+  "https://relay.zintus.ai",
   "http://localhost:3000",
   "http://localhost:3001",
 ];

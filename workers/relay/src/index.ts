@@ -48,6 +48,16 @@ import { MANAGED_KEYS_AVAILABLE, MANAGED_KEY_TIERS } from "./tiers.js";
 import { corsOrigin, validateRedirectTo } from "./http-security.js";
 import { enforceQuota, recordUsage } from "./middleware/quota.js";
 import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
+import { validateGoogleClaims, type GoogleClaims } from "./google-auth.js";
+import {
+  kvRateLimitOk,
+  magicLinkEmailKey,
+  magicLinkIpKey,
+  MAGIC_LINK_EMAIL_LIMIT,
+  MAGIC_LINK_EMAIL_WINDOW_SECS,
+  MAGIC_LINK_IP_LIMIT,
+  MAGIC_LINK_IP_WINDOW_SECS,
+} from "./rate-limit.js";
 
 // Re-export the Durable Object class for wrangler to find.
 export { GatewaySession } from "./GatewaySession.js";
@@ -77,15 +87,6 @@ function decodeBase64url(str: string): string {
       .replace(/_/g, "/")
       .padEnd(Math.ceil(str.length / 4) * 4, "=")
   );
-}
-
-interface GoogleClaims {
-  email: string;
-  email_verified?: boolean;
-  iss: string;
-  aud: string;
-  exp: number;
-  sub: string;
 }
 
 async function verifyGoogleJWT(
@@ -137,15 +138,12 @@ async function verifyGoogleJWT(
     const claims = JSON.parse(
       decodeBase64url(parts[1]!)
     ) as GoogleClaims;
+    // Validate iss / aud / exp AND require email_verified === true (RFC 8725 +
+    // Google's verify-ID-token guidance). Shared with the unit tests so the
+    // account-takeover guard can't silently drift. See google-auth.ts.
     const now = Math.floor(Date.now() / 1000);
-    if (claims.exp < now) return null;
-    if (claims.aud !== expectedAud) return null;
-    if (
-      claims.iss !== "https://accounts.google.com" &&
-      claims.iss !== "accounts.google.com"
-    )
-      return null;
-    if (!claims.email) return null;
+    const result = validateGoogleClaims(claims, expectedAud, now);
+    if (!result.ok) return null;
     return claims;
   } catch {
     return null;
@@ -178,19 +176,6 @@ async function requireSession(
   const cookie = parseSessionCookie(c.req.header("Cookie") ?? null);
   if (!cookie) return null;
   return verifySessionToken(c.env.KV, cookie);
-}
-
-async function kvRateLimitOk(
-  kv: KVNamespace,
-  key: string,
-  limit: number,
-  windowSecs: number,
-): Promise<boolean> {
-  const raw = await kv.get(key);
-  const count = raw ? parseInt(raw, 10) : 0;
-  if (count >= limit) return false;
-  await kv.put(key, String(count + 1), { expirationTtl: windowSecs });
-  return true;
 }
 
 async function findOrCreateUser(
@@ -255,10 +240,31 @@ app.post("/api/auth/magic-link", async (c) => {
   }
   const { email } = parsed.data;
 
+  // Layered rate limit (both must pass):
+  //   • per-email — 3/hour: caps mail to one inbox (anti-spam to a victim).
+  //   • per-IP   — 10/hour: caps links one host can request across *any*
+  //     emails, so rotating the address from one host is throttled too.
+  // The per-email limit alone was bypassable by changing `email` (bug B6).
   const ip = c.req.header("cf-connecting-ip") ?? "unknown";
-  const rlKey = `rl:ml:${email.toLowerCase()}`;
-  if (!(await kvRateLimitOk(c.env.KV, rlKey, 3, 3600))) {
-    return c.json({ error: "Too many magic link requests (3/hour)" }, 429);
+  if (
+    !(await kvRateLimitOk(
+      c.env.KV,
+      magicLinkEmailKey(email),
+      MAGIC_LINK_EMAIL_LIMIT,
+      MAGIC_LINK_EMAIL_WINDOW_SECS,
+    ))
+  ) {
+    return c.json({ error: "Too many magic link requests (3/hour per email)" }, 429);
+  }
+  if (
+    !(await kvRateLimitOk(
+      c.env.KV,
+      magicLinkIpKey(ip),
+      MAGIC_LINK_IP_LIMIT,
+      MAGIC_LINK_IP_WINDOW_SECS,
+    ))
+  ) {
+    return c.json({ error: "Too many magic link requests (10/hour per IP)" }, 429);
   }
 
   // Store a short-lived token in KV (15 min).
@@ -290,8 +296,6 @@ app.post("/api/auth/magic-link", async (c) => {
       `,
     }),
   });
-
-  void ip; // used for rate limiting above
 
   if (!emailRes.ok) {
     return c.json({ error: "Failed to send email" }, 502);
