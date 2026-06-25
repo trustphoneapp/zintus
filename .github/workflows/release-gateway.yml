@@ -18,6 +18,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # buildx is needed for `load: true` + the gha layer cache shared between
+      # the smoke build and the push build (so the push doesn't rebuild).
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -35,6 +40,41 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
+      # GATE: build + LOAD the image locally (no push yet), boot it, and prove
+      # /health serves. A tag cut from a broken commit must NOT publish a
+      # crash-on-boot image to GHCR. The layer cache written here is reused by
+      # the push below, so the gate costs a container run, not a full rebuild.
+      - name: Build image for smoke (load, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: zintus-gateway:smoke
+          cache-to: type=gha,mode=max
+          cache-from: type=gha
+
+      - name: Smoke test (container boots & /health serves)
+        run: |
+          docker run -d --name zintus-gw -p 8788:8788 \
+            -e GATEWAY_TOKEN=release-smoke-token \
+            zintus-gateway:smoke
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8788/health >/dev/null; then
+              echo "container healthy"; ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "release image failed to serve /health — refusing to publish:"
+            docker logs zintus-gw || true
+            docker rm -f zintus-gw >/dev/null 2>&1 || true
+            exit 1
+          fi
+          docker rm -f zintus-gw >/dev/null 2>&1 || true
+
+      # Only reached if the smoke passed. Reuses the gha cache from the build
+      # above, so this is a fast re-tag/push.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -42,3 +82,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha

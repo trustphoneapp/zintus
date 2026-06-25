@@ -46,14 +46,15 @@ One command, no SaaS — the gateway runs locally and your keys stay on the host
 # 1. Routing policy (no secrets in it):
 cp policy.example.json policy.json
 
-# 2. Bring up the gateway on :8788 (keys + quota.db persist in ./.zintus-data):
+# 2. Bring up the gateway on :8788 (keys + quota.db persist in the
+#    `zintus-data` named volume; the container runs as the non-root `bun` user):
 GATEWAY_TOKEN=$(openssl rand -hex 24) docker compose up -d
 
 # 3. Verify:
 curl -s localhost:8788/health | jq      # { "ok": true, ... "savings": {...} }
 
 # 4. Add provider keys (free tiers) — either via env on the container,
-#    or mount your CLI keychain dir at /root/.zintus.
+#    or mount your CLI keychain dir at /home/bun/.zintus.
 ```
 
 Prebuilt images are published to GHCR on each `v*` tag
@@ -61,8 +62,10 @@ Prebuilt images are published to GHCR on each `v*` tag
 
 ```bash
 docker pull ghcr.io/<owner>/zintus-gateway:latest
+# The container runs as the non-root `bun` user (uid 1000); state lives at
+# /home/bun/.zintus. A bind-mounted host dir must be writable by uid 1000.
 docker run -p 8788:8788 -e GATEWAY_TOKEN=secret \
-  -v "$HOME/.zintus:/root/.zintus" \
+  -v "$HOME/.zintus:/home/bun/.zintus" \
   -v "$PWD/policy.json:/app/policy.json:ro" \
   ghcr.io/<owner>/zintus-gateway:latest
 ```
