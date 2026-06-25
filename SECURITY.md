@@ -62,14 +62,19 @@ before deploying anything beyond your own machine.
 - **BYOK is zero-knowledge.** Clients encrypt key material to the home gateway's
   public key; the relay forwards the opaque ciphertext and never holds the
   plaintext or the key that decrypts it (`GatewaySession.ts`).
-- **Managed keys are NOT zero-knowledge.** For the Pro tier, provider keys are
-  encrypted server-side with AES-256-GCM (key derived from
-  `KEY_ENCRYPTION_SECRET` via HKDF-SHA256) and decrypted inside the relay worker
-  to call providers on the user's behalf. The relay therefore holds both the
-  ciphertext and the secret that decrypts it — anyone with worker-env access
-  (the platform, a compromised deploy, or an insider) can read managed keys.
-  - **Recommendation:** use BYOK for high-value keys. Treat managed keys as a
-    convenience tier with operator-level trust, not as zero-knowledge custody.
+- **Managed keys are not currently available.** A managed-key Pro tier — where
+  the relay would hold and decrypt provider keys to call providers on the user's
+  behalf — is planned but **not implemented**. The server-side key-custody
+  scaffold (AES-256-GCM, key derived from `KEY_ENCRYPTION_SECRET` via
+  HKDF-SHA256, decrypted inside the relay worker) was **removed** because it was
+  never wired into any route and shipped an operator-decryptable path that
+  contradicts the BYOK-first trust model. The paid tiers that advertise managed
+  keys are gated "Coming soon" and checkout for them is disabled
+  (`MANAGED_KEYS_AVAILABLE` in the relay's `tiers.ts`).
+  - **If reintroduced**, managed keys would **not** be zero-knowledge: the relay
+    would hold both the ciphertext and the secret that decrypts it, so anyone
+    with worker-env access (the platform, a compromised deploy, or an insider)
+    could read them. BYOK remains the recommendation for high-value keys.
 
 ## validate-key worker
 

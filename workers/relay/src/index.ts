@@ -44,6 +44,7 @@ import {
   type SessionPayload,
 } from "./auth.js";
 import { createCheckoutSession, createPortalSession, handleStripeWebhook } from "./billing.js";
+import { MANAGED_KEYS_AVAILABLE, MANAGED_KEY_TIERS } from "./tiers.js";
 import { enforceQuota, recordUsage } from "./middleware/quota.js";
 import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 
@@ -691,6 +692,22 @@ app.post('/api/billing/checkout', async (c) => {
   const { tier, ref } = await c.req.json<{ tier: 'starter' | 'growth' | 'scale'; ref?: string }>();
   if (!['starter', 'growth', 'scale'].includes(tier)) {
     return c.json({ error: 'Invalid tier' }, 400);
+  }
+
+  // Managed-key tiers (starter/growth/scale) sell Zintus-managed key custody,
+  // whose backend was removed (scaffold, never wired). Until it actually ships
+  // these are NOT purchasable — block checkout so no one pays for an unbuilt
+  // feature. Single re-enable toggle: MANAGED_KEYS_AVAILABLE in tiers.ts.
+  if (!MANAGED_KEYS_AVAILABLE && (MANAGED_KEY_TIERS as readonly string[]).includes(tier)) {
+    return c.json(
+      {
+        error: {
+          code: 'managed_keys_unavailable',
+          message: 'Managed-key tiers are coming soon and not yet available for purchase.',
+        },
+      },
+      503,
+    );
   }
 
   const user = await c.env.DB.prepare('SELECT email FROM zintus_users WHERE id = ?')
