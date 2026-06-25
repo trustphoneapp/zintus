@@ -60,19 +60,24 @@ export async function createPortalSession(stripeCustomerId: string, env: Env): P
 }
 
 /** Verify Stripe webhook HMAC-SHA256 signature. */
-async function verifyStripeSignature(body: string, sigHeader: string, secret: string): Promise<boolean> {
+export async function verifyStripeSignature(body: string, sigHeader: string, secret: string): Promise<boolean> {
   const parts = Object.fromEntries(sigHeader.split(',').map(p => p.split('=')));
   const timestamp = parts['t'];
   const v1 = parts['v1'];
   if (!timestamp || !v1) return false;
 
   const payload = `${timestamp}.${body}`;
+  // The key is used with crypto.subtle.sign() below, so it must carry the
+  // 'sign' usage. It was previously imported with ['verify'], which is a
+  // WebCrypto spec violation (a verify-only key cannot sign) — strict runtimes
+  // throw InvalidAccessError. Recomputing the HMAC and comparing is the correct
+  // pattern here.
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
-    ['verify'],
+    ['sign'],
   );
   const expected = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
   const expectedHex = Array.from(new Uint8Array(expected)).map(b => b.toString(16).padStart(2, '0')).join('');

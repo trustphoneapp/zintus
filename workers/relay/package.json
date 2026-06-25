@@ -15,6 +15,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250214.0",
+    "@noble/curves": "^2.2.0",
+    "@zintus/crypto-e2e": "workspace:*",
     "wrangler": "^4.0.0"
   }
 }

@@ -24,7 +24,7 @@ type StatusMsg = { type: "status"; payload: unknown };
 type EventMsg = { type: "event"; event: string; payload: unknown };
 type GatewayMsg = RegisterMsg | PingMsg | StatusMsg | EventMsg;
 
-function parseGatewayMsg(raw: string): GatewayMsg | null {
+export function parseGatewayMsg(raw: string): GatewayMsg | null {
   try {
     return JSON.parse(raw) as GatewayMsg;
   } catch {
@@ -54,7 +54,7 @@ const VALID_PROVIDER_IDS = new Set<string>([
  * null to allow forwarding. The relay forwards opaque ciphertext and MUST NOT
  * decrypt or inspect `encryptedKey`.
  */
-function validateControlPayload(action: string, value: unknown): string | null {
+export function validateControlPayload(action: string, value: unknown): string | null {
   if (action === "set_key") {
     const v = (value ?? {}) as { provider?: unknown; encryptedKey?: unknown };
     if (typeof v.provider !== "string" || !VALID_PROVIDER_IDS.has(v.provider)) {
