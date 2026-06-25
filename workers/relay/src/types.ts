@@ -11,16 +11,6 @@ export interface Env {
   // Stripe
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
-  // Managed key encryption
-  KEY_ENCRYPTION_SECRET: string;
-  // Zintus master API keys for Pro tier
-  ZINTUS_GROQ_KEY: string;
-  ZINTUS_DEEPSEEK_KEY: string;
-  ZINTUS_GEMINI_KEY: string;
-  ZINTUS_CEREBRAS_KEY: string;
-  ZINTUS_OPENROUTER_KEY: string;
-  ZINTUS_COHERE_KEY: string;
-  ZINTUS_MISTRAL_KEY: string;
 }
 
 /** Attached to every accepted WebSocket (survives DO hibernation). */
