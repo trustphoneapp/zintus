@@ -65,27 +65,50 @@ describe("redactSecrets — leaves non-secrets alone", () => {
   });
 });
 
-describe("redactSecrets — SECURITY GAPS pinned (known, not yet fixed)", () => {
-  test("GAP: xAI keys (xai-) are NOT redacted -> would leak", () => {
+describe("redactSecrets — formats fixed in this change", () => {
+  test("now redacts xAI keys (xai-)", () => {
     const key = "xai-" + "a".repeat(40);
-    // Pinning current behavior: there is no xai- pattern, so the key survives.
-    expect(redactSecrets(`key=${key}`)).toContain(key);
+    const out = redactSecrets(`key=${key}`);
+    expect(out).not.toContain(key);
+    expect(out).toContain("REDACTED");
   });
 
-  test("GAP: HuggingFace keys (hf_) are NOT redacted -> would leak", () => {
+  test("now redacts HuggingFace keys (hf_)", () => {
     const key = "hf_" + "a".repeat(34);
-    expect(redactSecrets(`key=${key}`)).toContain(key);
+    const out = redactSecrets(`key=${key}`);
+    expect(out).not.toContain(key);
+    expect(out).toContain("REDACTED");
   });
 
-  test("GAP: generic-format keys (Cohere/Mistral/Fireworks) cannot be matched", () => {
+  test("now redacts Cerebras keys fully (csk-, leading c included)", () => {
+    const key = "csk-" + "a".repeat(40);
+    const out = redactSecrets(`key=${key}`);
+    expect(out).not.toContain(key);
+    expect(out).toContain("csk-****REDACTED****");
+  });
+
+  test("now redacts Stripe secrets (sk_live_ / rk_live_ / whsec_)", () => {
+    const sk = "sk_live_" + "a".repeat(24);
+    const wh = "whsec_" + "b".repeat(32);
+    const out = redactSecrets(`stripe=${sk} hook=${wh}`);
+    expect(out).not.toContain(sk);
+    expect(out).not.toContain(wh);
+    expect(out).toContain("sk_live_****REDACTED****");
+    expect(out).toContain("whsec_****REDACTED****");
+  });
+
+  test("returns '' on null/undefined instead of throwing (safe inside loggers)", () => {
+    expect(redactSecrets(null as unknown as string)).toBe("");
+    expect(redactSecrets(undefined as unknown as string)).toBe("");
+  });
+});
+
+describe("redactSecrets — accepted limitation", () => {
+  test("generic-format keys (Cohere/Mistral/Fireworks) still cannot be matched", () => {
     // These providers use GENERIC_KEY (\\S{8,}) with no distinguishing prefix,
     // so a pattern-based redactor cannot catch them without false positives.
-    const key = "Xy7Qp2Lм".replace("м", "m") + "ZkVa90bRtN";
+    // Documented limitation: callers must not log raw key material directly.
+    const key = "Xy7Qp2LmZkVa90bRtNopArs";
     expect(redactSecrets(`key=${key}`)).toContain(key);
-  });
-
-  test("GAP: throws on null/undefined (no input guard) -> can crash a logger", () => {
-    expect(() => redactSecrets(null as unknown as string)).toThrow();
-    expect(() => redactSecrets(undefined as unknown as string)).toThrow();
   });
 });

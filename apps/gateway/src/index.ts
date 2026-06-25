@@ -14,7 +14,7 @@ export {
   type LogFn as GatewayLogFn,
 } from "./handler.js";
 import { createEngine } from "@zintus/engine";
-import { loadPolicy, watchPolicy } from "@zintus/router";
+import { loadPolicy, watchPolicy, redactSecrets } from "@zintus/router";
 import { DEFAULT_CONFIG } from "@zintus/types";
 import { buildGatewayConfig, type GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type LogFn } from "./handler.js";
@@ -70,13 +70,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   });
 
   const log: LogFn = (level, message, fields = {}) => {
-    const line = JSON.stringify({
-      ts: new Date().toISOString(),
-      level,
-      service: "gateway",
-      message,
-      ...fields,
-    });
+    // Redact any provider/secret token before the structured line is emitted —
+    // an upstream error echoed into `fields` (e.g. a 401 body) can carry a key.
+    const line = redactSecrets(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        level,
+        service: "gateway",
+        message,
+        ...fields,
+      }),
+    );
     if (level === "error") {
       console.error(line);
     } else {
