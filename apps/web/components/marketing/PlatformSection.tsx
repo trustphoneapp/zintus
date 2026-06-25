@@ -63,8 +63,11 @@ export function PlatformSection() {
           ))}
         </div>
 
-        <p style={{ textAlign: "center", color: "#4a3070", fontSize: 13, marginTop: "1.75rem" }}>
-          Desktop app coming soon for macOS, Windows, Linux
+        <p style={{ textAlign: "center", color: "#94a3b8", fontSize: 13, marginTop: "1.75rem" }}>
+          Desktop app available for macOS, Windows, and Linux (beta).{" "}
+          <Link href="/download" style={{ color: "#c4b5fd", textDecoration: "none" }}>
+            See all downloads →
+          </Link>
         </p>
       </div>
     </section>

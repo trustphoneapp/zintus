@@ -25,6 +25,7 @@ const navItems = [
   { label: "Supported AIs", href: "/#providers" },
   { label: "FAQ", href: "/#faq" },
   { label: "Install", href: "/#install" },
+  { label: "Download", href: "/download" },
   { label: "Pricing", href: "/pricing" },
   { label: "Docs", href: "/docs" },
 ];
