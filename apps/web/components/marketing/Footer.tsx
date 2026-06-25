@@ -25,7 +25,7 @@ const LINKS = {
     { label: "Privacy", href: "/privacy" },
     { label: "Security", href: "/security" },
     { label: "License (BUSL-1.1)", href: "/docs" },
-    { label: "Terms", href: "/privacy" },
+    { label: "Terms", href: "/terms" },
   ],
 };
 

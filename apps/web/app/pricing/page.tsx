@@ -9,6 +9,13 @@ import { createCheckout } from "@/lib/billing";
 /* ─── types ─────────────────────────────────────────────── */
 type Tier = "starter" | "growth" | "scale";
 
+// Managed-key paid tiers are listed here, but their backend (Zintus-managed key
+// custody) is not yet built — the relay scaffold was removed. Until it ships,
+// checkout is disabled and the tiers render as "Coming soon". Flip to true to
+// re-enable once managed keys are live (mirrors MANAGED_KEYS_AVAILABLE in the
+// relay's tiers.ts, which guards the checkout endpoint server-side).
+const MANAGED_KEYS_AVAILABLE = false;
+
 /* ─── data ───────────────────────────────────────────────── */
 const FREE_FEATURES = [
   "8 providers via your own keys",
@@ -21,7 +28,7 @@ const FREE_FEATURES = [
 
 const GROWTH_FEATURES = [
   "Everything in Free",
-  "Zintus manages your keys",
+  "Zintus manages your keys (coming soon)",
   "Works on mobile",
   "5M tokens / month",
   "20 concurrent requests",
@@ -100,6 +107,9 @@ function PricingInner() {
   const [openFaq, setOpenFaq] = useState<number | null>(null);
 
   async function handleUpgrade(tier: Tier) {
+    // Guarded: managed-key tiers aren't purchasable until the backend ships.
+    // Buttons are disabled too; this is belt-and-suspenders.
+    if (!MANAGED_KEYS_AVAILABLE) return;
     setLoadingTier(tier);
     const url = await createCheckout(tier, ref);
     setLoadingTier(null);
@@ -213,11 +223,11 @@ function PricingInner() {
             </ul>
             <button
               className="m-primary-btn"
-              style={{ width: "100%", cursor: loadingTier === "growth" ? "wait" : "pointer" }}
+              style={{ width: "100%", cursor: !MANAGED_KEYS_AVAILABLE ? "not-allowed" : loadingTier === "growth" ? "wait" : "pointer" }}
               onClick={() => handleUpgrade("growth")}
-              disabled={loadingTier !== null}
+              disabled={!MANAGED_KEYS_AVAILABLE || loadingTier !== null}
             >
-              {loadingTier === "growth" ? "Redirecting…" : "Upgrade to Growth"}
+              {!MANAGED_KEYS_AVAILABLE ? "Coming soon" : loadingTier === "growth" ? "Redirecting…" : "Upgrade to Growth"}
             </button>
           </div>
 
@@ -241,11 +251,11 @@ function PricingInner() {
             </ul>
             <button
               className="m-ghost-btn"
-              style={{ width: "100%", cursor: loadingTier === "scale" ? "wait" : "pointer" }}
+              style={{ width: "100%", cursor: !MANAGED_KEYS_AVAILABLE ? "not-allowed" : loadingTier === "scale" ? "wait" : "pointer" }}
               onClick={() => handleUpgrade("scale")}
-              disabled={loadingTier !== null}
+              disabled={!MANAGED_KEYS_AVAILABLE || loadingTier !== null}
             >
-              {loadingTier === "scale" ? "Redirecting…" : "Upgrade to Scale"}
+              {!MANAGED_KEYS_AVAILABLE ? "Coming soon" : loadingTier === "scale" ? "Redirecting…" : "Upgrade to Scale"}
             </button>
           </div>
         </div>
@@ -284,16 +294,16 @@ function PricingInner() {
                   fontSize: "0.9rem",
                 }}
               >
-                500K tokens · Zintus-managed keys · Works on mobile
+                500K tokens · Zintus-managed keys (coming soon) · Works on mobile
               </span>
             </div>
             <button
               className="m-ghost-btn"
-              style={{ cursor: loadingTier === "starter" ? "wait" : "pointer", whiteSpace: "nowrap" }}
+              style={{ cursor: !MANAGED_KEYS_AVAILABLE ? "not-allowed" : loadingTier === "starter" ? "wait" : "pointer", whiteSpace: "nowrap" }}
               onClick={() => handleUpgrade("starter")}
-              disabled={loadingTier !== null}
+              disabled={!MANAGED_KEYS_AVAILABLE || loadingTier !== null}
             >
-              {loadingTier === "starter" ? "Redirecting…" : "Get Starter"}
+              {!MANAGED_KEYS_AVAILABLE ? "Coming soon" : loadingTier === "starter" ? "Redirecting…" : "Get Starter"}
             </button>
           </div>
         </div>

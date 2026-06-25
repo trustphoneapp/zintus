@@ -214,9 +214,54 @@ jobs:
       # project build produces every workspace package's declaration outputs.
       - run: bun run --filter tokzen build
       - run: bunx tsc -b tsconfig.build.json
-      # Gateway Docker image builds (self-host artifact).
+      # Production web build (Next.js). The audit flagged H5: CI only typechecked
+      # apps/web, so a broken `next build` (bad route, server-component misuse)
+      # could ship undetected. Build the real deployable artifact.
+      - run: bun run --filter @zintus/web build
+      # The gateway Docker image build + runtime /health smoke moved to the
+      # dedicated `docker-smoke` job below so it also runs on PRs (catching a
+      # tokzen/dist regression BEFORE merge, not just post-merge on main).
+
+  # Gateway Docker image build + runtime /health smoke. Runs on PRs AND main: a
+  # green `docker build` proves nothing if the container can't boot (e.g. the
+  # "tokzen" import can't resolve), so we actually start it and probe /health.
+  # Self-contained (the multi-stage Dockerfile builds tokzen IN-image), so no
+  # host pre-build is needed — keeps the PR path cheap (one job, not the matrix).
+  docker-smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      # Built from a CLEAN context (.dockerignore strips host node_modules +
+      # every dist), so this proves tokzen/dist is produced IN-image — not
+      # leaked from the host (the false-pass this whole change fixes).
       - name: Build gateway Docker image
         run: docker build -t zintus-gateway:ci .
+      - name: Run gateway container & verify /health
+        run: |
+          # GATEWAY_TOKEN is required because the image binds publicly
+          # (GATEWAY_HOST=0.0.0.0, port 8788); /health itself is keyless.
+          docker run -d --name zintus-gw -p 8788:8788 \
+            -e GATEWAY_TOKEN=ci-smoke-token \
+            zintus-gateway:ci
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8788/health >/dev/null; then
+              echo "container healthy"; ok=1; break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            echo "container did not become healthy — logs:"
+            docker logs zintus-gw || true
+            docker rm -f zintus-gw >/dev/null 2>&1 || true
+            exit 1
+          fi
+          # Confirm the hardened image is actually running as non-root.
+          uid="$(docker exec zintus-gw id -u || echo unknown)"
+          echo "container uid: $uid"
+          docker rm -f zintus-gw >/dev/null 2>&1 || true
+          [ "$uid" != "0" ] && [ "$uid" != "unknown" ] || { echo "expected non-root, got uid=$uid"; exit 1; }
 
   # k6 load smoke against /health (keyless). Thresholds (p95<2s, <5% errors) are
   # enforced in tests/load/gateway-smoke.js, so the run-k6 step fails on breach.

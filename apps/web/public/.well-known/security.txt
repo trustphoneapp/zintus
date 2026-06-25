@@ -1,0 +1,10 @@
+# Zintus security contact — RFC 9116
+# DRAFT — pending legal/security review before public launch.
+# NOTE: update Canonical/Policy hostnames to the production domain, and refresh
+# Expires before it lapses (RFC 9116 requires a future date).
+
+Contact: mailto:security@zintus.ai
+Expires: 2027-06-25T00:00:00.000Z
+Policy: https://zintus.ai/security
+Preferred-Languages: en
+Canonical: https://zintus.ai/.well-known/security.txt

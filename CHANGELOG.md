@@ -4,7 +4,43 @@ All notable changes to Zintus are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this project is pre-1.0 so
 minor versions may include breaking changes.
 
-## [Unreleased] — production hardening
+## [Unreleased] — production-readiness follow-through
+
+Closes remaining audit gaps on top of 0.2.0.
+
+### Removed
+- **Unwired managed-key scaffold deleted** (`crypto.ts`, `managed-keys.ts`). It
+  was operator-decryptable, wired into zero routes, and contradicted the
+  BYOK-first zero-knowledge model. Recoverable from git history when a real
+  client-wrapped design is built. (Supersedes the 0.2.0 managed-key HKDF entry.)
+
+### Security / billing
+- **Managed-key paid tiers gated "Coming soon"**, Stripe checkout disabled for
+  them (`503 managed_keys_unavailable`) so no one pays for an unbuilt feature.
+  Single `MANAGED_KEYS_AVAILABLE` toggle (relay `tiers.ts` + pricing page).
+
+### Reliability
+- **Mid-stream SSE idle watchdog** (`GATEWAY_STREAM_IDLE_TIMEOUT_MS`, default
+  60s, `0` disables): aborts a stalled upstream that stops sending chunks
+  mid-stream, instead of relying only on the connect/first-token timeout.
+
+### Deployment
+- **Docker image is now self-contained and hardened**: builds tokzen's `dist`
+  in-image (fixes a runtime crash in the published image), multi-stage,
+  non-root `USER bun` + `HOME`, `HEALTHCHECK`, digest-pinned base, `.dockerignore`.
+  CI runs a `docker run` + `/health` smoke on PRs and main; the release workflow
+  smokes before pushing to GHCR.
+
+### Web / legal
+- **DRAFT privacy, terms, and security pages** grounded in the real architecture
+  (GDPR + CCPA + ToS sections), plus `/.well-known/security.txt` (RFC 9116).
+  Banner-marked DRAFT pending legal review.
+
+### Docs
+- README savings endpoint corrected to the auth-gated `/v1/status`.
+- Added a network-exposed deployment checklist (`docs/DEPLOY.md`).
+
+## [0.2.0] — 2026-06-24 — production hardening
 
 Hardening pass from the production-readiness audit
 (see `docs/PRODUCTION-ARCHITECTURE.md`).

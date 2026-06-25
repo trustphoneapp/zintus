@@ -380,6 +380,112 @@ describe("gateway handler", () => {
     expect(res.status).toBe(408);
   });
 
+  test("idle watchdog aborts a stalled stream and emits an error chunk", async () => {
+    // A stream that yields once then stalls forever, and records whether the
+    // upstream abort signal fired (the watchdog must tear the upstream down).
+    let aborted = false;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        request.signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          stream: (async function* () {
+            yield "first";
+            // Stall: never yields again, ignores the abort (worst case).
+            await new Promise<void>(() => {});
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({ streamIdleTimeoutMs: 25 }, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // First chunk made it through, then the watchdog surfaced the shared error
+    // shape and closed the stream cleanly.
+    expect(text).toContain("first");
+    expect(text).toContain('"error"');
+    expect(text).toContain("stalled");
+    expect(text).not.toContain("[DONE]");
+    expect(aborted).toBe(true);
+  });
+
+  test("idle watchdog does NOT abort a stream that keeps sending in time", async () => {
+    let aborted = false;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        request.signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          stream: (async function* () {
+            for (let i = 0; i < 5; i += 1) {
+              // 10ms between chunks, comfortably under the 50ms idle window.
+              await new Promise<void>((r) => setTimeout(r, 10));
+              yield `chunk-${i}`;
+            }
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({ streamIdleTimeoutMs: 50 }, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+    const text = await res.text();
+    expect(text).toContain("chunk-0");
+    expect(text).toContain("chunk-4");
+    expect(text).not.toContain('"error"');
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    expect(aborted).toBe(false);
+  });
+
+  test("idle watchdog disabled (0) never fires and leaves no timer", async () => {
+    // With the watchdog disabled, a slow-but-progressing stream completes and
+    // no idle timer is created (so nothing to leak). We assert normal DONE.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          stream: (async function* () {
+            await new Promise<void>((r) => setTimeout(r, 15));
+            yield "slow";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({ streamIdleTimeoutMs: 0 }, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+    const text = await res.text();
+    expect(text).toContain("slow");
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
   test("unknown route returns 404", async () => {
     const handler = makeHandler();
     const res = await handler(new Request("http://x/nope"));

@@ -28,7 +28,7 @@ production than 64/100 implies on *correctness*, but the **reliability and secur
                          │  workers/relay (Cloudflare)                                                    │
                          │   • magic-link auth, JWT          • KV rate limits (3/hr, 60/min, 30/min)      │
    mobile / web ─────────┤   • BYOK: forwards OPAQUE ciphertext (zero-knowledge) ✔                         │
-   dashboard             │   • Managed keys: AES-GCM decrypted SERVER-SIDE ✗ (not ZK)                      │
+   dashboard             │   • Managed keys: REMOVED (was operator-decryptable; tiers "coming soon")       │
                          │   • billing / referral / tiers  ── ⚠ untested, not in CI                        │
                          └──────────────────────────────────────────┬─────────────────────────────────────┘
                                                                      │ WSS control channel
@@ -141,9 +141,9 @@ Ordered by **risk-reduction per hour**, not by audit number. Phase 0 is the "sto
 - [ ] Router circuit breaker (open/half-open) on top of existing cooldown. *(#9)*
 
 ### Phase 3 — Hardening, coverage, maintainability  (~1-2 weeks)
-- [ ] Relay managed-key decision: **(a)** document now that managed keys are operator-decryptable / not ZK (`SECURITY.md`); **(b)** replace `crypto.ts:5` `slice(0,32).padEnd` with a real HKDF/PBKDF2 + per-user derived keys + Cloudflare Secrets Store; **(c)** track client-side-wrapped managed keys as the ZK target. *(#12)*
+- [x] Relay managed-key decision: **REMOVED** the unwired, operator-decryptable scaffold (`crypto.ts`/`managed-keys.ts`) — it was never wired into a route and contradicts the BYOK-first ZK model. Paid tiers are gated "coming soon" and checkout is disabled (`MANAGED_KEYS_AVAILABLE` in `tiers.ts`). Recoverable from git history if/when a real client-side-wrapped (ZK) managed-key design is built. *(#12)*
 - [ ] Remediate `bun audit` highs (`bun update` undici/wrangler/xmldom chain), then flip audit job to gating. *(#7)*
-- [ ] P0 tests: relay `crypto.ts`/`managed-keys.ts`/`billing.ts`, `keychain/storage.ts`, `memory-store.ts` CRUD. *(#17)*
+- [ ] P0 tests: relay `billing.ts`, `keychain/storage.ts`, `memory-store.ts` CRUD. *(`crypto.ts`/`managed-keys.ts` removed.)* *(#17)*
 - [ ] Extract `handler.ts` (769→thin router + `routes/` + `http-helpers.ts`); split `memory-store.ts`, `cache.ts`, `factory.ts/selection.ts`. *(#16)*
 - [ ] Root `.env.example`, `CHANGELOG.md`, OpenAPI spec for `/v1/*`, rollback runbook. *(#19,#20)*
 
@@ -181,7 +181,7 @@ run test` pass; relay typechecks). ~1,250 lines across 29 files.
 | Gateway rate limiter (`GATEWAY_RATELIMIT_RPM`, 429 + Retry-After) | ✅ done |
 | `@zintus/schemas` (zod) — gateway chat **+ research** + relay magic-link | ✅ done |
 | Circuit-breaker half-open probe gate | ✅ done |
-| Relay managed-key HKDF-SHA256 (+ legacy decrypt fallback) | ✅ done |
+| Relay managed-key scaffold (HKDF-SHA256, AES-GCM) | ⛔ removed — unwired + operator-decryptable; tiers gated "coming soon" |
 | `SECURITY.md` managed-key trust model + `/health` + rate-limit docs | ✅ done |
 | Root `.env.example`, `CHANGELOG.md` | ✅ done |
 | New tests (rate limiter, /v1/status, draining, 429, zod ×2, relay crypto) | ✅ done |

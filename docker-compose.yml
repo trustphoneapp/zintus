@@ -1,5 +1,5 @@
 # Zintus gateway — one-liner self-host: `docker compose up`.
-# Gateway on :8788. Keys + quota.db persist in ./.zintus-data (host volume).
+# Gateway on :8788. Keys + quota.db persist in the `zintus-data` named volume.
 # Set GATEWAY_TOKEN in your shell or a .env file before `up` for a public bind.
 services:
   gateway:
@@ -13,6 +13,15 @@ services:
       # Provider keys can be supplied via env (otherwise mount your keychain-backed
       # ~/.zintus). Example: GROQ_API_KEY, GEMINI_API_KEY, ...
     volumes:
-      - ./.zintus-data:/root/.zintus
+      # The container runs as the unprivileged `bun` user (uid 1000) and writes
+      # state to /home/bun/.zintus. A NAMED volume inherits that dir's `bun`
+      # ownership from the image, so writes succeed out of the box. (A host
+      # bind-mount would be created root-owned and uid 1000 couldn't write it —
+      # if you prefer a bind-mount, pre-create the dir and `chown 1000:1000`.)
+      - zintus-data:/home/bun/.zintus
+      # policy.json is read-only at runtime, so a root-owned bind-mount is fine.
       - ./policy.json:/app/policy.json:ro
     restart: unless-stopped
+
+volumes:
+  zintus-data:

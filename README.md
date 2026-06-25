@@ -14,7 +14,7 @@ Notes: grades reflect *this lane only*. LiteLLM/Portkey/OpenRouter are stronger 
 
 ### Provable savings
 
-Every free-tier token served is valued at what an equivalent paid API would have charged, summed per provider. The gateway exposes it at `GET /health` (`savings.estimatedUsdSaved`) and the web **Usage** page renders it. It is an *estimate*, labelled as such.
+Every free-tier token served is valued at what an equivalent paid API would have charged, summed per provider. The gateway exposes it at the auth-gated `GET /v1/status` (`savings.estimatedUsdSaved`, plus a focused `GET /v1/savings`) and the web **Usage** page renders it. (`GET /health` is now a minimal, unauthenticated liveness probe — savings and provider topology moved behind auth to avoid disclosure.) It is an *estimate*, labelled as such.
 
 ### Declarative routing (`policy.json`)
 
@@ -46,23 +46,32 @@ One command, no SaaS — the gateway runs locally and your keys stay on the host
 # 1. Routing policy (no secrets in it):
 cp policy.example.json policy.json
 
-# 2. Bring up the gateway on :8788 (keys + quota.db persist in ./.zintus-data):
+# 2. Bring up the gateway on :8788 (keys + quota.db persist in the
+#    `zintus-data` named volume; the container runs as the non-root `bun` user):
 GATEWAY_TOKEN=$(openssl rand -hex 24) docker compose up -d
 
 # 3. Verify:
-curl -s localhost:8788/health | jq      # { "ok": true, ... "savings": {...} }
+curl -s localhost:8788/health | jq      # { "ok": true, "draining": false }  (minimal liveness)
+# Savings + provider topology are auth-gated:
+curl -s -H "Authorization: Bearer $GATEWAY_TOKEN" localhost:8788/v1/status | jq   # { ... "savings": {...} }
 
 # 4. Add provider keys (free tiers) — either via env on the container,
-#    or mount your CLI keychain dir at /root/.zintus.
+#    or mount your CLI keychain dir at /home/bun/.zintus.
 ```
+
+> **Exposing it beyond loopback?** Read [`docs/DEPLOY.md`](docs/DEPLOY.md) first —
+> a network-exposed gateway requires `GATEWAY_TOKEN` and should set
+> `GATEWAY_RATELIMIT_RPM`, TLS, and CORS.
 
 Prebuilt images are published to GHCR on each `v*` tag
 (`ghcr.io/<owner>/zintus-gateway`):
 
 ```bash
 docker pull ghcr.io/<owner>/zintus-gateway:latest
+# The container runs as the non-root `bun` user (uid 1000); state lives at
+# /home/bun/.zintus. A bind-mounted host dir must be writable by uid 1000.
 docker run -p 8788:8788 -e GATEWAY_TOKEN=secret \
-  -v "$HOME/.zintus:/root/.zintus" \
+  -v "$HOME/.zintus:/home/bun/.zintus" \
   -v "$PWD/policy.json:/app/policy.json:ro" \
   ghcr.io/<owner>/zintus-gateway:latest
 ```
