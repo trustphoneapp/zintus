@@ -79,4 +79,27 @@ describe("buildGatewayConfig", () => {
       buildGatewayConfig({ GATEWAY_PORT: "70000" } as NodeJS.ProcessEnv),
     ).toThrow(/Invalid GATEWAY_PORT/);
   });
+
+  test("defaults the stream idle watchdog to 60s and allows 0 to disable it", () => {
+    const def = buildGatewayConfig({} as NodeJS.ProcessEnv);
+    expect(def.streamIdleTimeoutMs).toBe(60_000);
+
+    const disabled = buildGatewayConfig({
+      GATEWAY_STREAM_IDLE_TIMEOUT_MS: "0",
+    } as NodeJS.ProcessEnv);
+    expect(disabled.streamIdleTimeoutMs).toBe(0);
+
+    const custom = buildGatewayConfig({
+      GATEWAY_STREAM_IDLE_TIMEOUT_MS: "5000",
+    } as NodeJS.ProcessEnv);
+    expect(custom.streamIdleTimeoutMs).toBe(5000);
+  });
+
+  test("rejects a negative stream idle timeout", () => {
+    expect(() =>
+      buildGatewayConfig({
+        GATEWAY_STREAM_IDLE_TIMEOUT_MS: "-1",
+      } as NodeJS.ProcessEnv),
+    ).toThrow(/Invalid GATEWAY_STREAM_IDLE_TIMEOUT_MS/);
+  });
 });

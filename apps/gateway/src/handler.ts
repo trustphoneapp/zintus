@@ -44,10 +44,20 @@ const DEFAULT_MAX_BODY_BYTES = 1_000_000;
 const DEFAULT_MAX_MESSAGES = 200;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 60_000;
+
 class RequestTimeoutError extends Error {
   constructor() {
     super("Request timed out while starting the upstream stream");
     this.name = "RequestTimeoutError";
+  }
+}
+
+/** Raised by the mid-stream idle watchdog when the upstream goes silent. */
+class StreamIdleTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Upstream stream stalled: no data received for ${ms}ms`);
+    this.name = "StreamIdleTimeoutError";
   }
 }
 
@@ -112,6 +122,8 @@ export function createGatewayHandler(
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxMessages = config.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const streamIdleTimeoutMs =
+    config.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
 
   function corsHeaders(request: Request): Record<string, string> {
     const origin = resolveCorsOrigin(
@@ -411,8 +423,44 @@ export function createGatewayHandler(
     const stream = new ReadableStream({
       async start(controller) {
         const encoder = new TextEncoder();
+        // Mid-stream idle watchdog. The start-timeout above only guards the
+        // connect/first-token phase; once the stream is open a provider can
+        // stall (socket alive, no chunks) and the client would hang until it
+        // gave up. Race each chunk read against an idle deadline that RESETS on
+        // every received chunk: when it fires we abort the upstream (releasing
+        // the socket + in-flight quota reservation) and fall through to the
+        // shared error path below. Disabled when streamIdleTimeoutMs <= 0.
+        const iterator = result.stream[Symbol.asyncIterator]();
+        let idleTimer: ReturnType<typeof setTimeout> | null = null;
+        const clearIdle = () => {
+          if (idleTimer) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+          }
+        };
         try {
-          for await (const chunk of result.stream) {
+          for (;;) {
+            let step: IteratorResult<string>;
+            if (streamIdleTimeoutMs > 0) {
+              const idle = new Promise<never>((_resolve, reject) => {
+                idleTimer = setTimeout(() => {
+                  upstreamAbort.abort();
+                  reject(new StreamIdleTimeoutError(streamIdleTimeoutMs));
+                }, streamIdleTimeoutMs);
+                (idleTimer as { unref?: () => void }).unref?.();
+              });
+              try {
+                step = await Promise.race([iterator.next(), idle]);
+              } finally {
+                // Reset on each chunk (and clear on the idle-fire path).
+                clearIdle();
+              }
+            } else {
+              step = await iterator.next();
+            }
+            if (step.done) {
+              break;
+            }
             const payload = {
               id: result.traceId,
               object: "chat.completion.chunk",
@@ -420,7 +468,7 @@ export function createGatewayHandler(
               provider: result.providerId,
               thread_id: result.threadId,
               compile_trace_id: result.compileTraceId,
-              choices: [{ index: 0, delta: { content: chunk } }],
+              choices: [{ index: 0, delta: { content: step.value } }],
             };
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
@@ -437,6 +485,12 @@ export function createGatewayHandler(
             encoder.encode(`data: ${JSON.stringify({ error: { message } })}\n\n`),
           );
         } finally {
+          clearIdle();
+          // Best-effort nudge so an upstream generator that honors return()
+          // runs its cleanup (closing the provider fetch reader). Fire-and-
+          // forget: a stalled generator already had its fetch aborted above,
+          // and awaiting could deadlock behind a pending next().
+          void iterator.return?.().catch(() => {});
           controller.close();
         }
       },

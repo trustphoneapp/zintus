@@ -67,6 +67,12 @@ export interface GatewayConfig {
   maxMessages?: number;
   /** Abort a chat request that takes longer than this to start streaming (408). */
   requestTimeoutMs?: number;
+  /**
+   * Mid-stream idle watchdog: abort the upstream and surface an error if no
+   * chunk arrives within this many ms while a stream is open. 0 disables the
+   * watchdog; undefined falls back to the handler default.
+   */
+  streamIdleTimeoutMs?: number;
   /** Tavily API key — enables web search on providers without native support. */
   tavilyApiKey?: string;
   /** Serper API key — automatic fallback when Tavily quota is exhausted. */
@@ -83,6 +89,25 @@ function parsePositiveInt(
   }
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`Invalid ${name}: ${raw}`);
+  }
+  return value;
+}
+
+/**
+ * Like parsePositiveInt but permits 0, which callers use as an explicit
+ * "disabled" sentinel (e.g. the mid-stream idle watchdog).
+ */
+function parseNonNegativeInt(
+  raw: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (raw == null || raw.trim() === "") {
+    return fallback;
+  }
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
     throw new Error(`Invalid ${name}: ${raw}`);
   }
   return value;
@@ -127,6 +152,13 @@ export function buildGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
       env.GATEWAY_REQUEST_TIMEOUT_MS,
       60_000,
       "GATEWAY_REQUEST_TIMEOUT_MS",
+    ),
+    // Mid-stream idle watchdog. Defaults to 60s of allowed silence between
+    // chunks; set GATEWAY_STREAM_IDLE_TIMEOUT_MS=0 to disable it entirely.
+    streamIdleTimeoutMs: parseNonNegativeInt(
+      env.GATEWAY_STREAM_IDLE_TIMEOUT_MS,
+      60_000,
+      "GATEWAY_STREAM_IDLE_TIMEOUT_MS",
     ),
     tavilyApiKey: env.TAVILY_API_KEY?.trim() || undefined,
     serperApiKey: env.SERPER_API_KEY?.trim() || undefined,
