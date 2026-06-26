@@ -17,7 +17,7 @@ import {
 import type { ListRenderItem } from "react-native";
 import { PROVIDER_IDS, type ProviderId } from "@zintus/types";
 import { PROVIDER_METADATA } from "@zintus/providers";
-import { useFocusEffect, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 
 import { ChatMessageBubble } from "@/components/ChatMessageBubble";
 import { streamChat } from "@/lib/chat";
@@ -35,8 +35,8 @@ import {
 import {
   appendMessage,
   createThread,
+  getMessages,
   setThreadGatewayId,
-  updateMessage,
 } from "@/lib/history";
 import {
   createAssistantPlaceholder,
@@ -45,6 +45,7 @@ import {
   type UiMessage,
 } from "@/lib/messages";
 import { migrateLegacyKeys } from "@/lib/secure-keys";
+import { takePendingPrompt } from "@/lib/onboarding";
 import { COLORS } from "@/lib/theme";
 
 type ProviderSelection = ProviderId | "auto";
@@ -53,6 +54,7 @@ const STREAM_FLUSH_MS = 50;
 
 export default function ChatScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ thread?: string }>();
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [input, setInput] = useState("");
   const [provider, setProvider] = useState<ProviderSelection>("auto");
@@ -74,6 +76,8 @@ export default function ChatScreen() {
 
   useEffect(() => {
     void migrateLegacyKeys();
+    const pending = takePendingPrompt();
+    if (pending) setInput(pending);
   }, []);
 
   useFocusEffect(
@@ -81,6 +85,38 @@ export default function ChatScreen() {
       setProvider(loadSelectedProvider());
     }, []),
   );
+
+  // Continue a thread opened from History (?thread=<id>): hydrate its messages.
+  useFocusEffect(
+    useCallback(() => {
+      const id = typeof params.thread === "string" ? params.thread : undefined;
+      if (!id || id === threadIdRef.current) return;
+      void (async () => {
+        const stored = await getMessages(id);
+        threadIdRef.current = id;
+        setMessages(
+          stored.map((m) => ({
+            id: m.id,
+            storedId: m.id,
+            role: m.role,
+            content: m.content,
+            providerId: m.providerId ?? undefined,
+            model: m.model ?? undefined,
+            meta: m.meta ?? undefined,
+          })),
+        );
+      })();
+    }, [params.thread]),
+  );
+
+  function newChat() {
+    abortRef.current?.abort();
+    threadIdRef.current = null;
+    setMessages([]);
+    setInput("");
+    setError(null);
+    router.setParams({ thread: "" });
+  }
 
   // Gateway health: polled ONLY while the Chat tab is focused AND the app is
   // foregrounded, with 5→30s backoff while status is unchanged and the in-flight
@@ -372,7 +408,15 @@ export default function ChatScreen() {
       behavior={Platform.OS === "ios" ? "padding" : undefined}
     >
       <View style={styles.header}>
-        <Text style={styles.title}>Zintus</Text>
+        <View style={styles.headerLeft}>
+          <Text style={styles.title}>Zintus</Text>
+          <Pressable hitSlop={6} onPress={newChat}>
+            <Text style={styles.headerLink}>＋ New</Text>
+          </Pressable>
+          <Pressable hitSlop={6} onPress={() => router.push("/history")}>
+            <Text style={styles.headerLink}>History</Text>
+          </Pressable>
+        </View>
         <View style={styles.chipRow}>
           <Pressable
             style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
@@ -581,6 +625,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   title: { color: COLORS.ink, fontSize: 22, fontWeight: "700" },
+  headerLeft: { flexDirection: "row", alignItems: "center", gap: 12 },
+  headerLink: { color: COLORS.accentBright, fontSize: 13, fontWeight: "600" },
   chipRow: { flexDirection: "row", gap: 8 },
   gatewayHint: {
     color: COLORS.muted,
