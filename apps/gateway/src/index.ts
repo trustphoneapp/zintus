@@ -166,11 +166,19 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   log("info", "gateway.listening", {
     url,
     auth: config.token ? "required" : "disabled",
-    cors: config.corsOrigins === "*" ? "*" : config.corsOrigins.join(","),
+    cors:
+      config.corsOrigins === "*"
+        ? "*"
+        : config.corsOrigins === "loopback"
+          ? "loopback (localhost + desktop + zintus.ai)"
+          : config.corsOrigins.join(","),
   });
   if (!config.token) {
     log("warn", "gateway.auth_disabled", {
-      hint: "Set GATEWAY_TOKEN to require a bearer token on API requests.",
+      hint:
+        "No GATEWAY_TOKEN: API auth is disabled and CORS is restricted to " +
+        "localhost / the desktop app / zintus.ai so other websites can't reach " +
+        "this gateway. Set GATEWAY_TOKEN to require a bearer token (and allow any origin).",
     });
   }
 

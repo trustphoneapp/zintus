@@ -108,14 +108,16 @@ are pre-existing.
   loopback gateway (`isLoopbackGateway` guard) or E2E-encrypted; relay logs are
   redacted. Single execution plane (`@zintus/engine`).
 - **Security baseline strong** (redacted logs, OS keychain, web vault AES-GCM +
-  PBKDF2-600k, Stripe HMAC + replay window, scoped account deletion). **P1 to fix:**
-  a local gateway with **no `GATEWAY_TOKEN` is open with CORS `*`** — any visited
-  website can drive `localhost:8788` and burn BYOK quota / read responses (public
-  `0.0.0.0` binds are correctly refused without a token). **P2:** specific-IP bind
-  escapes that guard; web CSP `script-src 'unsafe-inline'`; Stripe webhook not
-  itself flag-gated (defense-in-depth); Private Mode passes `"unknown"`-training
-  providers. These are gateway/relay hardening items — careful follow-up, not a
-  blind change.
+  PBKDF2-600k, Stripe HMAC + replay window, scoped account deletion).
+- **✅ FIXED — open tokenless gateway (was P1).** A gateway with no `GATEWAY_TOKEN`
+  now defaults to a **`loopback` CORS policy** (`auth.ts`): it reflects only
+  localhost (any port), the desktop (Tauri) webview, and the official `*.zintus.ai`
+  origin — arbitrary websites get no CORS header and can't read responses or burn
+  BYOK quota. A token-set gateway keeps `*` (auth gates it); `GATEWAY_CORS_ORIGIN`
+  still overrides. Verified by new `auth.test.ts` cases + 28 gateway tests.
+- **P2 remaining (careful follow-up):** web CSP `script-src 'unsafe-inline'`;
+  Stripe webhook not itself flag-gated (defense-in-depth); Private Mode passes
+  `"unknown"`-training providers; bundle-baked `NEXT_PUBLIC_GATEWAY_TOKEN`.
 
 ## How to keep this honest
 

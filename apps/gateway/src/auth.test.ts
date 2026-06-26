@@ -4,6 +4,7 @@ import {
   buildGatewayConfig,
   parseCorsOrigins,
   resolveCorsOrigin,
+  resolveDefaultCors,
   timingSafeEqual,
 } from "./auth.js";
 
@@ -101,5 +102,47 @@ describe("buildGatewayConfig", () => {
         GATEWAY_STREAM_IDLE_TIMEOUT_MS: "-1",
       } as NodeJS.ProcessEnv),
     ).toThrow(/Invalid GATEWAY_STREAM_IDLE_TIMEOUT_MS/);
+  });
+
+  test("CORS default: loopback when tokenless, * when a token is set", () => {
+    expect(buildGatewayConfig({} as NodeJS.ProcessEnv).corsOrigins).toBe(
+      "loopback",
+    );
+    expect(
+      buildGatewayConfig({ GATEWAY_TOKEN: "secret" } as NodeJS.ProcessEnv)
+        .corsOrigins,
+    ).toBe("*");
+    expect(
+      buildGatewayConfig({
+        GATEWAY_CORS_ORIGIN: "https://app.example.com",
+      } as NodeJS.ProcessEnv).corsOrigins,
+    ).toEqual(["https://app.example.com"]);
+  });
+});
+
+describe("loopback CORS (tokenless gateway hardening)", () => {
+  test("resolveDefaultCors: explicit wins, else token→* / tokenless→loopback", () => {
+    expect(resolveDefaultCors(undefined, "")).toBe("loopback");
+    expect(resolveDefaultCors("", "")).toBe("loopback");
+    expect(resolveDefaultCors(undefined, "secret")).toBe("*");
+    expect(resolveDefaultCors("*", "")).toBe("*");
+    expect(resolveDefaultCors("https://x.com", "")).toEqual(["https://x.com"]);
+  });
+
+  test("loopback allows localhost (any port), tauri, official web; denies others", () => {
+    expect(resolveCorsOrigin("loopback", "http://localhost:3000")).toBe(
+      "http://localhost:3000",
+    );
+    expect(resolveCorsOrigin("loopback", "http://127.0.0.1:5173")).toBe(
+      "http://127.0.0.1:5173",
+    );
+    expect(resolveCorsOrigin("loopback", "tauri://localhost")).toBe(
+      "tauri://localhost",
+    );
+    expect(resolveCorsOrigin("loopback", "https://www.zintus.ai")).toBe(
+      "https://www.zintus.ai",
+    );
+    expect(resolveCorsOrigin("loopback", "https://evil.com")).toBeNull();
+    expect(resolveCorsOrigin("loopback", null)).toBeNull();
   });
 });

@@ -43,24 +43,76 @@ export function parseCorsOrigins(raw: string | undefined): string[] | "*" {
     .filter(Boolean);
 }
 
+// Origins always allowed for a tokenless ("loopback") gateway in addition to
+// any localhost origin: the desktop (Tauri) webview and the official Zintus web
+// app. A self-hoster on a different web origin sets GATEWAY_CORS_ORIGIN.
+const TAURI_ORIGINS = [
+  "tauri://localhost",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+];
+const OFFICIAL_WEB_ORIGINS = ["https://www.zintus.ai", "https://zintus.ai"];
+
+/** True for http(s)://localhost | 127.0.0.1 | [::1] on ANY port. */
+export function isLoopbackOrigin(origin: string): boolean {
+  try {
+    const { hostname } = new URL(origin);
+    return (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "[::1]" ||
+      hostname === "::1"
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function resolveCorsOrigin(
-  origins: string[] | "*",
+  origins: string[] | "*" | "loopback",
   requestOrigin: string | null,
 ): string | null {
   if (origins === "*") {
     return "*";
   }
-  if (requestOrigin && origins.includes(requestOrigin)) {
-    return requestOrigin;
+  if (!requestOrigin) {
+    return null;
   }
-  return null;
+  if (origins === "loopback") {
+    // Tokenless local gateway: allow local dev (any localhost port), the desktop
+    // webview, and the official web app — but NOT arbitrary websites, which could
+    // otherwise drive the user's gateway and read their AI responses (CORS lets
+    // them read the body). Reflect the specific origin, never "*".
+    return isLoopbackOrigin(requestOrigin) ||
+      TAURI_ORIGINS.includes(requestOrigin) ||
+      OFFICIAL_WEB_ORIGINS.includes(requestOrigin)
+      ? requestOrigin
+      : null;
+  }
+  return origins.includes(requestOrigin) ? requestOrigin : null;
+}
+
+/**
+ * Default CORS policy when GATEWAY_CORS_ORIGIN is unset: a token-protected
+ * gateway may safely allow any origin ("*", auth gates it); a tokenless gateway
+ * restricts to local/official origins ("loopback") so a random website can't
+ * reach it. An explicit GATEWAY_CORS_ORIGIN always wins (may be "*").
+ */
+export function resolveDefaultCors(
+  raw: string | undefined,
+  token: string,
+): string[] | "*" | "loopback" {
+  if (raw && raw.trim()) {
+    return parseCorsOrigins(raw);
+  }
+  return token ? "*" : "loopback";
 }
 
 export interface GatewayConfig {
   port: number;
   host: string;
   token: string;
-  corsOrigins: string[] | "*";
+  corsOrigins: string[] | "*" | "loopback";
   /** Reject request bodies larger than this many bytes with 413. */
   maxBodyBytes?: number;
   /** Reject requests with more than this many messages with 413. */
@@ -137,7 +189,7 @@ export function buildGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     port,
     host,
     token,
-    corsOrigins: parseCorsOrigins(env.GATEWAY_CORS_ORIGIN),
+    corsOrigins: resolveDefaultCors(env.GATEWAY_CORS_ORIGIN, token),
     maxBodyBytes: parsePositiveInt(
       env.GATEWAY_MAX_BODY_BYTES,
       1_000_000,
