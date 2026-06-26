@@ -26,18 +26,5 @@
         "resourceClass": "m-medium"
       }
     }
-  },
-  "submit": {
-    "production": {
-      "ios": {
-        "appleId": "you@example.com",
-        "ascAppId": "0000000000",
-        "appleTeamId": "XXXXXXXXXX"
-      },
-      "android": {
-        "serviceAccountKeyPath": "./google-service-account.json",
-        "track": "internal"
-      }
-    }
   }
 }

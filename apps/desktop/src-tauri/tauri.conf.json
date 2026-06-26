@@ -37,7 +37,7 @@
       "icons/icon.ico"
     ],
     "updater": {
-      "active": true,
+      "active": false,
       "endpoints": [
         "https://github.com/ysventures/zintus/releases/latest/download/latest.json"
       ],

@@ -41,6 +41,58 @@ Covered by `lib/gateway-url-resolve.test.ts` — keep it passing.
 - No `localhost` pings for detection — use gateway status.
 - `expo-secure-store` for all key storage.
 
+## Release config (read before tagging `mobile-v*`)
+
+### One-time: EAS project id (`eas init`)
+`app.json` intentionally has **no** `extra.eas.projectId` — we do not commit a
+fake/borrowed id. Before the first release build, the owner runs once:
+```bash
+cd apps/mobile && eas init   # links the slug to an EAS project, writes extra.eas.projectId
+```
+`eas build` (and `.github/workflows/release-mobile.yml`) **cannot run a release
+without it**. If you want a cheap guard, add a step to `release-mobile.yml` that
+fails fast when the id is absent, e.g. before the `eas build` step:
+```yaml
+- run: node -e "process.exit(require('./apps/mobile/app.json').expo.extra?.eas?.projectId?0:1)"
+  # or: grep -q '"projectId"' apps/mobile/app.json
+```
+Source: [Expo — Configuration with eas.json](https://docs.expo.dev/eas/json/),
+[Expo environment variables in EAS](https://docs.expo.dev/eas/environment-variables/).
+
+### Store submission (`eas submit`) — no creds in the repo
+The `submit` block was **removed from `eas.json`** on purpose: it previously held
+placeholder Apple creds (`appleId: you@example.com`, `ascAppId: 0000000000`,
+`appleTeamId: XXXXXXXXXX`) which would mis-submit or fail. Per Expo guidance,
+submit creds should never be committed. To re-add when real creds exist, prefer
+an App Store Connect **API key** over Apple-ID/password and keep secrets in env:
+```jsonc
+// eas.json
+"submit": {
+  "production": {
+    "ios": {
+      "ascApiKeyPath": "./asc-api-key.p8",   // gitignored
+      "ascApiKeyId": "...", "ascApiKeyIssuerId": "...",
+      "appleTeamId": "...", "ascAppId": "..."
+    },
+    "android": { "serviceAccountKeyPath": "./google-service-account.json", "track": "internal" }
+  }
+}
+```
+Add the `.p8` / `*-service-account.json` files to `.gitignore`; for CI pass
+`EXPO_APPLE_APP_SPECIFIC_PASSWORD` (or the ASC API key) via repo secrets, not the
+repo. Source: [Expo — Submit to the Apple App Store](https://docs.expo.dev/submit/ios/),
+[Expo — local credentials](https://docs.expo.dev/app-signing/local-credentials/).
+
+### Release workflow vars / assets
+- `.github/workflows/release-mobile.yml` (tag `mobile-v*` or manual dispatch)
+  reads repo **var** `EXPO_PUBLIC_VALIDATE_URL` and **secret** `EXPO_TOKEN`.
+- `EXPO_PUBLIC_VALIDATE_URL` → deployed web `/api/validate` (worker/Vercel URL).
+  Used by `lib/limits.ts`; defaults to `http://localhost:3000/api/validate` for
+  local dev. Set it as a build-time env (`EXPO_PUBLIC_*` is inlined at build).
+- `assets/` already contains every file `app.json` references: `icon.png`,
+  `splash-icon.png`, `notification-icon.png`, `favicon.png`, and the three
+  `android-icon-*` adaptive-icon layers — verified present, nothing missing.
+
 ## When you're done
 - [ ] `bun run typecheck` (mobile) — 0 errors
 - [ ] `npx expo start` — loads on a device / Expo Go
