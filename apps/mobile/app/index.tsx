@@ -23,7 +23,13 @@ import { ChatMessageBubble } from "@/components/ChatMessageBubble";
 import { streamChat } from "@/lib/chat";
 import { getGatewayUrl } from "@/lib/gateway-url";
 import { fetchGatewayHealth } from "@/lib/gateway";
-import { loadConfig, loadSelectedProvider, saveConfig } from "@/lib/config";
+import {
+  loadConfig,
+  loadSelectedProvider,
+  saveConfig,
+  saveSelectedProvider,
+} from "@/lib/config";
+import { getProject } from "@/lib/projects";
 import { CHAT_MODES, deriveRouting, nextMode, type ChatMode } from "@/lib/chat-mode";
 import { grantProviderSendConsent, hasProviderSendConsent } from "@/lib/consent";
 import { DESTINATIONS, attachmentPrivacyNotice, describeFlow } from "@/lib/data-flow";
@@ -59,7 +65,7 @@ const STREAM_FLUSH_MS = 50;
 
 export default function ChatScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ thread?: string }>();
+  const params = useLocalSearchParams<{ thread?: string; project?: string }>();
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [input, setInput] = useState("");
   const [provider, setProvider] = useState<ProviderSelection>("auto");
@@ -87,6 +93,14 @@ export default function ChatScreen() {
     atts: Attachment[];
     oneShot?: ProviderId;
   } | null>(null);
+
+  const activeProject = useMemo(
+    () =>
+      typeof params.project === "string" && params.project
+        ? getProject(params.project)
+        : null,
+    [params.project],
+  );
 
   useEffect(() => {
     void migrateLegacyKeys();
@@ -121,6 +135,21 @@ export default function ChatScreen() {
         );
       })();
     }, [params.thread]),
+  );
+
+  // Apply a project's routing defaults when chatting inside it.
+  useFocusEffect(
+    useCallback(() => {
+      if (!activeProject) return;
+      if (activeProject.defaultProvider) {
+        setProvider(activeProject.defaultProvider);
+        saveSelectedProvider(activeProject.defaultProvider);
+      }
+      if (activeProject.privateDefault) {
+        setPrivateMode(true);
+        saveConfig({ blockTrainingProviders: true });
+      }
+    }, [activeProject]),
   );
 
   function newChat() {
@@ -217,6 +246,7 @@ export default function ChatScreen() {
       if (!threadIdRef.current) {
         const thread = await createThread({
           title: text.slice(0, 48),
+          projectId: activeProject?.id ?? null,
           defaultProvider: effectiveProvider ?? null,
           strategy: routing.strategy ?? null,
           privacyPosture: routing.posture,
@@ -264,7 +294,12 @@ export default function ChatScreen() {
           blockTraining: routing.blockTraining || privateMode,
           mode: config.contextMode,
           threadId: threadIdRef.current ?? undefined,
-          messages: toChatMessages([...messages, userMessage]),
+          messages: activeProject?.instructions
+            ? [
+                { role: "system", content: activeProject.instructions },
+                ...toChatMessages([...messages, userMessage]),
+              ]
+            : toChatMessages([...messages, userMessage]),
           signal: controller.signal,
           onChunk: (t) => {
             latest = t;
@@ -316,7 +351,15 @@ export default function ChatScreen() {
         abortRef.current = null;
       }
     },
-    [messages, mode, provider, privateMode, setAssistant, loadRouteOptions],
+    [
+      messages,
+      mode,
+      provider,
+      privateMode,
+      activeProject,
+      setAssistant,
+      loadRouteOptions,
+    ],
   );
 
   const send = useCallback(
@@ -476,6 +519,9 @@ export default function ChatScreen() {
           <Pressable hitSlop={6} onPress={() => router.push("/history")}>
             <Text style={styles.headerLink}>History</Text>
           </Pressable>
+          <Pressable hitSlop={6} onPress={() => router.push("/projects")}>
+            <Text style={styles.headerLink}>Projects</Text>
+          </Pressable>
           <Pressable hitSlop={6} onPress={togglePrivate}>
             <Text style={[styles.headerLink, privateMode && styles.shieldOn]}>
               {privateMode ? "🛡 Private" : "🛡"}
@@ -521,6 +567,9 @@ export default function ChatScreen() {
         </View>
       )}
 
+      {activeProject ? (
+        <Text style={styles.projectBadge}>📁 {activeProject.name}</Text>
+      ) : null}
       <Text style={styles.gatewayHint}>
         Gateway: {getGatewayUrl()} · {modeDef.hint}
       </Text>
@@ -753,6 +802,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     paddingHorizontal: 16,
     paddingBottom: 8,
+  },
+  projectBadge: {
+    color: COLORS.accentBright,
+    fontSize: 12,
+    fontWeight: "700",
+    paddingHorizontal: 16,
+    paddingBottom: 2,
   },
   errorText: {
     color: COLORS.error,

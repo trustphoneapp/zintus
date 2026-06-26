@@ -138,6 +138,7 @@ export default function RootLayout() {
         {/* Routed to imperatively; hidden from the tab bar. */}
         <Tabs.Screen name="onboarding" options={{ href: null, headerShown: false }} />
         <Tabs.Screen name="history" options={{ href: null, title: "History" }} />
+        <Tabs.Screen name="projects" options={{ href: null, title: "Projects" }} />
       </Tabs>
     </GestureHandlerRootView>
   );

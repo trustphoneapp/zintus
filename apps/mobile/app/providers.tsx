@@ -8,7 +8,7 @@ import {
   View,
 } from "react-native";
 import BottomSheet from "@gorhom/bottom-sheet";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { listProviders } from "@zintus/providers";
 import { PROVIDER_METADATA } from "@zintus/providers";
 import type { ProviderId } from "@zintus/types";
@@ -45,6 +45,7 @@ interface ProviderRowState {
 }
 
 export default function ProvidersScreen() {
+  const router = useRouter();
   const sheetRef = useRef<BottomSheet>(null);
   const [rows, setRows] = useState<ProviderRowState[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>(
@@ -356,6 +357,20 @@ export default function ProvidersScreen() {
                       style={{ backgroundColor: meta.color }}
                     />
                   </View>
+                  {detected ? (
+                    <Pressable
+                      className="mt-3 items-center rounded-lg bg-accent py-2"
+                      onPress={() => {
+                        setSelectedProvider(id);
+                        saveSelectedProvider(id);
+                        router.push("/");
+                      }}
+                    >
+                      <Text className="font-semibold text-slate-950">
+                        Use {meta.name} (on-device)
+                      </Text>
+                    </Pressable>
+                  ) : null}
                 </View>
               );
             })}
