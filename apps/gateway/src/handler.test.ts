@@ -545,6 +545,86 @@ describe("gateway handler", () => {
     expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
+  test("non-streaming chat is bounded by the idle watchdog (408 on mid-aggregation stall)", async () => {
+    // The start timeout only guards routeAndStream() RESOLVING, not consuming
+    // the buffered stream. A provider that connects then stalls mid-aggregation
+    // would hang the `for await` forever — so the non-streaming branch now wraps
+    // the read in the same idle watchdog. Prove it: a start that resolves fast
+    // (under the large requestTimeoutMs) then a stream that never yields → 408,
+    // and the upstream is aborted.
+    let aborted = false;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        request.signal?.addEventListener("abort", () => {
+          aborted = true;
+        });
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          // Connect succeeds, but the stream stalls forever (no chunks).
+          stream: (async function* () {
+            await new Promise<void>(() => {});
+            yield "never";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler(
+      { streamIdleTimeoutMs: 25, requestTimeoutMs: 5000 },
+      engine,
+    );
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hi" }],
+          stream: false,
+        }),
+      }),
+    );
+    expect(res.status).toBe(408);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("stalled");
+    expect(aborted).toBe(true);
+  });
+
+  test("non-streaming chat completes 200 when chunks keep arriving in time", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          threadId: "thread-1",
+          stream: (async function* () {
+            for (let i = 0; i < 3; i += 1) {
+              await new Promise<void>((r) => setTimeout(r, 10));
+              yield `c${i}`;
+            }
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({ streamIdleTimeoutMs: 50 }, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hi" }],
+          stream: false,
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      choices: { message: { content: string } }[];
+    };
+    expect(body.choices[0]?.message.content).toBe("c0c1c2");
+  });
+
   test("unknown route returns 404", async () => {
     const handler = makeHandler();
     const res = await handler(new Request("http://x/nope"));
