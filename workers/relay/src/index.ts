@@ -38,6 +38,7 @@ import { redactSecrets } from "./redact.js";
 import type { Env, GatewaySessionRow, UserRow, SubscriptionRow } from "./types.js";
 import {
   sha256Hex,
+  verifyGatewaySecret,
   issueSessionToken,
   verifySessionToken,
   revokeSessionToken,
@@ -213,6 +214,73 @@ async function requireSession(
   // requireSession, so it pays no extra read.
   if (await isUserDeleted(c.env.KV, session.user_id)) return null;
   return session;
+}
+
+/** Parse a Bearer token from an Authorization header. "" if absent/malformed. */
+function parseBearerToken(authHeader: string | null): string {
+  if (!authHeader) return "";
+  const m = /^Bearer\s+(.+)$/.exec(authHeader.trim());
+  return m ? m[1]!.trim() : "";
+}
+
+type SessionAuthz =
+  | { ok: true; via: "cookie" | "bearer"; user_id: string }
+  | { ok: false; status: 401 | 404; body: { error: string } };
+
+/**
+ * Authorize a request that targets ONE specific gateway session `:id`.
+ *
+ * Two independent paths are accepted:
+ *   (a) a valid user-session cookie whose user OWNS session `:id` (web/dashboard);
+ *   (b) ONLY when `allowGatewaySecret` is true — an `Authorization: Bearer
+ *       <gateway_secret>` whose SHA-256 matches the stored `gateway_secret_hash`
+ *       of THIS session `:id` (the CLI, which holds the secret but has no cookie).
+ *
+ * ISOLATION INVARIANT (critical): the row is fetched by `:id`, and the Bearer is
+ * compared ONLY against THAT row's `gateway_secret_hash`. A gateway_secret can
+ * therefore authorize ONLY the single session it belongs to — session B's secret
+ * presented against session A's id never matches A's stored hash, so it falls
+ * through to the cookie path and ends at 401. Comparison reuses the timing-safe
+ * `verifyGatewaySecret` — the exact scheme the WS register handshake uses
+ * (GatewaySession.ts) — so we never invent a new check or compare raw secrets.
+ *
+ * `requireSession` (and every cookie-only route) is left untouched; only callers
+ * that opt in via `allowGatewaySecret` gain the Bearer alternative.
+ */
+async function authorizeSessionScoped(
+  c: Context<{ Bindings: Env }>,
+  sessionId: string,
+  allowGatewaySecret: boolean,
+): Promise<SessionAuthz> {
+  const row = await c.env.DB.prepare(
+    "SELECT user_id, gateway_secret_hash FROM gateway_sessions WHERE id = ?",
+  )
+    .bind(sessionId)
+    .first<{ user_id: string; gateway_secret_hash: string }>();
+
+  // (b) Bearer gateway_secret — bound to THIS session id only.
+  if (allowGatewaySecret) {
+    const bearer = parseBearerToken(c.req.header("Authorization") ?? null);
+    if (
+      bearer &&
+      row?.gateway_secret_hash &&
+      (await verifyGatewaySecret(bearer, row.gateway_secret_hash))
+    ) {
+      return { ok: true, via: "bearer", user_id: row.user_id };
+    }
+  }
+
+  // (a) Session cookie — user must own this session.
+  const cookieSession = await requireSession(c);
+  if (cookieSession) {
+    if (row && row.user_id === cookieSession.user_id) {
+      return { ok: true, via: "cookie", user_id: cookieSession.user_id };
+    }
+    // Authenticated but not the owner (or session gone): 404, never leak existence.
+    return { ok: false, status: 404, body: { error: "Not found" } };
+  }
+
+  return { ok: false, status: 401, body: { error: "Unauthorized" } };
 }
 
 // Exported for unit tests (duplicate-prevention). Normalises the email before
@@ -683,19 +751,15 @@ app.post("/api/sessions", async (c) => {
 });
 
 app.delete("/api/sessions/:id", async (c) => {
-  const session = await requireSession(c as Context<{ Bindings: Env }>);
-  if (!session) return c.json({ error: "Unauthorized" }, 401);
-
   const sessionId = c.req.param("id");
-  const row = await c.env.DB.prepare(
-    "SELECT user_id FROM gateway_sessions WHERE id = ?",
-  )
-    .bind(sessionId)
-    .first<{ user_id: string }>();
-
-  if (!row || row.user_id !== session.user_id) {
-    return c.json({ error: "Not found" }, 404);
-  }
+  // Cookie (owner) OR this session's own gateway_secret via Bearer — so the CLI
+  // (`zintus cloud logout`) can delete the row it created without a cookie.
+  const authz = await authorizeSessionScoped(
+    c as Context<{ Bindings: Env }>,
+    sessionId,
+    true,
+  );
+  if (!authz.ok) return c.json(authz.body, authz.status);
 
   // Force-disconnect closes WS connections, revokes relay_token, and marks offline.
   const doId = c.env.GATEWAY_SESSION.idFromName(sessionId);
@@ -766,26 +830,21 @@ async function relayToSession(
   c: Context<{ Bindings: Env }>,
   sessionId: string,
   path: string,
+  allowGatewaySecret = false,
 ): Promise<Response> {
-  const session = await requireSession(c);
-  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  // Authorize + ownership in one shot. Only the read-only `/status` route opts
+  // into the Bearer gateway_secret alternative; `/control` and `/stream` stay
+  // cookie-only (allowGatewaySecret defaults to false).
+  const authz = await authorizeSessionScoped(c, sessionId, allowGatewaySecret);
+  if (!authz.ok) return c.json(authz.body, authz.status);
+  const userId = authz.user_id;
 
   // Rate limit: 30 req/min per user for control.
   if (path === "/control") {
-    const rlKey = `rl:ctrl:${session.user_id}`;
+    const rlKey = `rl:ctrl:${userId}`;
     if (!(await kvRateLimitOk(c.env.KV, rlKey, 30, 60))) {
       return c.json({ error: "Rate limit exceeded" }, 429);
     }
-  }
-
-  // Verify user owns this session.
-  const row = await c.env.DB.prepare(
-    "SELECT user_id FROM gateway_sessions WHERE id = ?",
-  )
-    .bind(sessionId)
-    .first<{ user_id: string }>();
-  if (!row || row.user_id !== session.user_id) {
-    return c.json({ error: "Not found" }, 404);
   }
 
   // For /control we read the body once here to (a) decide whether the action is
@@ -808,7 +867,7 @@ async function relayToSession(
     // BYOK trust model (the gateway holds the keys and does the inference), not
     // a regression introduced by the gate.
     if (!isQuotaExemptControl(controlBody)) {
-      const q = await enforceQuota(session.user_id, c.env);
+      const q = await enforceQuota(userId, c.env);
       if (!q.allowed) {
         const retryAfter = Math.max(1, q.reset - Math.floor(Date.now() / 1000));
         return c.json(
@@ -846,7 +905,9 @@ async function relayToSession(
 }
 
 app.get("/api/sessions/:id/status", async (c) =>
-  relayToSession(c as Context<{ Bindings: Env }>, c.req.param("id"), "/status"),
+  // Read-only status: cookie OR this session's gateway_secret (Bearer) — lets the
+  // CLI (`zintus cloud status`) poll without a cookie. Bearer is bound to :id.
+  relayToSession(c as Context<{ Bindings: Env }>, c.req.param("id"), "/status", true),
 );
 app.post("/api/sessions/:id/control", async (c) =>
   relayToSession(c as Context<{ Bindings: Env }>, c.req.param("id"), "/control"),
