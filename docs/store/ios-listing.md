@@ -102,35 +102,71 @@ in `app.json`) an iPad set as well. Sizes below are the 2026 spec.
 
 ---
 
-## 4. Encryption / export compliance
+## 4. Encryption / export compliance — needs a real call, do not assume `false`
 
-- `app.json` sets `ios.infoPlist.ITSAppUsesNonExemptEncryption = false`.
-- **Reality check:** Zintus uses encryption (TLS/HTTPS to providers and relay;
-  x25519 via `@noble` for BYOK key push — see `apps/mobile/lib/gateway-key-push.ts`).
-  This is **standard / exempt** encryption (HTTPS + standard crypto used for
-  the app's own security), which qualifies for the exemption — hence
-  `ITSAppUsesNonExemptEncryption = false` and **no annual self-classification
-  report / no French import declaration** is required.
-- App Store Connect "Export Compliance" answer: **uses encryption, but only
-  exempt** (standard encryption). This matches the `false` flag.
-- `[HUMAN]` if Apple's export-compliance flow asks, the answer is: the app uses
-  standard encryption algorithms (TLS, NaCl/x25519) and qualifies for the
-  Category 5 Part 2 exemption. Confirm with counsel if shipping to regions with
-  specific import rules.
+- `app.json` currently sets `ios.infoPlist.ITSAppUsesNonExemptEncryption = false`.
+- **What's clearly exempt:** all the **HTTPS/TLS** traffic (to providers, relay,
+  gateway) is OS-provided encryption via the URL loading system → fully exempt,
+  no filing.
+- **The wrinkle (be honest):** Zintus does **not** rely on OS TLS alone. It runs
+  its **own key exchange in app code** — x25519 via `@noble` to encrypt the BYOK
+  key push (`apps/mobile/lib/gateway-key-push.ts`). Apple/BIS guidance treats
+  "ships its own key exchange / implements its own asymmetric crypto" as the
+  exact case where a blanket `false` is **no longer automatically correct**, even
+  when the algorithm (Curve25519/NaCl) is a *standard, published* one. The prior
+  draft overstated this as "clearly exempt → false"; it is **not** clear-cut.
+- **Two defensible paths — `[HUMAN]`/counsel must pick one before submit:**
+  1. **Keep `false`** *if* counsel concludes the x25519 use qualifies as exempt
+     because it is a standard published algorithm used solely to protect the
+     app's own credentials (not the app's primary purpose, no proprietary
+     crypto). Document this rationale. Lowest friction; some audit risk now that
+     Apple cross-checks export answers against build/metadata.
+  2. **Set `ITSAppUsesNonExemptEncryption = true`**, then in App Store Connect
+     answer the export questions to claim the **standard/mass-market exemption**
+     (EAR §740.17(b)(1), Category 5 Part 2). This path typically requires a
+     **one-time/annual self-classification report to BIS + the ENC encryption
+     registration** (a filing, **not** a CCATS). Most audit-proof.
+- **Not required either way:** a CCATS classification request (the app uses only
+  standard algorithms), and there is no separate French import declaration unless
+  distributing specifically into regulated regions — confirm with counsel.
+- **Recommendation:** because the x25519 key-push is genuinely app-controlled
+  crypto, treat the `false` flag as **`[HUMAN]`/counsel-gated**, not a given. If
+  in doubt, path 2 is the safe answer.
 
 ---
 
 ## 5. App Privacy "nutrition labels" — mapped to what is actually collected
 
 Set in App Store Connect → App Privacy. Map each to the **real** data flow.
+Apple's definition (accessed 2026-06-26): **"Collect"** = transmitting data off
+the device **and storing it in readable form for longer than needed to service
+the request in real time.** Data processed only on-device, or sent to a server
+and **immediately discarded after servicing the request, is NOT "collected."**
+"Third-party partners" whose collection you must also declare = "analytics
+tools, advertising networks, third-party SDKs, or other external vendors whose
+code you've added to your app."
+
+> **Two separate obligations — don't conflate them:**
+> 1. **App Privacy nutrition label (this §5)** — what *Zintus* (and embedded
+>    SDKs) collect. Under Apple's "collect" definition, Zintus does **not**
+>    collect chat content or keys (it doesn't retain them; the AI providers are
+>    **not** SDKs embedded by Zintus — they're user-chosen endpoints).
+> 2. **Guideline 5.1.2(i) third-party-AI consent (new §5b below)** — a
+>    **separate, mandatory** requirement that applies *because* prompts/images/
+>    files are sent to third-party AI. It is **not** satisfied by the nutrition
+>    label; it needs an explicit in-app consent disclosure + privacy-policy
+>    disclosure. **This is the #1 new compliance gap for Zintus.**
 
 ### From the app on iOS (BYOK path)
 - **API keys:** stored on-device in `expo-secure-store` only; pushed to the
   user's gateway as opaque x25519 ciphertext via relay. **Not collected by us**,
   not readable by the relay. → Do **not** list keys as collected.
-- **Prompts / chat content:** routed device → gateway → chosen provider. On the
-  pure-LAN/BYOK path the prompt content does **not** touch Zintus servers. →
-  Not collected by us on the BYOK path.
+- **Prompts / chat content, image input, file input:** routed device → gateway →
+  chosen provider; **Zintus does not retain them** (real-time pass-through), and
+  on the pure-LAN/BYOK path they never touch Zintus servers. → **Not "collected"
+  by Zintus** for nutrition-label purposes. **BUT they ARE shared with a
+  third-party AI provider → handle via Guideline 5.1.2(i) (§5b), and disclose in
+  the privacy policy.**
 
 ### From the relay (Remote tab / Zintus Cloud sign-in)
 The relay (`workers/relay`) collects only what's needed for auth + routing +
@@ -161,12 +197,127 @@ quota (see `docs/agents/OPS.md`). When the user signs in to Zintus Cloud:
 > the union (email + user id + diagnostics collected, since the Cloud feature
 > exists in the binary).
 
+### App Privacy nutrition-label summary (ready to enter)
+| Apple data type | Collected? | Linked to user? | Used to track? | Purpose |
+|---|---|---|---|---|
+| Contact Info → **Email Address** | Yes (Cloud sign-in only) | Yes | No | App Functionality |
+| Identifiers → **User ID** | Yes (Cloud only) | Yes | No | App Functionality |
+| Diagnostics → **Crash/Performance/Other** | Yes | Yes | No | App Functionality / Analytics |
+| User Content → **Other User Content / Photos or Videos / Audio** (prompts, images, files, dictation) | **No** (not retained by Zintus) | — | No | n/a for label — but **see §5b**: shared with third-party AI, needs 5.1.2(i) consent |
+| **API keys / credentials** | No | — | No | Stored on-device only |
+
+> No **Data Used to Track You** at all (no ATT prompt, no ad SDKs, no data
+> brokers). Most of the binary's collection exists only for the optional Zintus
+> Cloud feature.
+
+---
+
+## 5b. Guideline 5.1.2(i) — third-party-AI data sharing (NEW, MANDATORY)
+
+**This is the single biggest 2026 compliance change for an app like Zintus and a
+top rejection risk.** On **2025-11-13** Apple revised Guideline **5.1.2(i)** (and
+reaffirmed it in the **2026-06-08** guidelines update) to read (verbatim):
+
+> "You must clearly disclose where personal data will be shared with third
+> parties, **including with third-party AI**, and obtain explicit permission
+> before doing so."
+
+Zintus sends **prompts, images, and files to third-party AI providers**
+(OpenAI / Anthropic / Google Gemini / Groq / OpenRouter, etc.) — exactly the flow
+this rule governs. Reviewers actively reject for: no consent before first send, a
+single vague consent screen, vague privacy-policy wording, or any mismatch
+between the consent text and actual behavior.
+
+**What Zintus MUST implement (`[HUMAN]`/engineering — not just a doc change):**
+- **Explicit consent BEFORE the first time data leaves the device to a provider.**
+  Show a clear modal/onboarding step stating that the prompt (and any attached
+  image/file/voice transcript) **will be sent to the AI provider the user
+  selected**, and require an affirmative action to proceed.
+- **Name the recipient.** Because providers are user-chosen, the consent can be
+  generalized ("…to the AI provider you select, e.g. OpenAI, Anthropic, Google,
+  Groq") and ideally surface the **active provider's name** at send time.
+- **State the data types** shared: message text, attached images, attached
+  files/documents, and (if dictation is server-side) audio/transcript.
+- **Repeat it in Settings** (a persistent disclosure the user can revisit), and
+  allow opting back out (the BYOK/offline reality already supports "don't send").
+- **Privacy policy must list:** the provider(s), the purpose (AI inference /
+  research), and **retention** ("retention is governed by your own account with
+  that provider; Zintus does not retain prompt content"). Keep wording identical
+  in app + policy to avoid a behavior/disclosure mismatch rejection.
+- Mention the consent flow in **review notes** so the reviewer sees it is present
+  and intentional (see `review-notes.md`).
+
+> Architecture nuance to state, but which does **not** exempt you: data goes
+> device → the user's own gateway → the user-chosen provider, and Zintus never
+> custodies it. 5.1.2(i) still applies because personal data ultimately reaches a
+> third-party AI; disclose + consent regardless.
+
+---
+
+## 5c. Permission purpose strings (Info.plist) — required wording
+
+Guideline **5.1.1** requires every accessed sensitive API to have a purpose
+string that **names the feature, the benefit, and the data type** — generic
+strings like "App needs access" pass the automated upload check but are
+**rejected by human reviewers**. A missing key for a symbol present in the binary
+is a hard **ITMS-90683** upload failure. Set these in `app.json` →
+`ios.infoPlist` (only ship the keys for features actually in the build):
+
+| Info.plist key | Triggered by | Suggested string |
+|---|---|---|
+| `NSCameraUsageDescription` | Take a photo to attach to chat | "Zintus uses the camera so you can take a photo and attach it to your chat as image input for the AI." |
+| `NSMicrophoneUsageDescription` | Voice dictation (speech-to-text) | "Zintus uses the microphone for voice dictation, converting your speech to text when you compose a message." |
+| `NSPhotoLibraryUsageDescription` | Attach an existing image/file from the library | "Zintus accesses your photo library so you can attach an existing image to your chat as input for the AI." |
+| `NSPhotoLibraryAddUsageDescription` | **Only if** the app saves images back to the library (e.g. saving a generated/annotated image) | "Zintus saves images you choose to export back to your photo library." (Omit if Zintus never writes to the library.) |
+| `NSLocalNetworkUsageDescription` | Auto-detect the LAN gateway | *(already set)* "Zintus connects to a gateway running on your local network to route AI requests." |
+| `NSSpeechRecognitionUsageDescription` | **Only if** using Apple's on-device `Speech` framework for dictation | "Zintus uses speech recognition to turn your dictation into text on-device." |
+
+Notes:
+- Prefer **`NSPhotoLibraryUsageDescription`** (read) for image input; only add
+  **`NSPhotoLibraryAddUsageDescription`** if you actually write to the library.
+- Guideline **2.5.14** (recording): for camera/microphone capture you must get
+  explicit consent **and** show a clear visual/audible indication while
+  recording — add a recording indicator to the voice-dictation UI.
+- Request each permission **at point of use**, not on launch (5.1.1 best
+  practice; avoids "requests data it doesn't need yet" rejections).
+
+---
+
+## 5d. Other guidelines that bite this app
+
+- **4.2 Minimum Functionality:** an app that does nothing without an external
+  gateway + a provider key is a 4.2 / 2.1 risk. Mitigations: ship enough working
+  UX (history, projects, settings render offline), and **give reviewers a live
+  demo path** (demo gateway URL or a built-in demo mode) — see `review-notes.md`.
+- **2.1 App Completeness:** the backend (demo gateway / relay) **must be live
+  during review**; if you can't provide a demo account, Apple allows a **built-in
+  demo mode with prior approval** that "exhibits the app's full features."
+- **1.2 User-Generated / AI content:** chat surfaces model output. Provide a way
+  to **report/flag** an objectionable AI response, the ability to not see it, and
+  published contact info; act on reports. (Mirrors Play's Gen-AI requirement.)
+- **5.1.1(v) Account deletion:** because the app supports account creation
+  (Zintus Cloud), it must offer **in-app account deletion** (not just a website).
+  Relay `DELETE /api/account` exists; `[HUMAN]` confirm the in-app entry
+  (Settings → Account → Delete account) is wired.
+- **3.1.1 / 2.3.x:** no IAP/subscriptions ship in this build (managed keys
+  disabled); don't advertise them. See `review-notes.md`.
+
 ---
 
 ## 6. Pre-submission gate
 
-- [ ] Privacy Policy URL live (not draft placeholder) — `[HUMAN]` + counsel.
-- [ ] Demo gateway reachable for review, or built-in demo steps — see `review-notes.md`.
+- [ ] **5.1.2(i) consent UI shipped** (explicit pre-send disclosure naming
+      third-party AI) + repeated in Settings + matching privacy-policy wording
+      (§5b). **Top rejection risk — verify in the binary.**
+- [ ] Permission purpose strings set with feature-specific wording (§5c); only
+      the keys for shipped features present; request at point of use.
+- [ ] In-app **report/flag AI response** control present (1.2 / §5d).
+- [ ] In-app **account deletion** wired (5.1.1(v)) — `[HUMAN]` confirm.
+- [ ] **Encryption export answer decided** (`ITSAppUsesNonExemptEncryption`
+      path 1 or 2) — `[HUMAN]`/counsel, §4.
+- [ ] Privacy Policy URL live (not draft); **lists AI providers + purpose +
+      retention** — `[HUMAN]` + counsel.
+- [ ] Demo gateway reachable for review, or built-in demo mode (Apple-approved) — see `review-notes.md`.
 - [ ] Screenshots at exact 2026 sizes (§2).
 - [ ] No paid/managed-key copy in description (feature is disabled).
 - [ ] `[HUMAN]` Apple Developer Program enrollment ($99/yr) — see `SECRETS.md`.
@@ -174,9 +325,12 @@ quota (see `docs/agents/OPS.md`). When the user signs in to Zintus Cloud:
 
 ---
 
-## Sources (2026)
-- [App Store Review Guidelines](https://developer.apple.com/app-store/review/guidelines/) — esp. 2.1 (completeness/demo), 2.3.x (accurate metadata), 3.x (business), 5.1.1 (privacy policy).
+## Sources (accessed 2026-06-26)
+- [App Store Review Guidelines](https://developer.apple.com/app-store/review/guidelines/) — **5.1.2(i)** (third-party AI consent), 4.2 (minimum functionality), 2.1 (completeness/demo, live backend, built-in demo mode), 1.2 (UGC moderation), 2.5.14 (recording indication), 5.1.1 + 5.1.1(v) (privacy policy + in-app account deletion), 2.3.x (accurate metadata).
+- [Apple News: Updated App Review Guidelines (2026-06-08)](https://developer.apple.com/news/?id=d75yllv4)
+- [Apple's new App Review Guidelines clamp down on apps sharing personal data with 'third-party AI' — TechCrunch (2025-11-13)](https://techcrunch.com/2025/11/13/apples-new-app-review-guidelines-clamp-down-on-apps-sharing-personal-data-with-third-party-ai/)
+- [App Privacy Details — App Store](https://developer.apple.com/app-store/app-privacy-details/) — "collect" = transmit off-device + retain beyond real-time; tracking vs linked vs not-linked; data-use purposes.
+- [ITSAppUsesNonExemptEncryption — Apple Developer](https://developer.apple.com/documentation/bundleresources/information-property-list/itsappusesnonexemptencryption) — when `false` is/ isn't correct; OS HTTPS exempt; app-controlled key exchange not automatically exempt.
+- [NSCameraUsageDescription / NSMicrophoneUsageDescription / NSPhotoLibraryUsageDescription / NSPhotoLibraryAddUsageDescription — Apple Developer](https://developer.apple.com/documentation/BundleResources/Information-Property-List/NSCameraUsageDescription)
 - [Screenshot specifications — App Store Connect](https://developer.apple.com/help/app-store-connect/reference/app-information/screenshot-specifications/)
-- [App Store Screenshot Dimensions 2026 (6.9" 1320×2868, 13" iPad 2064×2752)](https://screenhance.com/blog/app-store-screenshot-dimensions-2026)
-- [App Privacy Details — App Store](https://developer.apple.com/app-store/app-privacy-details/)
 - [User Privacy and Data Use](https://developer.apple.com/app-store/user-privacy-and-data-use/)

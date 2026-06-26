@@ -1,199 +1,405 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
+  Alert,
+  AppState,
   FlatList,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
   Pressable,
+  ScrollView,
   Share,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
-import type { ProviderId } from "@zintus/types";
+import type { ListRenderItem } from "react-native";
+import { PROVIDER_IDS, type ProviderId } from "@zintus/types";
+import { PROVIDER_METADATA } from "@zintus/providers";
 import { useFocusEffect, useRouter } from "expo-router";
-import { streamChat, getGatewayUrl } from "@/lib/chat";
+
+import { ChatMessageBubble } from "@/components/ChatMessageBubble";
+import { streamChat } from "@/lib/chat";
+import { getGatewayUrl } from "@/lib/gateway-url";
 import { fetchGatewayHealth } from "@/lib/gateway";
 import { loadConfig, loadSelectedProvider } from "@/lib/config";
-import { toChatMessages } from "@/lib/messages";
+import { CHAT_MODES, deriveRouting, nextMode, type ChatMode } from "@/lib/chat-mode";
+import { grantProviderSendConsent, hasProviderSendConsent } from "@/lib/consent";
+import { DESTINATIONS, describeFlow } from "@/lib/data-flow";
+import {
+  fetchRouteOptions,
+  type RouteOption,
+  type RouteOptions,
+} from "@/lib/route-options";
+import {
+  appendMessage,
+  createThread,
+  setThreadGatewayId,
+  updateMessage,
+} from "@/lib/history";
+import {
+  createAssistantPlaceholder,
+  createUserMessage,
+  toChatMessages,
+  type UiMessage,
+} from "@/lib/messages";
 import { migrateLegacyKeys } from "@/lib/secure-keys";
 import { COLORS } from "@/lib/theme";
 
-// "auto" is a UI-only sentinel: it sends NO provider so the gateway routes
-// using the configured strategy.
 type ProviderSelection = ProviderId | "auto";
 
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  streaming?: boolean;
-  providerId?: ProviderId;
-  model?: string;
-}
+const STREAM_FLUSH_MS = 50;
 
 export default function ChatScreen() {
   const router = useRouter();
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<UiMessage[]>([]);
   const [input, setInput] = useState("");
-  const [selectedProvider, setSelectedProvider] =
-    useState<ProviderSelection>("auto");
+  const [provider, setProvider] = useState<ProviderSelection>("auto");
+  const [mode, setMode] = useState<ChatMode>("auto");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [gatewayOnline, setGatewayOnline] = useState(true);
   const [gatewayChecked, setGatewayChecked] = useState(false);
+  const [consentVisible, setConsentVisible] = useState(false);
+  const [overrideVisible, setOverrideVisible] = useState(false);
+  const [routeOptions, setRouteOptions] = useState<
+    Record<string, RouteOptions | null>
+  >({});
+
+  const threadIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const listRef = useRef<FlatList<UiMessage>>(null);
+  const pendingSendRef = useRef<string | null>(null);
 
   useEffect(() => {
     void migrateLegacyKeys();
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    async function refresh() {
-      const health = await fetchGatewayHealth();
-      if (!active) return;
-      setGatewayOnline(Boolean(health?.ok));
-      setGatewayChecked(true);
-    }
-    void refresh();
-    const interval = setInterval(() => void refresh(), 5000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, []);
-
   useFocusEffect(
     useCallback(() => {
-      setSelectedProvider(loadSelectedProvider());
+      setProvider(loadSelectedProvider());
     }, []),
   );
 
-  function toggleAuto() {
-    setSelectedProvider((current) =>
-      current === "auto" ? loadSelectedProvider() : "auto",
-    );
-  }
+  // Gateway health: polled ONLY while the Chat tab is focused AND the app is
+  // foregrounded, with 5→30s backoff while status is unchanged and the in-flight
+  // probe aborted on teardown. Replaces the old always-on 5s setInterval that
+  // woke the radio ~720x/hour even when blurred (battery + store-compliance).
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let controller: AbortController | null = null;
+      let delay = 5000;
+      const onlineRef = { current: null as boolean | null };
 
-  async function copyMessage(content: string) {
-    if (!content.trim()) {
-      return;
-    }
-    try {
-      await Share.share({ message: content });
-    } catch {
-      // Share sheet dismissed/unavailable — ignore.
-    }
-  }
+      const tick = async () => {
+        controller?.abort();
+        controller = new AbortController();
+        const health = await fetchGatewayHealth(controller.signal);
+        if (cancelled) return;
+        const online = Boolean(health?.ok);
+        delay =
+          onlineRef.current === online ? Math.min(delay * 1.5, 30000) : 5000;
+        onlineRef.current = online;
+        setGatewayOnline(online);
+        setGatewayChecked(true);
+        timer = setTimeout(() => void tick(), delay);
+      };
 
-  async function send() {
-    if (!input.trim() || sending) {
-      return;
-    }
+      void tick();
 
-    const config = loadConfig();
-    const userMessage: Message = {
-      id: `${Date.now()}-user`,
-      role: "user",
-      content: input.trim(),
-    };
-    const assistantId = `${Date.now()}-assistant`;
-
-    setMessages((current) => [
-      ...current,
-      userMessage,
-      { id: assistantId, role: "assistant", content: "", streaming: true },
-    ]);
-    setInput("");
-    setSending(true);
-    setError(null);
-
-    try {
-      const result = await streamChat({
-        // "auto" -> send no provider so the gateway routes by strategy.
-        providerId: selectedProvider === "auto" ? undefined : selectedProvider,
-        strategy: selectedProvider === "auto" ? config.routingStrategy : undefined,
-        mode: config.contextMode,
-        messages: toChatMessages([...messages, userMessage]),
-        onChunk: (text) => {
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === assistantId
-                ? { ...message, content: text }
-                : message,
-            ),
-          );
-        },
+      const sub = AppState.addEventListener("change", (state) => {
+        if (state === "active") {
+          if (!timer && !cancelled) {
+            delay = 5000;
+            void tick();
+          }
+        } else {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          controller?.abort();
+        }
       });
 
+      return () => {
+        cancelled = true;
+        if (timer) clearTimeout(timer);
+        controller?.abort();
+        sub.remove();
+      };
+    }, []),
+  );
+
+  const setAssistant = useCallback(
+    (id: string, patch: Partial<UiMessage>) => {
       setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantId
-            ? {
-                ...message,
-                streaming: false,
-                providerId: result.providerId,
-                model: result.model,
-                content:
-                  message.content ||
-                  `[${result.providerId}/${result.model}] (empty response)`,
-              }
-            : message,
-        ),
+        current.map((m) => (m.id === id ? { ...m, ...patch } : m)),
       );
-    } catch (sendError) {
-      const message =
-        sendError instanceof Error ? sendError.message : "Request failed";
-      setError(message);
-      setMessages((current) =>
-        current.map((item) =>
-          item.id === assistantId
-            ? {
-                ...item,
-                streaming: false,
-                content: `Error: ${message}`,
-              }
-            : item,
-        ),
-      );
-    } finally {
-      setSending(false);
+    },
+    [],
+  );
+
+  const loadRouteOptions = useCallback(async (providerId: ProviderId) => {
+    const options = await fetchRouteOptions(providerId);
+    setRouteOptions((prev) => ({ ...prev, [providerId]: options }));
+  }, []);
+
+  const runTurn = useCallback(
+    async (text: string, oneShotProvider?: ProviderId) => {
+      const config = loadConfig();
+      const routing = deriveRouting(mode, config.routingStrategy);
+      const effectiveProvider =
+        oneShotProvider ?? (provider === "auto" ? undefined : provider);
+
+      // Ensure a local thread exists so the conversation persists.
+      if (!threadIdRef.current) {
+        const thread = await createThread({
+          title: text.slice(0, 48),
+          defaultProvider: effectiveProvider ?? null,
+          strategy: routing.strategy ?? null,
+          privacyPosture: routing.posture,
+        });
+        threadIdRef.current = thread.id;
+      }
+      const threadId = threadIdRef.current;
+
+      const userMessage = createUserMessage(text);
+      const placeholder = createAssistantPlaceholder();
+      setMessages((current) => [...current, userMessage, placeholder]);
+      setInput("");
+      setSending(true);
+      setError(null);
+
+      void appendMessage({
+        threadId,
+        role: "user",
+        content: userMessage.content,
+      });
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // Throttle stream→state so we don't re-render the list per token.
+      let latest = "";
+      let flushScheduled = false;
+      const flush = () => {
+        flushScheduled = false;
+        setAssistant(placeholder.id, { content: latest });
+      };
+
+      try {
+        const result = await streamChat({
+          providerId: effectiveProvider,
+          strategy: effectiveProvider ? undefined : routing.strategy,
+          blockTraining: routing.blockTraining,
+          mode: config.contextMode,
+          threadId: threadIdRef.current ?? undefined,
+          messages: toChatMessages([...messages, userMessage]),
+          signal: controller.signal,
+          onChunk: (t) => {
+            latest = t;
+            if (!flushScheduled) {
+              flushScheduled = true;
+              setTimeout(flush, STREAM_FLUSH_MS);
+            }
+          },
+        });
+
+        setAssistant(placeholder.id, {
+          streaming: false,
+          providerId: result.providerId,
+          model: result.model,
+          meta: result.meta,
+          content: latest || `[${result.providerId}/${result.model}] (empty response)`,
+        });
+
+        if (result.threadId && threadId) {
+          void setThreadGatewayId(threadId, result.threadId);
+        }
+        void appendMessage({
+          threadId,
+          role: "assistant",
+          content: latest,
+          providerId: result.providerId,
+          model: result.model,
+          meta: result.meta,
+        });
+        void loadRouteOptions(result.providerId);
+      } catch (sendError) {
+        if (controller.signal.aborted) {
+          setAssistant(placeholder.id, {
+            streaming: false,
+            content: latest || "(stopped)",
+          });
+        } else {
+          const message =
+            sendError instanceof Error ? sendError.message : "Request failed";
+          setError(message);
+          setAssistant(placeholder.id, {
+            streaming: false,
+            error: true,
+            content: `Error: ${message}`,
+          });
+        }
+      } finally {
+        setSending(false);
+        abortRef.current = null;
+      }
+    },
+    [messages, mode, provider, setAssistant, loadRouteOptions],
+  );
+
+  const send = useCallback(
+    (oneShotProvider?: ProviderId) => {
+      const text = input.trim();
+      if (!text || sending || !gatewayOnline) return;
+      const routing = deriveRouting(mode, loadConfig().routingStrategy);
+      // Apple 5.1.2(i): consent before sending to a third-party provider.
+      if (routing.posture !== "local-only" && !hasProviderSendConsent()) {
+        pendingSendRef.current = text;
+        setConsentVisible(true);
+        return;
+      }
+      void runTurn(text, oneShotProvider);
+    },
+    [input, sending, gatewayOnline, mode, runTurn],
+  );
+
+  function grantConsentAndSend() {
+    grantProviderSendConsent();
+    setConsentVisible(false);
+    const text = pendingSendRef.current;
+    pendingSendRef.current = null;
+    if (text) void runTurn(text);
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+  }
+
+  const copy = useCallback((text: string) => {
+    if (text.trim()) void Share.share({ message: text });
+  }, []);
+
+  const lastUserText = useMemo(
+    () => [...messages].reverse().find((m) => m.role === "user")?.content ?? "",
+    [messages],
+  );
+
+  const retry = useCallback(() => {
+    if (lastUserText) void runTurn(lastUserText);
+  }, [lastUserText, runTurn]);
+
+  const regenerate = useCallback(() => {
+    if (!lastUserText) return;
+    const lastProvider = [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && m.providerId)?.providerId;
+    const idx = lastProvider ? PROVIDER_IDS.indexOf(lastProvider) : -1;
+    const next = PROVIDER_IDS[(idx + 1) % PROVIDER_IDS.length];
+    void runTurn(lastUserText, next);
+  }, [lastUserText, messages, runTurn]);
+
+  const report = useCallback(() => {
+    // Play Gen-AI policy / Apple 1.2: in-app way to flag offensive AI content.
+    Alert.alert(
+      "Report this response",
+      "Flag this AI-generated response as offensive, unsafe, or inaccurate? This stays on your device and helps you track problem providers.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Report",
+          style: "destructive",
+          onPress: () =>
+            Alert.alert("Reported", "Thanks — response flagged on this device."),
+        },
+      ],
+    );
+  }, []);
+
+  const notAvailable = useCallback((feature: string) => {
+    Alert.alert(
+      `${feature} needs a dev build`,
+      `${feature} uses native modules that aren't in this Expo Go-style runtime. Install the dev build (see Settings) to enable it.`,
+    );
+  }, []);
+
+  const renderItem = useCallback<ListRenderItem<UiMessage>>(
+    ({ item }) => (
+      <ChatMessageBubble
+        message={item}
+        routeOptions={item.providerId ? routeOptions[item.providerId] : null}
+        onCopy={copy}
+        onCopyCode={copy}
+        onRetry={!sending ? retry : undefined}
+        onRegenerate={!sending ? regenerate : undefined}
+        onReport={report}
+        onRouteAction={handleRouteAction}
+      />
+    ),
+    [routeOptions, copy, retry, regenerate, report, sending],
+  );
+
+  function handleRouteAction(action: RouteOption) {
+    switch (action) {
+      case "switch_provider":
+      case "use_local":
+        router.push("/providers");
+        break;
+      case "compress_harder":
+        Alert.alert(
+          "Compress harder",
+          "Tokzen already compresses every turn. Shorter prompts and fewer attachments stretch your free-tier budget further.",
+        );
+        break;
+      case "wait":
+        Alert.alert("Wait for reset", "No healthy alternative right now — your quota will recover at the provider's reset time.");
+        break;
     }
   }
 
-  const chipLabel = selectedProvider === "auto" ? "Auto" : selectedProvider;
+  const keyExtractor = useCallback((item: UiMessage) => item.id, []);
+  const modeDef = CHAT_MODES.find((m) => m.mode === mode)!;
+  const canSend = Boolean(input.trim()) && !sending && gatewayOnline;
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
       <View style={styles.header}>
         <Text style={styles.title}>Zintus</Text>
         <View style={styles.chipRow}>
           <Pressable
+            style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
+            onPress={() => setMode((m) => nextMode(m))}
+          >
+            <Text style={styles.chipText}>{modeDef.label}</Text>
+          </Pressable>
+          <Pressable
             style={({ pressed }) => [
               styles.chip,
-              selectedProvider === "auto" && styles.chipActive,
+              provider === "auto" && styles.chipActive,
               pressed && styles.pressed,
             ]}
-            onPress={toggleAuto}
+            onPress={() => router.push("/providers")}
           >
             <Text
               style={[
                 styles.chipText,
-                selectedProvider === "auto" && styles.chipTextActive,
+                provider === "auto" && styles.chipTextActive,
               ]}
             >
-              {chipLabel}
+              {provider === "auto" ? "Auto" : provider}
             </Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
-            onPress={() => {
-              router.push("/providers");
-            }}
-          >
-            <Text style={styles.chipText}>Change</Text>
           </Pressable>
         </View>
       </View>
+
       {gatewayChecked && !gatewayOnline && (
         <View style={styles.offlineBanner}>
           <Text style={styles.offlineText}>
@@ -205,111 +411,162 @@ export default function ChatScreen() {
           </Text>
         </View>
       )}
+
       <Text style={styles.gatewayHint}>
-        Gateway: {getGatewayUrl()}
-        {selectedProvider === "auto" ? " · auto-routing" : ""}
+        Gateway: {getGatewayUrl()} · {modeDef.hint}
       </Text>
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       <FlatList
+        ref={listRef}
         style={styles.list}
         data={messages}
-        keyExtractor={(item) => item.id}
+        keyExtractor={keyExtractor}
+        renderItem={renderItem}
         contentContainerStyle={
-          messages.length === 0 ? styles.emptyContainer : undefined
+          messages.length === 0 ? styles.emptyContainer : styles.listContent
         }
+        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+        windowSize={10}
+        maxToRenderPerBatch={8}
+        removeClippedSubviews
+        keyboardShouldPersistTaps="handled"
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={styles.emptyTitle}>Ask anything</Text>
             <Text style={styles.emptySubtitle}>
-              {selectedProvider === "auto"
-                ? "Auto mode routes your message to the best available free provider."
-                : `Messages route through ${selectedProvider}. Tap Auto to let the gateway choose.`}
+              {provider === "auto"
+                ? "Auto mode routes your message to the best available free provider — through your gateway, using your own keys."
+                : `Messages route through ${provider}. Tap the chip to change.`}
             </Text>
           </View>
         }
-        renderItem={({ item }) => {
-          const isUser = item.role === "user";
-          return (
-            <View
-              style={[
-                styles.bubble,
-                isUser ? styles.userBubble : styles.assistantBubble,
-              ]}
-            >
-              {item.streaming && !item.content ? (
-                <View style={styles.typingRow}>
-                  <ActivityIndicator size="small" color={COLORS.accentBright} />
-                  <Text style={styles.typingText}>Thinking…</Text>
-                </View>
-              ) : (
-                <Text style={[styles.bubbleText, isUser && styles.userBubbleText]}>
-                  {item.content}
-                  {item.streaming ? (
-                    <Text style={styles.cursor}>▋</Text>
-                  ) : null}
-                </Text>
-              )}
-
-              {!isUser && !item.streaming && item.content ? (
-                <View style={styles.assistantFooter}>
-                  {item.providerId ? (
-                    <Text style={styles.attribution}>
-                      {item.providerId}
-                      {item.model ? ` · ${item.model}` : ""}
-                    </Text>
-                  ) : (
-                    <View />
-                  )}
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.copyButton,
-                      pressed && styles.pressed,
-                    ]}
-                    onPress={() => {
-                      void copyMessage(item.content);
-                    }}
-                  >
-                    <Text style={styles.copyText}>Copy</Text>
-                  </Pressable>
-                </View>
-              ) : null}
-            </View>
-          );
-        }}
       />
 
       <View style={styles.composer}>
-        <TextInput
-          style={styles.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder="Message..."
-          placeholderTextColor={COLORS.muted}
-          editable={!sending}
-          onSubmitEditing={() => {
-            void send();
-          }}
-        />
-        <Pressable
-          style={({ pressed }) => [
-            styles.sendButton,
-            (sending || !input.trim()) && styles.sendButtonDisabled,
-            pressed && !sending && input.trim() ? styles.pressed : null,
-          ]}
-          onPress={() => {
-            void send();
-          }}
-          disabled={sending || !input.trim()}
-        >
+        <View style={styles.composerTopRow}>
+          <Pressable
+            hitSlop={6}
+            onPress={() => notAvailable("Attachments")}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.iconBtnText}>＋</Text>
+          </Pressable>
+          <Pressable
+            hitSlop={6}
+            onPress={() => notAvailable("Voice dictation")}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.iconBtnText}>🎤</Text>
+          </Pressable>
+          <TextInput
+            style={styles.input}
+            value={input}
+            onChangeText={setInput}
+            placeholder={gatewayOnline ? "Message…" : "Gateway offline"}
+            placeholderTextColor={COLORS.muted}
+            editable={!sending}
+            multiline
+          />
+        </View>
+        <View style={styles.composerBottomRow}>
+          <Text style={styles.composerMeta}>
+            {provider === "auto" ? `Auto · ${modeDef.label}` : provider}
+          </Text>
           {sending ? (
-            <ActivityIndicator color={COLORS.onAccent} />
+            <Pressable
+              onPress={stop}
+              style={({ pressed }) => [styles.stopButton, pressed && styles.pressed]}
+            >
+              <Text style={styles.stopText}>Stop</Text>
+            </Pressable>
           ) : (
-            <Text style={styles.sendText}>Send</Text>
+            <Pressable
+              onPress={() => send()}
+              onLongPress={() => input.trim() && setOverrideVisible(true)}
+              disabled={!canSend}
+              style={({ pressed }) => [
+                styles.sendButton,
+                !canSend && styles.sendButtonDisabled,
+                pressed && canSend && styles.pressed,
+              ]}
+            >
+              <Text style={styles.sendText}>Send</Text>
+            </Pressable>
           )}
-        </Pressable>
+        </View>
       </View>
-    </View>
+
+      {/* Pre-send consent (Apple 5.1.2(i)) — where the data actually goes. */}
+      <Modal visible={consentVisible} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Before your first send</Text>
+            <Text style={styles.modalBody}>
+              Your message goes to the AI provider you choose, routed through your
+              own gateway. Here&apos;s exactly where data travels:
+            </Text>
+            <ScrollView style={styles.flowList}>
+              {describeFlow("standard").map((item, i) => (
+                <View key={i} style={styles.flowItem}>
+                  <Text style={styles.flowDest}>
+                    {DESTINATIONS[item.destination].label}
+                  </Text>
+                  <Text style={styles.flowData}>{item.data}</Text>
+                  <Text style={styles.flowDetail}>{item.detail}</Text>
+                </View>
+              ))}
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setConsentVisible(false)}
+                style={({ pressed }) => [styles.modalBtn, pressed && styles.pressed]}
+              >
+                <Text style={styles.modalBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={grantConsentAndSend}
+                style={({ pressed }) => [
+                  styles.modalBtn,
+                  styles.modalBtnPrimary,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.modalBtnPrimaryText}>Got it — send</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Long-press Send → one-message provider override. */}
+      <Modal visible={overrideVisible} transparent animationType="slide">
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setOverrideVisible(false)}
+        >
+          <View style={styles.sheet}>
+            <Text style={styles.sheetTitle}>Send this message via…</Text>
+            <ScrollView>
+              {PROVIDER_IDS.map((id) => (
+                <Pressable
+                  key={id}
+                  onPress={() => {
+                    setOverrideVisible(false);
+                    send(id);
+                  }}
+                  style={({ pressed }) => [styles.sheetRow, pressed && styles.pressed]}
+                >
+                  <Text style={styles.sheetRowText}>
+                    {PROVIDER_METADATA[id]?.name ?? id}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -346,16 +603,8 @@ const styles = StyleSheet.create({
     borderColor: COLORS.error,
     backgroundColor: COLORS.panel,
   },
-  offlineText: {
-    color: COLORS.error,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  offlineSub: {
-    color: COLORS.muted,
-    fontSize: 11,
-    marginTop: 2,
-  },
+  offlineText: { color: COLORS.error, fontSize: 13, fontWeight: "600" },
+  offlineSub: { color: COLORS.muted, fontSize: 11, marginTop: 2 },
   chip: {
     backgroundColor: COLORS.panel,
     borderRadius: 999,
@@ -364,63 +613,45 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  chipActive: {
-    backgroundColor: COLORS.accent,
-    borderColor: COLORS.accent,
-  },
+  chipActive: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
   chipText: { color: COLORS.accentBright, textTransform: "capitalize" },
   chipTextActive: { color: COLORS.onAccent, fontWeight: "700" },
   pressed: { opacity: 0.7 },
   list: { flex: 1, paddingHorizontal: 16 },
+  listContent: { paddingBottom: 8 },
   emptyContainer: { flexGrow: 1, justifyContent: "center" },
   empty: { alignItems: "center", paddingHorizontal: 24 },
-  emptyTitle: {
-    color: COLORS.ink,
-    fontSize: 18,
-    fontWeight: "700",
-    marginBottom: 8,
-  },
+  emptyTitle: { color: COLORS.ink, fontSize: 18, fontWeight: "700", marginBottom: 8 },
   emptySubtitle: {
     color: COLORS.muted,
     fontSize: 14,
     textAlign: "center",
     lineHeight: 20,
   },
-  bubble: {
-    borderRadius: 12,
+  composer: {
     padding: 12,
-    marginBottom: 10,
-    maxWidth: "85%",
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    gap: 8,
   },
-  userBubble: { alignSelf: "flex-end", backgroundColor: COLORS.accent },
-  assistantBubble: { alignSelf: "flex-start", backgroundColor: COLORS.panel },
-  bubbleText: { color: COLORS.ink },
-  userBubbleText: { color: COLORS.onAccent },
-  cursor: { color: COLORS.accentBright },
-  typingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  typingText: { color: COLORS.muted, fontSize: 13 },
-  assistantFooter: {
-    marginTop: 8,
+  composerTopRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
+  composerBottomRow: {
     flexDirection: "row",
-    alignItems: "center",
     justifyContent: "space-between",
+    alignItems: "center",
   },
-  attribution: { color: COLORS.muted, fontSize: 11 },
-  copyButton: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
+  composerMeta: { color: COLORS.muted, fontSize: 11, textTransform: "capitalize" },
+  iconBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: COLORS.panel,
+    alignItems: "center",
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  copyText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "600" },
-  composer: {
-    flexDirection: "row",
-    gap: 8,
-    padding: 16,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-  },
+  iconBtnText: { color: COLORS.accentBright, fontSize: 18 },
   input: {
     flex: 1,
     backgroundColor: COLORS.panel,
@@ -428,15 +659,71 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
+    maxHeight: 140,
+    minHeight: 38,
   },
   sendButton: {
     backgroundColor: COLORS.accent,
     borderRadius: 10,
     justifyContent: "center",
-    paddingHorizontal: 14,
-    minWidth: 56,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
     alignItems: "center",
   },
-  sendButtonDisabled: { opacity: 0.5 },
+  sendButtonDisabled: { opacity: 0.4 },
   sendText: { color: COLORS.onAccent, fontWeight: "700" },
+  stopButton: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.error,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+  },
+  stopText: { color: COLORS.error, fontWeight: "700" },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center",
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: COLORS.panel,
+    borderRadius: 14,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  modalTitle: { color: COLORS.ink, fontSize: 17, fontWeight: "800", marginBottom: 8 },
+  modalBody: { color: COLORS.muted, fontSize: 13, lineHeight: 19, marginBottom: 10 },
+  flowList: { maxHeight: 230 },
+  flowItem: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+    paddingVertical: 8,
+  },
+  flowDest: { color: COLORS.accentBright, fontSize: 12, fontWeight: "800" },
+  flowData: { color: COLORS.ink, fontSize: 13, fontWeight: "600", marginTop: 1 },
+  flowDetail: { color: COLORS.muted, fontSize: 12, lineHeight: 17, marginTop: 1 },
+  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 14 },
+  modalBtn: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 9 },
+  modalBtnText: { color: COLORS.muted, fontWeight: "700" },
+  modalBtnPrimary: { backgroundColor: COLORS.accent },
+  modalBtnPrimaryText: { color: COLORS.onAccent, fontWeight: "800" },
+  sheet: {
+    marginTop: "auto",
+    backgroundColor: COLORS.panel,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: 16,
+    maxHeight: "70%",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  sheetTitle: { color: COLORS.ink, fontSize: 15, fontWeight: "800", marginBottom: 8 },
+  sheetRow: {
+    paddingVertical: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  sheetRowText: { color: COLORS.ink, fontSize: 15 },
 });

@@ -55,6 +55,40 @@ Pick ONE of the two options and fill in the `[HUMAN]` values before submitting.
 
 Option A is preferred because it removes any setup burden from the reviewer.
 
+> **Apple 2.1 fallback — built-in demo mode.** If a live demo gateway can't be
+> guaranteed for the whole review window, Apple allows (with **prior approval**)
+> a **built-in demo mode** that "exhibits the app's full features and
+> functionality" in lieu of a demo account/backend. `[HUMAN]` decide between
+> (a) keeping the demo gateway up reliably, or (b) shipping a demo mode and
+> requesting Apple's approval. Either way the reviewer must be able to send a
+> message and get a real response — an app that only shows "Gateway offline"
+> will be rejected under 4.2 (minimum functionality) / 2.1 (completeness).
+
+---
+
+## Third-party AI data-sharing consent (Apple Guideline 5.1.2(i)) — what the reviewer will see
+
+> Apple's Guideline **5.1.2(i)** (revised 2025-11-13) requires explicit
+> disclosure + consent before any personal data is shared with third-party AI.
+> Zintus handles this with an **in-app consent step shown before the first time a
+> prompt/image/file is sent** to an AI provider: it states that the message and
+> any attachment will be sent to the AI provider the user selected (e.g. OpenAI,
+> Anthropic, Google, Groq), names the data types, and requires the user to
+> proceed. The same disclosure is available in **Settings**, and the **privacy
+> policy** lists the providers, purpose, and retention. This consent UI is
+> intentional and expected — please do not flag it as a blocker. (Data goes
+> device → the user's own gateway → the user-chosen provider; Zintus does not
+> retain prompt content.)
+
+## AI-generated content reporting (Apple 1.2 / Google Play Gen-AI policy)
+
+> Chat and Deep Research surface output from third-party LLMs. Per Apple 1.2 and
+> Google Play's AI-Generated Content policy, each AI response includes a
+> **"report / flag"** control (long-press or overflow menu on an assistant
+> message) that lets users report offensive content **without leaving the app**;
+> reports route to support and inform moderation. Prompts are user-driven (BYOK),
+> and provider-side safety also applies.
+
 ---
 
 ## Why there are no paid / in-app-purchase features to test
@@ -92,12 +126,15 @@ Option A is preferred because it removes any setup burden from the reviewer.
   the user's gateway as **opaque x25519 ciphertext** via the relay
   (`apps/mobile/lib/gateway-key-push.ts`). The relay forwards ciphertext and
   **cannot read keys**.
-- **Prompts / chat content**: on the BYOK/LAN path, prompts go device → gateway
-  → the provider the user chose; they do **not** touch Zintus servers.
+- **Prompts / chat content, image input, file input, voice transcript**: on the
+  BYOK/LAN path these go device → gateway → the provider the user chose; they do
+  **not** touch Zintus servers and Zintus does **not** retain them. They ARE
+  shared with the third-party AI provider, which is disclosed and consented per
+  Apple 5.1.2(i) and declared in the Play Data safety form.
 - **Relay logs**: only auth + routing + quota metadata (and optional Sentry).
   **No prompt bodies, no plaintext keys.** See `docs/agents/OPS.md`.
-- Matches the App Privacy labels (`ios-listing.md`) and Data safety form
-  (`play-listing.md`).
+- Matches the App Privacy labels + 5.1.2(i) consent (`ios-listing.md`) and Data
+  safety form (`play-listing.md`).
 
 ---
 
@@ -109,14 +146,29 @@ Option A is preferred because it removes any setup burden from the reviewer.
 
 ---
 
+## Permission prompts the reviewer will see (all expected & disclosed)
+
+- **Local network** (iOS) — to auto-detect the gateway on the LAN.
+- **Camera** — only when the user taps "take a photo" to attach image input.
+- **Photo library** — only when the user attaches an existing image/file.
+- **Microphone** (+ Speech Recognition on iOS) — only when the user starts voice
+  dictation; a recording indicator is shown while capturing (Apple 2.5.14).
+- Each is requested **at point of use**, not on launch, with a feature-specific
+  purpose string. None are used for tracking or analytics.
+
 ## Known-good "negative" behaviors (so the reviewer doesn't file them as bugs)
 
 - "Gateway offline — run `zintus serve`" when no gateway is reachable — expected.
+  (Use **Option A demo gateway** so chat returns a real response during review.)
 - Empty/locked features tied to managed keys / paid tiers — expected (disabled).
 - Local-network permission prompt on first launch (iOS) — expected and disclosed.
+- The **third-party-AI consent step** before the first send — intentional
+  (Guideline 5.1.2(i)), not a bug.
 
 ---
 
-## Sources (2026)
-- [App Store Review Guidelines — 2.1 (provide demo account / live backend), 2.3.x, 3.1.1](https://developer.apple.com/app-store/review/guidelines/)
+## Sources (accessed 2026-06-26)
+- [App Store Review Guidelines](https://developer.apple.com/app-store/review/guidelines/) — 5.1.2(i) (third-party AI consent), 4.2 (minimum functionality), 2.1 (demo account / live backend / built-in demo mode), 1.2 (UGC reporting), 2.5.14 (recording indication), 3.1.1.
+- [Apple's new App Review Guidelines clamp down on apps sharing personal data with 'third-party AI' — TechCrunch (2025-11-13)](https://techcrunch.com/2025/11/13/apples-new-app-review-guidelines-clamp-down-on-apps-sharing-personal-data-with-third-party-ai/)
+- [Understanding Google Play's AI-Generated Content policy (in-app reporting/flagging)](https://support.google.com/googleplay/android-developer/answer/14094294)
 - [Google Play Developer Program Policy](https://support.google.com/googleplay/android-developer/answer/16810878)
