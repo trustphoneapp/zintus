@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ChatMessage, Provider, ProviderId } from "@zintus/types";
 import { ProviderHttpError, estimateUsage } from "@zintus/providers";
-import { createRouter } from "./factory.js";
+import { createRouter, type RouteAttemptEvent } from "./factory.js";
 
 const dbPaths: string[] = [];
 
@@ -224,6 +224,69 @@ describe("createRouter failover", () => {
     expect(models).toEqual(["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]);
     expect(result.model).toBe("llama-3.1-8b-instant");
     expect(result.providerId).toBe("groq");
+  });
+
+  // Fix 3: the success attempt must be recorded only once the stream COMPLETES,
+  // not when the provider connection is established.
+  test("emits the success attempt only after the stream fully drains", async () => {
+    const events: RouteAttemptEvent[] = [];
+    const router = createTestRouter([
+      stubProvider("groq", 1, async () => ({
+        stream: (async function* () {
+          yield { content: "ok" };
+        })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({
+      messages,
+      onAttempt: (event) => events.push(event),
+    });
+    // Connecting is not success — nothing is recorded before the drain.
+    expect(events).toHaveLength(0);
+
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(events).toHaveLength(1);
+    expect(events[0]?.status).toBe("success");
+  });
+
+  // Fix 3: a stream that dies mid-drain must be recorded as FAIL, never as a
+  // success the pre-fix code would have already emitted before consumption.
+  test("records a stream that dies mid-drain as a failure, not a success", async () => {
+    const events: RouteAttemptEvent[] = [];
+    const router = createTestRouter([
+      stubProvider("groq", 1, async () => ({
+        stream: (async function* () {
+          yield { content: "partial" };
+          throw new Error("stream died");
+        })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({
+      messages,
+      onAttempt: (event) => events.push(event),
+    });
+    expect(events).toHaveLength(0);
+
+    let drained = "";
+    await expect(
+      (async () => {
+        for await (const chunk of result.stream) {
+          drained += chunk;
+        }
+      })(),
+    ).rejects.toThrow("stream died");
+
+    // The partial output streamed, but the recorded outcome is honest: a fail,
+    // and never a success.
+    expect(drained).toBe("partial");
+    expect(events.some((event) => event.status === "success")).toBe(false);
+    const fail = events.find((event) => event.status === "fail");
+    expect(fail).toBeDefined();
+    expect(fail?.providerId).toBe("groq");
   });
 });
 

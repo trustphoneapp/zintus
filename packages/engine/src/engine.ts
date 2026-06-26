@@ -59,6 +59,14 @@ export interface EngineConfig extends RouterConfig {
   compilerVersion?: string;
   cachePath?: string;
   enableCache?: boolean;
+  /** Filesystem path for the long-term memory DB. Defaults to MemoryStore's
+   *  own default (~/.zintus/memory.db). Injecting a path keeps separate
+   *  engines/processes/tests from colliding on a single hidden global DB. */
+  memoryPath?: string;
+  /** Pre-built MemoryStore to use instead of constructing one. Takes precedence
+   *  over `memoryPath`. When injected, the CALLER owns its lifecycle and
+   *  Engine.close() will not close it. */
+  memory?: MemoryStore;
   /** Local workspace to index for codebase-aware context (Smart Context
    *  Engine). Defaults to $ZINTUS_WORKSPACE. Off when neither is set. */
   workspaceDir?: string;
@@ -110,6 +118,12 @@ export interface Engine {
   getTrace(traceId: string): RequestTrace | null;
   getLastTrace(): RequestTrace | null;
   listTraces(limit: number): RequestTrace[];
+  /** Release the DB handles this engine OWNS (conversation store, response
+   *  cache, and the memory store ONLY when the engine constructed it). An
+   *  injected MemoryStore is left open for its owner to close. Idempotent.
+   *  Optional so lightweight fake engines (e.g. gateway tests) need not
+   *  implement it; the real `createEngine` always provides it. */
+  close?(): void;
 }
 
 const DEFAULT_QUOTA_PATH = join(homedir(), ".zintus", "quota.db");
@@ -158,7 +172,12 @@ export function createEngine(config: EngineConfig = {}): Engine {
   const conversations = new ConversationStore(config.conversationsPath);
   const persistConversations = config.persistConversations !== false;
   const persistTraces = config.persistTraces !== false;
-  const memory = new MemoryStore();
+  // Memory store is injectable so separate engines/processes/tests don't
+  // collide on a single hidden global DB. `ownsMemory` is false when the caller
+  // injected an instance — in that case its lifecycle (and close) belongs to
+  // the caller, so Engine.close() must not close it.
+  const ownsMemory = config.memory == null;
+  const memory = config.memory ?? new MemoryStore(config.memoryPath);
   memory.init();
   const cache = config.enableCache !== false ? new ResponseCache(config.cachePath) : null;
   const compilerVersion = config.compilerVersion ?? resolveCompilerVersion();
@@ -436,6 +455,18 @@ export function createEngine(config: EngineConfig = {}): Engine {
       const targetModel = request.model ?? "auto";
 
       if (cache && !request.bypassCache) {
+        // SCOPED-CACHE NOTE (assessed, intentionally NOT scoped here): the L1
+        // key (prompt/model/provider/temp/maxTokens) and the L2 semantic lookup
+        // (prompt embedding + model + provider) are NOT scoped by user / thread
+        // / workspace. This is safe because the engine's ResponseCache is a
+        // single-user, machine-local DB (~/.zintus/cache.db) — every entry was
+        // produced by, and is served back to, the same local user. The risk
+        // would be cross-user leakage IF this same cache instance were ever
+        // shared across users (e.g. a multi-tenant relay); in that case the
+        // cache key MUST gain a scope dimension. The store already carries
+        // userId/threadId columns for that future, but threading a scope into
+        // the key/lookup lives in @zintus/cache, which is outside this change's
+        // scope. See docs/agents/CORE.md ("Response cache scope").
         const cacheKey = cache.generateKey(effectiveMessages, {
           model: targetModel,
           providerId: targetProvider,
@@ -471,6 +502,28 @@ export function createEngine(config: EngineConfig = {}): Engine {
               },
             );
           }
+
+          // A cache hit is a real, observable outcome — finish the trace the
+          // SAME way the provider path does (winner, latency, completedAt) so
+          // observability never silently drops or lies about cache hits. The
+          // hit tier is carried out-of-band via the OTLP `zintus.cache.hit`
+          // attribute (cacheStatus = "L1"/"L2", i.e. a hit, vs "miss").
+          const cacheCompletedAt = new Date();
+          const cacheTrace: Omit<RequestTrace, "traceId" | "attempts"> = {
+            startedAt: new Date(traceStartedAt),
+            completedAt: cacheCompletedAt,
+            winner: { providerId: targetProvider as ProviderId, model: targetModel },
+            totalLatencyMs: cacheCompletedAt.getTime() - traceStartedAt,
+          };
+          if (persistTraces) {
+            conversations.completeTrace(traceId, cacheTrace);
+          }
+          exportRequestTrace({
+            trace: { traceId, attempts: [], ...cacheTrace },
+            cacheHit,
+            compileTokens: compileTokenEstimate,
+            failoverCount: 0,
+          });
 
           return {
             providerId: targetProvider as any,
@@ -606,6 +659,31 @@ export function createEngine(config: EngineConfig = {}): Engine {
         return null;
       }
       return memory.getCompileTrace(parsed);
+    },
+
+    close() {
+      // Close only what this engine owns. Each close is best-effort and never
+      // throws so a partial failure can't strand the rest of the shutdown.
+      // `close?.()` is used for stores that may not (yet) expose a close hook
+      // (e.g. MemoryStore / ResponseCache live in packages outside this scope);
+      // it becomes a real close the moment those packages add the method.
+      try {
+        conversations.close();
+      } catch {
+        /* already closed / never opened */
+      }
+      try {
+        (cache as { close?: () => void } | null)?.close?.();
+      } catch {
+        /* already closed */
+      }
+      if (ownsMemory) {
+        try {
+          (memory as { close?: () => void }).close?.();
+        } catch {
+          /* already closed */
+        }
+      }
     },
   };
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { QuotaBar } from "@/app/_components/QuotaBar";
+import { RouteOptionsPanel } from "@/app/_components/RouteOptionsPanel";
 import { useAppStore } from "@/lib/app-store";
 import { hasEncryptedKeys } from "@/lib/crypto";
 import { PROVIDER_BY_ID, PROVIDERS } from "@/lib/providers";
@@ -241,6 +242,14 @@ export default function ProvidersPage() {
                           % success · {stats[provider.id]!.avgLatencyMs}ms avg ·{" "}
                           {stats[provider.id]!.attempts} req
                         </div>
+                      ) : null}
+                      {gatewayConnected &&
+                      (provider.inCooldown ||
+                        (provider.quota != null && provider.quota <= 20)) ? (
+                        <RouteOptionsPanel
+                          provider={provider.id}
+                          quotaPct={provider.quota}
+                        />
                       ) : null}
                     </>
                   ) : (

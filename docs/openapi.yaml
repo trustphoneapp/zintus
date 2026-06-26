@@ -259,6 +259,57 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/route/options:
+    get:
+      tags: [Operations]
+      operationId: getRouteOptions
+      summary: BYOK quota-exhaustion decision (auth-gated)
+      description: |
+        Local, BYOK-only decision API: given a provider (and an optional `quota`
+        hint), it returns what the UI should do when that provider's free-tier
+        quota is low or exhausted — derived ONLY from local provider/quota/runtime
+        state. The only recommended actions are the BYOK options
+        `compress_harder`, `switch_provider`, `use_local`, and `wait`. It never
+        bills, holds funds, manages keys, or exposes a paid/credits/overflow path,
+        and the response carries only derived fields (no API keys, prompt content,
+        or secrets). `resetIn` is returned only when the ledger genuinely tracks a
+        reset time (e.g. a 429 / Groq reset header); otherwise it is `null` with a
+        `resetReason`. `alternatives` are cheapest-healthy BYOK providers priced
+        from a static estimate catalog (not billing truth).
+      parameters:
+        - name: provider
+          in: query
+          required: true
+          description: Provider to evaluate. Must be a known provider id.
+          schema:
+            type: string
+        - name: quota
+          in: query
+          required: false
+          description: |
+            Optional client hint for remaining quota (0..1). Ignored when the
+            server's ledger has a value for the provider.
+          schema:
+            type: number
+            minimum: 0
+            maximum: 1
+      responses:
+        "200":
+          description: The recommended BYOK action and supporting context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteOptions"
+        "400":
+          description: Missing or unknown provider.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example: { error: { message: "Unknown provider: anthropic" } }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/savings:
     get:
       tags: [Operations]
@@ -897,6 +948,70 @@ components:
         note:
           type: string
           example: "estimate vs. paid-API list pricing"
+
+    RouteOptions:
+      type: object
+      required:
+        [provider, quotaRemaining, resetIn, best, options, reason, alternatives, localAvailable]
+      additionalProperties: false
+      properties:
+        provider:
+          type: string
+          description: The evaluated provider id.
+        quotaRemaining:
+          description: |
+            Remaining quota ratio (0..1) from the server ledger when the provider
+            is keyed, else the client hint, else null. Never fabricated.
+          oneOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+            - type: "null"
+        resetIn:
+          description: |
+            Seconds until reset, ONLY when the ledger genuinely tracks it (e.g. a
+            429 / Groq reset header or backoff cooldown); otherwise null.
+          oneOf:
+            - type: integer
+            - type: "null"
+        resetReason:
+          type: string
+          description: Present only when `resetIn` is null.
+          example: "Reset time unavailable"
+        best:
+          type: string
+          description: The recommended BYOK action.
+          enum: [compress_harder, switch_provider, use_local, wait]
+        options:
+          type: array
+          description: BYOK-only actions available. Never includes a paid/credits option.
+          items:
+            type: string
+            enum: [compress_harder, switch_provider, use_local, wait]
+        reason:
+          type: string
+          description: Human-readable explanation of the recommendation.
+        alternatives:
+          type: array
+          description: |
+            Cheapest healthy BYOK providers to switch to, priced from a static
+            ESTIMATE catalog (not billing truth). Empty when none are healthy.
+          items:
+            type: object
+            required: [provider, model, estInputPer1M, estOutputPer1M]
+            additionalProperties: false
+            properties:
+              provider:
+                type: string
+              model:
+                type: string
+              estInputPer1M:
+                type: number
+              estOutputPer1M:
+                type: number
+        localAvailable:
+          type: boolean
+          description: Whether a local Ollama/LM Studio runtime was detected.
 
     Status:
       type: object

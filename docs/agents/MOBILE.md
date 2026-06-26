@@ -83,12 +83,31 @@ Add the `.p8` / `*-service-account.json` files to `.gitignore`; for CI pass
 repo. Source: [Expo — Submit to the Apple App Store](https://docs.expo.dev/submit/ios/),
 [Expo — local credentials](https://docs.expo.dev/app-signing/local-credentials/).
 
+### Android output: AAB for store, APK for QA
+`eas.json` `production.android.buildType = "app-bundle"` → produces an **AAB**,
+the format Play requires for new apps/updates (APK is rejected on the store).
+The `preview` profile keeps `buildType: "apk"` for direct-install/sideload QA.
+Don't flip production back to `apk`. (Target API level: new Play apps must target
+Android 16 / API 36+ by **Aug 31 2026**.)
+
+### Version
+`app.json` `version` is **0.2.0** (aligned with the repo's 0.2.0 line). Bump it
+per release. Build numbers auto-increment via `eas.json` `production.autoIncrement`
+(versionCode/buildNumber tracked remotely, `cli.appVersionSource = "remote"`).
+
 ### Release workflow vars / assets
 - `.github/workflows/release-mobile.yml` (tag `mobile-v*` or manual dispatch)
-  reads repo **var** `EXPO_PUBLIC_VALIDATE_URL` and **secret** `EXPO_TOKEN`.
+  reads repo **vars** `EXPO_PUBLIC_VALIDATE_URL`, `EXPO_PUBLIC_RELAY_URL` and
+  **secret** `EXPO_TOKEN`.
 - `EXPO_PUBLIC_VALIDATE_URL` → deployed web `/api/validate` (worker/Vercel URL).
   Used by `lib/limits.ts`; defaults to `http://localhost:3000/api/validate` for
   local dev. Set it as a build-time env (`EXPO_PUBLIC_*` is inlined at build).
+- `EXPO_PUBLIC_RELAY_URL` → Zintus Cloud relay (`lib/cloud.ts`); defaults to
+  `https://relay.zintus.ai`. Only set the var to override (staging/self-host).
+- The `eas-submit` job uploads the latest build to the stores
+  (`eas submit --platform all --profile production --latest`). It runs only when
+  repo var `MOBILE_SUBMIT_ENABLED == 'true'` and `EXPO_TOKEN` is set, so a repo
+  without store creds skips cleanly; it's a separate job from `eas-build`.
 - `assets/` already contains every file `app.json` references: `icon.png`,
   `splash-icon.png`, `notification-icon.png`, `favicon.png`, and the three
   `android-icon-*` adaptive-icon layers — verified present, nothing missing.

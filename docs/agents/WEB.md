@@ -20,7 +20,11 @@
 | Robots/sitemap/site config | `apps/web/app/{robots,sitemap}.ts`, `apps/web/lib/site.ts` |
 
 ## Surfaces
-**Marketing (public):** `/ /pricing /docs /download /privacy /terms /security /changelog /about /contact`
+**Marketing (public):** `/ /pricing /docs /download /privacy /terms /security /changelog /about /contact /account/delete`
+> `/account/delete` is a **public, login-free** account-deletion page (Google
+> Play / App Store requirement). Source of truth: `app/account/delete/page.tsx`
+> + `lib/cloud.ts#deleteAccount` → relay `DELETE /api/account`. It's in
+> `PUBLIC_ROUTES`/sitemap by design.
 **Product (auth-gated):** `/dashboard /dashboard/billing /chat /providers /settings`
 
 ## Decisions you must NOT reverse

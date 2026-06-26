@@ -40,6 +40,14 @@ export class QuotaCounter {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
+    // Account deletion: wipe this user-period counter's storage immediately
+    // (don't wait for the idle self-prune alarm). Idempotent — deleting an
+    // already-empty instance is a no-op. See DELETE /api/account in index.ts.
+    if (url.pathname === "/reset" && request.method === "POST") {
+      await this.storage.deleteAll();
+      return Response.json({ ok: true });
+    }
+
     if (url.pathname === "/add" && request.method === "POST") {
       const n = parseInt(await request.text(), 10);
       const delta = Number.isFinite(n) && n > 0 ? n : 0;

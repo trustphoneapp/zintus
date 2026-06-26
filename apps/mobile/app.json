@@ -2,12 +2,11 @@
   "expo": {
     "name": "Zintus",
     "slug": "zintus",
-    "version": "0.0.1",
+    "version": "0.2.0",
     "scheme": "zintus",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
     "icon": "./assets/icon.png",
-    "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "com.zintus.app",
       "supportsTablet": true,
@@ -21,7 +20,6 @@
     },
     "android": {
       "package": "com.zintus.app",
-      "edgeToEdgeEnabled": true,
       "adaptiveIcon": {
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
@@ -50,7 +48,9 @@
           "icon": "./assets/notification-icon.png",
           "color": "#A855F7"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true

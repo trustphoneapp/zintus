@@ -28,6 +28,10 @@ export const PUBLIC_ROUTES = [
   "/privacy",
   "/terms",
   "/security",
+  // Public, login-free account-deletion page. Required by Google Play / the App
+  // Store to be reachable without signing in (see docs/store/play-listing.md §5),
+  // so it is intentionally crawlable rather than under DISALLOWED_ROUTES.
+  "/account/delete",
 ] as const;
 // Note: /blog is intentionally excluded. It is a "Coming soon" stub marked
 // noindex (see app/blog/page.tsx) — keeping it out of the sitemap avoids

@@ -1,5 +1,9 @@
 import type { AppConfig, ContextMode, ProviderId } from "@zintus/types";
-import { streamGatewayChat, resolveGatewayUrl } from "./gateway";
+import {
+  streamGatewayChat,
+  resolveGatewayUrl,
+  type CompressionStats,
+} from "./gateway";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -10,6 +14,8 @@ export interface StreamChatResult {
   providerId: ProviderId;
   model: string;
   source: "gateway";
+  /** Tokzen savings for this response, when the gateway reported real compression. */
+  compression?: CompressionStats;
 }
 
 export async function isGatewayAvailable(): Promise<boolean> {
@@ -43,5 +49,6 @@ export async function streamChat(params: {
     providerId: result.providerId,
     model: result.model,
     source: "gateway",
+    compression: result.compression,
   };
 }

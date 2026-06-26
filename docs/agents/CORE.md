@@ -66,6 +66,24 @@ WebCrypto x25519 is NOT available in RN). The relay sees **only opaque
 ciphertext** — never plaintext. The HKDF `info` string MUST stay byte-identical
 across gateway, mobile, and web.
 
+### Response cache scope — single-user-local (assessed, NOT scoped by user)
+The engine's `ResponseCache` (`packages/cache`) keys L1 by
+`prompt/model/provider/temperature/maxTokens` and matches L2 by
+`prompt-embedding + model + provider`. **Neither is scoped by user / thread /
+workspace.** This is intentional and safe *because the engine cache is a
+single-user, machine-local SQLite DB* (`~/.zintus/cache.db`): every entry was
+produced by, and is served back to, the same local user.
+- **Risk:** if this exact cache instance is ever shared across users (e.g. a
+  multi-tenant relay reusing one engine/cache), an unscoped key leaks one user's
+  response to another. Before that ever happens, the cache key + L2 lookup MUST
+  gain a scope dimension.
+- The store already carries `userId` / `threadId` columns for that future, but
+  they are not part of the lookup key. Threading scope into `generateKey` /
+  `getL2Detailed` lives in `@zintus/cache` (outside the Core-Runtime change that
+  documented this). The decision was: do not force a scope dimension into a
+  single-user-local cache — document the assumption + risk instead (see the
+  `SCOPED-CACHE NOTE` comment in `packages/engine/src/engine.ts`).
+
 ### Never
 - Log API keys — use `redactSecrets()` (`router/src/redact.ts`).
 - Add synchronous blocking in async paths.

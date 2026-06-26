@@ -1,6 +1,6 @@
 [package]
 name = "zintus-desktop"
-version = "0.0.1"
+version = "0.2.0"
 description = "Zintus desktop shell"
 authors = ["Zintus"]
 edition = "2021"

@@ -571,15 +571,12 @@ export function createRouter(config: RouterConfig = {}): Router {
                 }, request.stickySessionTtlMs).unref?.();
               }
             }
-            const successEvt = {
-              providerId: provider.id,
-              model,
-              status: "success" as const,
-              latencyMs: Date.now() - attemptStarted,
-            };
-            request.onAttempt?.(successEvt);
-            config.onAttempt?.(successEvt);
-
+            // NOTE: the success attempt event is intentionally NOT emitted here.
+            // Connecting to a provider is not the same as a successful response —
+            // a stream can die mid-drain. We emit `status: "success"` only AFTER
+            // the stream fully drains (below), and a `status: "fail"` if it errors
+            // mid-stream, so the recorded outcome reflects reality. Provider
+            // selection / cooldown / sticky-session state above are unchanged.
             const textStream = async function* (): AsyncGenerator<string> {
               let reportedUsage: TokenUsage | undefined;
               let outputText = "";
@@ -623,6 +620,17 @@ export function createRouter(config: RouterConfig = {}): Router {
                   outputTokens: usage.outputTokens,
                   latencyMs: completionLatencyMs,
                 });
+                // The stream fully drained — NOW it's honestly a success. Recording
+                // it here (rather than before the stream is consumed) means a stream
+                // that dies mid-way is never recorded as success.
+                const successEvt = {
+                  providerId: provider.id,
+                  model,
+                  status: "success" as const,
+                  latencyMs: completionLatencyMs,
+                };
+                request.onAttempt?.(successEvt);
+                config.onAttempt?.(successEvt);
               } catch (streamError: unknown) {
                 const usage =
                   reportedUsage ?? estimateUsage(request.messages, outputText);
@@ -639,6 +647,27 @@ export function createRouter(config: RouterConfig = {}): Router {
                 if (vKey) {
                   ledger.recordVirtualKeyUsage(vKey, usage.inputTokens, usage.outputTokens);
                 }
+                // The response started but the stream broke mid-drain — record the
+                // attempt as a FAILURE so the trace doesn't lie. This is purely an
+                // observability signal; it does not alter provider selection or
+                // cooldown (the stream is already committed to this provider).
+                const failEvt = {
+                  providerId: provider.id,
+                  model,
+                  status: "fail" as const,
+                  latencyMs: Date.now() - attemptStarted,
+                  errorCode:
+                    streamError instanceof ProviderHttpError
+                      ? streamError.status
+                      : undefined,
+                  errorMessage: redactSecrets(
+                    streamError instanceof Error
+                      ? streamError.message
+                      : String(streamError),
+                  ),
+                };
+                request.onAttempt?.(failEvt);
+                config.onAttempt?.(failEvt);
                 throw streamError;
               } finally {
                 // Release the reservation once the stream is fully drained, errors,

@@ -1,6 +1,7 @@
 "use client";
 
 import type { ChatMessageUi } from "@/lib/store";
+import { CompressionBadge } from "./CompressionBadge";
 
 /**
  * Renders a single chat message as a bubble. Assistant messages show routed
@@ -33,6 +34,9 @@ export function MessageBubble({ message }: { message: ChatMessageUi }) {
           </span>
         )}
       </div>
+      {message.compression ? (
+        <CompressionBadge stats={message.compression} />
+      ) : null}
     </div>
   );
 }

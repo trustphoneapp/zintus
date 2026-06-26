@@ -54,6 +54,7 @@ describe("engine integration (stubbed provider)", () => {
       conversationsPath: join(dir, "conversations.db"),
       dbPath: join(dir, "quota.db"),
       cachePath: join(dir, "cache.db"),
+      memoryPath: join(dir, "memory.db"),
       getApiKey: async () => "test-key",
       persistConversations: true,
       persistTraces: true,
@@ -127,5 +128,42 @@ describe("engine integration (stubbed provider)", () => {
     // input estimate is at least the bare user-message estimate.
     expect(gemini?.tokensToday).toBeGreaterThanOrEqual(expected.outputTokens);
     expect(gemini?.tokensToday).toBeGreaterThan(0);
+  });
+
+  // Fix 2: a cache HIT must record a complete trace (winner, latency,
+  // completedAt) — not silently bail out leaving the trace half-written. The
+  // pre-fix code returned on a hit without ever completing the trace.
+  test("a cache hit records a completed trace tagged as a hit", async () => {
+    let providerCalls = 0;
+    const provider = stubProvider("gemini", async function* () {
+      providerCalls += 1;
+      yield { content: "cached answer" };
+    });
+    const engine = await makeEngine(provider);
+
+    const messages = [{ role: "user" as const, content: "repeat me exactly" }];
+
+    // First request: cache MISS — hits the provider and writes the cache.
+    const miss = await engine.routeAndStream({ messages });
+    let firstText = "";
+    for await (const chunk of miss.stream) firstText += chunk;
+    expect(firstText).toBe("cached answer");
+    expect(miss.cacheHit).toBe("miss");
+    expect(providerCalls).toBe(1);
+
+    // Second identical request: cache HIT — provider must NOT be called again.
+    const hit = await engine.routeAndStream({ messages });
+    let secondText = "";
+    for await (const chunk of hit.stream) secondText += chunk;
+    expect(secondText).toBe("cached answer");
+    expect(hit.cacheHit).toBe("L1");
+    expect(providerCalls).toBe(1);
+
+    // The crux of Fix 2: the cache-hit trace is COMPLETE, not abandoned.
+    const trace = engine.getTrace(hit.traceId);
+    expect(trace).not.toBeNull();
+    expect(trace?.completedAt).toBeInstanceOf(Date);
+    expect(trace?.winner).toBeDefined();
+    expect(typeof trace?.totalLatencyMs).toBe("number");
   });
 });

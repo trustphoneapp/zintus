@@ -412,3 +412,88 @@ button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
   margin: 0 0 4px;
   font-family: var(--font-mono);
 }
+
+/* Compression savings badge — under an assistant message (Tokzen proof). */
+.compression-badge {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 0;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 0.5px solid color-mix(in oklch, var(--color-green) 35%, transparent);
+  background: color-mix(in oklch, var(--color-green) 12%, transparent);
+  color: var(--color-green);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  width: fit-content;
+}
+
+.compression-badge-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* Quota-exhaustion options under a low/exhausted provider card. */
+.route-options {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 0.5px solid var(--color-border);
+  background: color-mix(in oklch, var(--c-warn) 8%, transparent);
+  text-align: left;
+}
+
+.route-options-reason {
+  margin: 0 0 6px;
+  font-size: 11px;
+  color: var(--color-text-sub);
+  line-height: 1.4;
+}
+
+.route-options-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.route-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--color-text);
+}
+
+.route-option.best .route-option-label {
+  font-weight: 700;
+}
+
+.route-option-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--c-accent-light);
+  color: var(--c-accent);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.route-option-alts {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.route-options-reset {
+  margin: 6px 0 0;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+}

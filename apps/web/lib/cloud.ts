@@ -51,6 +51,18 @@ export async function getMe(): Promise<{
   return res.json();
 }
 
+/**
+ * Self-service account deletion. Calls the authenticated relay endpoint, which
+ * deletes the signed-in user's account + all their data (sessions, subscription,
+ * usage, quota) and clears the session cookie. The user id is resolved entirely
+ * from the session on the relay — never sent from here — so a user can only ever
+ * delete their own account. Returns true on success (HTTP 200).
+ */
+export async function deleteAccount(): Promise<boolean> {
+  const res = await relayFetch("/api/account", { method: "DELETE" }).catch(() => null);
+  return Boolean(res?.ok);
+}
+
 // ── Sessions ──────────────────────────────────────────────────────────────
 
 export interface GatewaySession {

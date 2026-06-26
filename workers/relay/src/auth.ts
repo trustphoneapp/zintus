@@ -137,6 +137,40 @@ export async function revokeSessionToken(
   await kv.delete(kvSessionKey(hash));
 }
 
+// ── Account-deletion tombstone ──────────────────────────────────────────────
+// On account deletion we only revoke the *presented* cookie's KV session token,
+// but a second, independently-issued KV session token for the same user keeps
+// passing verifySessionToken until its ~30-day TTL. It can't resurrect the
+// account, but it could write orphan child rows. The tombstone fixes that: we
+// write `deleted:<user_id>` with the SAME TTL as a session token, and
+// requireSession rejects any session whose user_id is tombstoned. This kills ALL
+// of the deleted user's orphan tokens immediately, and the tombstone itself
+// expires once the longest-lived possible session token would already be gone.
+
+function kvDeletedUserKey(userId: string): string {
+  return `deleted:${userId}`;
+}
+
+/** Mark a user as deleted so every still-cached session token for them is
+ *  rejected by requireSession. TTL matches the max session-token lifetime so the
+ *  tombstone outlives any session token that could still be in KV. */
+export async function tombstoneDeletedUser(
+  kv: KVNamespace,
+  userId: string,
+): Promise<void> {
+  await kv.put(kvDeletedUserKey(userId), "1", {
+    expirationTtl: SESSION_TOKEN_TTL_SECONDS,
+  });
+}
+
+/** True if the user has been deleted (a deletion tombstone exists in KV). */
+export async function isUserDeleted(
+  kv: KVNamespace,
+  userId: string,
+): Promise<boolean> {
+  return (await kv.get(kvDeletedUserKey(userId))) !== null;
+}
+
 /** Parse the session token from the Cookie header. */
 export function parseSessionCookie(cookieHeader: string | null): string | null {
   if (!cookieHeader) return null;

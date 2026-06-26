@@ -94,6 +94,7 @@ export function ChatPanel() {
       updateMessage(assistant.id, {
         providerId: result.providerId,
         model: result.model,
+        compression: result.compression,
       });
       setActiveProvider(result.providerId);
 

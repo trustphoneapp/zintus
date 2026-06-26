@@ -66,6 +66,24 @@ export async function createPortalSession(stripeCustomerId: string, env: Env): P
   return portal.url;
 }
 
+/**
+ * Cancel a Stripe subscription immediately (account deletion). Throws on a
+ * non-2xx Stripe response so the caller can log it — the DELETE /api/account
+ * handler wraps this in try/catch and NEVER lets a Stripe failure block the
+ * account deletion (best-effort, see index.ts). Caller must guard that
+ * STRIPE_SECRET_KEY is configured before calling.
+ */
+export async function cancelStripeSubscription(subscriptionId: string, env: Env): Promise<void> {
+  const res = await fetch(`https://api.stripe.com/v1/subscriptions/${subscriptionId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` },
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Stripe cancel error: ${err}`);
+  }
+}
+
 // Stripe's libraries reject events whose signed timestamp is more than 5 minutes
 // (300s) from now, to bound replay of an intercepted (validly-signed) request.
 // The `t` value is inside the signed payload, so it can't be moved without

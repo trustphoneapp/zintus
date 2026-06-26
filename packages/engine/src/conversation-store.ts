@@ -255,4 +255,10 @@ export class ConversationStore {
       .filter((trace): trace is RequestTrace => trace !== null);
   }
 
+  /** Release the underlying SQLite handle. Idempotent enough for shutdown:
+   *  the caller (Engine.close) guards against a double close. */
+  close(): void {
+    this.db.$client.close();
+  }
+
 }

@@ -29,4 +29,11 @@ export {
   type DataPolicy,
   type TrainingBadge,
 } from "./data-policies.js";
+export {
+  PRICING_CATALOG,
+  getModelPricing,
+  listPricing,
+  estimateCostUsd,
+  type ModelPricing,
+} from "./pricing.js";
 export type { Provider, ProviderId } from "@zintus/types";
