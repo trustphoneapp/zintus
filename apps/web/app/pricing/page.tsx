@@ -78,11 +78,11 @@ const FAQS: Array<{ q: string; a: string }> = [
   },
   {
     q: "Can I cancel at any time?",
-    a: "Yes. Cancel anytime from the billing dashboard; you keep access until the period ends. No cancellation fees.",
+    a: "Yes — when paid tiers launch. You'll be able to cancel anytime from the billing dashboard and keep access until the period ends, with no cancellation fees. (Paid tiers aren't purchasable yet.)",
   },
   {
     q: "How does the referral program work?",
-    a: "Share your referral link from the billing dashboard. Each confirmed referral earns you credit toward your subscription. Credits are applied automatically at the start of the next billing cycle.",
+    a: "A referral program is planned for when paid tiers launch: you'll share a referral link from the billing dashboard, and each confirmed referral will earn credit toward your subscription, applied automatically at the start of the next billing cycle. It isn't live yet.",
   },
 ];
 
@@ -203,7 +203,7 @@ function PricingInner() {
                 whiteSpace: "nowrap",
               }}
             >
-              MOST POPULAR
+              COMING SOON
             </div>
             <div>
               <p style={{ fontWeight: 700, fontSize: "1.1rem", color: "var(--marketing-text)" }}>

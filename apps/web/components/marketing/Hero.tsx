@@ -69,14 +69,14 @@ export function Hero() {
 
           {/* Reassurance line */}
           <p style={{ marginTop: 14, fontSize: 13, color: "var(--marketing-muted)" }}>
-            No account required · Keys stay on your device · Start chatting instantly
+            No account required · Keys stay on your device · Start chatting with your own keys
           </p>
 
           {/* Pricing clarity */}
           <p style={{ marginTop: 6, fontSize: 13, color: "var(--marketing-muted)" }}>
             Free forever with your own API keys ·{" "}
             <Link href="/pricing" style={{ color: "var(--marketing-accent-light)", textDecoration: "none" }}>
-              Managed keys from $15/mo →
+              Managed keys from $15/mo (coming soon) →
             </Link>
           </p>
 

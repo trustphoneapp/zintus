@@ -20,15 +20,18 @@ export const PUBLIC_ROUTES = [
   "/",
   "/pricing",
   "/docs",
+  "/developers",
   "/download",
   "/changelog",
   "/about",
-  "/blog",
   "/contact",
   "/privacy",
   "/terms",
   "/security",
 ] as const;
+// Note: /blog is intentionally excluded. It is a "Coming soon" stub marked
+// noindex (see app/blog/page.tsx) — keeping it out of the sitemap avoids
+// advertising a thin placeholder until it has real content.
 
 /** Private/app route prefixes that must never be indexed. */
 export const DISALLOWED_ROUTES = [
@@ -37,6 +40,8 @@ export const DISALLOWED_ROUTES = [
   "/login",
   "/dashboard",
   "/chat",
+  "/compare",
+  "/research",
   "/settings",
   "/usage",
   "/terminal",
