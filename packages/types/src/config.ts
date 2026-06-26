@@ -8,6 +8,10 @@ export interface AppConfig {
   contextMode: ContextMode;
   defaultProvider?: ProviderId;
   providerPriority: ProviderId[];
+  /** Privacy mode: route away from providers that may train on your data. */
+  blockTrainingProviders?: boolean;
+  /** Providers allowed even when blockTrainingProviders is on. */
+  allowTrainingProviders?: ProviderId[];
 }
 
 /**

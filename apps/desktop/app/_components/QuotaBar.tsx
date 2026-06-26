@@ -10,12 +10,14 @@ export function QuotaBar({
   label?: string;
 }) {
   const pct = limit > 0 ? Math.min(used / limit, 1) : 0;
+  // Usage framing (pct = fraction used). --color-yellow was undefined on desktop
+  // — use the shared design-system thresholds.
   const color =
     pct >= 0.9
-      ? "var(--color-red)"
+      ? "var(--c-danger)"
       : pct >= 0.7
-        ? "var(--color-yellow)"
-        : "var(--color-green)";
+        ? "var(--c-warn)"
+        : "var(--c-ok)";
 
   return (
     <div>

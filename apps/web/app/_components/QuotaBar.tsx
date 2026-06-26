@@ -16,7 +16,13 @@ export function QuotaBar({
         style={{
           width: `${pct}%`,
           background:
-            pct > 50 ? color : pct > 20 ? "var(--color-yellow)" : "var(--color-red)",
+            pct > 50
+              ? color
+              : pct > 20
+                ? "var(--c-accent)"
+                : pct > 10
+                  ? "var(--c-warn)"
+                  : "var(--c-danger)",
         }}
       />
     </div>

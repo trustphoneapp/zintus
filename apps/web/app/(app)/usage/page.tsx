@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { QuotaBar } from "@/app/_components/QuotaBar";
 import { useAppStore } from "@/lib/app-store";
 import { fetchGatewayTraces, type GatewayTrace } from "@/lib/gateway";
+import { downloadFile } from "@/lib/download";
 import { PROVIDERS } from "@/lib/providers";
 import { getRemainingQuotaPercent } from "@/lib/quota";
 import { useProviderStatusStore } from "@/lib/store";
@@ -69,8 +70,57 @@ export default function UsagePage() {
 
   const configured = rows.filter((row) => row.hasKey).length;
 
+  function exportJson() {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      savings: gatewaySavings ?? null,
+      providers: rows.map((r) => ({
+        id: r.id,
+        hasKey: r.hasKey,
+        available: r.available,
+        quotaPercent: r.quota,
+      })),
+      recentTraces: traces,
+    };
+    downloadFile(
+      "zintus-usage.json",
+      JSON.stringify(payload, null, 2),
+      "application/json",
+    );
+  }
+
+  function exportCsv() {
+    const header = "traceId,winner,latencyMs,failovers,attempts";
+    const lines = traces.map((t) => {
+      const fails = t.attempts.filter((a) => a.status === "fail").length;
+      const attempts = t.attempts.map((a) => a.providerId).join("|");
+      return `${t.traceId},${t.winner?.providerId ?? ""},${t.totalLatencyMs ?? ""},${fails},${attempts}`;
+    });
+    downloadFile(
+      "zintus-usage.csv",
+      [header, ...lines].join("\n"),
+      "text/csv",
+    );
+  }
+
   return (
     <div className="screen usage-screen">
+      <div className="usage-toolbar">
+        <span className="usage-toolbar-title">
+          {gatewayConnected && gatewaySavings
+            ? `You've saved ~$${gatewaySavings.estimatedUsdSaved.toFixed(2)} vs paid APIs`
+            : "Usage & savings"}
+        </span>
+        <div className="usage-toolbar-actions">
+          <button type="button" className="message-action" onClick={exportJson}>
+            Download JSON
+          </button>
+          <button type="button" className="message-action" onClick={exportCsv}>
+            Download CSV
+          </button>
+        </div>
+      </div>
+
       <div className="usage-summary">
         <article className="usage-stat">
           <span className="usage-stat-label">Providers configured</span>

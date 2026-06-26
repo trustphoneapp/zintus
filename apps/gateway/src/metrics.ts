@@ -3,16 +3,6 @@
  * lifetime of the server process. Exposed as JSON at GET /metrics and as
  * Prometheus text via toPrometheus().
  */
-export interface MetricsSnapshot {
-  uptimeSeconds: number;
-  requestsTotal: number;
-  requestsByOutcome: { ok: number; clientError: number; serverError: number };
-  chatCompletionsTotal: number;
-  chatByProvider: Record<string, number>;
-  errorsTotal: number;
-  latencyMs: { count: number; sum: number; max: number; avg: number };
-}
-
 export interface TokzenMetricsSnapshot {
   tokensSavedTotal: number;
   avgCompressionRatio: number;

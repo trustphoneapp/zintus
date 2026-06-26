@@ -20,7 +20,8 @@ type IconName =
   | "check"
   | "x"
   | "paperclip"
-  | "globe";
+  | "globe"
+  | "compare";
 
 const paths: Record<IconName, ReactNode> = {
   send: (
@@ -45,6 +46,12 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   zap: <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
+  compare: (
+    <>
+      <rect x="3" y="4" width="7" height="16" rx="1" />
+      <rect x="14" y="4" width="7" height="16" rx="1" />
+    </>
+  ),
   activity: <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />,
   layers: (
     <>

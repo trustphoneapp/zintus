@@ -26,6 +26,17 @@ export interface RouteRequest {
   maxTokens?: number;
   /** Request provider-native web search (Gemini grounding / OpenRouter tool). */
   webSearch?: boolean;
+  /** Drop providers that may train on user data (privacy mode). */
+  blockTrainingProviders?: boolean;
+  /** Providers the user explicitly allows even when blockTrainingProviders is on. */
+  allowTrainingProviders?: ProviderId[];
+  /**
+   * Per-request BYOK keys (provider -> key), used in preference to the gateway's
+   * configured keys for this request only. For the LOCAL gateway: lets a browser
+   * client supply keys without server-side key storage. Never logged, never
+   * persisted. Must never be forwarded to the relay.
+   */
+  keys?: Partial<Record<ProviderId, string>>;
   /** Per-request attempt callback. Fires for each provider attempt. */
   onAttempt?: (event: TraceAttempt) => void;
   /**
@@ -34,6 +45,20 @@ export interface RouteRequest {
    * leaking the socket and holding the in-flight quota reservation open.
    */
   signal?: AbortSignal;
+  /**
+   * Per-request usage callback. Fires once, when the winning provider's stream
+   * completes successfully, carrying the final token counts and latency. Used to
+   * surface the per-response transparency strip without a second round-trip.
+   */
+  onUsage?: (usage: RouteUsage) => void;
+}
+
+export interface RouteUsage {
+  providerId: ProviderId;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
 }
 
 export interface RouteResponse {

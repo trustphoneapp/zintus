@@ -9,10 +9,10 @@ export interface ProviderDisplay {
 }
 
 export const PROVIDERS: ProviderDisplay[] = [
-  { id: "cerebras", name: "Cerebras", color: "#10B981", priority: 1, quotaLimit: 1_000_000 },
-  { id: "groq", name: "Groq", color: "#F59E0B", priority: 2, quotaLimit: 1_000_000 },
-  { id: "gemini", name: "Gemini", color: "#3B82F6", priority: 3, quotaLimit: 1_000_000 },
-  { id: "openrouter", name: "OpenRouter", color: "#A855F7", priority: 4, quotaLimit: 1_000_000 },
+  { id: "cerebras", name: "Cerebras", color: "#f59e0b", priority: 1, quotaLimit: 1_000_000 },
+  { id: "groq", name: "Groq", color: "#10b981", priority: 2, quotaLimit: 1_000_000 },
+  { id: "gemini", name: "Gemini", color: "#3b82f6", priority: 3, quotaLimit: 1_000_000 },
+  { id: "openrouter", name: "OpenRouter", color: "#8b5cf6", priority: 4, quotaLimit: 1_000_000 },
   { id: "cohere", name: "Cohere", color: "#06B6D4", priority: 5, quotaLimit: 1_000_000 },
   { id: "mistral", name: "Mistral", color: "#F97316", priority: 6, quotaLimit: 1_000_000 },
   { id: "deepseek", name: "DeepSeek", color: "#EC4899", priority: 7, quotaLimit: 1_000_000 },

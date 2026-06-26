@@ -9,14 +9,41 @@
   --color-text: #e8eef5;
   --color-text-sub: #9ca3af;
   --color-text-muted: #6b7280;
-  /* Neutral, professional accent (ChatGPT/Claude-style monochrome). Token names
-     kept for compatibility; values are now a near-white neutral on the dark UI. */
-  --color-purple-bright: #f4f6f8;
-  --color-purple-mid: #e2e8f0;
-  --color-purple-faint: rgba(244, 246, 248, 0.08);
-  --color-purple-glow: rgba(244, 246, 248, 0.16);
+  /* Accent — indigo design system (2026). Legacy `--color-purple-*` names kept
+     so existing desktop components pick up the indigo accent without a rename. */
+  --color-purple-bright: #818cf8;
+  --color-purple-mid: #6366f1;
+  --color-purple-faint: rgba(99, 102, 241, 0.1);
+  --color-purple-glow: rgba(99, 102, 241, 0.25);
   --color-green: #34d399;
   --color-red: #f87171;
+
+  /* Design-system layer (2026) — shared with apps/web (dark-mode values). */
+  --c-accent: #6366f1;
+  --c-accent-light: rgba(99, 102, 241, 0.1);
+  --c-accent-mid: rgba(99, 102, 241, 0.25);
+  --c-accent-contrast: #ffffff;
+  --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(99, 102, 241, 0.4);
+  --c-bg: var(--color-bg);
+  --c-border: rgba(255, 255, 255, 0.08);
+  --c-border-strong: rgba(255, 255, 255, 0.14);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --t-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-reveal: 300ms cubic-bezier(0.4, 0, 0.2, 1);
+  --shadow-xs: 0 0 0 0.5px var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 0 0 0.5px var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.3),
+    0 4px 12px -4px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 0 0 0.5px var(--c-border), 0 2px 4px rgba(0, 0, 0, 0.35),
+    0 12px 28px -8px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 0 0 0.5px var(--c-border), 0 8px 28px -6px rgba(0, 0, 0, 0.55);
+  --shadow-float: 0 0 0 0.5px var(--c-border), 0 16px 64px rgba(0, 0, 0, 0.6);
+  --c-inset: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  --c-ok: #22c55e;
+  --c-warn: #f59e0b;
+  --c-danger: #ef4444;
 }
 
 * {

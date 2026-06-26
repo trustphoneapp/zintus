@@ -5,6 +5,7 @@ import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
 import type { UiMessage } from "@/lib/app-store";
 import { Icon } from "./Icons";
+import { TransparencyStrip } from "./TransparencyStrip";
 
 function renderLine(line: string, index: number) {
   if (line.startsWith("```")) {
@@ -34,9 +35,11 @@ function renderLine(line: string, index: number) {
 export function MessageBubble({
   message,
   onRegenerate,
+  isStreaming = false,
 }: {
   message: UiMessage;
   onRegenerate?: () => void;
+  isStreaming?: boolean;
 }) {
   const isUser = message.role === "user";
   const provider = message.providerId
@@ -72,10 +75,21 @@ export function MessageBubble({
         </div>
       ) : null}
       <div className={`message-bubble${isUser ? " user" : ""}`}>
-        {message.content
-          ? message.content.split("\n").map((line, index) => renderLine(line, index))
-          : <span className="message-thinking">Thinking…</span>}
+        {message.content ? (
+          <>
+            {message.content.split("\n").map((line, index) => renderLine(line, index))}
+            {isStreaming ? <span className="stream-caret" aria-hidden /> : null}
+          </>
+        ) : (
+          <span className="message-thinking">
+            <span className="thinking-dot" aria-hidden />
+            Thinking…
+          </span>
+        )}
       </div>
+      {!isUser && message.meta ? (
+        <TransparencyStrip meta={message.meta} />
+      ) : null}
       <div className="message-footer">
         <span className={`message-time${isUser ? " user" : ""}`}>{message.time}</span>
         {hasContent ? (

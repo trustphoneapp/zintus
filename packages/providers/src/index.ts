@@ -23,4 +23,10 @@ export {
   estimateTokensFromText,
   usageFromProviderFields,
 } from "./token-estimate.js";
+export {
+  DATA_POLICIES,
+  trainsOnUserData,
+  type DataPolicy,
+  type TrainingBadge,
+} from "./data-policies.js";
 export type { Provider, ProviderId } from "@zintus/types";

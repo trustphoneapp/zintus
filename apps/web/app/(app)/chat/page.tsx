@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { MessageBubble } from "@/app/_components/MessageBubble";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
+import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { Icon } from "@/app/_components/Icons";
 import { Tooltip } from "@/components/ui/Tooltip";
 import {
@@ -11,6 +13,9 @@ import {
   useAppStore,
 } from "@/lib/app-store";
 import { streamChat, type ChatMessage } from "@/lib/chat-client";
+import { memorySystemMessage } from "@/lib/memory";
+import { downloadFile } from "@/lib/download";
+import { loadPresets, type Preset } from "@/lib/presets";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
 
 const PROMPT_CARDS = [
@@ -54,13 +59,16 @@ function searchTooltip(provider: string | null): string {
 }
 
 export default function ChatPage() {
-  const { settings, hydrate } = useSettingsStore();
-  const { keys, unlock } = useProviderStatusStore();
+  const { settings, hydrate, update: updateSettings } = useSettingsStore();
+  const { unlock } = useProviderStatusStore();
+  // Atomic value selectors — re-render only when these specific fields change
+  // (not on unrelated store writes like terminal-line spam or savings updates).
+  const threadId = useAppStore((s) => s.threadId);
+  const activeThreadId = useAppStore((s) => s.activeThreadId);
+  const selectedProvider = useAppStore((s) => s.selectedProvider);
+  const gatewayConnected = useAppStore((s) => s.gatewayConnected);
+  // Actions have stable identity — useShallow over the bag never re-renders.
   const {
-    threadId,
-    activeThreadId,
-    selectedProvider,
-    gatewayConnected,
     appendMessage,
     updateMessage,
     patchMessage,
@@ -69,13 +77,39 @@ export default function ChatPage() {
     pushTerminalLine,
     loadLastTrace,
     dropLastAssistant,
-  } = useAppStore();
+    newChat,
+    setSelectedProvider,
+  } = useAppStore(
+    useShallow((s) => ({
+      appendMessage: s.appendMessage,
+      updateMessage: s.updateMessage,
+      patchMessage: s.patchMessage,
+      setThreadId: s.setThreadId,
+      setActiveProvider: s.setActiveProvider,
+      pushTerminalLine: s.pushTerminalLine,
+      loadLastTrace: s.loadLastTrace,
+      dropLastAssistant: s.dropLastAssistant,
+      newChat: s.newChat,
+      setSelectedProvider: s.setSelectedProvider,
+    })),
+  );
   const messages = useAppStore(
     (state) =>
       state.threads.find((t) => t.id === state.activeThreadId)?.messages ?? [],
   );
+  const incognito = useAppStore(
+    (state) =>
+      state.threads.find((t) => t.id === state.activeThreadId)?.incognito ??
+      false,
+  );
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [keyManagerOpen, setKeyManagerOpen] = useState(false);
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [activePreset, setActivePreset] = useState<Preset | null>(null);
+  // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
+  // hydration mismatch (document.cookie is client-only).
+  const [localMode, setLocalMode] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -95,7 +129,19 @@ export default function ChatPage() {
   useEffect(() => {
     hydrate();
     void unlock();
+    setLocalMode(!document.cookie.includes("zintus_session="));
+    setPresets(loadPresets());
   }, [hydrate, unlock]);
+
+  const applyPreset = useCallback(
+    (preset: Preset | null) => {
+      setActivePreset(preset);
+      if (!preset) return;
+      if (preset.provider) setSelectedProvider(preset.provider);
+      if (preset.strategy) updateSettings({ routingStrategy: preset.strategy });
+    },
+    [setSelectedProvider, updateSettings],
+  );
 
   // Switching to a different thread (via the sidebar) should drop any
   // in-flight stream from the previous thread and reset composer state —
@@ -109,6 +155,9 @@ export default function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Abort any in-flight stream when leaving the page (mirrors /compare, /research).
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const handleFiles = useCallback((files: FileList | File[]) => {
     const fileArray = Array.from(files);
@@ -168,9 +217,15 @@ export default function ChatPage() {
           providerId: selectedProvider ?? undefined,
           mode: settings.contextMode,
           threadId,
-          apiKeys: keys,
-          settings,
+          // Read fresh: the LocalKeyManager may have just populated the vault and
+          // re-invoked send() before this component re-rendered with new keys.
+          apiKeys: useProviderStatusStore.getState().keys,
+          // Incognito prefers non-training providers regardless of the saved pref.
+          settings: incognito
+            ? { ...settings, blockTrainingProviders: true }
+            : settings,
           webSearch: webSearchEnabled,
+          temperature: activePreset?.temperature,
           images: sendImages,
           signal: controller.signal,
           onChunk: (text) => updateMessage(assistantId, text),
@@ -182,6 +237,7 @@ export default function ChatPage() {
           providerId: result.providerId,
           model: result.model,
           compileTokens: result.compileTokens,
+          meta: result.meta,
         });
 
         pushTerminalLine({
@@ -204,7 +260,6 @@ export default function ChatPage() {
       }
     },
     [
-      keys,
       loadLastTrace,
       patchMessage,
       pushTerminalLine,
@@ -215,11 +270,24 @@ export default function ChatPage() {
       threadId,
       updateMessage,
       webSearchEnabled,
+      incognito,
+      activePreset,
     ],
   );
 
   const send = useCallback(async () => {
     if (!input.trim() || loading) {
+      return;
+    }
+    // No usable keys anywhere (browser vault locked/empty AND gateway unconfigured)
+    // → guide the user to add one, then retry. Input is preserved.
+    const haveBrowserKeys =
+      Object.keys(useProviderStatusStore.getState().keys).length > 0;
+    const gatewayHasKeys = useAppStore
+      .getState()
+      .gatewayProviders.some((provider) => provider.hasKey);
+    if (!haveBrowserKeys && !gatewayHasKeys) {
+      setKeyManagerOpen(true);
       return;
     }
     const prompt = input.trim();
@@ -258,10 +326,24 @@ export default function ChatPage() {
     setInput("");
     setAttachments([]);
 
+    // Leading system messages, injected once at the start of a new conversation
+    // (full history sent; server owns context afterwards). Incognito skips memory.
+    const leading: ChatMessage[] = [];
+    if (threadId == null) {
+      if (!incognito) {
+        const memoryMsg = memorySystemMessage();
+        if (memoryMsg) leading.push(memoryMsg);
+      }
+      if (activePreset?.systemPrompt?.trim()) {
+        leading.push({ role: "system", content: activePreset.systemPrompt.trim() });
+      }
+    }
     const sendMessages: ChatMessage[] =
-      threadId == null ? history : [{ role: "user", content: userContent }];
+      threadId == null
+        ? [...leading, ...history]
+        : [{ role: "user", content: userContent }];
     await streamAssistant(assistant.id, sendMessages, prompt, sendImages);
-  }, [appendMessage, attachments, input, loading, messages, streamAssistant, threadId]);
+  }, [activePreset, appendMessage, attachments, incognito, input, loading, messages, streamAssistant, threadId]);
 
   const regenerate = useCallback(async () => {
     if (loading) {
@@ -301,8 +383,37 @@ export default function ChatPage() {
     .reverse()
     .find((message) => message.role === "assistant")?.id;
 
+  const exportThread = useCallback(() => {
+    if (messages.length === 0) return;
+    const md = messages
+      .map((m) => {
+        const who = m.role === "user" ? "You" : (m.providerId ?? "Assistant");
+        return `**${who}:**\n\n${m.content}`;
+      })
+      .join("\n\n---\n\n");
+    downloadFile("zintus-chat.md", md, "text/markdown");
+  }, [messages]);
+
   return (
     <div className="screen chat-screen">
+      {incognito ? (
+        <div className="chat-local-banner chat-incognito-banner">
+          <span>🕶 Incognito — nothing is saved, and only non-training providers are used.</span>
+        </div>
+      ) : localMode ? (
+        <div className="chat-local-banner">
+          <span>Local mode — chats stay on this device.</span>
+          <a href="/login">Sign in to sync across devices →</a>
+        </div>
+      ) : null}
+      <LocalKeyManager
+        open={keyManagerOpen}
+        onClose={() => setKeyManagerOpen(false)}
+        onReady={() => {
+          setKeyManagerOpen(false);
+          void send();
+        }}
+      />
       <div className="chat-messages">
         {messages.length === 0 ? (
           <div className="chat-empty">
@@ -339,6 +450,7 @@ export default function ChatPage() {
             <MessageBubble
               key={message.id}
               message={message}
+              isStreaming={loading && message.id === lastAssistantId}
               onRegenerate={
                 message.id === lastAssistantId && !loading
                   ? regenerate
@@ -361,25 +473,74 @@ export default function ChatPage() {
         >
           <div className="chat-composer-top">
             <ProviderPicker />
-            <Tooltip content={`Toggle web search — ${searchTooltip(selectedProvider)}`}>
+            {presets.length > 0 ? (
+              <select
+                className="chat-preset-select"
+                value={activePreset?.id ?? ""}
+                onChange={(event) =>
+                  applyPreset(
+                    presets.find((p) => p.id === event.target.value) ?? null,
+                  )
+                }
+                title="Apply a saved preset"
+              >
+                <option value="">No preset</option>
+                {presets.map((preset) => (
+                  <option key={preset.id} value={preset.id}>
+                    {preset.name}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+            {settings.blockTrainingProviders ? (
+              <span
+                className="chat-privacy-chip"
+                title="Privacy mode — only routing to providers that don't train on your data"
+              >
+                🛡 Privacy
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className={`chat-tool-toggle${incognito ? " active" : ""}`}
+              onClick={() => newChat(!incognito)}
+              title={
+                incognito
+                  ? "Leave incognito (start a normal chat)"
+                  : "Start an incognito chat — nothing saved, non-training providers only"
+              }
+            >
+              🕶 Incognito
+            </button>
+            {messages.length > 0 ? (
               <button
                 type="button"
-                className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
-                aria-pressed={webSearchEnabled}
-                onClick={() => {
-                  setWebSearchEnabled((v) => {
-                    const next = !v;
-                    if (typeof localStorage !== "undefined") {
-                      localStorage.setItem("zintus:web-search", String(next));
-                    }
-                    return next;
-                  });
-                }}
+                className="chat-tool-toggle"
+                onClick={exportThread}
+                title="Export this chat as Markdown"
+                style={{ marginLeft: "auto" }}
               >
-                <Icon name="globe" size={13} />
-                Search
+                <Icon name="copy" size={13} />
+                Export
               </button>
-            </Tooltip>
+            ) : null}
+            <button
+              type="button"
+              className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
+              onClick={() => {
+                setWebSearchEnabled((v) => {
+                  const next = !v;
+                  if (typeof localStorage !== "undefined") {
+                    localStorage.setItem("zintus:web-search", String(next));
+                  }
+                  return next;
+                });
+              }}
+              title={searchTooltip(selectedProvider)}
+            >
+              <Icon name="globe" size={13} />
+              Search
+            </button>
           </div>
           {attachments.length > 0 && (
             <div className="chat-attachments">
