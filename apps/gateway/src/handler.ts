@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { listProviders } from "@zintus/providers";
+import { listProviders, getModelPricing } from "@zintus/providers";
 import type { Engine } from "@zintus/engine";
+import {
+  detectLocalRuntimes as defaultDetectLocalRuntimes,
+  type LocalRuntimes,
+} from "./local-runtimes.js";
 import type {
   ChatMessage,
   ContextMode,
@@ -209,6 +213,29 @@ export interface GatewayHandlerDeps {
    * (preserves prior behaviour; enabled from index.ts via GATEWAY_RATELIMIT_RPM).
    */
   rateLimiter?: RateLimiter;
+  /**
+   * Local-runtime detector for GET /v1/route/options. Defaults to the gateway's
+   * existing Ollama/LM-Studio probe (`detectLocalRuntimes`); injectable so tests
+   * can assert `use_local` / `localAvailable` without a live runtime.
+   */
+  detectLocalRuntimes?: () => Promise<LocalRuntimes>;
+}
+
+/** BYOK-only fallback actions when a provider's quota is low/exhausted. */
+type RouteOption =
+  | "compress_harder"
+  | "switch_provider"
+  | "use_local"
+  | "wait";
+
+/** Below this remaining ratio a provider is treated as quota-constrained. */
+const LOW_QUOTA_THRESHOLD = 0.2;
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 1;
+  }
+  return Math.max(0, Math.min(1, value));
 }
 
 /**
@@ -226,6 +253,7 @@ export function createGatewayHandler(
   const getQuotaRemaining = deps.getQuotaRemaining;
   const getDraining = deps.getDraining;
   const rateLimiter = deps.rateLimiter;
+  const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxMessages = config.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -295,6 +323,181 @@ export function createGatewayHandler(
       429,
       { "Retry-After": String(retryAfterSec) },
     );
+  }
+
+  /**
+   * GET /v1/route/options — a LOCAL, BYOK-only quota-exhaustion DECISION API.
+   *
+   * Given a provider (and an optional client `quota` hint), it derives — using
+   * ONLY local provider/quota/runtime state — what the UI should do when that
+   * provider's free-tier quota is low or exhausted. It never bills, holds funds,
+   * manages keys, or offers a paid/credits/overflow path: the only actions it can
+   * recommend are the BYOK options `compress_harder`, `switch_provider`,
+   * `use_local`, and `wait`. The response carries only derived fields — no API
+   * keys, prompt/chat content, or internal secrets ever leak through it.
+   */
+  async function handleRouteOptions(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const providerParam = url.searchParams.get("provider");
+
+    // Validate `provider` against the REAL ProviderId set (400 on unknown).
+    const known = listProviders();
+    const match = known.find((p) => p.id === providerParam);
+    if (!providerParam || !match) {
+      return json(
+        request,
+        {
+          error: {
+            message: `Unknown provider: ${providerParam ?? "(missing)"}`,
+          },
+        },
+        400,
+      );
+    }
+    const provider = match.id;
+
+    // Optional client quota hint (0..1). Ignored when malformed/out of range —
+    // the server's ledger value is always preferred when available.
+    let clientHint: number | null = null;
+    const rawQuota = url.searchParams.get("quota");
+    if (rawQuota != null && rawQuota.trim() !== "") {
+      const n = Number(rawQuota);
+      if (Number.isFinite(n) && n >= 0 && n <= 1) {
+        clientHint = n;
+      }
+    }
+
+    const now = Date.now();
+    const statuses = await engine.getProviderStatus();
+    const self = statuses.find((s) => s.id === provider);
+
+    // quotaRemaining: prefer the ledger value when this provider is keyed (so the
+    // ledger genuinely tracks its usage); else fall back to the client hint; else
+    // null. Never fabricated.
+    const ledgerKnown = self?.hasKey === true;
+    const serverQuota = ledgerKnown
+      ? clamp01(engine.getQuotaRemaining(provider))
+      : null;
+    const quotaRemaining = serverQuota ?? clientHint;
+    const effectiveQuota = quotaRemaining ?? 1;
+
+    // resetIn: ONLY from the ledger's tracked `cooldownUntil`, which is set from a
+    // real 429 / Groq reset header or the router's backoff cooldown. Daily-quota
+    // providers reset lazily at the UTC boundary and the ledger stores NO
+    // per-provider reset timestamp for them, so we report null + a reason rather
+    // than fabricate a reset time (HARD rule #3).
+    let resetIn: number | null = null;
+    let resetReason: string | undefined;
+    const cooldownUntilMs = self?.cooldownUntil
+      ? self.cooldownUntil.getTime()
+      : null;
+    if (cooldownUntilMs != null && cooldownUntilMs > now) {
+      resetIn = Math.ceil((cooldownUntilMs - now) / 1000);
+    } else {
+      resetReason = "Reset time unavailable";
+    }
+
+    // localAvailable: reuse the gateway's existing Ollama/LM-Studio detection.
+    // (The router's `available` flag is unreliable for local runtimes — they have
+    // no key/limit so it reports them available even when the process is down.)
+    const runtimes = await detectLocal();
+    const localAvailable =
+      runtimes.ollama.detected || runtimes.lmstudio.detected;
+
+    // alternatives: cheapest HEALTHY cloud BYOK providers, ESTIMATES ONLY (from
+    // the static pricing catalog). Healthy = the router reports `available` (has
+    // key, has quota, NOT in cooldown). Exclude the target itself and the local
+    // runtimes (surfaced via use_local/localAvailable, and unpriced at $0).
+    const defaultModelById = new Map(known.map((p) => [p.id, p.defaultModel]));
+    const alternatives = statuses
+      .filter(
+        (s) =>
+          s.id !== provider &&
+          s.available &&
+          s.id !== "ollama" &&
+          s.id !== "lmstudio",
+      )
+      .map((s) => {
+        const model = defaultModelById.get(s.id) ?? "";
+        const pricing = getModelPricing(s.id, model);
+        return pricing
+          ? {
+              provider: s.id,
+              model,
+              estInputPer1M: pricing.inputPer1M,
+              estOutputPer1M: pricing.outputPer1M,
+            }
+          : null;
+      })
+      .filter((a): a is NonNullable<typeof a> => a !== null)
+      .sort(
+        (a, b) =>
+          a.estInputPer1M +
+          a.estOutputPer1M -
+          (b.estInputPer1M + b.estOutputPer1M),
+      );
+
+    // Is the cheapest healthy alternative actually cheaper than staying put?
+    const selfModel = defaultModelById.get(provider) ?? "";
+    const selfPricing = getModelPricing(provider, selfModel);
+    const selfCost = selfPricing
+      ? selfPricing.inputPer1M + selfPricing.outputPer1M
+      : Number.POSITIVE_INFINITY;
+    const cheapest = alternatives[0];
+    const cheaperAltExists =
+      cheapest != null &&
+      cheapest.estInputPer1M + cheapest.estOutputPer1M <= selfCost;
+
+    // Options offered — BYOK ONLY. There is intentionally NO use_credits / paid /
+    // overflow option: managed keys are gated off and Zintus never takes custody.
+    const options: RouteOption[] = ["compress_harder"];
+    if (alternatives.length > 0) {
+      options.push("switch_provider");
+    }
+    if (localAvailable) {
+      options.push("use_local");
+    }
+    options.push("wait");
+
+    const name = self?.name ?? match.name;
+    const low = effectiveQuota <= LOW_QUOTA_THRESHOLD;
+    const exhausted = effectiveQuota <= 0 || self?.inCooldown === true;
+
+    let best: RouteOption;
+    let reason: string;
+    if (!low) {
+      best = "compress_harder";
+      reason = `${name} quota is healthy; compress harder to conserve your free-tier budget`;
+    } else if (alternatives.length > 0) {
+      best = "switch_provider";
+      reason = cheaperAltExists
+        ? `${name} quota low; a cheaper healthy provider is available`
+        : `${name} quota low; another healthy provider is available`;
+    } else if (localAvailable) {
+      best = "use_local";
+      reason = `${name} quota low; a local runtime is available to take over at no API cost`;
+    } else if (exhausted) {
+      best = "wait";
+      reason =
+        resetIn != null
+          ? `${name} is exhausted with no healthy alternatives; wait ~${resetIn}s for it to reset`
+          : `${name} is exhausted and no healthy alternatives are available; wait for quota to recover`;
+    } else {
+      best = "compress_harder";
+      reason = `${name} quota low; compress harder to stretch the remaining budget`;
+    }
+
+    return json(request, {
+      provider,
+      quotaRemaining,
+      resetIn,
+      ...(resetReason ? { resetReason } : {}),
+      best,
+      options,
+      reason,
+      alternatives,
+      localAvailable,
+    });
   }
 
   async function handleChatCompletions(
@@ -938,6 +1141,12 @@ export function createGatewayHandler(
           note: "estimate vs. paid-API list pricing",
         },
       });
+    }
+
+    // Local, BYOK-only quota-exhaustion decision API. Auth-gated above like every
+    // other /v1/* route (401 without the gateway token).
+    if (url.pathname === "/v1/route/options" && request.method === "GET") {
+      return handleRouteOptions(request);
     }
 
     if (url.pathname === "/v1/models" && request.method === "GET") {
