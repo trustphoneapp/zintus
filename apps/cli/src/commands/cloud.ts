@@ -3,7 +3,16 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import chalk from "chalk";
 
-const CLOUD_CONFIG_PATH = join(homedir(), ".zintus", "cloud.json");
+// Config lives in ~/.zintus by default. ZINTUS_CONFIG_DIR relocates it (CI /
+// containers / tests that must not touch the developer's real home). Read lazily
+// via a function — not a module constant — because some runtimes (Bun) cache
+// os.homedir() at startup, so a constant computed at import can't be redirected.
+function cloudConfigDir(): string {
+  return process.env.ZINTUS_CONFIG_DIR ?? join(homedir(), ".zintus");
+}
+function cloudConfigPath(): string {
+  return join(cloudConfigDir(), "cloud.json");
+}
 const DEFAULT_RELAY_URL = "https://relay.zintus.ai";
 // The browser sign-in page lives on the Next.js web app, NOT the relay worker.
 // The relay only exposes API routes (e.g. POST /api/auth/magic-link); it has no
@@ -34,7 +43,7 @@ export async function loadCloudConfig(): Promise<CloudConfig | null> {
   }
 
   try {
-    const raw = await readFile(CLOUD_CONFIG_PATH, "utf-8");
+    const raw = await readFile(cloudConfigPath(), "utf-8");
     return JSON.parse(raw) as CloudConfig;
   } catch {
     return null;
@@ -42,15 +51,15 @@ export async function loadCloudConfig(): Promise<CloudConfig | null> {
 }
 
 export async function saveCloudConfig(config: CloudConfig): Promise<void> {
-  await mkdir(join(homedir(), ".zintus"), { recursive: true });
-  await writeFile(CLOUD_CONFIG_PATH, JSON.stringify(config, null, 2), {
+  await mkdir(cloudConfigDir(), { recursive: true });
+  await writeFile(cloudConfigPath(), JSON.stringify(config, null, 2), {
     mode: 0o600,
   });
 }
 
 export async function clearCloudConfig(): Promise<void> {
   try {
-    await rm(CLOUD_CONFIG_PATH);
+    await rm(cloudConfigPath());
   } catch {
     // already gone
   }

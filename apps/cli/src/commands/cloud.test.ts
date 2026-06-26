@@ -1,7 +1,6 @@
 import {
   afterAll,
   afterEach,
-  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -13,11 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // ── Isolate the on-disk config from the real ~/.zintus ──────────────────────
-// cloud.ts computes the config path from os.homedir(), which honors $HOME on
-// POSIX. Point HOME at a throwaway dir BEFORE importing cloud.ts so the test can
-// never read or clobber the developer's real ~/.zintus/cloud.json.
-const TEST_HOME = await mkdtemp(join(tmpdir(), "zintus-cloud-test-"));
-process.env.HOME = TEST_HOME;
+// cloud.ts reads ZINTUS_CONFIG_DIR (falling back to ~/.zintus). Point it at a
+// throwaway dir so the test can never read or clobber the developer's real
+// ~/.zintus/cloud.json. (HOME can't be used: Bun caches os.homedir() at startup.)
+const TEST_DIR = await mkdtemp(join(tmpdir(), "zintus-cloud-test-"));
+process.env.ZINTUS_CONFIG_DIR = TEST_DIR;
 // loadCloudConfig() prefers these env vars over the file — clear them so the
 // file path (the thing under test) is exercised.
 delete process.env.ZINTUS_SESSION_ID;
@@ -37,7 +36,7 @@ const cloud = await import("./cloud.js");
 
 const RELAY = "https://relay.test";
 const WEB = "https://web.test";
-const CONFIG_PATH = join(TEST_HOME, ".zintus", "cloud.json");
+const CONFIG_PATH = join(TEST_DIR, "cloud.json");
 
 // ── fetch double ────────────────────────────────────────────────────────────
 interface RecordedCall {
