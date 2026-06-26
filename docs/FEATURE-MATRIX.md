@@ -37,10 +37,10 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 23 | file input | ✅ | ✅ | ❌ | 🟡 | web text+image picker (drag/paste); desktop none |
 | 24 | image input | ❌ | ⚠️ | ❌ | 🚫 | **web UI sends base64 `images`, gateway DROPS them — no multimodal path. Silent no-op; fix or hide.** |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
-| 26 | consent gate (pre-send) | ✅ | ❌ | ❌ | ❌ | **only mobile** (Apple 5.1.2(i)); web incognito is opt-in, not a gate |
+| 26 | consent gate (pre-send) | ✅ | ❌ | ✅ | ❌ | mobile + desktop now gate first provider send; web still missing |
 | 27 | report AI response | ✅ | 🟡 | ❌ | ❌ | mobile = Gen-AI report; verify web |
 | 28 | account / session / cloud remote | ✅ | ✅ | 🟡 | ✅ | web login/session; CLI `cloud`+`remote` |
-| 29 | export / share | ✅ | ✅ | ❌ | ❌ | web `exportThread`→md; desktop+CLI none |
+| 29 | export / share | ✅ | ✅ | ✅ | ❌ | desktop now exports thread→md; CLI none |
 
 ## Cross-surface issues to resolve (ranked)
 

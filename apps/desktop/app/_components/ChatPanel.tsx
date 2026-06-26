@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquarePlus } from "lucide-react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
@@ -11,6 +11,11 @@ import {
   useProviderStatusStore,
   useSettingsStore,
 } from "@/lib/store";
+import {
+  DATA_FLOW,
+  grantProviderSendConsent,
+  hasProviderSendConsent,
+} from "@/lib/consent";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
@@ -41,6 +46,8 @@ export function ChatPanel() {
 
   const abortRef = useRef<AbortController | null>(null);
   const outputRef = useRef<HTMLDivElement>(null);
+  const [consentOpen, setConsentOpen] = useState(false);
+  const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
 
   useEffect(() => {
     hydrate();
@@ -50,94 +57,141 @@ export function ChatPanel() {
     outputRef.current?.scrollTo(0, outputRef.current.scrollHeight);
   }, [messages]);
 
-  const send = useCallback(async () => {
+  // Shared streaming path used by both send and regenerate.
+  const runTurn = useCallback(
+    async (history: ChatMessage[], assistantId: string) => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+      setLoading(true);
+      setActiveProvider(null);
+      try {
+        const result = await streamChat({
+          messages: history,
+          settings,
+          providerId: selectedProvider ?? undefined,
+          mode: settings.contextMode,
+          signal: controller.signal,
+          onChunk: (text) => {
+            if (!controller.signal.aborted) {
+              updateMessage(assistantId, { content: text });
+            }
+          },
+        });
+        updateMessage(assistantId, {
+          providerId: result.providerId,
+          model: result.model,
+          compression: result.compression,
+        });
+        setActiveProvider(result.providerId);
+        void refresh();
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          return;
+        }
+        updateMessage(assistantId, {
+          content: error instanceof Error ? error.message : "Request failed",
+        });
+      } finally {
+        setLoading(false);
+      }
+    },
+    [settings, selectedProvider, setActiveProvider, setLoading, updateMessage, refresh],
+  );
+
+  const doSend = useCallback(
+    async (trimmed: string) => {
+      const history: ChatMessage[] = [
+        ...messages.map((m) => ({ role: m.role, content: m.content })),
+        { role: "user" as const, content: trimmed },
+      ];
+      appendMessage(createChatMessage("user", trimmed));
+      const assistant = createChatMessage("assistant", "");
+      appendMessage(assistant);
+      setPrompt("");
+      await runTurn(history, assistant.id);
+    },
+    [messages, appendMessage, setPrompt, runTurn],
+  );
+
+  const send = useCallback(() => {
     const trimmed = prompt.trim();
     if (!trimmed || loading) {
       return;
     }
-
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // Send the full conversation so multi-turn context is preserved.
-    const history: ChatMessage[] = [
-      ...messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
-      { role: "user" as const, content: trimmed },
-    ];
-
-    const userMessage = createChatMessage("user", trimmed);
-    const assistant = createChatMessage("assistant", "");
-    appendMessage(userMessage);
-    appendMessage(assistant);
-    setPrompt("");
-    setLoading(true);
-    setActiveProvider(null);
-
-    try {
-      const result = await streamChat({
-        messages: history,
-        settings,
-        providerId: selectedProvider ?? undefined,
-        mode: settings.contextMode,
-        signal: controller.signal,
-        onChunk: (text) => {
-          if (!controller.signal.aborted) {
-            updateMessage(assistant.id, { content: text });
-          }
-        },
-      });
-
-      updateMessage(assistant.id, {
-        providerId: result.providerId,
-        model: result.model,
-        compression: result.compression,
-      });
-      setActiveProvider(result.providerId);
-
-      void refresh();
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        return;
-      }
-      updateMessage(assistant.id, {
-        content: error instanceof Error ? error.message : "Request failed",
-      });
-    } finally {
-      setLoading(false);
+    // Consent before the first send to a third-party provider (parity w/ mobile).
+    if (!hasProviderSendConsent()) {
+      setPendingPrompt(trimmed);
+      setConsentOpen(true);
+      return;
     }
-  }, [
-    appendMessage,
-    loading,
-    messages,
-    prompt,
-    refresh,
-    selectedProvider,
-    setActiveProvider,
-    setLoading,
-    setPrompt,
-    settings,
-    updateMessage,
-  ]);
+    void doSend(trimmed);
+  }, [prompt, loading, doSend]);
+
+  function grantAndSend() {
+    grantProviderSendConsent();
+    setConsentOpen(false);
+    const p = pendingPrompt;
+    setPendingPrompt(null);
+    if (p) void doSend(p);
+  }
+
+  const regenerate = useCallback(async () => {
+    if (loading) return;
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+    if (!lastAssistant) return;
+    const idx = messages.findIndex((m) => m.id === lastAssistant.id);
+    const history = messages
+      .slice(0, idx)
+      .map((m) => ({ role: m.role, content: m.content }));
+    if (history.length === 0) return;
+    updateMessage(lastAssistant.id, { content: "" });
+    await runTurn(history, lastAssistant.id);
+  }, [loading, messages, runTurn, updateMessage]);
 
   const stop = () => {
     abortRef.current?.abort();
     setLoading(false);
   };
 
+  const exportThread = useCallback(() => {
+    if (messages.length === 0) return;
+    const md = messages
+      .map(
+        (m) =>
+          `**${m.role === "user" ? "You" : (m.providerId ?? "Assistant")}:**\n\n${m.content}`,
+      )
+      .join("\n\n---\n\n");
+    const blob = new Blob([md], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "zintus-chat.md";
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [messages]);
+
+  const lastAssistantId = [...messages]
+    .reverse()
+    .find((m) => m.role === "assistant")?.id;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col p-4">
       <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-[var(--color-surface)]">
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Chat</CardTitle>
-          {activeProvider && (
-            <Badge style={{ color: "var(--color-purple-bright)" }}>
-              routed → {activeProvider}
-            </Badge>
-          )}
+          <div className="flex items-center gap-2">
+            {activeProvider && (
+              <Badge style={{ color: "var(--color-purple-bright)" }}>
+                routed → {activeProvider}
+              </Badge>
+            )}
+            {messages.length > 0 && (
+              <Button type="button" variant="secondary" onClick={exportThread}>
+                Export
+              </Button>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
           <div className="flex items-center gap-2">
@@ -149,9 +203,7 @@ export function ChatPanel() {
               value={selectedProvider ?? "auto"}
               onChange={(e) => {
                 const value = e.target.value;
-                setSelectedProvider(
-                  value === "auto" ? null : (value as ProviderId),
-                );
+                setSelectedProvider(value === "auto" ? null : (value as ProviderId));
               }}
               className="h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-elevated)] px-2 text-sm"
             >
@@ -206,7 +258,13 @@ export function ChatPanel() {
               </div>
             ) : (
               messages.map((message) => (
-                <MessageBubble key={message.id} message={message} />
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  onRegenerate={
+                    message.id === lastAssistantId && !loading ? regenerate : undefined
+                  }
+                />
               ))
             )}
           </div>
@@ -236,6 +294,35 @@ export function ChatPanel() {
           </div>
         </CardContent>
       </Card>
+
+      {consentOpen && (
+        <div className="consent-backdrop" role="dialog" aria-modal="true">
+          <div className="consent-card">
+            <h2 className="consent-title">Before your first send</h2>
+            <p className="consent-body">
+              Your message goes to the AI provider you choose, routed through your
+              own gateway. Here&apos;s exactly where data travels:
+            </p>
+            <div className="consent-flow">
+              {DATA_FLOW.map((item) => (
+                <div key={item.data} className="consent-flow-item">
+                  <span className="consent-flow-dest">{item.dest}</span>
+                  <span className="consent-flow-data">{item.data}</span>
+                  <span className="consent-flow-detail">{item.detail}</span>
+                </div>
+              ))}
+            </div>
+            <div className="consent-actions">
+              <Button type="button" variant="secondary" onClick={() => setConsentOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="button" onClick={grantAndSend}>
+                Got it — send
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

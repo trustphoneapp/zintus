@@ -519,3 +519,15 @@ button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
 .chat-bubble-actions { display: flex; gap: 12px; margin-top: 6px; }
 .chat-bubble-action { font-size: 12px; color: #cbd5e1; background: none; border: none; cursor: pointer; padding: 0; }
 .chat-bubble-action:hover { color: #fff; }
+
+/* ── Consent dialog (pre-send data-destination gate) ── */
+.consent-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: grid; place-items: center; z-index: 50; padding: 24px; }
+.consent-card { background: var(--color-surface, #0b0f14); border: 1px solid var(--color-border, #1f2937); border-radius: 14px; padding: 20px; max-width: 460px; width: 100%; }
+.consent-title { font-size: 17px; font-weight: 800; margin: 0 0 8px; }
+.consent-body { font-size: 13px; color: var(--color-text-muted, #94a3b8); line-height: 1.5; margin: 0 0 12px; }
+.consent-flow { display: flex; flex-direction: column; }
+.consent-flow-item { display: flex; flex-direction: column; padding: 8px 0; border-top: 1px solid var(--color-border, #1f2937); }
+.consent-flow-dest { font-size: 12px; font-weight: 800; color: var(--color-purple-bright, #c4b5fd); }
+.consent-flow-data { font-size: 13px; font-weight: 600; }
+.consent-flow-detail { font-size: 12px; color: var(--color-text-muted, #94a3b8); line-height: 1.4; }
+.consent-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
