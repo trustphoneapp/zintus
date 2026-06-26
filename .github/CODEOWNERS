@@ -1,0 +1,65 @@
+# Zintus CODEOWNERS — DOMAIN MAP (documentation only)
+#
+# ⚠️ NOT ENFORCED via branch protection.
+# Every owner here is the same single account (solo founder), so wiring
+# "require review from code owners" would block you from merging your own PRs
+# (GitHub forbids self-approval). Keep this file as a MAP, not a gate.
+#
+# Purpose: given a changed path, tell the agent WHICH context doc to read first.
+#   path under here   → read this doc          → owning "agent domain"
+#   packages/router   → docs/agents/CORE.md     → CORE
+#   workers/, .github → docs/agents/OPS.md       → OPS
+#   apps/gateway      → docs/agents/GATEWAY.md   → GATEWAY
+#   apps/web          → docs/agents/WEB.md       → WEB
+#   apps/mobile       → docs/agents/MOBILE.md    → MOBILE
+#   apps/cli          → docs/agents/CLI.md       → CLI
+#   apps/desktop      → docs/agents/DESKTOP.md   → DESKTOP
+#
+# Last matching pattern wins (standard CODEOWNERS rule).
+
+# DEFAULT
+*                           @trustphoneapp
+
+# ── CORE — routing, compression, quota, crypto, schemas, providers ──
+# Risk: HIGH (every request flows through here). Doc: docs/agents/CORE.md
+/packages/router/           @trustphoneapp
+/packages/tokzen/           @trustphoneapp
+/packages/engine/           @trustphoneapp
+/packages/crypto-e2e/       @trustphoneapp
+/packages/schemas/          @trustphoneapp
+/packages/providers/        @trustphoneapp
+
+# ── OPS — relay, CI, Docker, deploy ──
+# Risk: HIGH (affects all users on deploy). Doc: docs/agents/OPS.md
+/workers/                   @trustphoneapp
+/.github/                   @trustphoneapp
+/Dockerfile                 @trustphoneapp
+/docker-compose.yml         @trustphoneapp
+/scripts/                   @trustphoneapp
+
+# ── GATEWAY — the local API server ──
+# Risk: HIGH (main API surface). Doc: docs/agents/GATEWAY.md
+/apps/gateway/              @trustphoneapp
+
+# ── WEB — marketing site + dashboard ──
+# Risk: MEDIUM (UI, not data). Doc: docs/agents/WEB.md
+/apps/web/                  @trustphoneapp
+
+# ── MOBILE — Expo app ── Doc: docs/agents/MOBILE.md
+/apps/mobile/               @trustphoneapp
+
+# ── DESKTOP — Tauri app ── Doc: docs/agents/DESKTOP.md
+/apps/desktop/              @trustphoneapp
+
+# ── CLI — published npm package ── Doc: docs/agents/CLI.md
+/apps/cli/                  @trustphoneapp
+
+# ── SHARED PACKAGES (read CORE.md for the request-path ones) ──
+/packages/memory/           @trustphoneapp
+/packages/keychain/         @trustphoneapp
+/packages/test-utils/       @trustphoneapp
+/packages/search/           @trustphoneapp
+/packages/context-compiler/ @trustphoneapp
+/packages/codebase-indexer/ @trustphoneapp
+/packages/types/            @trustphoneapp
+/packages/ui/               @trustphoneapp
