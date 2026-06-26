@@ -6,6 +6,7 @@ import { PROVIDER_BY_ID } from "@/lib/providers";
 import type { UiMessage } from "@/lib/app-store";
 import { Icon } from "./Icons";
 import { TransparencyStrip } from "./TransparencyStrip";
+import { CompressionBadge } from "./CompressionBadge";
 
 function renderLine(line: string, index: number) {
   if (line.startsWith("```")) {
@@ -87,6 +88,9 @@ export function MessageBubble({
           </span>
         )}
       </div>
+      {!isUser && message.compression ? (
+        <CompressionBadge stats={message.compression} />
+      ) : null}
       {!isUser && message.meta ? (
         <TransparencyStrip meta={message.meta} />
       ) : null}

@@ -1,5 +1,10 @@
 import type { AppConfig, ContextMode, ProviderId } from "@zintus/types";
-import { fetchGatewayHealth, streamGatewayChat, type ChatMeta } from "./gateway";
+import {
+  fetchGatewayHealth,
+  streamGatewayChat,
+  type ChatMeta,
+  type CompressionStats,
+} from "./gateway";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -13,6 +18,7 @@ export interface StreamChatResult {
   traceId?: string;
   compileTokens?: number;
   meta?: ChatMeta;
+  compression?: CompressionStats;
   source: "gateway";
 }
 

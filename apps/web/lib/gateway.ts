@@ -107,6 +107,115 @@ export async function fetchGatewayHealth(): Promise<GatewayHealth | null> {
   }
 }
 
+/**
+ * Tokzen compression savings for a single chat response, parsed from the
+ * gateway's derived-only `X-Zintus-*` headers. The gateway emits these ONLY
+ * when real compression happened (compressedTokens < originalTokens); the USD
+ * figure is an ESTIMATE off a non-billing pricing table.
+ */
+export interface CompressionStats {
+  originalTokens: number;
+  compressedTokens: number;
+  tokensSaved: number;
+  /** compressed/original ratio in 0..1 (e.g. 0.36 = compressed to 36%). */
+  ratio: number;
+  /** Estimate only — omitted when the gateway can't price the saved tokens. */
+  costSavedUsd?: number;
+}
+
+function parseHeaderNumber(value: string | null): number | null {
+  if (value == null || value.trim() === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Read the compression headers off a chat response. Returns null unless a real
+ * saving is present — matching the gateway, which omits the headers entirely
+ * when no compression happened (so the badge shows nothing).
+ */
+export function readCompressionStats(headers: Headers): CompressionStats | null {
+  const originalTokens = parseHeaderNumber(headers.get("X-Zintus-Original-Tokens"));
+  const compressedTokens = parseHeaderNumber(
+    headers.get("X-Zintus-Compressed-Tokens"),
+  );
+  const tokensSaved = parseHeaderNumber(headers.get("X-Zintus-Tokens-Saved"));
+  const ratio = parseHeaderNumber(headers.get("X-Zintus-Compression-Ratio"));
+  if (
+    originalTokens == null ||
+    compressedTokens == null ||
+    tokensSaved == null ||
+    ratio == null ||
+    tokensSaved <= 0 ||
+    compressedTokens >= originalTokens
+  ) {
+    return null;
+  }
+  const costSavedUsd = parseHeaderNumber(headers.get("X-Zintus-Cost-Saved-Usd"));
+  return {
+    originalTokens,
+    compressedTokens,
+    tokensSaved,
+    ratio,
+    ...(costSavedUsd != null && costSavedUsd > 0 ? { costSavedUsd } : {}),
+  };
+}
+
+/** BYOK-only quota-exhaustion actions the gateway may recommend. */
+export type RouteOptionId =
+  | "compress_harder"
+  | "switch_provider"
+  | "use_local"
+  | "wait";
+
+export interface RouteOptionAlternative {
+  provider: ProviderId;
+  model: string;
+  estInputPer1M: number;
+  estOutputPer1M: number;
+}
+
+/** Mirrors the GET /v1/route/options response (derived-only, no secrets). */
+export interface RouteOptions {
+  provider: ProviderId;
+  quotaRemaining: number | null;
+  resetIn: number | null;
+  resetReason?: string;
+  best: RouteOptionId;
+  options: RouteOptionId[];
+  reason: string;
+  alternatives: RouteOptionAlternative[];
+  localAvailable: boolean;
+}
+
+/**
+ * Quota-exhaustion decision for one provider from the gateway's BYOK-only
+ * `GET /v1/route/options`. The endpoint never returns a paid/credits option;
+ * we render exactly what it sends. Returns null when the gateway is offline or
+ * rejects the provider.
+ */
+export async function fetchRouteOptions(
+  provider: ProviderId,
+  quotaHint?: number,
+): Promise<RouteOptions | null> {
+  try {
+    const params = new URLSearchParams({ provider });
+    if (typeof quotaHint === "number" && quotaHint >= 0 && quotaHint <= 1) {
+      params.set("quota", String(quotaHint));
+    }
+    const response = await fetch(
+      `${GATEWAY_URL}/v1/route/options?${params.toString()}`,
+      { cache: "no-store", headers: { ...gatewayAuthHeaders() } },
+    );
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as RouteOptions;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchLastTrace(): Promise<{
   trace?: {
     traceId: string;
@@ -318,6 +427,7 @@ export async function streamGatewayChat(params: {
   traceId?: string;
   compileTokens?: number;
   meta?: ChatMeta;
+  compression?: CompressionStats;
 }> {
   const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
     method: "POST",
@@ -366,6 +476,8 @@ export async function streamGatewayChat(params: {
     compileTokensHeader && Number.isFinite(Number(compileTokensHeader))
       ? Number(compileTokensHeader)
       : undefined;
+  // Compression savings ride along as response headers (known before streaming).
+  const compression = readCompressionStats(response.headers) ?? undefined;
   let output = "";
 
   await readSseData(response, (payload) => {
@@ -411,5 +523,6 @@ export async function streamGatewayChat(params: {
     traceId,
     compileTokens,
     meta,
+    compression,
   };
 }

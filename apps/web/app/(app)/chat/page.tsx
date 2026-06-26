@@ -238,6 +238,7 @@ export default function ChatPage() {
           model: result.model,
           compileTokens: result.compileTokens,
           meta: result.meta,
+          compression: result.compression,
         });
 
         pushTerminalLine({

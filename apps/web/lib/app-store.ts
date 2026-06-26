@@ -1,7 +1,12 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { ProviderId } from "@zintus/types";
-import type { ChatMeta, GatewayProviderStatus, GatewaySavings } from "./gateway";
+import type {
+  ChatMeta,
+  CompressionStats,
+  GatewayProviderStatus,
+  GatewaySavings,
+} from "./gateway";
 
 export interface UiMessage {
   id: string;
@@ -12,6 +17,8 @@ export interface UiMessage {
   compileTokens?: number;
   /** Per-response transparency metadata (tokens, latency, savings). */
   meta?: ChatMeta;
+  /** Tokzen compression savings for this response (present only on a real hit). */
+  compression?: CompressionStats;
   time: string;
 }
 
@@ -47,7 +54,7 @@ interface AppState {
   terminalLines: TerminalLine[];
   appendMessage: (message: UiMessage) => void;
   updateMessage: (id: string, content: string) => void;
-  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens" | "meta">>) => void;
+  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens" | "meta" | "compression">>) => void;
   setThreadId: (threadId?: string) => void;
   setActiveProvider: (providerId: ProviderId | null) => void;
   setSelectedProvider: (providerId: ProviderId | null) => void;
