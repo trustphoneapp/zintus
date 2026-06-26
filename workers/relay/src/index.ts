@@ -11,6 +11,9 @@
  *     POST /api/auth/mobile-verify
  *     POST /api/auth/signout
  *
+ *   ACCOUNT (user cookie auth):
+ *     DELETE /api/account   — self-service account + data deletion
+ *
  *   SESSION MANAGEMENT (user cookie auth):
  *     GET    /api/sessions
  *     POST   /api/sessions
@@ -43,10 +46,10 @@ import {
   clearSessionCookie,
   type SessionPayload,
 } from "./auth.js";
-import { createCheckoutSession, createPortalSession, handleStripeWebhook } from "./billing.js";
+import { createCheckoutSession, createPortalSession, handleStripeWebhook, cancelStripeSubscription } from "./billing.js";
 import { checkoutAvailability } from "./tiers.js";
 import { corsOrigin, validateRedirectTo } from "./http-security.js";
-import { enforceQuota, recordUsage, getQuotaUsed } from "./middleware/quota.js";
+import { enforceQuota, recordUsage, getQuotaUsed, resetQuota } from "./middleware/quota.js";
 import { createErrorSink } from "./observability.js";
 import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 import { validateGoogleClaims, type GoogleClaims } from "./google-auth.js";
@@ -61,6 +64,9 @@ import {
   usageReportKey,
   USAGE_REPORT_LIMIT,
   USAGE_REPORT_WINDOW_SECS,
+  accountDeleteKey,
+  ACCOUNT_DELETE_LIMIT,
+  ACCOUNT_DELETE_WINDOW_SECS,
 } from "./rate-limit.js";
 
 // Re-export the Durable Object classes for wrangler to find.
@@ -530,6 +536,96 @@ app.get("/api/auth/me", async (c) => {
   const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return c.json({ authenticated: false }, 401);
   return c.json({ authenticated: true, email: session.email, user_id: session.user_id });
+});
+
+// ── ACCOUNT — self-service deletion (Google Play / store requirement) ────────
+//
+// DELETE /api/account — a signed-in user deletes THEIR OWN account and all data.
+// Hard rules (the whole point of this route):
+//   • The user id is taken ONLY from the verified session cookie
+//     (`session.user_id`), NEVER from the request body or a URL param — so one
+//     user can never delete another's data. There is intentionally no
+//     admin/bulk delete and no id input of any kind.
+//   • Every D1 statement is scoped `WHERE user_id = ?`/`email = ?` for THIS user.
+//   • Destructive + irreversible → 401 without a session, rate-limited per user,
+//     and the session cookie is cleared in the response.
+//   • Idempotent: every DELETE simply affects 0 rows once data is gone, so a
+//     repeat call (e.g. via a second still-cached session token for the same
+//     user) returns 200, not 500.
+app.delete("/api/account", async (c) => {
+  const session = await requireSession(c as Context<{ Bindings: Env }>);
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+
+  // Per-user rate limit on the destructive path (hijacked cookie / buggy client).
+  if (
+    !(await kvRateLimitOk(
+      c.env.KV,
+      accountDeleteKey(session.user_id),
+      ACCOUNT_DELETE_LIMIT,
+      ACCOUNT_DELETE_WINDOW_SECS,
+    ))
+  ) {
+    return c.json({ error: "Too many account-deletion requests" }, 429);
+  }
+
+  // The ONLY identity used for the whole operation — never trust client input.
+  const userId = session.user_id;
+  const email = session.email;
+
+  // Best-effort Stripe cancellation. Managed keys are disabled so there is
+  // usually no Stripe subscription, but if one exists AND Stripe is configured,
+  // cancel it. A Stripe error must NEVER block the account deletion (the user's
+  // right to erasure wins) — log it redacted and continue.
+  if (c.env.STRIPE_SECRET_KEY) {
+    const sub = await c.env.DB.prepare(
+      "SELECT stripe_subscription_id FROM subscriptions WHERE user_id = ? AND stripe_subscription_id IS NOT NULL",
+    )
+      .bind(userId)
+      .first<{ stripe_subscription_id: string | null }>();
+    if (sub?.stripe_subscription_id) {
+      try {
+        await cancelStripeSubscription(sub.stripe_subscription_id, c.env);
+      } catch (err) {
+        console.error("account.delete.stripe", redactSecrets(String(err)));
+      }
+    }
+  }
+
+  // Wipe the current-period quota counter (Durable Object). Best-effort: a DO
+  // hiccup must not strand the D1 deletion — the counter self-prunes anyway.
+  try {
+    await resetQuota(c.env, userId);
+  } catch {
+    // Best effort — continue with the D1 deletion.
+  }
+
+  // Delete every D1 row owned by THIS user. Children first, the users row last
+  // (matches the FK order; explicit so it works whether or not D1 enforces the
+  // ON DELETE CASCADE in schema.sql). All scoped to the session's user id/email.
+  await c.env.DB.prepare("DELETE FROM gateway_sessions WHERE user_id = ?").bind(userId).run();
+  await c.env.DB.prepare("DELETE FROM user_sessions WHERE user_id = ?").bind(userId).run();
+  await c.env.DB.prepare("DELETE FROM subscriptions WHERE user_id = ?").bind(userId).run();
+  await c.env.DB.prepare("DELETE FROM usage_log WHERE user_id = ?").bind(userId).run();
+  await c.env.DB.prepare("DELETE FROM referrals WHERE referrer_id = ? OR referred_id = ?")
+    .bind(userId, userId)
+    .run();
+  await c.env.DB.prepare("DELETE FROM referral_codes WHERE user_id = ?").bind(userId).run();
+  await c.env.DB.prepare("DELETE FROM auth_tokens WHERE email = ?").bind(email).run();
+  await c.env.DB.prepare("DELETE FROM zintus_users WHERE id = ?").bind(userId).run();
+
+  // Revoke the presented session token in KV and clear the cookie so the now-
+  // deleted user is no longer authenticated. (Other cached KV session tokens for
+  // this user expire by TTL; their D1 user_sessions rows are already gone.)
+  const cookie = parseSessionCookie(c.req.header("Cookie") ?? null);
+  if (cookie) await revokeSessionToken(c.env.KV, cookie);
+
+  return new Response(JSON.stringify({ ok: true, deleted: true }), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Set-Cookie": clearSessionCookie(c.env.COOKIE_DOMAIN),
+    },
+  });
 });
 
 // ── SESSIONS — list / create / delete ────────────────────────────────────

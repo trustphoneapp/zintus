@@ -37,6 +37,18 @@ export async function getQuotaUsed(env: Env, userId: string): Promise<number> {
   return total ?? 0;
 }
 
+/**
+ * Wipe the current-period quota counter for `userId` (account deletion).
+ * Addresses the same DO instance enforceQuota reads (`${userId}:${period}`) and
+ * clears its storage. Only the current period is meaningful — past-period
+ * instances self-prune via their idle alarm (see QuotaCounter.ts).
+ */
+export async function resetQuota(env: Env, userId: string): Promise<void> {
+  await counterStub(env, userId, billingPeriod()).fetch('https://quota/reset', {
+    method: 'POST',
+  });
+}
+
 /** Atomically add `tokens` to the current-period counter; returns the new total. */
 async function addQuotaUsed(env: Env, userId: string, tokens: number): Promise<number> {
   const res = await counterStub(env, userId, billingPeriod()).fetch('https://quota/add', {

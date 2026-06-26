@@ -114,11 +114,17 @@ Play requires a way to request **account + data deletion** both in-app and via a
 deletion page — not a buried homepage link; must state what is deleted, what is
 retained and why, and processing time).
 
-- **Account deletion URL:** `https://www.zintus.ai/account/delete` `[HUMAN]`
-  build this page; it must work without login and describe deletion scope.
+- **Account deletion URL:** `https://www.zintus.ai/account/delete` — **BUILT**
+  (was a blocker). Public, login-free page (`apps/web/app/account/delete/page.tsx`,
+  in `PUBLIC_ROUTES` + sitemap) describing the deletion scope; signed-in users
+  confirm in-page and it calls the relay. `[HUMAN]` only remaining: deploy to
+  prod (Vercel auto-deploys on merge to `main`) so the URL is live before submit.
+- **Relay endpoint:** `DELETE /api/account` (`workers/relay/src/index.ts`) —
+  cookie-authenticated, deletes ONLY the signed-in user's data (id from session,
+  never from input), rate-limited, best-effort Stripe-cancel, idempotent.
 - **In-app flow:** Settings → Account → Delete account (for Zintus Cloud
-  accounts). `[HUMAN]` confirm the in-app entry exists and triggers relay-side
-  account/data deletion.
+  accounts) should call the same `DELETE /api/account`. `[HUMAN]` confirm the
+  mobile-app entry exists and is wired to it (relay side is done).
 - Note: applies because the app supports account creation (Zintus Cloud /
   Remote tab). Pure BYOK users have no Zintus account to delete.
 
@@ -143,7 +149,8 @@ retained and why, and processing time).
 - [ ] AAB built; targetSdk ≥ 35 (≥ 36 after Aug 31 2026).
 - [ ] Data safety form complete + consistent with iOS labels.
 - [ ] IARC content rating completed.
-- [ ] Account-deletion web URL live + in-app flow working.
+- [ ] Account-deletion web URL live (page BUILT at `/account/delete` + relay
+      `DELETE /api/account`; needs prod deploy) + in-app flow wired to it.
 - [ ] Privacy Policy URL live (not draft) — `[HUMAN]` + counsel.
 - [ ] No live paid/managed-key claims in description.
 - [ ] Demo gateway / steps ready for review — see `review-notes.md`.

@@ -97,8 +97,10 @@ optional `SENTRY_DSN`. Vars: `RELAY_BASE_URL`, `COOKIE_DOMAIN`.
       `{"ok":true}` (Remote tab / Zintus Cloud depends on it).
 - [ ] **Demo gateway** stood up for App/Play review (see `review-notes.md`).
 - [ ] **Privacy policy** (`https://www.zintus.ai/privacy`) finalized with counsel
-      (currently DRAFT) and **account-deletion page**
-      (`https://www.zintus.ai/account/delete`) live before submission.
+      (currently DRAFT) before submission. **Account-deletion page**
+      (`https://www.zintus.ai/account/delete`) is **BUILT** (public page +
+      `DELETE /api/account` relay endpoint) — just needs the prod deploy to be
+      live (Vercel auto-deploys on merge to `main`).
 - [ ] **Code-signing certs obtained** (Apple Developer ID Application; Windows
       Authenticode OV) before flipping the desktop signing steps on.
 

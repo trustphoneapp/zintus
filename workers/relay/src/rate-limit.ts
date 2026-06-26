@@ -68,3 +68,18 @@ export const USAGE_REPORT_WINDOW_SECS = 60; // 1 minute
 export function usageReportKey(userId: string): string {
   return `rl:usage:${userId}`;
 }
+
+// ── Account-deletion limit ──────────────────────────────────────────────────
+// DELETE /api/account is destructive and irreversible (drops the user's row,
+// sessions, subscription, usage, quota). A small per-user cap stops a hijacked
+// cookie or a buggy client from hammering the deletion path (which fans out to
+// D1 + a Durable Object + best-effort Stripe). A legitimate user deletes once;
+// 5/hour leaves ample room for a retry after a transient failure while capping
+// abuse hard. Per-user (the id comes from the verified session, never the body).
+
+export const ACCOUNT_DELETE_LIMIT = 5;
+export const ACCOUNT_DELETE_WINDOW_SECS = 3600; // 1 hour
+
+export function accountDeleteKey(userId: string): string {
+  return `rl:acctdel:${userId}`;
+}
