@@ -42,6 +42,7 @@ export async function streamChat(params: {
     defaultProvider: params.settings.defaultProvider,
     strategy: params.settings.routingStrategy,
     mode: params.mode ?? params.settings.contextMode,
+    blockTraining: params.settings.blockTrainingProviders,
     signal: params.signal,
     onChunk: params.onChunk,
   });

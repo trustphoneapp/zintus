@@ -232,6 +232,8 @@ export async function streamGatewayChat(params: {
   strategy?: RoutingStrategy;
   mode?: ContextMode;
   threadId?: string;
+  /** Private Mode: refuse providers that train on user data. */
+  blockTraining?: boolean;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<{
@@ -261,6 +263,7 @@ export async function streamGatewayChat(params: {
       strategy: params.strategy,
       mode: params.mode,
       thread_id: params.threadId,
+      block_training: params.blockTraining,
     }),
     signal: params.signal,
   });

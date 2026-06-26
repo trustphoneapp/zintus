@@ -29,7 +29,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 15 | Deep Research | ✅ | ✅ | ❌ | ❌ | web `(app)/research`; **desktop+CLI missing** |
 | 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
 | 17 | projects / workspaces | ✅ | ❌ | ❌ | ❌ | **only mobile** |
-| 18 | Private Mode | ✅ | ✅ | ❌ | 🟡 | web = incognito + privacy chip (`blockTrainingProviders`) |
+| 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
 | 19 | provider key management | ✅ | ✅ | ✅ | ✅ | web `LocalKeyManager`, desktop `ProvidersScreen`, CLI `keys` |
 | 20 | provider key test | ✅ | 🟡 | 🟡 | ❌ | mobile has explicit Test; CLI has no `keys test` |
 | 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |

@@ -23,7 +23,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { MessageBubble } from "./MessageBubble";
 
 export function ChatPanel() {
-  const { settings, hydrate } = useSettingsStore();
+  const { settings, hydrate, update } = useSettingsStore();
   const {
     selectedProvider,
     activeProvider,
@@ -214,6 +214,25 @@ export function ChatPanel() {
                 </option>
               ))}
             </select>
+            <button
+              type="button"
+              onClick={() =>
+                update({ blockTrainingProviders: !settings.blockTrainingProviders })
+              }
+              className="h-9 rounded-md border px-3 text-sm"
+              style={{
+                borderColor: settings.blockTrainingProviders
+                  ? "var(--color-good, #34d399)"
+                  : "var(--color-border)",
+                color: settings.blockTrainingProviders
+                  ? "var(--color-good, #34d399)"
+                  : "var(--color-text-muted)",
+                background: "var(--color-elevated)",
+              }}
+              title="Private Mode — refuse providers that train on your data (may reduce availability)"
+            >
+              🛡 {settings.blockTrainingProviders ? "Private on" : "Private"}
+            </button>
           </div>
 
           <div
