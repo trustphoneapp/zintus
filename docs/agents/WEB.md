@@ -3,10 +3,11 @@
 **Owns:** `apps/web/` (one Next.js app, two surfaces)
 **Risk:** MEDIUM — UI bugs, not data bugs.
 
-> ⚠️ **Scope:** this doc describes `main`. The branch
-> `feat/deep-feature-plan-design-system` (PR #10) has a larger design-system
-> rewrite (`globals.css`, providers page, tokens) **not yet merged** — don't
-> document it as current until it lands.
+> **Design system:** the violet/tokens design system + the providers-page
+> rewrite are now on `main` (merged via PR #10). Tokens live in
+> `packages/ui/styles/tokens.css` (`--c-*`) and `apps/web/app/globals.css`; the
+> providers page uses `DATA_POLICIES` (`packages/providers/src/data-policies.ts`)
+> for training badges. Document against `main` as usual.
 
 ## Source of truth
 | Fact | Where |
