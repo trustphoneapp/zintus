@@ -12,6 +12,13 @@ const RELAY_URL = (
   process.env.EXPO_PUBLIC_RELAY_URL ?? "https://relay.zintus.ai"
 ).replace(/\/$/, "");
 
+// The login PAGE is served by the WEB app (the relay only exposes /api/* and
+// redirects /login → the web app), so browser OAuth/magic-link login must open
+// the web URL, not the relay.
+const WEB_URL = (
+  process.env.EXPO_PUBLIC_WEB_URL ?? "https://www.zintus.ai"
+).replace(/\/$/, "");
+
 // ── Token storage (MMKV, never AsyncStorage) ──────────────────────────────
 
 export function getCloudSessionToken(): string | null {
@@ -138,7 +145,7 @@ export async function cloudSignOut(): Promise<void> {
 
 /** URL to open in expo-web-browser for mobile OAuth login. */
 export function mobileLoginUrl(): string {
-  return `${RELAY_URL}/login?mobile=true`;
+  return `${WEB_URL}/login?mobile=true`;
 }
 
 export { RELAY_URL };
