@@ -67,22 +67,24 @@ that `signCommand` exists the `.msi`/`.exe` ships unsigned. See
 [Tauri — Windows code signing](https://v2.tauri.app/distribute/sign/windows/).
 
 ### Updater is OFF until signing is wired
-`src-tauri/tauri.conf.json` → `bundle.updater.active` is **`false`** with an empty
-`pubkey`. This is deliberate: an *active* updater with an empty/unsigned key is a
-foot-gun (a Tauri v2 build with `active: true` needs a real `pubkey`, and an
-unsigned `latest.json` can't be verified). `active: false` matches the "unsigned
-beta" reality and the `/download` "beta" copy. Do **not** flip it to `true` until
-you generate a signing keypair and paste the public half into `pubkey`.
+`src-tauri/tauri.conf.json` has **no `plugins.updater` block** and
+`bundle.createUpdaterArtifacts: false`, so auto-update is fully off. This is
+deliberate: an active updater with an empty/unsigned key is a foot-gun (a Tauri v2
+updater needs a real `pubkey`, and an unsigned `latest.json` can't be verified).
+Off matches the "unsigned beta" reality and the `/download` "beta" copy. **Note:**
+in Tauri v2 the updater lives under `plugins.updater`, NOT the v1 `bundle.updater`
+(the old v1 block was removed because it fails v2 config validation).
 
 To enable auto-update later (one-time, `[HUMAN]`):
 ```bash
 cd apps/desktop && bun run tauri signer generate -w ~/.tauri/zintus.key
-# 1. paste contents of ~/.tauri/zintus.key.pub into tauri.conf.json -> bundle.updater.pubkey
-# 2. set bundle.updater.active = true
-# 3. set bundle.createUpdaterArtifacts = true   (currently explicitly `false`)
-# 4. add TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD as repo secrets
+# 1. add a plugins.updater block to tauri.conf.json:
+#      "endpoints": ["https://github.com/trustphoneapp/zintus/releases/latest/download/latest.json"]
+#      "pubkey": "<contents of ~/.tauri/zintus.key.pub>"
+# 2. set bundle.createUpdaterArtifacts = true   (currently explicitly `false`)
+# 3. add TAURI_SIGNING_PRIVATE_KEY + TAURI_SIGNING_PRIVATE_KEY_PASSWORD as repo secrets
 ```
-With those four in place the next `desktop-v*` tag produces signed `.sig`
+With those in place the next `desktop-v*` tag produces signed `.sig`
 artifacts and `release-desktop.yml` publishes `latest.json` automatically — its
 `includeUpdaterJson` input is gated on `TAURI_SIGNING_PRIVATE_KEY` being set, so a
 half-configured updater never ships a broken feed.
@@ -93,7 +95,7 @@ Source: [Tauri v2 — Updater plugin](https://v2.tauri.app/plugin/updater/).
 signing secrets via `secrets.*` (none hardcoded) and never fails when they are
 absent — a dry run still publishes unsigned bundles. The full secret list +
 meaning is in the "`[HUMAN]` signing secrets" table above. State today:
-- **Updater signing** (`TAURI_SIGNING_*`): no-op while `updater.active = false`.
+- **Updater signing** (`TAURI_SIGNING_*`): no-op while there is no `plugins.updater` block / `createUpdaterArtifacts: false`.
 - **macOS Developer ID + notarization** (`APPLE_*`): wired; certs `[HUMAN]`-pending.
 - **Windows Authenticode** (`AZURE_*`): env wired; needs `signCommand` in
   `tauri.conf.json` + `[HUMAN]` Azure Trusted Signing setup before it signs.
