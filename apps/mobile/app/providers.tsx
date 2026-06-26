@@ -29,6 +29,12 @@ import {
   removeKeyFromGateway,
   resolveSessionId,
 } from "@/lib/gateway-key-push";
+import { fetchRouteOptions, type RouteOptions } from "@/lib/route-options";
+import {
+  priceLabel,
+  testStoredKey,
+  type KeyTestResult,
+} from "@/lib/provider-intel";
 
 interface ProviderRowState {
   providerId: ProviderId;
@@ -51,6 +57,16 @@ export default function ProvidersScreen() {
   > | null>(null);
   // null = gateway offline / no status → hide "On your system" section entirely.
   const [localRuntimes, setLocalRuntimes] = useState<LocalRuntimes | null>(null);
+  const [testResults, setTestResults] = useState<
+    Record<string, KeyTestResult | "testing" | undefined>
+  >({});
+  const [recommendation, setRecommendation] = useState<RouteOptions | null>(null);
+
+  async function runTest(providerId: ProviderId) {
+    setTestResults((prev) => ({ ...prev, [providerId]: "testing" }));
+    const result = await testStoredKey(providerId);
+    setTestResults((prev) => ({ ...prev, [providerId]: result }));
+  }
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -95,6 +111,9 @@ export default function ProvidersScreen() {
       } catch {
         setLocalRuntimes(null);
       }
+
+      // Recommendation for the user's selected provider (cheapest/local/wait).
+      setRecommendation(await fetchRouteOptions(loadSelectedProvider()));
     } finally {
       setLoading(false);
     }
@@ -117,6 +136,24 @@ export default function ProvidersScreen() {
           API keys are stored in expo-secure-store. Open the sheet to add or
           update a key.
         </Text>
+
+        {recommendation ? (
+          <View className="rounded-xl border border-slate-700 bg-panel p-3">
+            <Text className="text-xs font-semibold text-accent-bright">
+              Recommended now
+            </Text>
+            <Text className="mt-0.5 text-xs text-muted">
+              {recommendation.reason}
+            </Text>
+            {recommendation.alternatives.length > 0 ? (
+              <Text className="mt-1 text-[10px] text-muted">
+                Cheapest alternative: {recommendation.alternatives[0].provider} (~$
+                {recommendation.alternatives[0].estInputPer1M} in /$
+                {recommendation.alternatives[0].estOutputPer1M} out per 1M)
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
 
         {loading ? (
           <ActivityIndicator color="#f4f6f8" />
@@ -167,6 +204,17 @@ export default function ProvidersScreen() {
                         </Text>
                       </View>
                     ) : null}
+                    {(() => {
+                      const price = priceLabel(
+                        provider.id,
+                        provider.defaultModel,
+                      );
+                      return price ? (
+                        <Text className="mt-1 text-[10px] text-muted">
+                          {price}
+                        </Text>
+                      ) : null;
+                    })()}
                     {live ? (
                       <Text
                         className={`text-xs ${
@@ -217,6 +265,16 @@ export default function ProvidersScreen() {
                   </Pressable>
                   {row?.hasKey ? (
                     <Pressable
+                      className="items-center rounded-lg border border-slate-600 px-3 py-2.5"
+                      onPress={() => void runTest(provider.id)}
+                    >
+                      <Text className="text-ink">
+                        {testResults[provider.id] === "testing" ? "…" : "Test"}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  {row?.hasKey ? (
+                    <Pressable
                       className="items-center rounded-lg border border-slate-600 px-4 py-2.5"
                       onPress={async () => {
                         await removeKeyFromGateway(provider.id);
@@ -227,6 +285,22 @@ export default function ProvidersScreen() {
                     </Pressable>
                   ) : null}
                 </View>
+                {testResults[provider.id] &&
+                testResults[provider.id] !== "testing" ? (
+                  <Text
+                    className={`mt-2 text-xs ${
+                      testResults[provider.id] === "ok"
+                        ? "text-emerald-400"
+                        : "text-red-400"
+                    }`}
+                  >
+                    {testResults[provider.id] === "ok"
+                      ? "Key valid ✓"
+                      : testResults[provider.id] === "bad"
+                        ? "Key invalid ✗"
+                        : "No key saved"}
+                  </Text>
+                ) : null}
               </View>
             );
           })

@@ -23,7 +23,7 @@ import { ChatMessageBubble } from "@/components/ChatMessageBubble";
 import { streamChat } from "@/lib/chat";
 import { getGatewayUrl } from "@/lib/gateway-url";
 import { fetchGatewayHealth } from "@/lib/gateway";
-import { loadConfig, loadSelectedProvider } from "@/lib/config";
+import { loadConfig, loadSelectedProvider, saveConfig } from "@/lib/config";
 import { CHAT_MODES, deriveRouting, nextMode, type ChatMode } from "@/lib/chat-mode";
 import { grantProviderSendConsent, hasProviderSendConsent } from "@/lib/consent";
 import { DESTINATIONS, describeFlow } from "@/lib/data-flow";
@@ -65,6 +65,10 @@ export default function ChatScreen() {
   const [gatewayChecked, setGatewayChecked] = useState(false);
   const [consentVisible, setConsentVisible] = useState(false);
   const [overrideVisible, setOverrideVisible] = useState(false);
+  const [privateMode, setPrivateMode] = useState(
+    () => loadConfig().blockTrainingProviders ?? false,
+  );
+  const [privateExplainVisible, setPrivateExplainVisible] = useState(false);
   const [routeOptions, setRouteOptions] = useState<
     Record<string, RouteOptions | null>
   >({});
@@ -116,6 +120,13 @@ export default function ChatScreen() {
     setInput("");
     setError(null);
     router.setParams({ thread: "" });
+  }
+
+  function togglePrivate() {
+    const next = !privateMode;
+    setPrivateMode(next);
+    saveConfig({ blockTrainingProviders: next });
+    if (next) setPrivateExplainVisible(true);
   }
 
   // Gateway health: polled ONLY while the Chat tab is focused AND the app is
@@ -231,7 +242,7 @@ export default function ChatScreen() {
         const result = await streamChat({
           providerId: effectiveProvider,
           strategy: effectiveProvider ? undefined : routing.strategy,
-          blockTraining: routing.blockTraining,
+          blockTraining: routing.blockTraining || privateMode,
           mode: config.contextMode,
           threadId: threadIdRef.current ?? undefined,
           messages: toChatMessages([...messages, userMessage]),
@@ -286,7 +297,7 @@ export default function ChatScreen() {
         abortRef.current = null;
       }
     },
-    [messages, mode, provider, setAssistant, loadRouteOptions],
+    [messages, mode, provider, privateMode, setAssistant, loadRouteOptions],
   );
 
   const send = useCallback(
@@ -415,6 +426,11 @@ export default function ChatScreen() {
           </Pressable>
           <Pressable hitSlop={6} onPress={() => router.push("/history")}>
             <Text style={styles.headerLink}>History</Text>
+          </Pressable>
+          <Pressable hitSlop={6} onPress={togglePrivate}>
+            <Text style={[styles.headerLink, privateMode && styles.shieldOn]}>
+              {privateMode ? "🛡 Private" : "🛡"}
+            </Text>
           </Pressable>
         </View>
         <View style={styles.chipRow}>
@@ -583,6 +599,35 @@ export default function ChatScreen() {
         </View>
       </Modal>
 
+      {/* Private Mode explainer (shown the first time it's enabled). */}
+      <Modal visible={privateExplainVisible} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>🛡 Private Mode on</Text>
+            <Text style={styles.modalBody}>
+              Zintus will refuse providers that train on your data for every
+              message. Your prompts still travel to a no-training provider
+              through your gateway — for fully on-device processing, pick a local
+              runtime (Ollama / LM Studio).
+              {"\n\n"}Tradeoff: blocking training providers can reduce
+              availability, so some free providers may be skipped.
+            </Text>
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setPrivateExplainVisible(false)}
+                style={({ pressed }) => [
+                  styles.modalBtn,
+                  styles.modalBtnPrimary,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.modalBtnPrimaryText}>Got it</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* Long-press Send → one-message provider override. */}
       <Modal visible={overrideVisible} transparent animationType="slide">
         <Pressable
@@ -627,6 +672,7 @@ const styles = StyleSheet.create({
   title: { color: COLORS.ink, fontSize: 22, fontWeight: "700" },
   headerLeft: { flexDirection: "row", alignItems: "center", gap: 12 },
   headerLink: { color: COLORS.accentBright, fontSize: 13, fontWeight: "600" },
+  shieldOn: { color: COLORS.good, fontWeight: "800" },
   chipRow: { flexDirection: "row", gap: 8 },
   gatewayHint: {
     color: COLORS.muted,
