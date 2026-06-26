@@ -4,7 +4,7 @@ Branch `feat/mobile-serious-app`. Tracks the upgrade from basic text chat to a
 serious cross-platform (Android + iOS) AI app. Updated as the loop progresses.
 
 ## Verification gates (run before calling anything done)
-- `cd apps/mobile && bun run typecheck` — currently **EXIT 0**
+- root `bun run typecheck` (all packages + web/desktop/mobile) — currently **EXIT 0**
 - `bun test apps/mobile/lib/gateway-url-resolve.test.ts` — **6/6**
 - `bun run doctor:mobile` — needs network; run on a connected machine
 - EAS Android + iOS preview builds + real-device smoke — **[HUMAN]** (accounts/devices)
@@ -22,7 +22,7 @@ serious cross-platform (Android + iOS) AI app. Updated as the loop progresses.
 | 12 | Providers control center | DONE | Test button, est-cost (pricing catalog), route/options recommendation + cheapest alt; training badge; key add/update/remove |
 | 13 | Local runtimes | PARTIAL | shown via cloud session; TODO: one-tap Use Local; local /v1/status lacks runtime list (gateway gap) |
 | 10 | Projects/workspaces | TODO | thread store already carries project_id |
-| 6 | File input | TODO (needs deps) | client-side text extraction → string schema; needs expo-document-picker + expo-file-system |
+| 6 | File input | DONE (text formats) | expo-document-picker + expo-file-system; on-device text extraction → string schema; chips + privacy notice. PDF/binary flagged unsupported on-device (honest) |
 | 7 | Voice dictation | TODO (needs deps + dev client) | expo-speech-recognition + expo-audio; foreground-only; never auto-send |
 | 5 | Image input | BLOCKED | needs cross-package multimodal content + provider vision-capability field, then expo-image-picker |
 

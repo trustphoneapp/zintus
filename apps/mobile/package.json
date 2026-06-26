@@ -20,6 +20,8 @@
     "@zintus/types": "workspace:*",
     "expo": "~56.0.0",
     "expo-constants": "~56.0.18",
+    "expo-document-picker": "~56.0.4",
+    "expo-file-system": "~56.0.8",
     "expo-font": "~56.0.7",
     "expo-linking": "~56.0.14",
     "expo-notifications": "^56.0.18",

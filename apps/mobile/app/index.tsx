@@ -26,7 +26,12 @@ import { fetchGatewayHealth } from "@/lib/gateway";
 import { loadConfig, loadSelectedProvider, saveConfig } from "@/lib/config";
 import { CHAT_MODES, deriveRouting, nextMode, type ChatMode } from "@/lib/chat-mode";
 import { grantProviderSendConsent, hasProviderSendConsent } from "@/lib/consent";
-import { DESTINATIONS, describeFlow } from "@/lib/data-flow";
+import { DESTINATIONS, attachmentPrivacyNotice, describeFlow } from "@/lib/data-flow";
+import {
+  composeMessage,
+  pickTextFile,
+  type Attachment,
+} from "@/lib/attachments";
 import {
   fetchRouteOptions,
   type RouteOption,
@@ -69,6 +74,7 @@ export default function ChatScreen() {
     () => loadConfig().blockTrainingProviders ?? false,
   );
   const [privateExplainVisible, setPrivateExplainVisible] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [routeOptions, setRouteOptions] = useState<
     Record<string, RouteOptions | null>
   >({});
@@ -76,7 +82,11 @@ export default function ChatScreen() {
   const threadIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const listRef = useRef<FlatList<UiMessage>>(null);
-  const pendingSendRef = useRef<string | null>(null);
+  const pendingSendRef = useRef<{
+    composed: string;
+    atts: Attachment[];
+    oneShot?: ProviderId;
+  } | null>(null);
 
   useEffect(() => {
     void migrateLegacyKeys();
@@ -118,6 +128,7 @@ export default function ChatScreen() {
     threadIdRef.current = null;
     setMessages([]);
     setInput("");
+    setAttachments([]);
     setError(null);
     router.setParams({ thread: "" });
   }
@@ -196,7 +207,7 @@ export default function ChatScreen() {
   }, []);
 
   const runTurn = useCallback(
-    async (text: string, oneShotProvider?: ProviderId) => {
+    async (text: string, oneShotProvider?: ProviderId, atts: Attachment[] = []) => {
       const config = loadConfig();
       const routing = deriveRouting(mode, config.routingStrategy);
       const effectiveProvider =
@@ -225,6 +236,14 @@ export default function ChatScreen() {
         threadId,
         role: "user",
         content: userMessage.content,
+        attachments: atts.length
+          ? atts.map((a) => ({
+              kind: "file" as const,
+              name: a.name,
+              mimeType: a.mimeType,
+              bytes: a.bytes,
+            }))
+          : null,
       });
 
       const controller = new AbortController();
@@ -303,25 +322,52 @@ export default function ChatScreen() {
   const send = useCallback(
     (oneShotProvider?: ProviderId) => {
       const text = input.trim();
-      if (!text || sending || !gatewayOnline) return;
+      if ((!text && attachments.length === 0) || sending || !gatewayOnline) {
+        return;
+      }
+      const composed = composeMessage(text, attachments);
+      const atts = attachments;
       const routing = deriveRouting(mode, loadConfig().routingStrategy);
       // Apple 5.1.2(i): consent before sending to a third-party provider.
       if (routing.posture !== "local-only" && !hasProviderSendConsent()) {
-        pendingSendRef.current = text;
+        pendingSendRef.current = { composed, atts, oneShot: oneShotProvider };
         setConsentVisible(true);
         return;
       }
-      void runTurn(text, oneShotProvider);
+      setAttachments([]);
+      void runTurn(composed, oneShotProvider, atts);
     },
-    [input, sending, gatewayOnline, mode, runTurn],
+    [input, attachments, sending, gatewayOnline, mode, runTurn],
   );
 
   function grantConsentAndSend() {
     grantProviderSendConsent();
     setConsentVisible(false);
-    const text = pendingSendRef.current;
+    const pending = pendingSendRef.current;
     pendingSendRef.current = null;
-    if (text) void runTurn(text);
+    if (pending) {
+      setAttachments([]);
+      void runTurn(pending.composed, pending.oneShot, pending.atts);
+    }
+  }
+
+  async function addAttachment() {
+    const att = await pickTextFile();
+    if (!att) return;
+    if (att.unsupported) {
+      Alert.alert(
+        "Can't read this file on-device",
+        `${att.name} isn't a text format Zintus can extract here (PDFs and images aren't supported yet). Text files — txt, md, csv, json, code — work.`,
+      );
+      return;
+    }
+    if (att.truncated) {
+      Alert.alert(
+        "Large file truncated",
+        `${att.name} was truncated to fit the prompt budget.`,
+      );
+    }
+    setAttachments((prev) => [...prev, att]);
   }
 
   function stop() {
@@ -411,7 +457,10 @@ export default function ChatScreen() {
 
   const keyExtractor = useCallback((item: UiMessage) => item.id, []);
   const modeDef = CHAT_MODES.find((m) => m.mode === mode)!;
-  const canSend = Boolean(input.trim()) && !sending && gatewayOnline;
+  const canSend =
+    (Boolean(input.trim()) || attachments.length > 0) &&
+    !sending &&
+    gatewayOnline;
 
   return (
     <KeyboardAvoidingView
@@ -504,10 +553,35 @@ export default function ChatScreen() {
       />
 
       <View style={styles.composer}>
+        {attachments.length > 0 ? (
+          <View style={styles.attachWrap}>
+            <View style={styles.attachChips}>
+              {attachments.map((a) => (
+                <View key={a.id} style={styles.attachChip}>
+                  <Text style={styles.attachName} numberOfLines={1}>
+                    📄 {a.name}
+                    {a.truncated ? " (truncated)" : ""}
+                  </Text>
+                  <Pressable
+                    hitSlop={6}
+                    onPress={() =>
+                      setAttachments((prev) => prev.filter((x) => x.id !== a.id))
+                    }
+                  >
+                    <Text style={styles.attachRemove}>×</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+            <Text style={styles.attachNotice}>
+              {attachmentPrivacyNotice("standard")[0]}
+            </Text>
+          </View>
+        ) : null}
         <View style={styles.composerTopRow}>
           <Pressable
             hitSlop={6}
-            onPress={() => notAvailable("Attachments")}
+            onPress={() => void addAttachment()}
             style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
           >
             <Text style={styles.iconBtnText}>＋</Text>
@@ -726,6 +800,23 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
     gap: 8,
   },
+  attachWrap: { gap: 6 },
+  attachChips: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  attachChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    maxWidth: "100%",
+    backgroundColor: COLORS.panel,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  attachName: { color: COLORS.ink, fontSize: 12, flexShrink: 1 },
+  attachRemove: { color: COLORS.muted, fontSize: 16, fontWeight: "800" },
+  attachNotice: { color: COLORS.muted, fontSize: 11, lineHeight: 15 },
   composerTopRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
   composerBottomRow: {
     flexDirection: "row",
