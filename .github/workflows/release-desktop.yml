@@ -5,8 +5,12 @@ on:
     tags:
       - "desktop-v*"
 
+# tauri-action needs write access to publish a GitHub Release + attach bundles.
+permissions:
+  contents: write
+
 jobs:
-  build:
+  release:
     strategy:
       fail-fast: false
       matrix:
@@ -24,19 +28,61 @@ jobs:
         with:
           bun-version: latest
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # universal-apple-darwin is not a rustup target: a universal build needs
+          # BOTH apple arches installed. Windows/Linux host triples are the default
+          # but listing them is harmless.
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
       - name: Install Linux deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: bun install
+      # Build the Next.js frontend up front so frontend errors surface before the
+      # long native build. `tauri build` also runs this via beforeBuildCommand.
       - run: cd apps/desktop && bun run build
-      - run: cd apps/desktop && bun run tauri build
+
+      - name: Build, sign & publish GitHub Release
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # --- Tauri updater signing (no-op until the updater is enabled; see
+          #     docs/agents/DESKTOP.md). Required only once updater.active = true. ---
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@v4
+          # --- macOS Developer ID signing + notarization (notarytool).
+          #     All absent on a dry run -> Tauri skips signing, build still produces
+          #     an unsigned .dmg/.app. [HUMAN] must add these secrets to sign. ---
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          # Tauri's notarization var is APPLE_PASSWORD; feed it the app-specific pw.
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # --- Windows Authenticode via Azure Trusted Signing.
+          #     No-op unless bundle.windows.signCommand is configured in
+          #     tauri.conf.json ([HUMAN], see DESKTOP.md). Without it the .msi/.exe
+          #     is unsigned and SmartScreen will warn. ---
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         with:
-          name: desktop-${{ matrix.target }}
-          path: |
-            apps/desktop/src-tauri/target/release/bundle/**/*
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "Zintus Desktop ${{ github.ref_name }}"
+          releaseBody: |
+            Zintus desktop — beta. These builds may be **unsigned**: Gatekeeper
+            (macOS) / SmartScreen (Windows) can warn until OS code-signing is wired.
+            Download the installer for your platform from the assets below.
+          releaseDraft: false
+          prerelease: true
+          # Gate latest.json on the updater actually being signed. While
+          # TAURI_SIGNING_PRIVATE_KEY is unset (updater off, see tauri.conf.json),
+          # we do NOT publish an updater feed — shipping an unverifiable latest.json
+          # would break auto-update. Flip on by adding the secret + enabling the
+          # updater (DESKTOP.md). tauri-action only generates latest.json when
+          # createUpdaterArtifacts produces .sig files, so this is belt-and-braces.
+          includeUpdaterJson: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          args: --target ${{ matrix.target }}
