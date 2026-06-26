@@ -342,6 +342,13 @@ curl -s -H "Authorization: Bearer $GATEWAY_TOKEN" localhost:8788/v1/status | jq`
             ports. Only status JSON, control commands, and SSE events pass through; never API keys,
             raw chat messages, or router state.
           </p>
+          <p className="m-subtitle" style={{ marginTop: "1rem" }}>
+            <strong>Domains:</strong> <code>zintus.ai</code> is the marketing site, these docs, and
+            the relay (<code>relay.zintus.ai</code>). <code>zintus.app</code> is the cloud account
+            &amp; dashboard you sign in to (sign-in emails come from <code>@zintus.app</code>). Your
+            gateway runs <em>locally</em> on your own machine (<code>localhost:8788</code> by
+            default) — neither domain hosts it; the relay only brokers the connection.
+          </p>
           <Terminal>{`$ zintus cloud login          # sign in to zintus.app, save credentials
 $ zintus serve --cloud        # start gateway + connect to the relay
 # then open zintus.app/dashboard — your gateway appears online`}</Terminal>

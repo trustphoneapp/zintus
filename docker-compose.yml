@@ -1,6 +1,7 @@
 # Zintus gateway — one-liner self-host: `docker compose up`.
 # Gateway on :8788. Keys + quota.db persist in the `zintus-data` named volume.
-# Set GATEWAY_TOKEN in your shell or a .env file before `up` for a public bind.
+# GATEWAY_TOKEN is REQUIRED (this binds 0.0.0.0): compose fails fast if it's unset.
+#   GATEWAY_TOKEN=$(openssl rand -hex 24) docker compose up
 services:
   gateway:
     build: .
@@ -9,7 +10,11 @@ services:
     environment:
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: "8788"
-      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
+      # Fail fast (the `:?` operator) if GATEWAY_TOKEN is unset/empty, so the
+      # gateway can never be exposed on 0.0.0.0 without auth by accident.
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:?GATEWAY_TOKEN is required — e.g. GATEWAY_TOKEN=$(openssl rand -hex 24) docker compose up}
+      # Recommended on any exposed deploy: per-client request cap (off by default).
+      GATEWAY_RATELIMIT_RPM: ${GATEWAY_RATELIMIT_RPM:-}
       # Provider keys can be supplied via env (otherwise mount your keychain-backed
       # ~/.zintus). Example: GROQ_API_KEY, GEMINI_API_KEY, ...
     volumes:

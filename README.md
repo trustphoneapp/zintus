@@ -374,7 +374,6 @@ wrangler d1 create zintus-relay      # paste database_id into wrangler.toml
 wrangler kv namespace create RELAY_KV # paste id into wrangler.toml
 
 # Set secrets:
-wrangler secret put RELAY_AUTH_SECRET
 wrangler secret put GOOGLE_CLIENT_ID
 wrangler secret put GOOGLE_CLIENT_SECRET
 wrangler secret put RESEND_API_KEY

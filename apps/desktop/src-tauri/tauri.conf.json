@@ -39,7 +39,7 @@
     "updater": {
       "active": false,
       "endpoints": [
-        "https://github.com/ysventures/zintus/releases/latest/download/latest.json"
+        "https://github.com/trustphoneapp/zintus/releases/latest/download/latest.json"
       ],
       "dialog": false,
       "pubkey": ""
