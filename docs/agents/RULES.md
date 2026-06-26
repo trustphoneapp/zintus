@@ -23,8 +23,6 @@ Before you start, capture it; your PR must not reduce it:
 git stash -u 2>/dev/null; git switch main; bun run test 2>&1 | grep -E "pass|fail"
 git switch -; git stash pop 2>/dev/null
 ```
-(As of writing, `main` = 768 passing / 0 failing — 738 across the bun batches + 30
-vitest — but verify, don't trust this line.)
 
 ## Commit format
 `type(scope): description` — types: `feat fix test ci docs chore refactor`
