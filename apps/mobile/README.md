@@ -95,3 +95,57 @@ app/           Expo Router tabs (chat, providers, usage)
 components/    ProviderSheet, QuotaBar
 lib/           chat, keys, quota, limits, notifications, validate
 ```
+
+## `expo-doctor` notes
+
+**Always run it from this directory** (or `bun run doctor:mobile` from the repo
+root). The `expo` CLI is a project-local bin; running `expo-doctor` from the
+monorepo root fails the Metro check with *"Cannot determine the project's Expo
+SDK version because the module `expo` is not installed"* (really `expo: command
+not found`, exit 127) — an invocation artifact, **not** a project defect.
+Canonical result from here: **20/21**, the one real failure being duplicate
+native deps (below).
+
+### Metro / Tailwind config resolution — FIXED
+
+`metro.config.js` passes **absolute** paths for NativeWind's `input` and
+`configPath` (anchored to `__dirname`). NativeWind runs `path.resolve()` on
+both, which is cwd-relative; in this Bun monorepo `expo-doctor` (and Metro)
+evaluate the config from the **workspace root**, where the old relative
+`"./global.css"` / default `"tailwind.config"` resolved to
+`<repo-root>/tailwind.config` and failed with *"Cannot find module
+.../zintus/tailwind.config"*. Absolute paths make it cwd-independent.
+
+### Duplicate native dependencies — KNOWN, needs an EAS build or a PM decision
+
+`expo-doctor`'s one remaining failure ("duplicate native module dependencies")
+is a **Bun + Expo monorepo limitation, not version skew, and not locally
+fixable by config**. Verified facts:
+
+- The flagged copies resolve to **distinct realpaths** in Bun's content-addressed
+  store (`node_modules/.bun/<pkg>@<ver>+<hash>`) — genuine physical duplicates,
+  not symlink aliases.
+- They are the **same version** (e.g. `expo-constants@56.0.18` has **20** store
+  variants), forked only by peer-resolution context because Expo 56's peer graph
+  is heavily circular (`expo ↔ @expo/cli ↔ @expo/log-box ↔ expo-router`). So
+  `overrides` (which pin versions) cannot collapse them.
+- A clean reinstall does **not** help: the store is regenerated deterministically
+  and every variant is referenced by the live graph (app + `expo` + `expo-router`).
+  Verified by inspection; do not waste a destructive `rm -rf node_modules` on it.
+- Bun 1.3.x has **no `dedupe` command**.
+- (Orphaned `expo@52` copies from a prior SDK exist in the store but are **not**
+  in the lockfile and are **not** what the check flags — cosmetic only.)
+
+The only real resolutions — both outside a local code change:
+
+1. **Prove harmless via a real native build**: `eas build --profile preview
+   --platform all` (needs `eas login`). EAS resolves deps in its own builder; if
+   autolinking succeeds and the app boots, the duplicates are cosmetic for our
+   dep set and the doctor check is a known false-positive we can suppress.
+2. **Migrate the mobile workspace's package manager** (npm/pnpm/yarn hoist
+   differently and avoid the peer-fork). This is an architecture decision with
+   monorepo-wide implications.
+
+Until one of those is done, treat iOS/Android **native release as unverified**.
+JS/TS is fine (typecheck + tests green); this is strictly a native-autolinking
+question that only a real build can answer.

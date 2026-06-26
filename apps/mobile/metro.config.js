@@ -40,4 +40,13 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   );
 };
 
-module.exports = withNativeWind(config, { input: "./global.css" });
+// Anchor NativeWind's input + tailwind config to the app dir with absolute
+// paths. NativeWind does `path.resolve()` on both, which is cwd-relative — and
+// in a Bun monorepo tools (expo-doctor, metro) often evaluate this config from
+// the workspace root, where "./global.css" / "tailwind.config" resolve against
+// the repo root and fail ("Cannot find .../zintus/tailwind.config"). Absolute
+// paths make resolution cwd-independent.
+module.exports = withNativeWind(config, {
+  input: path.resolve(projectRoot, "global.css"),
+  configPath: path.resolve(projectRoot, "tailwind.config.js"),
+});

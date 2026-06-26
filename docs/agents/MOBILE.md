@@ -112,7 +112,28 @@ per release. Build numbers auto-increment via `eas.json` `production.autoIncreme
   `splash-icon.png`, `notification-icon.png`, `favicon.png`, and the three
   `android-icon-*` adaptive-icon layers — verified present, nothing missing.
 
+## Known: `expo-doctor` duplicate native deps (false-positive)
+
+`expo-doctor` reports **duplicate native module dependencies** (same-version
+copies of `expo`, `expo-constants`, `expo-font`, etc. in Bun's content-addressed
+store). This is a **Bun/Expo compatibility artifact, not a real duplicate**:
+the copies are the same version, forked only by Expo 56's circular peer graph,
+and they resolve to distinct `.bun` store paths. **Reinstall does not fix it**
+(the store regenerates deterministically; Bun has no `dedupe`), and `overrides`
+can't collapse same-version copies. Run the check from the app dir
+(`bun run doctor:mobile`, or `cd apps/mobile && npx expo-doctor`) — from the repo
+root it also fails the Metro check because the `expo` CLI bin isn't on PATH there.
+
+**Resolution:** Run `eas build --profile preview` after `eas login` to confirm
+autolinking succeeds in EAS's managed environment. If the build passes, this
+warning is a confirmed false-positive and can be suppressed.
+
+**Status:** Unverified pending first EAS build. JS/TS gate is green; this is
+strictly a native-autolinking question only a real build can answer. See
+`apps/mobile/README.md` → "expo-doctor notes" for the full diagnosis.
+
 ## When you're done
 - [ ] `bun run typecheck` (mobile) — 0 errors
+- [ ] `bun run doctor:mobile` — 20/21 (only the known duplicate-deps false-positive)
 - [ ] `npx expo start` — loads on a device / Expo Go
 - [ ] PR opened, not merged
