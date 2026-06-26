@@ -111,6 +111,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [keyManagerOpen, setKeyManagerOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
+  const [imageUnsupported, setImageUnsupported] = useState(false);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [activePreset, setActivePreset] = useState<Preset | null>(null);
   // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
@@ -172,30 +173,26 @@ export default function ChatPage() {
       const isImage = file.type.startsWith("image/");
       const isText = TEXT_EXTENSIONS.has(ext);
 
-      if (!isImage && !isText) continue;
+      // Images are NOT wired end-to-end yet: the gateway has no multimodal path
+      // (content is z.string()). Refuse them rather than silently drop the bytes
+      // AND inject a fake "[Image: … see attached]" note the model never gets.
+      // Text files DO work (extracted + sent inline). See docs/multimodal-image-plan.md.
+      if (isImage) {
+        setImageUnsupported(true);
+        continue;
+      }
+      if (!isText) continue;
 
       const id = crypto.randomUUID();
       const reader = new FileReader();
-
-      if (isImage) {
-        reader.onload = (e) => {
-          const content = e.target?.result as string;
-          setAttachments((prev) => [
-            ...prev,
-            { id, name: file.name, type: "image", content, mimeType: file.type },
-          ]);
-        };
-        reader.readAsDataURL(file);
-      } else {
-        reader.onload = (e) => {
-          const content = e.target?.result as string;
-          setAttachments((prev) => [
-            ...prev,
-            { id, name: file.name, type: "text", content, mimeType: file.type || "text/plain" },
-          ]);
-        };
-        reader.readAsText(file);
-      }
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setAttachments((prev) => [
+          ...prev,
+          { id, name: file.name, type: "text", content, mimeType: file.type || "text/plain" },
+        ]);
+      };
+      reader.readAsText(file);
     }
   }, []);
 
@@ -304,25 +301,15 @@ export default function ChatPage() {
     }
     const prompt = input.trim();
 
-    // Build user content with attachments
+    // Build user content from text attachments only (images are unsupported
+    // end-to-end — see handleFiles; no fake image notes are injected).
     let textPrefix = "";
-    const imageNotes: string[] = [];
-    const sendImages: Array<{ data: string; mimeType: string; name: string }> = [];
-
     for (const att of attachments) {
-      if (att.type === "text") {
-        const ext = att.name.split(".").pop() ?? "txt";
-        textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
-      } else {
-        imageNotes.push(`[Image: ${att.name} — see attached]`);
-        const base64 = att.content.includes(",") ? (att.content.split(",")[1] ?? att.content) : att.content;
-        sendImages.push({ data: base64, mimeType: att.mimeType, name: att.name });
-      }
+      const ext = att.name.split(".").pop() ?? "txt";
+      textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
     }
 
-    const userContent = (
-      textPrefix + prompt.trim() + (imageNotes.length ? "\n\n" + imageNotes.join("\n") : "")
-    ).trim();
+    const userContent = (textPrefix + prompt.trim()).trim();
 
     const history: ChatMessage[] = [
       ...messages.map((message) => ({
@@ -354,7 +341,7 @@ export default function ChatPage() {
       threadId == null
         ? [...leading, ...history]
         : [{ role: "user", content: userContent }];
-    await streamAssistant(assistant.id, sendMessages, prompt, sendImages);
+    await streamAssistant(assistant.id, sendMessages, prompt, []);
   }, [activePreset, appendMessage, attachments, incognito, input, loading, messages, streamAssistant, threadId]);
 
   const regenerate = useCallback(async () => {
@@ -616,6 +603,22 @@ export default function ChatPage() {
               Search
             </button>
           </div>
+          {imageUnsupported && (
+            <div className="chat-attachments" style={{ alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, color: "#f59e0b" }}>
+                Images aren&apos;t supported yet — attach text files (txt, md, code,
+                json…).
+              </span>
+              <button
+                type="button"
+                className="chat-attachment-remove"
+                onClick={() => setImageUnsupported(false)}
+                aria-label="Dismiss"
+              >
+                <Icon name="x" size={11} />
+              </button>
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="chat-attachments">
               {attachments.map((att) => (
@@ -646,7 +649,7 @@ export default function ChatPage() {
             <input
               type="file"
               ref={fileInputRef}
-              accept="image/*,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
+              accept=".txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
               multiple
               style={{ display: "none" }}
               onChange={(e) => e.target.files && handleFiles(e.target.files)}
@@ -671,12 +674,12 @@ export default function ChatPage() {
               }}
               placeholder="Ask anything — routed automatically across your free providers"
             />
-            <Tooltip content="Attach file or image">
+            <Tooltip content="Attach a text file (images not supported yet)">
               <button
                 type="button"
                 className="chat-attach"
                 onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach file or image"
+                aria-label="Attach a text file"
               >
                 <Icon name="paperclip" size={15} />
               </button>

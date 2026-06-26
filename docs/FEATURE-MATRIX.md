@@ -7,8 +7,10 @@ surface **silently claims an unsupported feature**. Verified against code on
 Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupported ·
 ⚠️ **present but broken/misleading** (must fix or remove).
 
-> Mobile reflects the unmerged `feat/mobile-serious-app` branch (see
-> `apps/mobile/BUILD-STATUS.md`); it is not on `main` yet.
+> Mobile reflects the unmerged `feat/mobile-serious-app` branch and is
+> **UNVERIFIABLE from this branch** — its cited `apps/mobile/BUILD-STATUS.md` lives
+> on that branch, not here. Treat the mobile column as *claimed, not certified*
+> until that branch is checked out or merged.
 
 | # | Feature | Mobile | Web | Desktop | CLI | Notes / source |
 |---|---------|:---:|:---:|:---:|:---:|----------------|
@@ -35,7 +37,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |
 | 22 | one-tap local runtime | ✅ | ❌ | ❌ | 🚫 | CLI = `--provider ollama` |
 | 23 | file input | ✅ | ✅ | ❌ | 🟡 | web text+image picker (drag/paste); desktop none |
-| 24 | image input | ❌ | ⚠️ | ❌ | 🚫 | **web UI sends base64 `images`, gateway DROPS them — no multimodal path. Silent no-op; fix or hide.** |
+| 24 | image input | ❌ | 🚫 | ❌ | 🚫 | web image attach **removed** (was a silent no-op that injected a fake "[Image: …]" note); now text-only + an honest "images unsupported" notice. Multimodal = `docs/multimodal-image-plan.md` |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
 | 27 | report AI response | ✅ | 🟡 | ✅ | ❌ | mobile + desktop have the Gen-AI flag control; verify web |
@@ -44,14 +46,11 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 
 ## Cross-surface issues to resolve (ranked)
 
-1. **⚠️ Web image input is a silent no-op (#24).** `apps/web/app/(app)/chat/page.tsx`
-   reads images and `chat-client.ts` sends `images:[{data,mimeType,name}]`, but the
-   gateway has **no image request path** — `content` is `z.string()`
-   (`packages/schemas/src/index.ts`) so the field is stripped; the model never sees
-   the image. Confirmed by grep across gateway/engine/providers/types. **Action:**
-   either hide web image attach until the multimodal backend exists
-   (`docs/multimodal-image-plan.md`), or build that backend. Do **not** leave a
-   silent broken feature — it violates the "no silent unsupported features" rule.
+1. **✅ FIXED — web image no-op.** Was the cardinal sin: the UI injected a fake
+   "[Image: … see attached]" note AND sent base64 the gateway strips, so the model
+   was told an image was attached and got none. Now web attach is **text-only**
+   (images refused with an honest notice); no fake notes. Full multimodal stays a
+   separate PR (`docs/multimodal-image-plan.md`).
 2. **Desktop parity — largely closed on this branch.** Added markdown+code-copy,
    regenerate, export, consent gate, Private Mode, Deep Research, report,
    projects, real multi-res app icons (were stubs), and Cmd+N/Cmd+,/Cmd+Shift+F
@@ -99,6 +98,24 @@ are pre-existing.
   do not expand.** Re-confirm the gate before any release.
 - No server-side provider-key custody, no prompts/files to relay: unchanged
   (relay = auth/session only).
+
+### Whole-platform readiness audit (independent, brutal)
+- **All three hard rules HOLD, server-enforced.** Paid tiers hit a relay 503
+  `managed_keys_unavailable` BEFORE any Stripe call (tested); **no payout/credit-
+  ledger/transfer code exists** (referral `commission_cents` is tracked but nothing
+  moves money, and no referral row can be created while checkout is gated).
+  web/desktop/cli POST prompts straight to the gateway; BYOK keys go only to a
+  loopback gateway (`isLoopbackGateway` guard) or E2E-encrypted; relay logs are
+  redacted. Single execution plane (`@zintus/engine`).
+- **Security baseline strong** (redacted logs, OS keychain, web vault AES-GCM +
+  PBKDF2-600k, Stripe HMAC + replay window, scoped account deletion). **P1 to fix:**
+  a local gateway with **no `GATEWAY_TOKEN` is open with CORS `*`** — any visited
+  website can drive `localhost:8788` and burn BYOK quota / read responses (public
+  `0.0.0.0` binds are correctly refused without a token). **P2:** specific-IP bind
+  escapes that guard; web CSP `script-src 'unsafe-inline'`; Stripe webhook not
+  itself flag-gated (defense-in-depth); Private Mode passes `"unknown"`-training
+  providers. These are gateway/relay hardening items — careful follow-up, not a
+  blind change.
 
 ## How to keep this honest
 
