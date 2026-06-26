@@ -23,6 +23,30 @@ const RELEASES_URL = `${REPO_URL}/releases`;
 const GHCR_IMAGE = "ghcr.io/trustphoneapp/zintus-gateway";
 const GHCR_PACKAGE_URL = `${REPO_URL}/pkgs/container/zintus-gateway`;
 
+// GitHub's stable "latest release asset" redirect:
+//   https://github.com/<owner>/<repo>/releases/latest/download/<asset>
+// resolves to the same asset on whatever the newest (non-prerelease) release is.
+// It only 200s once a release that actually attaches <asset> exists; until then
+// it 404s — so we keep the Releases *page* as the live link and surface the
+// direct URL/asset names as documentation, not as a working button yet.
+//   docs: https://docs.github.com/repos/releases/linking-to-releases
+const latestAsset = (name: string) => `${RELEASES_URL}/latest/download/${name}`;
+
+// Tauri v2 default bundle filenames, derived from apps/desktop/src-tauri/
+// tauri.conf.json (productName "Zintus") and the build matrix in
+// .github/workflows/release-desktop.yml. <version> is the desktop-v* tag's
+// version. Pattern refs:
+//   DMG (universal-apple-darwin):   [productName]_[version]_universal.dmg
+//   MSI/WiX (x86_64-pc-windows):    [productName]_[version]_x64_en-US.msi
+// https://v2.tauri.app/distribute/dmg/  •  https://v2.tauri.app/distribute/windows-installer/
+const MAC_DMG_NAME = "Zintus_<version>_universal.dmg";
+const WIN_MSI_NAME = "Zintus_<version>_x64_en-US.msi";
+
+// NOTE: no GitHub release exists yet (`gh release list` → []), and the desktop
+// workflow currently uploads to Actions artifacts, not Releases. Keep desktop
+// badges as Beta/"download from Releases" until a `desktop-v*` release attaches
+// these assets. Do NOT claim "signed"/"notarized" — neither is true yet.
+
 const sectionStyle: React.CSSProperties = {
   marginBottom: "2.75rem",
   paddingBottom: "2.5rem",
@@ -172,37 +196,102 @@ export default function DownloadPage() {
             </a>
           </section>
 
-          {/* ── Desktop ─────────────────────────────────────── */}
+          {/* ── Desktop: macOS ──────────────────────────────── */}
           <section style={sectionStyle}>
-            <Header icon={Monitor} title="Desktop — macOS, Windows, Linux" badge={{ text: "Beta", tone: "soon" }} />
+            <Header icon={Monitor} title="macOS — desktop app" badge={{ text: "Beta", tone: "soon" }} />
             <p style={leadStyle}>
               A native Tauri app with a built-in gateway, provider dashboard, and quota bars.
-              Universal macOS, Windows (x64), and Linux builds are attached to each desktop release.
+              The macOS build is a Universal binary (Apple Silicon + Intel) attached to each{" "}
+              <code style={{ color: "#c4b5fd" }}>desktop-v*</code> release as a <code>.dmg</code>.
             </p>
+            {/* [HUMAN] Not notarized yet. Only add "notarized" once the build is run through
+                Apple notarization — do NOT claim it before then. */}
             <p style={noteStyle}>
-              Beta builds aren&apos;t code-signed for OS distribution yet, so macOS Gatekeeper and
-              Windows SmartScreen may warn on first launch — open it from the security prompt to
-              proceed. Always download from the official GitHub release below.
+              Once the first <code>desktop-v*</code> release is published, the direct download is{" "}
+              <code style={{ color: "#c4b5fd" }}>{latestAsset(MAC_DMG_NAME)}</code> (the{" "}
+              <code>&lt;version&gt;</code> is filled in per release). Builds are{" "}
+              <strong>not notarized</strong> yet, so Gatekeeper will warn on first launch — open it
+              from the security prompt to proceed. Always grab it from the official Releases page.
             </p>
             <a href={RELEASES_URL} style={linkBtn} target="_blank" rel="noopener noreferrer">
-              Download from GitHub Releases <ExternalLink size={13} />
+              View desktop releases on GitHub <ExternalLink size={13} />
             </a>
           </section>
 
-          {/* ── Mobile ──────────────────────────────────────── */}
-          <section style={{ ...sectionStyle, borderBottom: "none", paddingBottom: 0 }}>
-            <Header icon={Smartphone} title="Mobile — iOS & Android" badge={{ text: "Coming soon", tone: "soon" }} />
+          {/* ── Desktop: Windows ────────────────────────────── */}
+          <section style={sectionStyle}>
+            <Header icon={Monitor} title="Windows — desktop app" badge={{ text: "Beta", tone: "soon" }} />
+            <p style={leadStyle}>
+              The same Tauri desktop app for Windows (x64), shipped as a WiX{" "}
+              <code style={{ color: "#c4b5fd" }}>.msi</code> installer attached to each{" "}
+              <code style={{ color: "#c4b5fd" }}>desktop-v*</code> release.
+            </p>
+            {/* [HUMAN] Not Authenticode-signed yet. Only add "signed (Authenticode)" once a code-
+                signing cert is wired into release-desktop.yml — do NOT claim it before then. */}
+            <p style={noteStyle}>
+              Once the first <code>desktop-v*</code> release is published, the direct download is{" "}
+              <code style={{ color: "#c4b5fd" }}>{latestAsset(WIN_MSI_NAME)}</code>. Builds are{" "}
+              <strong>not code-signed (Authenticode)</strong> yet, so SmartScreen may warn — choose
+              &ldquo;More info → Run anyway.&rdquo; Always grab it from the official Releases page.
+            </p>
+            <a href={RELEASES_URL} style={linkBtn} target="_blank" rel="noopener noreferrer">
+              View desktop releases on GitHub <ExternalLink size={13} />
+            </a>
+          </section>
+
+          {/* ── Desktop: Linux ──────────────────────────────── */}
+          <section style={sectionStyle}>
+            <Header icon={Monitor} title="Linux — desktop app" badge={{ text: "Beta", tone: "soon" }} />
+            <p style={leadStyle}>
+              Linux builds (x86_64) ship as <code style={{ color: "#c4b5fd" }}>.AppImage</code>,{" "}
+              <code>.deb</code>, and <code>.rpm</code> bundles on each{" "}
+              <code style={{ color: "#c4b5fd" }}>desktop-v*</code> release. Pick the package that
+              matches your distro from the Releases page.
+            </p>
+            <a href={RELEASES_URL} style={linkBtn} target="_blank" rel="noopener noreferrer">
+              View desktop releases on GitHub <ExternalLink size={13} />
+            </a>
+          </section>
+
+          {/* ── Mobile: iOS ─────────────────────────────────── */}
+          <section style={sectionStyle}>
+            <Header icon={Smartphone} title="iOS" badge={{ text: "Coming soon", tone: "soon" }} />
             <p style={leadStyle}>
               An Expo app to control your gateway remotely — switch providers, watch quota, and chat
-              on the go. Production builds run through EAS; we&apos;re finishing store review.
+              on the go. Production builds run through EAS.
             </p>
+            {/* No live App Store listing yet. Apple's marketing guidelines require the
+                "Download on the App Store" badge to link to a live product page, so we use a
+                plain text "Coming soon" instead of fabricating a badge / dead URL.
+                https://developer.apple.com/app-store/marketing/guidelines/ */}
             <p style={noteStyle}>
-              Coming to TestFlight (iOS) and Play internal testing (Android). No public store
-              listing yet — we won&apos;t link a dead store. Watch the{" "}
+              <strong>Coming soon — TestFlight on request.</strong> There&apos;s no public App Store
+              listing yet, so we won&apos;t link a dead store or show an App Store badge until it
+              resolves. Want early access?{" "}
+              <Link href="/contact" style={{ color: "#c4b5fd" }}>
+                Ask for a TestFlight invite
+              </Link>
+              .
+            </p>
+          </section>
+
+          {/* ── Mobile: Android ─────────────────────────────── */}
+          <section style={{ ...sectionStyle, borderBottom: "none", paddingBottom: 0 }}>
+            <Header icon={Smartphone} title="Android" badge={{ text: "Coming soon", tone: "soon" }} />
+            <p style={leadStyle}>
+              The same Expo app for Android, built through EAS and headed to Google Play.
+            </p>
+            {/* No live Play listing yet. Google Play badge guidelines require the
+                "Get it on Google Play" badge to drive downloads to a live listing, so we use a
+                plain text "Coming soon" until it resolves.
+                https://partnermarketinghub.withgoogle.com/brands/google-play/visual-identity/badge-guidelines/ */}
+            <p style={noteStyle}>
+              <strong>Coming soon.</strong> No public Play Store listing yet — we won&apos;t link a
+              dead store or show a Google Play badge until it resolves. Watch the{" "}
               <Link href="/changelog" style={{ color: "#c4b5fd" }}>
                 changelog
               </Link>{" "}
-              for the rollout.
+              for the rollout (internal testing first).
             </p>
           </section>
         </div>
