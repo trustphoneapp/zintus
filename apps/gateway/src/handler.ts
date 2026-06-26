@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { listProviders, getModelPricing } from "@zintus/providers";
+import {
+  listProviders,
+  getModelPricing,
+  estimateCostUsd,
+} from "@zintus/providers";
 import type { Engine } from "@zintus/engine";
 import {
   detectLocalRuntimes as defaultDetectLocalRuntimes,
@@ -269,7 +273,10 @@ export function createGatewayHandler(
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
       "Access-Control-Expose-Headers":
-        "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens",
+        "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, " +
+        "X-Zintus-Original-Tokens, X-Zintus-Compressed-Tokens, " +
+        "X-Zintus-Tokens-Saved, X-Zintus-Compression-Ratio, " +
+        "X-Zintus-Cost-Saved-Usd",
       Vary: "Origin",
     };
     if (origin) {
@@ -701,6 +708,39 @@ export function createGatewayHandler(
       "X-Cache-Hit": result.cacheHit ?? "miss",
       "X-Failover-Count": String(result.failoverCount ?? 0),
     };
+
+    // Surface Tokzen compression savings as derived-only response headers so
+    // web/desktop can show "compressed N%, saved ~X tokens (~$Y)". Emit ONLY
+    // when real compression happened (compressedTokens < originalTokens and
+    // ratio < 1); otherwise omit every header rather than reporting zeros.
+    // These carry purely derived integers/ratios — never keys, prompt content,
+    // or secrets. They're known before the answer streams, so they ride along
+    // as HTTP headers on both the streaming and non-streaming responses.
+    {
+      const { originalTokens, compressedTokens, ratio } =
+        tokzenResult.totalResult;
+      if (compressedTokens < originalTokens && ratio < 1) {
+        const tokensSaved = originalTokens - compressedTokens;
+        metaHeaders["X-Zintus-Original-Tokens"] = String(originalTokens);
+        metaHeaders["X-Zintus-Compressed-Tokens"] = String(compressedTokens);
+        metaHeaders["X-Zintus-Tokens-Saved"] = String(tokensSaved);
+        metaHeaders["X-Zintus-Compression-Ratio"] = ratio.toFixed(2);
+        // Estimate-only USD on the SAVED input tokens, priced against the model
+        // that actually served. pricing.ts is non-billing; this is illustrative.
+        // Unknown (provider, model) → estimate 0 → omit just this one header.
+        const costSaved = estimateCostUsd(
+          result.providerId,
+          result.model,
+          tokensSaved,
+          0,
+        );
+        if (costSaved > 0) {
+          metaHeaders["X-Zintus-Cost-Saved-Usd"] = String(
+            Number(costSaved.toFixed(6)),
+          );
+        }
+      }
+    }
 
     metrics.recordChat(result.providerId);
     log("info", "chat.route", {

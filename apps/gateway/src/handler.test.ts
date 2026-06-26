@@ -665,4 +665,144 @@ describe("gateway handler", () => {
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Methods")).toContain("POST");
   });
+
+  // --- Tokzen compression-savings headers (X-Zintus-*) ---------------------
+
+  // A highly compressible assistant log message: ~60 near-identical timestamped
+  // lines collapse under Drain template mining, so compressedTokens <<
+  // originalTokens. User messages are never compressed, so the user turn stays
+  // verbatim — keeping a real "prompt" present to assert it never leaks.
+  const SECRET_PROMPT = "summarize-these-logs-SUPER-SECRET";
+  function compressibleLogBody(): string {
+    const lines: string[] = [];
+    for (let i = 0; i < 60; i++) {
+      lines.push(
+        `2026-06-25T12:00:${String(i % 60).padStart(2, "0")}.000Z INFO ` +
+          `request handled id=${i} user=u${i} latency=${i}ms ` +
+          `path=/api/v1/resource/${i} status=200`,
+      );
+    }
+    return lines.join("\n");
+  }
+  const ZINTUS_HEADERS = [
+    "X-Zintus-Original-Tokens",
+    "X-Zintus-Compressed-Tokens",
+    "X-Zintus-Tokens-Saved",
+    "X-Zintus-Compression-Ratio",
+    "X-Zintus-Cost-Saved-Usd",
+  ];
+
+  test("emits X-Zintus compression headers on a streamed response when context is compressed", async () => {
+    // Known pricing pair so the cost header is present.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-z",
+          stream: (async function* () {
+            yield "ok";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "http://app" },
+        body: JSON.stringify({
+          provider: "groq",
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "user", content: SECRET_PROMPT },
+            { role: "assistant", content: compressibleLogBody() },
+          ],
+        }),
+      }),
+    );
+
+    const original = Number(res.headers.get("X-Zintus-Original-Tokens"));
+    const compressed = Number(res.headers.get("X-Zintus-Compressed-Tokens"));
+    const saved = Number(res.headers.get("X-Zintus-Tokens-Saved"));
+    const ratio = res.headers.get("X-Zintus-Compression-Ratio");
+    const cost = res.headers.get("X-Zintus-Cost-Saved-Usd");
+
+    // Token headers present + internally consistent math.
+    expect(original).toBeGreaterThan(0);
+    expect(compressed).toBeGreaterThan(0);
+    expect(compressed).toBeLessThan(original);
+    expect(saved).toBe(original - compressed);
+    // Ratio is compressed/original, formatted to 2 dp, and < 1.
+    expect(ratio).not.toBeNull();
+    expect(Number(ratio)).toBeLessThan(1);
+    expect(ratio).toBe((compressed / original).toFixed(2));
+    // Cost header present (known pricing) and a positive estimate.
+    expect(cost).not.toBeNull();
+    expect(Number(cost)).toBeGreaterThan(0);
+
+    // Exposed for cross-origin reads.
+    const expose = res.headers.get("Access-Control-Expose-Headers") ?? "";
+    for (const h of ZINTUS_HEADERS) expect(expose).toContain(h);
+
+    // Derived-only: no header carries the prompt/log content or any secret.
+    res.headers.forEach((value) => {
+      expect(value).not.toContain(SECRET_PROMPT);
+      expect(value).not.toContain("request handled");
+    });
+    await res.text();
+  });
+
+  test("emits X-Zintus compression headers on a non-streaming response; omits cost when pricing unknown", async () => {
+    // Unknown (provider, model) pricing → cost header omitted, tokens kept.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "test-model",
+          traceId: "trace-z2",
+          stream: (async function* () {
+            yield "ok";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          messages: [
+            { role: "user", content: SECRET_PROMPT },
+            { role: "assistant", content: compressibleLogBody() },
+          ],
+        }),
+      }),
+    );
+    expect(Number(res.headers.get("X-Zintus-Original-Tokens"))).toBeGreaterThan(
+      0,
+    );
+    expect(Number(res.headers.get("X-Zintus-Tokens-Saved"))).toBeGreaterThan(0);
+    // Pricing unknown for (groq, test-model) → cost header omitted only.
+    expect(res.headers.get("X-Zintus-Cost-Saved-Usd")).toBeNull();
+    await res.json();
+  });
+
+  test("omits ALL X-Zintus compression headers when no compression happens", async () => {
+    const handler = makeHandler();
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // Short user message: nothing compressible → compressedTokens >= original.
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+    for (const h of ZINTUS_HEADERS) {
+      expect(res.headers.get(h)).toBeNull();
+    }
+    await res.text();
+  });
 });
