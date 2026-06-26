@@ -31,7 +31,7 @@ serious cross-platform (Android + iOS) AI app. Updated as the loop progresses.
 | 10 | Projects/workspaces | DONE | lib/projects.ts + screen: create/edit/delete, instructions→system message, default provider/private, per-project chat list |
 | 6 | File input | DONE (text formats) | expo-document-picker + expo-file-system; on-device text extraction → string schema; chips + privacy notice. PDF/binary flagged unsupported on-device (honest) |
 | 7 | Voice dictation | FALLBACK shipped | spec-required "unavailable fallback" is in (honest message, never auto-sends). Full STT = add expo-speech-recognition to a dev/preview build + purpose strings — [HUMAN]/EAS (can't verify a device speech session here) |
-| 5 | Image input | DEFERRED (cross-package) | scope separately: needs multimodal ChatMessage.content (types+schemas+providers+gateway+router) + a provider vision-capability field BEFORE any client UI is meaningful; then expo-image-picker + EXIF strip. A picker button alone would be non-functional, so intentionally not shipped |
+| 5 | Image input | DEFERRED (own PR) | scoped in `docs/multimodal-image-plan.md`: needs multimodal ChatMessage.content (types+schemas+providers+gateway+router) + a provider vision-capability field BEFORE any client UI is meaningful; then expo-image-picker + EXIF strip. A picker button alone would be non-functional, so intentionally not shipped |
 
 ## Compliance work folded in (from store research)
 - Apple 5.1.2(i): pre-send consent gate before first provider send — DONE (lib/consent.ts).
