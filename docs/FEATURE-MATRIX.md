@@ -28,7 +28,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 14 | route-options actions | ✅ | ✅ | ✅ | ❌ | `RouteOptionsPanel` on web+desktop; not in CLI |
 | 15 | Deep Research | ✅ | ✅ | ✅ | ❌ | desktop `/research` (stages, sources, export); CLI still missing |
 | 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
-| 17 | projects / workspaces | ✅ | ❌ | ❌ | ❌ | **only mobile** |
+| 17 | projects / workspaces | ✅ | ❌ | ✅ | ❌ | desktop store+screen, instructions→system msg; web still missing |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
 | 19 | provider key management | ✅ | ✅ | ✅ | ✅ | web `LocalKeyManager`, desktop `ProvidersScreen`, CLI `keys` |
 | 20 | provider key test | ✅ | 🟡 | 🟡 | ❌ | mobile has explicit Test; CLI has no `keys test` |
@@ -52,9 +52,13 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
    either hide web image attach until the multimodal backend exists
    (`docs/multimodal-image-plan.md`), or build that backend. Do **not** leave a
    silent broken feature — it violates the "no silent unsupported features" rule.
-2. **Desktop is the parity laggard (#7,15,16,17,18,23,26,27,29).** No markdown,
-   Deep Research, projects, Private Mode, consent, export; weak history; footer is
-   only a compression badge. This branch's primary build target.
+2. **Desktop parity — largely closed on this branch.** Added markdown+code-copy,
+   regenerate, export, consent gate, Private Mode, Deep Research, report, and
+   projects (all typecheck + `next build` green). Remaining desktop 🟡/gaps:
+   full footer/route-reason+meta (#9, currently compression badge only), a
+   history list/search/rename UI (#16, store already persists threads), a
+   routing-strategy chip (#6), onboarding, and the Tauri native menu + keyboard
+   shortcuts. File input (#23) still missing on desktop.
 3. **Projects (#17) and consent gate (#26) exist only on mobile.** Port to
    web + desktop (consent is also a store-compliance item).
 4. **CLI lacks `research`, `projects`, `keys test`, `--json` everywhere (#15,17,20).**

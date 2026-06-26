@@ -16,6 +16,7 @@ import {
   grantProviderSendConsent,
   hasProviderSendConsent,
 } from "@/lib/consent";
+import { getActiveProject, setActiveProjectId } from "@/lib/projects";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
@@ -48,6 +49,11 @@ export function ChatPanel() {
   const outputRef = useRef<HTMLDivElement>(null);
   const [consentOpen, setConsentOpen] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
+  const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
+
+  useEffect(() => {
+    setActiveProjectName(getActiveProject()?.name ?? null);
+  }, []);
 
   useEffect(() => {
     hydrate();
@@ -101,7 +107,15 @@ export function ChatPanel() {
 
   const doSend = useCallback(
     async (trimmed: string) => {
+      // A project's instructions ride as a leading system message on a fresh
+      // thread (the server owns context afterwards), mirroring web's presets.
+      const project = getActiveProject();
+      const leading: ChatMessage[] =
+        messages.length === 0 && project?.instructions
+          ? [{ role: "system" as const, content: project.instructions }]
+          : [];
       const history: ChatMessage[] = [
+        ...leading,
         ...messages.map((m) => ({ role: m.role, content: m.content })),
         { role: "user" as const, content: trimmed },
       ];
@@ -181,6 +195,22 @@ export function ChatPanel() {
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Chat</CardTitle>
           <div className="flex items-center gap-2">
+            {activeProjectName && (
+              <span style={{ fontSize: 12, color: "var(--color-purple-bright, #c4b5fd)", display: "flex", alignItems: "center", gap: 4 }}>
+                📁 {activeProjectName}
+                <button
+                  type="button"
+                  title="Leave project"
+                  onClick={() => {
+                    setActiveProjectId(null);
+                    setActiveProjectName(null);
+                  }}
+                  style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0 }}
+                >
+                  ×
+                </button>
+              </span>
+            )}
             {activeProvider && (
               <Badge style={{ color: "var(--color-purple-bright)" }}>
                 routed → {activeProvider}
