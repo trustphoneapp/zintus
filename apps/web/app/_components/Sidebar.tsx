@@ -19,6 +19,7 @@ const SECTIONS: Array<{
       { href: "/chat", icon: "chat", label: "Chat" },
       { href: "/compare", icon: "compare", label: "Compare" },
       { href: "/research", icon: "globe", label: "Research" },
+      { href: "/projects", icon: "layers", label: "Projects" },
       { href: "/providers", icon: "layers", label: "Providers" },
       { href: "/usage", icon: "activity", label: "Usage" },
     ],

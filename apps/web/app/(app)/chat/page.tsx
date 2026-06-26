@@ -20,6 +20,7 @@ import {
   grantProviderSendConsent,
   hasProviderSendConsent,
 } from "@/lib/consent";
+import { getActiveProject } from "@/lib/projects";
 import { loadPresets, type Preset } from "@/lib/presets";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
 
@@ -335,6 +336,10 @@ export default function ChatPage() {
       }
       if (activePreset?.systemPrompt?.trim()) {
         leading.push({ role: "system", content: activePreset.systemPrompt.trim() });
+      }
+      const activeProject = getActiveProject();
+      if (activeProject?.instructions) {
+        leading.push({ role: "system", content: activeProject.instructions });
       }
     }
     const sendMessages: ChatMessage[] =

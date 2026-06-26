@@ -30,7 +30,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 14 | route-options actions | ✅ | ✅ | ✅ | ❌ | `RouteOptionsPanel` on web+desktop; not in CLI |
 | 15 | Deep Research | ✅ | ✅ | ✅ | ❌ | desktop `/research` (stages, sources, export); CLI still missing |
 | 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
-| 17 | projects / workspaces | ✅ | ❌ | ✅ | ❌ | desktop store+screen, instructions→system msg; web still missing |
+| 17 | projects / workspaces | ✅ | ✅ | ✅ | ❌ | mobile+desktop+web (store+screen, instructions→leading system msg, defaults applied); CLI missing |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
 | 19 | provider key management | ✅ | ✅ | ✅ | ✅ | web `LocalKeyManager`, desktop `ProvidersScreen`, CLI `keys` |
 | 20 | provider key test | ✅ | 🟡 | 🟡 | ✅ | mobile explicit Test; CLI now has `zintus keys test <provider>`; web/desktop validate-on-save only |
@@ -61,8 +61,8 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
    Preferences/New Research/etc., need the Rust menu in lib.rs — [HUMAN]/native),
    and file input (#23). Windows `bundle.windows.signCommand` missing + signing/
    notarization are [HUMAN] (see docs/RELEASE-CHECKLIST.md).
-3. **Projects (#17) and consent gate (#26) exist only on mobile.** Port to
-   web + desktop (consent is also a store-compliance item).
+3. **(Resolved) Projects (#17) + consent gate (#26) now on mobile + desktop + web.**
+   CLI projects (#17) remains.
 4. **CLI lacks `research`, `projects`, and a broad `--json` mode (#15,17).**
    (`keys test` / #20 is now done.)
 
