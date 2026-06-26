@@ -41,6 +41,8 @@ import {
   issueSessionToken,
   verifySessionToken,
   revokeSessionToken,
+  tombstoneDeletedUser,
+  isUserDeleted,
   parseSessionCookie,
   buildSessionCookie,
   clearSessionCookie,
@@ -201,7 +203,16 @@ async function requireSession(
 ): Promise<SessionPayload | null> {
   const cookie = parseSessionCookie(c.req.header("Cookie") ?? null);
   if (!cookie) return null;
-  return verifySessionToken(c.env.KV, cookie);
+  const session = await verifySessionToken(c.env.KV, cookie);
+  if (!session) return null;
+  // Reject ANY still-cached session token for a deleted user. Account deletion
+  // only revokes the presented cookie's KV token; this tombstone check (one KV
+  // read on the cookie-auth control path) invalidates the user's orphan tokens
+  // immediately, before its ~30-day TTL would expire them. The high-volume
+  // gateway WebSocket path (`/relay/:sessionId`) uses relay_token auth, not
+  // requireSession, so it pays no extra read.
+  if (await isUserDeleted(c.env.KV, session.user_id)) return null;
+  return session;
 }
 
 // Exported for unit tests (duplicate-prevention). Normalises the email before
@@ -613,9 +624,18 @@ app.delete("/api/account", async (c) => {
   await c.env.DB.prepare("DELETE FROM auth_tokens WHERE email = ?").bind(email).run();
   await c.env.DB.prepare("DELETE FROM zintus_users WHERE id = ?").bind(userId).run();
 
+  // Tombstone the user so EVERY still-cached KV session token for them (not just
+  // the presented cookie) is rejected by requireSession immediately. Without
+  // this, a second independently-issued session token would keep authenticating
+  // the deleted user until its ~30-day TTL and could write orphan child rows.
+  // TTL matches the max session-token lifetime so the tombstone outlives any
+  // token that could still be in KV.
+  await tombstoneDeletedUser(c.env.KV, userId);
+
   // Revoke the presented session token in KV and clear the cookie so the now-
   // deleted user is no longer authenticated. (Other cached KV session tokens for
-  // this user expire by TTL; their D1 user_sessions rows are already gone.)
+  // this user are blocked by the tombstone above and expire by TTL; their D1
+  // user_sessions rows are already gone.)
   const cookie = parseSessionCookie(c.req.header("Cookie") ?? null);
   if (cookie) await revokeSessionToken(c.env.KV, cookie);
 

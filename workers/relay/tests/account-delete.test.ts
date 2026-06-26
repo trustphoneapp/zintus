@@ -206,7 +206,11 @@ describe("DELETE /api/account", () => {
     expect(counter.calls).toContain("POST /reset");
   });
 
-  test("idempotent — a second still-valid session for the same user re-deletes to 200", async () => {
+  test("an independent still-valid session token for a deleted user is rejected (401) by the tombstone", async () => {
+    // The verifier's bounded gap: deletion only revokes the PRESENTED cookie's KV
+    // token; a second, independently-issued KV token for the same user used to
+    // keep authenticating until its ~30-day TTL and could write orphan rows. The
+    // `deleted:<user_id>` tombstone must now reject it immediately.
     const { env, kv } = await seededEnv(userRows("u1", "u1@example.com"));
     const cookie1 = await cookieFor(kv, "u1", "u1@example.com");
     const cookie2 = await cookieFor(kv, "u1", "u1@example.com"); // independent KV token
@@ -218,15 +222,68 @@ describe("DELETE /api/account", () => {
     );
     expect(first.status).toBe(200);
 
-    // cookie2 is still cached in KV → authenticates the (now-deleted) user; the
-    // deletes affect 0 rows and the handler must still return 200, never 500.
+    // Tombstone written for the deleted user.
+    expect(kv.store.has("deleted:u1")).toBe(true);
+
+    // cookie2 is still cached in KV, but requireSession must now reject the
+    // deleted user → 401 (it must NOT reach the handler and re-run the deletes).
     const second = await app.request(
       "http://relay.test/api/account",
       { method: "DELETE", headers: { Cookie: cookie2 } },
       env,
     );
-    expect(second.status).toBe(200);
-    expect(await second.json()).toEqual({ ok: true, deleted: true });
+    expect(second.status).toBe(401);
+  });
+
+  test("a non-deleted user's session still authenticates after another user is deleted (no regression)", async () => {
+    const rows = [...userRows("u1", "u1@example.com"), ...userRows("u2", "u2@example.com")];
+    const { env, kv } = await seededEnv(rows);
+    const cookieU1 = await cookieFor(kv, "u1", "u1@example.com");
+    const cookieU2 = await cookieFor(kv, "u2", "u2@example.com");
+
+    await app.request("http://relay.test/api/account", { method: "DELETE", headers: { Cookie: cookieU1 } }, env);
+    expect(kv.store.has("deleted:u1")).toBe(true);
+    expect(kv.store.has("deleted:u2")).toBe(false);
+
+    // u2 is NOT tombstoned → their session still authenticates and the route runs.
+    const res = await app.request(
+      "http://relay.test/api/account",
+      { method: "DELETE", headers: { Cookie: cookieU2 } },
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, deleted: true });
+  });
+
+  test("the deletion tombstone is written with the max session-token TTL (30 days)", async () => {
+    // TTL semantics: the tombstone must outlive any session token that could
+    // still be cached, i.e. its TTL equals the session-token TTL (30 days).
+    const puts: Array<{ key: string; opts?: { expirationTtl?: number } }> = [];
+    const kv = fakeKV();
+    const recordingKv = {
+      ...kv,
+      put: async (k: string, v: string, opts?: { expirationTtl?: number }) => {
+        puts.push({ key: k, opts });
+        kv.store.set(k, v);
+      },
+    } as unknown as ReturnType<typeof fakeKV>;
+
+    const db = fakeDb(userRows("u1", "u1@example.com"));
+    const env = {
+      KV: recordingKv,
+      DB: db,
+      QUOTA_COUNTER: fakeCounter(),
+      GATEWAY_SESSION: noopGateway,
+      COOKIE_DOMAIN: "",
+      STRIPE_SECRET_KEY: "",
+    } as unknown as Env;
+    const cookie = await cookieFor(recordingKv, "u1", "u1@example.com");
+
+    await app.request("http://relay.test/api/account", { method: "DELETE", headers: { Cookie: cookie } }, env);
+
+    const tombstonePut = puts.find((p) => p.key === "deleted:u1");
+    expect(tombstonePut).toBeDefined();
+    expect(tombstonePut?.opts?.expirationTtl).toBe(60 * 60 * 24 * 30);
   });
 
   test("rate-limited per user after the cap is hit", async () => {
