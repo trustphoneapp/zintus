@@ -91,6 +91,40 @@ export async function runKeysList(): Promise<void> {
   }
 }
 
+export async function runKeysTest(provider: string): Promise<void> {
+  if (!isProviderId(provider)) {
+    console.error(
+      chalk.red(`Unknown provider: ${provider}`),
+      chalk.dim(`\nValid: ${PROVIDER_IDS.join(", ")}`),
+    );
+    process.exit(1);
+  }
+
+  if (provider === "ollama" || provider === "lmstudio") {
+    console.log(chalk.dim(`${provider} is a local runtime — no key to test.`));
+    return;
+  }
+
+  const key = await getKey(provider);
+  if (!key) {
+    console.error(
+      chalk.red(`No key stored for ${provider}.`),
+      chalk.dim(`\nAdd one: zintus keys set ${provider} <key>`),
+    );
+    process.exit(1);
+  }
+
+  const result = await validateKeyRemote(provider, key);
+  if (result.valid) {
+    console.log(chalk.green(`✓ ${provider} key is valid`));
+  } else {
+    console.error(
+      chalk.red(`✗ ${provider} key rejected: ${result.error ?? "invalid"}`),
+    );
+    process.exit(1);
+  }
+}
+
 export async function runKeysRemove(provider: string): Promise<void> {
   if (!isProviderId(provider)) {
     console.error(

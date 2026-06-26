@@ -4,7 +4,12 @@ import chalk from "chalk";
 import { PROVIDER_IDS, type ContextMode } from "@zintus/types";
 import { redactSecrets } from "@zintus/router";
 import { runChat, type ChatOptions } from "./commands/chat.js";
-import { runKeysSet, runKeysList, runKeysRemove } from "./commands/keys.js";
+import {
+  runKeysSet,
+  runKeysList,
+  runKeysRemove,
+  runKeysTest,
+} from "./commands/keys.js";
 import { runConfig } from "./commands/config.js";
 import { runHistory, runTrace } from "./commands/history.js";
 
@@ -95,6 +100,14 @@ keys
   .description("List stored API keys (masked)")
   .action(async () => {
     await runKeysList();
+  });
+
+keys
+  .command("test")
+  .description("Validate a stored API key against its provider")
+  .argument("<provider>", "Provider name")
+  .action(async (provider: string) => {
+    await runKeysTest(provider);
   });
 
 keys
