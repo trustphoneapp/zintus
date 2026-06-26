@@ -457,10 +457,13 @@ export default function ChatScreen() {
     );
   }, []);
 
-  const notAvailable = useCallback((feature: string) => {
+  const voiceUnavailable = useCallback(() => {
+    // Spec-required "unavailable fallback" for voice dictation. Dictation needs
+    // on-device speech recognition (expo-speech-recognition) in a dev/preview
+    // build; until then we degrade gracefully and never auto-send anything.
     Alert.alert(
-      `${feature} needs a dev build`,
-      `${feature} uses native modules that aren't in this Expo Go-style runtime. Install the dev build (see Settings) to enable it.`,
+      "Voice dictation",
+      "On-device dictation isn't enabled in this build yet. Add expo-speech-recognition to a dev/preview build to turn it on. For now, type your message — Zintus never auto-sends a voice transcript.",
     );
   }, []);
 
@@ -637,7 +640,7 @@ export default function ChatScreen() {
           </Pressable>
           <Pressable
             hitSlop={6}
-            onPress={() => notAvailable("Voice dictation")}
+            onPress={voiceUnavailable}
             style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
           >
             <Text style={styles.iconBtnText}>🎤</Text>

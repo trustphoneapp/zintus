@@ -4,9 +4,16 @@ Branch `feat/mobile-serious-app`. Tracks the upgrade from basic text chat to a
 serious cross-platform (Android + iOS) AI app. Updated as the loop progresses.
 
 ## Verification gates (run before calling anything done)
-- root `bun run typecheck` (all packages + web/desktop/mobile) — currently **EXIT 0**
+- root `bun run typecheck` (all packages + web/desktop/mobile) — **EXIT 0**
 - `bun test apps/mobile/lib/gateway-url-resolve.test.ts` — **6/6**
-- `bun run doctor:mobile` — needs network; run on a connected machine
+- `bun run doctor:mobile` (`npx expo-doctor`) — **20/21 passed, EXIT 1**. The one
+  failure is "no duplicate dependencies": bun's workspace symlink layout exposes
+  multiple links to the SAME versions of expo / expo-font / expo-linking /
+  expo-constants / expo-modules-core / @expo/dom-webview / @expo/log-box /
+  expo-file-system. Same version (not a conflict) → Metro resolves one copy and
+  EAS de-dupes on prebuild, so it's the benign kind. Pre-existing (the list is
+  dominated by packages that predate the file-input deps). **Proof of harmless =
+  a successful EAS build [HUMAN].**
 - EAS Android + iOS preview builds + real-device smoke — **[HUMAN]** (accounts/devices)
 
 ## Feature status
@@ -23,8 +30,8 @@ serious cross-platform (Android + iOS) AI app. Updated as the loop progresses.
 | 13 | Local runtimes | DONE (one-tap) | "Use <runtime> (on-device)" button routes chat to local; detection still via cloud session (local /v1/status lacks runtime list — gateway gap, noted) |
 | 10 | Projects/workspaces | DONE | lib/projects.ts + screen: create/edit/delete, instructions→system message, default provider/private, per-project chat list |
 | 6 | File input | DONE (text formats) | expo-document-picker + expo-file-system; on-device text extraction → string schema; chips + privacy notice. PDF/binary flagged unsupported on-device (honest) |
-| 7 | Voice dictation | TODO (needs deps + dev client) | expo-speech-recognition + expo-audio; foreground-only; never auto-send |
-| 5 | Image input | BLOCKED | needs cross-package multimodal content + provider vision-capability field, then expo-image-picker |
+| 7 | Voice dictation | FALLBACK shipped | spec-required "unavailable fallback" is in (honest message, never auto-sends). Full STT = add expo-speech-recognition to a dev/preview build + purpose strings — [HUMAN]/EAS (can't verify a device speech session here) |
+| 5 | Image input | DEFERRED (cross-package) | scope separately: needs multimodal ChatMessage.content (types+schemas+providers+gateway+router) + a provider vision-capability field BEFORE any client UI is meaningful; then expo-image-picker + EXIF strip. A picker button alone would be non-functional, so intentionally not shipped |
 
 ## Compliance work folded in (from store research)
 - Apple 5.1.2(i): pre-send consent gate before first provider send — DONE (lib/consent.ts).

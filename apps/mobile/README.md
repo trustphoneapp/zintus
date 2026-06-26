@@ -1,6 +1,14 @@
 # Zintus Mobile
 
-Expo SDK 56 app with streaming chat, secure API key storage, local quota ledger, and push notifications for quota warnings.
+Expo SDK 56 cross-platform (Android + iOS) app. A serious BYOK/local-first AI
+client: streaming chat with markdown, the Zintus "response intelligence" footer
+(provider, compression %, tokens/cost saved, quota, route reason) after every
+answer, Deep Research with cited sources, on-device file attachments,
+conversation history, projects/workspaces, Private Mode, a provider control
+center, and one-tap local runtimes. Provider keys stay on-device in SecureStore;
+the relay is auth/control only.
+
+See `BUILD-STATUS.md` for the per-feature status and the [HUMAN] ship checklist.
 
 ## Prerequisites
 
@@ -39,18 +47,34 @@ EXPO_PUBLIC_VALIDATE_URL=https://your-app.vercel.app/api/validate bun run start
 
 | Feature | Implementation |
 |---------|----------------|
-| Chat | Inverted `FlatList`, `KeyboardAvoidingView`, streaming via `@zintus/providers` |
-| Keys | `expo-secure-store` per provider |
-| Quota | `expo-sqlite` ledger (mirrors CLI/desktop schema) |
-| Warnings | `expo-notifications` when quota drops below 20% |
-| Providers UI | `@gorhom/bottom-sheet` key modal + quota bars |
-| Styling | NativeWind 4 + Tailwind v3 |
+| Chat | `FlatList` (memoized bubble + throttled stream), `KeyboardAvoidingView`, multiline composer, Stop, mode/provider chips, long-press one-shot override |
+| Response footer | `lib/chat.ts` parses `X-Zintus-*` headers + the `metadata` SSE frame → `components/ResponseFooter.tsx` (compression %, tokens/cost saved, saved-vs-Claude, quota via `/v1/route/options`, low-quota BYOK actions) |
+| Markdown | Dependency-free `components/Markdown.tsx` (headings, lists, tables, inline + fenced code with copy, links) |
+| Onboarding | `app/onboarding.tsx` first-run (gateway + key + sample), persisted in MMKV |
+| Deep Research | `lib/research.ts` consumes `/v1/research` SSE stages → `app/research.tsx` (source cards, citations, export, save-to-history) |
+| File input | `expo-document-picker` + `expo-file-system`; on-device text extraction → string schema |
+| History | `expo-sqlite` thread/message store (`lib/history.ts`) + `app/history.tsx` |
+| Projects | `lib/projects.ts` (MMKV) + `app/projects.tsx`; instructions → system message |
+| Private Mode | header shield → `block_training`; `lib/data-flow.ts` data-destination labels; pre-send consent (`lib/consent.ts`, Apple 5.1.2(i)) |
+| Providers | control center: Test key, est-cost (pricing catalog), route/options recommendation, training badges; `@gorhom/bottom-sheet` key modal |
+| Keys / Quota | `expo-secure-store` per provider; `expo-sqlite` quota ledger; `expo-notifications` warnings |
+| Voice | unavailable fallback (full STT pending `expo-speech-recognition` in a dev build) |
+| Styling | NativeWind 4 + Tailwind v3 / `StyleSheet` + `lib/theme.ts` |
 
-## Tabs
+## Navigation
 
-- **Chat** — streaming messages with provider selector sheet
-- **Providers** — quota bars, add/update/remove keys
+Tabs: **Chat**, **Research**, **Providers**, **Usage**, **Settings**, **Remote**.
+The Chat header hosts **＋ New**, **History**, **Projects**, and the **🛡 Private**
+toggle. **Onboarding**, **History**, and **Projects** are hidden routes reached
+from the Chat header (or first-run for onboarding).
+
+- **Chat** — streaming markdown chat; response-intelligence footer; mode/provider
+  chips; file attach (＋); voice (🎤, fallback); Stop; Private toggle
+- **Research** — Deep Research over `/v1/research` with staged progress + sources
+- **Providers** — control center: keys (add/update/remove/test), quota, est-cost,
+  recommendations, training badges, one-tap local runtimes
 - **Usage** — per-provider usage summary
+- **History** / **Projects** — saved chats and workspaces
 
 ## EAS Build
 
@@ -91,9 +115,12 @@ Update placeholders in `eas.json`:
 ## Project structure
 
 ```
-app/           Expo Router tabs (chat, providers, usage)
-components/    ProviderSheet, QuotaBar
-lib/           chat, keys, quota, limits, notifications, validate
+app/           Expo Router routes: index (chat), research, providers, usage,
+               settings, remote, onboarding, history, projects
+components/    Markdown, ResponseFooter, ChatMessageBubble, ProviderSheet, QuotaBar
+lib/           chat, route-options, research, history, projects, attachments,
+               data-flow, consent, chat-mode, onboarding, provider-intel,
+               keys, quota, limits, notifications, validate, gateway(-url), theme
 ```
 
 ## `expo-doctor` notes
