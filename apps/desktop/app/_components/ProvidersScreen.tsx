@@ -9,6 +9,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { QuotaBar } from "./QuotaBar";
+import { RouteOptionsPanel } from "./RouteOptionsPanel";
 
 export default function ProvidersScreen() {
   const { providers, statusMessage, refresh, setStatusMessage } = useProviderStatusStore();
@@ -95,7 +96,27 @@ export default function ProvidersScreen() {
           gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
         }}
       >
-        {providers.map((provider) => (
+        {providers.map((provider) => {
+          // Remaining free-tier quota as a percent (gateway owns the ledger).
+          const remainingPct =
+            provider.quotaLimit > 0
+              ? Math.max(
+                  0,
+                  Math.min(
+                    100,
+                    Math.round(
+                      (1 - provider.quotaUsed / provider.quotaLimit) * 100,
+                    ),
+                  ),
+                )
+              : null;
+          // Mirror web: only surface BYOK route options when a keyed provider is
+          // in cooldown or down to its last ~20% of quota.
+          const showRouteOptions =
+            provider.hasKey &&
+            (provider.inCooldown ||
+              (remainingPct != null && remainingPct <= 20));
+          return (
           <Card key={provider.id}>
             <CardHeader
               style={{
@@ -157,9 +178,16 @@ export default function ProvidersScreen() {
                   </Button>
                 </div>
               )}
+              {showRouteOptions && (
+                <RouteOptionsPanel
+                  provider={provider.id}
+                  quotaPct={remainingPct}
+                />
+              )}
             </CardContent>
           </Card>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

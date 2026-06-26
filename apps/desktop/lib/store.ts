@@ -3,7 +3,7 @@ import { persist } from "zustand/middleware";
 import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@zintus/types";
 import { loadConfig, saveConfig } from "./config";
 import { fetchProviderSnapshot, type DesktopProviderInfo } from "./providers";
-import type { GatewaySavings } from "./gateway";
+import type { CompressionStats, GatewaySavings } from "./gateway";
 
 interface SettingsState {
   settings: AppConfig;
@@ -32,6 +32,8 @@ export interface ChatMessageUi {
   content: string;
   providerId?: ProviderId;
   model?: string;
+  /** Tokzen compression proof for this response (null/undefined = no badge). */
+  compression?: CompressionStats;
 }
 
 export interface Thread {
