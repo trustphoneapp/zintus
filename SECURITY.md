@@ -57,6 +57,21 @@ before deploying anything beyond your own machine.
   the host keychain. Anyone who can reach it and present the token can use those
   keys. Scope the token and network accordingly.
 
+## Log & error redaction
+
+- Strings bound for logs, traces, and error sinks (including `SENTRY_DSN`) are
+  passed through `redactSecrets` (`packages/router/src/redact.ts`), wired into
+  the gateway's logging/error path (`apps/gateway/src/index.ts`). It scrubs every
+  provider key format with a recognizable prefix (OpenAI/DeepSeek/OpenRouter
+  `sk-`, Gemini `AIza`, Groq `gsk_`, Cerebras `csk-`, xAI `xai-`, HuggingFace
+  `hf_`) plus Stripe secrets (`sk_live_`/`rk_live_`/`whsec_`), replacing the body
+  with `****REDACTED****`.
+- **Best-effort, not a guarantee.** It is pattern-based: keys with no
+  distinctive prefix (e.g. Cohere/Mistral/Fireworks bare-format keys) can't be
+  matched without unacceptable false positives. The redactor reduces accidental
+  leakage of *recognizable* secrets into logs; callers must still avoid logging
+  raw key material directly.
+
 ## Cloud relay (Pro tier)
 
 - **BYOK is zero-knowledge.** Clients encrypt key material to the home gateway's
