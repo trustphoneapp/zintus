@@ -22,3 +22,34 @@ jobs:
       - run: cd apps/mobile && eas build --platform all --profile production --non-interactive
         env:
           EXPO_PUBLIC_VALIDATE_URL: ${{ vars.EXPO_PUBLIC_VALIDATE_URL }}
+          EXPO_PUBLIC_RELAY_URL: ${{ vars.EXPO_PUBLIC_RELAY_URL }}
+
+  # Submit the latest production build to the stores. Runs only when EXPO_TOKEN is
+  # configured AND the repo var MOBILE_SUBMIT_ENABLED == 'true', so a repo without
+  # store credentials (ASC API key / Google service account, supplied via
+  # EAS-managed credentials — never committed) skips cleanly instead of failing.
+  # This is a separate job, so even if submit is misconfigured the build job above
+  # is unaffected.
+  eas-submit:
+    needs: eas-build
+    runs-on: ubuntu-latest
+    if: ${{ vars.MOBILE_SUBMIT_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - run: bun install
+      - name: Submit to App Store / Play Store
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "EXPO_TOKEN not set — skipping store submit."
+            exit 0
+          fi
+          cd apps/mobile && eas submit --platform all --profile production --latest --non-interactive
