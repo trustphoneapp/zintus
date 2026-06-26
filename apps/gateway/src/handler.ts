@@ -1116,6 +1116,32 @@ export function createGatewayHandler(
       return new Response(null, { status: 204, headers: corsHeaders(request) });
     }
 
+    // CSRF / denial-of-wallet guard. Omitting the ACAO header stops a malicious
+    // site from READING responses, but a `no-cors` "simple" POST (text/plain,
+    // no preflight) would still EXECUTE and burn the user's BYOK quota. So when
+    // the gateway is origin-restricted (not "*"), REJECT any request carrying a
+    // disallowed Origin. Requests with no Origin (CLI, server-to-server, same
+    // origin) are unaffected; allowed browser origins pass.
+    {
+      const origin = request.headers.get("origin");
+      if (
+        origin &&
+        config.corsOrigins !== "*" &&
+        resolveCorsOrigin(config.corsOrigins, origin) === null
+      ) {
+        log("warn", "gateway.origin_rejected", {
+          requestId,
+          origin,
+          path: url.pathname,
+        });
+        return json(
+          request,
+          { error: { message: "Origin not allowed", type: "forbidden" } },
+          403,
+        );
+      }
+    }
+
     // Metrics endpoint — auth-gated only when GATEWAY_TOKEN is set.
     if (url.pathname === "/metrics") {
       if (config.token && !isAuthorized(request)) {

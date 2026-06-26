@@ -109,12 +109,21 @@ are pre-existing.
   redacted. Single execution plane (`@zintus/engine`).
 - **Security baseline strong** (redacted logs, OS keychain, web vault AES-GCM +
   PBKDF2-600k, Stripe HMAC + replay window, scoped account deletion).
-- **✅ FIXED — open tokenless gateway (was P1).** A gateway with no `GATEWAY_TOKEN`
-  now defaults to a **`loopback` CORS policy** (`auth.ts`): it reflects only
-  localhost (any port), the desktop (Tauri) webview, and the official `*.zintus.ai`
-  origin — arbitrary websites get no CORS header and can't read responses or burn
-  BYOK quota. A token-set gateway keeps `*` (auth gates it); `GATEWAY_CORS_ORIGIN`
-  still overrides. Verified by new `auth.test.ts` cases + 28 gateway tests.
+- **✅ FIXED — open tokenless gateway (was P1; two layers).** A brutal cross-check
+  confirmed the CORS change alone closed only the *read* hole — a `no-cors`
+  `text/plain` POST could still execute and burn quota. Both layers now in:
+  (1) tokenless gateways default to a **`loopback` CORS policy** (`auth.ts`:
+  reflects only localhost any-port, the desktop Tauri webview, `*.zintus.ai`) so
+  other sites can't READ responses; (2) the route guard (`handler.ts`) **rejects
+  (403) any request carrying a disallowed `Origin`** so a cross-site POST can't
+  EXECUTE / burn BYOK quota. Token-set keeps `*`; `GATEWAY_CORS_ORIGIN` overrides.
+  Verified: new `auth.test.ts` + handler origin-rejection tests + 90+ gateway
+  tests. The cross-check also confirmed **no shipped client is broken** (Tauri
+  `tauri://localhost`/`http://tauri.localhost`, dev `localhost:3001`, web
+  `www.zintus.ai` all covered; CLI sends no Origin). **[HUMAN] smoke:** confirm the
+  Tauri webview emits `Origin: tauri://localhost` (not `null`) on a real macOS/
+  Windows build, and that HTTPS web→`http://localhost:8788` still works on current
+  Chrome (Private-Network-Access) — both pre-existing.
 - **P2 remaining (careful follow-up):** web CSP `script-src 'unsafe-inline'`;
   Stripe webhook not itself flag-gated (defense-in-depth); Private Mode passes
   `"unknown"`-training providers; bundle-baked `NEXT_PUBLIC_GATEWAY_TOKEN`.

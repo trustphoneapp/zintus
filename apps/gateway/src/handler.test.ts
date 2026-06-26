@@ -56,6 +56,33 @@ function makeHandler(
   return createGatewayHandler({ engine, config: full, ...extraDeps });
 }
 
+describe("origin rejection (CSRF / denial-of-wallet guard)", () => {
+  test("loopback gateway 403s a disallowed Origin; allows allowed + no-Origin", async () => {
+    const handler = makeHandler({ corsOrigins: "loopback" });
+    const url = "http://localhost:8788/health";
+    const evil = await handler(
+      new Request(url, { headers: { origin: "https://evil.com" } }),
+    );
+    expect(evil.status).toBe(403);
+    const noOrigin = await handler(new Request(url));
+    expect(noOrigin.status).not.toBe(403);
+    const allowed = await handler(
+      new Request(url, { headers: { origin: "http://localhost:3000" } }),
+    );
+    expect(allowed.status).not.toBe(403);
+  });
+
+  test("'*' gateway never origin-rejects", async () => {
+    const handler = makeHandler({ corsOrigins: "*" });
+    const res = await handler(
+      new Request("http://localhost:8788/health", {
+        headers: { origin: "https://evil.com" },
+      }),
+    );
+    expect(res.status).not.toBe(403);
+  });
+});
+
 describe("gateway handler", () => {
   test("GET /health is public and reports auth state", async () => {
     const handler = makeHandler({ token: "secret" });
