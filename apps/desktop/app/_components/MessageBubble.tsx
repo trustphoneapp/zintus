@@ -37,8 +37,20 @@ export function MessageBubble({
       "Flag this AI-generated response as offensive, unsafe, or inaccurate? " +
         "This stays on your device and helps you track problem providers.",
     );
-    if (ok) {
-      window.alert("Reported — response flagged on this device.");
+    if (!ok) return;
+    try {
+      const KEY = "zintus:reported-responses.v1";
+      const list = JSON.parse(localStorage.getItem(KEY) ?? "[]") as unknown[];
+      list.push({
+        providerId: message.providerId ?? null,
+        model: message.model ?? null,
+        at: Date.now(),
+        excerpt: message.content.slice(0, 280),
+      });
+      localStorage.setItem(KEY, JSON.stringify(list));
+      window.alert("Reported — flagged and saved on this device.");
+    } catch {
+      window.alert("Reported.");
     }
   }
 

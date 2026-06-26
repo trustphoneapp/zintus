@@ -11,6 +11,7 @@ import {
   updateProject,
   type Project,
 } from "@/lib/projects";
+import { useChatStore, useProviderStatusStore, useSettingsStore } from "@/lib/store";
 import { Button } from "@/app/_components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/app/_components/ui/card";
 import { Textarea } from "@/app/_components/ui/textarea";
@@ -33,6 +34,9 @@ const EMPTY: FormState = {
 
 export default function ProjectsPage() {
   const router = useRouter();
+  const newChat = useChatStore((s) => s.newChat);
+  const setSelectedProvider = useProviderStatusStore((s) => s.setSelectedProvider);
+  const updateSettings = useSettingsStore((s) => s.update);
   const [projects, setProjects] = useState<Project[]>([]);
   const [form, setForm] = useState<FormState | null>(null);
 
@@ -55,6 +59,12 @@ export default function ProjectsPage() {
 
   function useInChat(project: Project) {
     setActiveProjectId(project.id);
+    // Start a FRESH thread so the project's instructions actually inject
+    // (ChatPanel only injects on an empty thread), and apply its routing
+    // defaults — otherwise the project would silently no-op in a busy thread.
+    newChat();
+    if (project.defaultProvider) setSelectedProvider(project.defaultProvider);
+    if (project.privateDefault) updateSettings({ blockTrainingProviders: true });
     router.push("/chat");
   }
 

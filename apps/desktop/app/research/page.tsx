@@ -7,6 +7,11 @@ import {
   type ResearchDepth,
   type ResearchSource,
 } from "@/lib/research";
+import {
+  DATA_FLOW,
+  grantProviderSendConsent,
+  hasProviderSendConsent,
+} from "@/lib/consent";
 import { Button } from "@/app/_components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/app/_components/ui/card";
 import { Textarea } from "@/app/_components/ui/textarea";
@@ -49,10 +54,16 @@ export default function ResearchPage() {
   const [answer, setAnswer] = useState("");
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [consentOpen, setConsentOpen] = useState(false);
 
   const run = useCallback(async () => {
     const q = query.trim();
     if (!q || running) return;
+    // Consent before the first send to providers/search (parity w/ chat).
+    if (!hasProviderSendConsent()) {
+      setConsentOpen(true);
+      return;
+    }
     setRunning(true);
     setStage("planning");
     setQueries([]);
@@ -216,6 +227,43 @@ export default function ResearchPage() {
           )}
         </CardContent>
       </Card>
+
+      {consentOpen ? (
+        <div className="consent-backdrop" role="dialog" aria-modal="true">
+          <div className="consent-card">
+            <h2 className="consent-title">Before your first send</h2>
+            <p className="consent-body">
+              Your research query and the pages it reads go to your gateway, a
+              search provider, and the AI provider you chose. Here&apos;s where
+              data travels:
+            </p>
+            <div className="consent-flow">
+              {DATA_FLOW.map((item) => (
+                <div key={item.data} className="consent-flow-item">
+                  <span className="consent-flow-dest">{item.dest}</span>
+                  <span className="consent-flow-data">{item.data}</span>
+                  <span className="consent-flow-detail">{item.detail}</span>
+                </div>
+              ))}
+            </div>
+            <div className="consent-actions">
+              <Button type="button" variant="secondary" onClick={() => setConsentOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={() => {
+                  grantProviderSendConsent();
+                  setConsentOpen(false);
+                  void run();
+                }}
+              >
+                Got it — research
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

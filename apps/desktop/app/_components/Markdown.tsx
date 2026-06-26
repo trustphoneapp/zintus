@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 /**
  * Dependency-free Markdown renderer for desktop chat answers and research
@@ -139,7 +139,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
 }
 
 export function Markdown({ content }: { content: string }) {
-  const blocks = parseBlocks(content);
+  const blocks = useMemo(() => parseBlocks(content), [content]);
   return (
     <div className="md">
       {blocks.map((block, idx) => {

@@ -40,7 +40,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
 | 27 | report AI response | ✅ | 🟡 | ✅ | ❌ | mobile + desktop have the Gen-AI flag control; verify web |
 | 28 | account / session / cloud remote | ✅ | ✅ | 🟡 | ✅ | web login/session; CLI `cloud`+`remote` |
-| 29 | export / share | ✅ | ✅ | ✅ | ❌ | desktop now exports thread→md; CLI none |
+| 29 | export / share | ✅ | ✅ | 🟡 | ❌ | web works; desktop uses Blob+`a.download` — **unverified in the Tauri webview** (may need an fs/dialog plugin), test on a packaged build; CLI none |
 
 ## Cross-surface issues to resolve (ranked)
 
@@ -65,6 +65,26 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 3. **Projects (#17) and consent gate (#26) exist only on mobile.** Port to
    web + desktop (consent is also a store-compliance item).
 4. **CLI lacks `research`, `projects`, `keys test`, `--json` everywhere (#15,17,20).**
+
+## Brutal audit fixes (desktop, post-review)
+
+A read-only audit (no P0; security clean — no key/prompt/token in logs or to relay)
+caught four runtime bugs that typecheck+build were blind to; all fixed:
+- **Projects "New chat" now actually starts a fresh thread + applies provider/
+  private defaults** — previously it only set the active id, so instructions
+  silently never injected in a busy thread and the defaults were dead data.
+- **Report now persists** the flag to localStorage (was an alert that stored
+  nothing) — #27 ✅ is now honest.
+- **Consent gate now also covers Deep Research** (was chat-only; a first research
+  query could ship ungated).
+- **Markdown is memoized** (was re-parsing the full cumulative string per token).
+
+Known, documented (not silent): Private Mode is **best-effort** — the router
+(`factory.ts:467`) keeps a training provider rather than fail when blocking would
+strand the request; the "may reduce availability" copy hints at this, but there's
+no per-response "not honored" badge yet. Export's Tauri runtime is unverified
+(#29 🟡). The 3 s AppShell health poll and bundle-baked `NEXT_PUBLIC_GATEWAY_TOKEN`
+are pre-existing.
 
 ## Hard-rule audit (this branch)
 
