@@ -15,6 +15,11 @@ import {
 import { streamChat, type ChatMessage } from "@/lib/chat-client";
 import { memorySystemMessage } from "@/lib/memory";
 import { downloadFile } from "@/lib/download";
+import {
+  DATA_FLOW,
+  grantProviderSendConsent,
+  hasProviderSendConsent,
+} from "@/lib/consent";
 import { loadPresets, type Preset } from "@/lib/presets";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
 
@@ -105,6 +110,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [keyManagerOpen, setKeyManagerOpen] = useState(false);
+  const [consentOpen, setConsentOpen] = useState(false);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [activePreset, setActivePreset] = useState<Preset | null>(null);
   // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
@@ -291,6 +297,11 @@ export default function ChatPage() {
       setKeyManagerOpen(true);
       return;
     }
+    // Consent before the first send to a third-party provider (parity w/ mobile+desktop).
+    if (!hasProviderSendConsent()) {
+      setConsentOpen(true);
+      return;
+    }
     const prompt = input.trim();
 
     // Build user content with attachments
@@ -415,6 +426,51 @@ export default function ChatPage() {
           void send();
         }}
       />
+      {consentOpen ? (
+        <div
+          className="consent-backdrop"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setConsentOpen(false)}
+        >
+          <div className="consent-card" onClick={(e) => e.stopPropagation()}>
+            <h2 className="consent-title">Before your first send</h2>
+            <p className="consent-body">
+              Your message goes to the AI provider you choose, routed through your
+              own gateway. Here&apos;s exactly where data travels:
+            </p>
+            <div className="consent-flow">
+              {DATA_FLOW.map((item) => (
+                <div key={item.data} className="consent-flow-item">
+                  <span className="consent-flow-dest">{item.dest}</span>
+                  <span className="consent-flow-data">{item.data}</span>
+                  <span className="consent-flow-detail">{item.detail}</span>
+                </div>
+              ))}
+            </div>
+            <div className="consent-actions">
+              <button
+                type="button"
+                className="chat-tool-toggle"
+                onClick={() => setConsentOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="chat-tool-toggle"
+                onClick={() => {
+                  grantProviderSendConsent();
+                  setConsentOpen(false);
+                  void send();
+                }}
+              >
+                Got it — send
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       <div className="chat-messages">
         {messages.length === 0 ? (
           <div className="chat-empty">

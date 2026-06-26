@@ -37,7 +37,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 23 | file input | ✅ | ✅ | ❌ | 🟡 | web text+image picker (drag/paste); desktop none |
 | 24 | image input | ❌ | ⚠️ | ❌ | 🚫 | **web UI sends base64 `images`, gateway DROPS them — no multimodal path. Silent no-op; fix or hide.** |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
-| 26 | consent gate (pre-send) | ✅ | ❌ | ✅ | ❌ | mobile + desktop now gate first provider send; web still missing |
+| 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
 | 27 | report AI response | ✅ | 🟡 | ✅ | ❌ | mobile + desktop have the Gen-AI flag control; verify web |
 | 28 | account / session / cloud remote | ✅ | ✅ | 🟡 | ✅ | web login/session; CLI `cloud`+`remote` |
 | 29 | export / share | ✅ | ✅ | ✅ | ❌ | desktop now exports thread→md; CLI none |

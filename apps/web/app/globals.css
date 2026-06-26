@@ -4625,3 +4625,15 @@ body:has(.dashboard-container) {
   font-size: 14px;
   color: #94a3b8;
 }
+
+/* ── Consent dialog (pre-send data-destination gate) ── */
+.consent-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: grid; place-items: center; z-index: 100; padding: 24px; }
+.consent-card { background: #0e1118; border: 1px solid #232a36; border-radius: 14px; padding: 20px; max-width: 460px; width: 100%; }
+.consent-title { font-size: 17px; font-weight: 800; margin: 0 0 8px; color: #e8eef5; }
+.consent-body { font-size: 13px; color: #94a3b8; line-height: 1.5; margin: 0 0 12px; }
+.consent-flow { display: flex; flex-direction: column; }
+.consent-flow-item { display: flex; flex-direction: column; padding: 8px 0; border-top: 1px solid #232a36; }
+.consent-flow-dest { font-size: 12px; font-weight: 800; color: #c4b5fd; }
+.consent-flow-data { font-size: 13px; font-weight: 600; color: #e8eef5; }
+.consent-flow-detail { font-size: 12px; color: #94a3b8; line-height: 1.4; }
+.consent-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
