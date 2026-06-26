@@ -63,7 +63,8 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
    notarization are [HUMAN] (see docs/RELEASE-CHECKLIST.md).
 3. **Projects (#17) and consent gate (#26) exist only on mobile.** Port to
    web + desktop (consent is also a store-compliance item).
-4. **CLI lacks `research`, `projects`, `keys test`, `--json` everywhere (#15,17,20).**
+4. **CLI lacks `research`, `projects`, and a broad `--json` mode (#15,17).**
+   (`keys test` / #20 is now done.)
 
 ## Brutal audit fixes (desktop, post-review)
 
