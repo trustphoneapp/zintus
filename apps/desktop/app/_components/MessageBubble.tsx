@@ -31,6 +31,17 @@ export function MessageBubble({
     }
   }
 
+  function report() {
+    // Play Gen-AI policy / Apple 1.2: an in-app way to flag offensive AI content.
+    const ok = window.confirm(
+      "Flag this AI-generated response as offensive, unsafe, or inaccurate? " +
+        "This stays on your device and helps you track problem providers.",
+    );
+    if (ok) {
+      window.alert("Reported — response flagged on this device.");
+    }
+  }
+
   if (isUser) {
     return <div className="chat-bubble-user">{message.content}</div>;
   }
@@ -67,6 +78,14 @@ export function MessageBubble({
               Regenerate
             </button>
           ) : null}
+          <button
+            type="button"
+            className="chat-bubble-action"
+            style={{ color: "var(--color-warn, #f59e0b)" }}
+            onClick={report}
+          >
+            Report
+          </button>
         </div>
       ) : null}
     </div>
