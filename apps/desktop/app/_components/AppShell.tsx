@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
 import { useChatStore } from "@/lib/store";
@@ -19,6 +19,7 @@ const NAV = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [online, setOnline] = useState(true);
   const [checked, setChecked] = useState(false);
   const [collapsed, setCollapsed] = useState(() => {
@@ -49,6 +50,29 @@ export function AppShell({ children }: { children: ReactNode }) {
       window.clearInterval(interval);
     };
   }, []);
+
+  // Desktop keyboard shortcuts (Cmd/Ctrl based). Cmd+W/Cmd+Q come from Tauri's
+  // default macOS menu; these add the app-level ones the menu doesn't cover.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      if (e.key === "n" || e.key === "N") {
+        e.preventDefault();
+        newChat();
+        router.push("/chat");
+      } else if (e.key === ",") {
+        e.preventDefault();
+        router.push("/settings");
+      } else if ((e.key === "f" || e.key === "F") && e.shiftKey) {
+        // Search/history → the recent-threads sidebar lives on chat for now.
+        e.preventDefault();
+        router.push("/chat");
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [newChat, router]);
 
   const toggleSidebar = () => {
     setCollapsed((v) => {

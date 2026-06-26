@@ -53,12 +53,15 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
    (`docs/multimodal-image-plan.md`), or build that backend. Do **not** leave a
    silent broken feature — it violates the "no silent unsupported features" rule.
 2. **Desktop parity — largely closed on this branch.** Added markdown+code-copy,
-   regenerate, export, consent gate, Private Mode, Deep Research, report, and
-   projects (all typecheck + `next build` green). Remaining desktop 🟡/gaps:
-   full footer/route-reason+meta (#9, currently compression badge only), a
-   history list/search/rename UI (#16, store already persists threads), a
-   routing-strategy chip (#6), onboarding, and the Tauri native menu + keyboard
-   shortcuts. File input (#23) still missing on desktop.
+   regenerate, export, consent gate, Private Mode, Deep Research, report,
+   projects, real multi-res app icons (were stubs), and Cmd+N/Cmd+,/Cmd+Shift+F
+   shortcuts (all typecheck + `next build` green). Remaining desktop 🟡/gaps:
+   full footer/route-reason+meta (#9, compression badge only), history
+   search/rename UI (#16 — sidebar already lists recent threads), a routing-
+   strategy chip (#6), onboarding, the Tauri **native menu** items (About/
+   Preferences/New Research/etc., need the Rust menu in lib.rs — [HUMAN]/native),
+   and file input (#23). Windows `bundle.windows.signCommand` missing + signing/
+   notarization are [HUMAN] (see docs/RELEASE-CHECKLIST.md).
 3. **Projects (#17) and consent gate (#26) exist only on mobile.** Port to
    web + desktop (consent is also a store-compliance item).
 4. **CLI lacks `research`, `projects`, `keys test`, `--json` everywhere (#15,17,20).**
