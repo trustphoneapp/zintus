@@ -14,7 +14,11 @@
 ## Production infrastructure
 
 ### Relay — `relay.zintus.ai` (Cloudflare Workers)
-Deploy: `cd workers/relay && bunx wrangler deploy`
+Deploy: `cd workers/relay && bun run deploy`
+(`deploy` runs `wrangler deploy --message "$(git rev-parse --short HEAD)$(git diff --quiet HEAD || echo -dirty)"`,
+stamping the live git SHA into the Cloudflare Version `Message` — `-dirty` if deployed
+from uncommitted changes — so `wrangler deployments list` shows exactly which commit
+is live; drift is verifiable, not inferred)
 Verify: `curl https://relay.zintus.ai/health` → `{"ok":true}`
 Config: `workers/relay/wrangler.toml`
 
@@ -85,8 +89,8 @@ stabilizes. The merged-lcov pipeline it consumes (`scripts/coverage.ts`, job
 coverage reliably clears 80%.
 
 ## Rules
-- **Never push to `main`.** Never edit `ci.yml` without reading the whole file.
-- After relay changes: `bunx wrangler deploy` → `curl https://relay.zintus.ai/health`
+- **Never push to `main` without running tests first.** Never edit `ci.yml` without reading the whole file.
+- After relay changes: `bun run deploy` (stamps the git SHA) → `curl https://relay.zintus.ai/health`
   → confirm bindings still match `wrangler.toml`.
 - The `QuotaCounter` DO migration is **additive** (`[[migrations]]` in
   `wrangler.toml`) — safe to deploy; it does not touch `GatewaySession`.
