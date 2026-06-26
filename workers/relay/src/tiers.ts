@@ -29,6 +29,49 @@ export const STRIPE_PRICES: Record<string, string> = {
   scale_monthly:   'price_FILL_FROM_STRIPE',
 };
 
+/** True when a real Stripe price (not a `price_FILL…` placeholder) is configured. */
+export function isStripePriceConfigured(tier: string): boolean {
+  const id = STRIPE_PRICES[`${tier}_monthly`];
+  return !!id && !id.startsWith('price_FILL');
+}
+
+export interface CheckoutBlock {
+  status: 503;
+  code: 'managed_keys_unavailable' | 'billing_not_configured';
+  message: string;
+}
+
+/**
+ * Pre-flight gate for `/api/billing/checkout`. Returns a 503 descriptor when
+ * checkout must NOT proceed, or null when it may. Two distinct failures:
+ *   1. managed-key tiers are gated off (MANAGED_KEYS_AVAILABLE=false), or
+ *   2. the flag is flipped on but STRIPE_PRICES are still placeholders — without
+ *      this guard `createCheckoutSession` throws and the route surfaces a 500
+ *      from the Stripe layer instead of a clear "not configured" signal.
+ * `managedKeysAvailable` is injectable so the price-placeholder path is testable
+ * without flipping the production constant.
+ */
+export function checkoutAvailability(
+  tier: string,
+  managedKeysAvailable: boolean = MANAGED_KEYS_AVAILABLE,
+): CheckoutBlock | null {
+  if (!managedKeysAvailable && (MANAGED_KEY_TIERS as readonly string[]).includes(tier)) {
+    return {
+      status: 503,
+      code: 'managed_keys_unavailable',
+      message: 'Managed-key tiers are coming soon and not yet available for purchase.',
+    };
+  }
+  if (!isStripePriceConfigured(tier)) {
+    return {
+      status: 503,
+      code: 'billing_not_configured',
+      message: 'Billing is not configured yet. Please try again later.',
+    };
+  }
+  return null;
+}
+
 export const REFERRAL_RULES = {
   starter: { type: 'one_time'  as const, cents: 1500, pct: 0,    months: 0  },
   growth:  { type: 'recurring' as const, cents: 0,    pct: 0.20, months: 12 },

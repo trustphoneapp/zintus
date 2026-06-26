@@ -4,7 +4,6 @@ export interface Env {
   QUOTA_COUNTER: DurableObjectNamespace;
   DB: D1Database;
   KV: KVNamespace;
-  RELAY_AUTH_SECRET: string;
   RELAY_BASE_URL: string;
   COOKIE_DOMAIN: string;
   GOOGLE_CLIENT_ID: string;

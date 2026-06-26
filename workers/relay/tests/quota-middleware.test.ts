@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { enforceQuota, recordUsage, billingPeriod } from "../src/middleware/quota.js";
+import { enforceQuota, recordUsage, billingPeriod, periodResetUnix } from "../src/middleware/quota.js";
 import type { Env, SubscriptionRow } from "../src/types.js";
 
 // Quota enforcement + usage recording for the relay's managed tiers. The token
@@ -86,6 +86,28 @@ describe("enforceQuota", () => {
     const r = await enforceQuota("u1", env);
     expect(r.allowed).toBe(false); // 500k not < 500k
     expect(r.reset).toBeGreaterThan(Math.floor(Date.now() / 1000));
+  });
+});
+
+// ── Quota period is the CALENDAR UTC month (B-Lane fix 6) ───────────────────
+// The QuotaCounter DO is keyed `${user}:${billingPeriod()}`, so the period key
+// rolling at the UTC month boundary IS the budget reset: a new month routes to a
+// fresh DO instance. Stripe `invoice.paid` resets only the cosmetic D1 column,
+// never the DO — this pins the calendar-month contract that decision documents.
+describe("billing period boundary (calendar UTC month)", () => {
+  test("key holds through the last second of a month, flips at the next month's first second", () => {
+    expect(billingPeriod(new Date("2026-01-31T23:59:59Z"))).toBe("2026-01");
+    expect(billingPeriod(new Date("2026-02-01T00:00:00Z"))).toBe("2026-02");
+    // Different period key => different DO instance => fresh counter (the reset).
+    expect(billingPeriod(new Date("2026-01-31T23:59:59Z")))
+      .not.toBe(billingPeriod(new Date("2026-02-01T00:00:00Z")));
+  });
+
+  test("reset timestamp is the first of next UTC month, incl. December→January rollover", () => {
+    expect(periodResetUnix(new Date("2026-01-15T12:00:00Z")))
+      .toBe(Math.floor(Date.UTC(2026, 1, 1) / 1000)); // Feb 1
+    expect(periodResetUnix(new Date("2026-12-15T12:00:00Z")))
+      .toBe(Math.floor(Date.UTC(2027, 0, 1) / 1000)); // Jan 1 next year
   });
 });
 

@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { verifyStripeSignature, handleStripeWebhook } from "../src/billing.js";
+import {
+  verifyStripeSignature,
+  handleStripeWebhook,
+  withinReplayWindow,
+  createPortalSession,
+  createCheckoutSession,
+  STRIPE_SIGNATURE_TOLERANCE_SECS,
+} from "../src/billing.js";
 import type { Env } from "../src/types.js";
 
 // The Stripe webhook signature gate. A bypass here = anyone can forge a
@@ -9,8 +16,10 @@ import type { Env } from "../src/types.js";
 
 const SECRET = "whsec_test_secret_value";
 
-/** Produce a valid Stripe-style signature header for a body, as Stripe would. */
-async function sign(body: string, secret = SECRET, t = "1718000000"): Promise<string> {
+/** Produce a valid Stripe-style signature header for a body, as Stripe would.
+ *  Defaults `t` to NOW so handler tests pass the ±5-min replay window; the
+ *  signature-only tests below pass an explicit `t` and don't care about recency. */
+async function sign(body: string, secret = SECRET, t = String(Math.floor(Date.now() / 1000))): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -141,5 +150,127 @@ describe("handleStripeWebhook — checkout.session.completed persistence (B4)", 
     );
     expect(res.status).toBe(400);
     expect(db.calls.length).toBe(0);
+  });
+});
+
+// ── B-Lane fix 1: replay window (±5 min) ────────────────────────────────────
+// A correctly-signed but stale (replayed) event must be rejected before any DB
+// write. Stripe's `t` is inside the HMAC, so it can't be moved without breaking
+// v1 — but a captured request replayed within seconds is otherwise valid forever.
+
+describe("withinReplayWindow", () => {
+  const now = 1_800_000_000;
+  test("default tolerance is Stripe's documented 5 minutes (300s)", () => {
+    expect(STRIPE_SIGNATURE_TOLERANCE_SECS).toBe(300);
+  });
+  test("accepts a timestamp inside the tolerance (both directions)", () => {
+    expect(withinReplayWindow(`t=${now},v1=x`, now)).toBe(true);
+    expect(withinReplayWindow(`t=${now - 299},v1=x`, now)).toBe(true);
+    expect(withinReplayWindow(`t=${now + 299},v1=x`, now)).toBe(true);
+  });
+  test("boundary is inclusive: exactly ±tolerance accepted, one past rejected", () => {
+    expect(withinReplayWindow(`t=${now - STRIPE_SIGNATURE_TOLERANCE_SECS},v1=x`, now)).toBe(true);
+    expect(withinReplayWindow(`t=${now + STRIPE_SIGNATURE_TOLERANCE_SECS},v1=x`, now)).toBe(true);
+    expect(withinReplayWindow(`t=${now - STRIPE_SIGNATURE_TOLERANCE_SECS - 1},v1=x`, now)).toBe(false);
+  });
+
+  test("rejects a stale timestamp beyond tolerance", () => {
+    expect(withinReplayWindow(`t=${now - STRIPE_SIGNATURE_TOLERANCE_SECS - 1},v1=x`, now)).toBe(false);
+  });
+  test("rejects a future timestamp beyond tolerance", () => {
+    expect(withinReplayWindow(`t=${now + STRIPE_SIGNATURE_TOLERANCE_SECS + 1},v1=x`, now)).toBe(false);
+  });
+  test("rejects a missing/garbage timestamp", () => {
+    expect(withinReplayWindow("v1=x", now)).toBe(false);
+    expect(withinReplayWindow("t=notanumber,v1=x", now)).toBe(false);
+  });
+});
+
+describe("handleStripeWebhook — replay window", () => {
+  const event = JSON.stringify({
+    type: "checkout.session.completed",
+    data: { object: { metadata: { user_id: "u1", tier: "growth" }, customer: "cus_1", subscription: "sub_1" } },
+  });
+
+  test("rejects a correctly-signed but STALE event (400) with zero DB writes", async () => {
+    const db = recordingDb();
+    const env = { DB: db, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    // Signed an hour ago: valid HMAC (the t is the signed one), stale window.
+    const staleT = String(Math.floor(Date.now() / 1000) - 3600);
+    const res = await handleStripeWebhook(
+      new Request("https://relay/webhook", {
+        method: "POST",
+        body: event,
+        headers: { "stripe-signature": await sign(event, SECRET, staleT) },
+      }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(db.calls.length).toBe(0);
+  });
+
+  test("accepts a fresh, correctly-signed event (200) and writes", async () => {
+    const db = recordingDb();
+    const env = { DB: db, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    const res = await handleStripeWebhook(
+      new Request("https://relay/webhook", {
+        method: "POST",
+        body: event,
+        headers: { "stripe-signature": await sign(event) }, // default t = now
+      }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(db.calls.some((c) => /INSERT INTO subscriptions/i.test(c.sql))).toBe(true);
+  });
+});
+
+// ── B-Lane fix 2: createPortalSession must check res.ok ─────────────────────
+
+describe("createPortalSession — Stripe error path", () => {
+  const realFetch = globalThis.fetch;
+  const env = { STRIPE_SECRET_KEY: "sk_test" } as unknown as Env;
+
+  test("throws on a non-2xx Stripe response instead of returning undefined url", async () => {
+    globalThis.fetch = (async () =>
+      new Response("No such customer", { status: 400 })) as typeof fetch;
+    try {
+      await expect(createPortalSession("cus_missing", env)).rejects.toThrow(/Stripe portal error/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("returns the url on success", async () => {
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ url: "https://billing.stripe.com/session/abc" }), { status: 200 })) as typeof fetch;
+    try {
+      expect(await createPortalSession("cus_ok", env)).toBe("https://billing.stripe.com/session/abc");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+// ── B-Lane fix 3 (adjacent): checkout never hits Stripe with a placeholder price.
+// createCheckoutSession throws BEFORE the network call when the price is still a
+// `price_FILL…` placeholder, so the route's checkoutAvailability guard returns a
+// clean 503 rather than letting an empty `line_items[0][price]` reach Stripe.
+
+describe("createCheckoutSession — placeholder price guard", () => {
+  test("throws before any fetch when the price is an unconfigured placeholder", async () => {
+    const realFetch = globalThis.fetch;
+    let fetched = false;
+    globalThis.fetch = (async () => {
+      fetched = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    const env = { STRIPE_SECRET_KEY: "sk_test" } as unknown as Env;
+    try {
+      await expect(createCheckoutSession("u1", "u1@e.com", "growth", null, env)).rejects.toThrow(/price not configured/i);
+      expect(fetched).toBe(false); // never reached Stripe
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

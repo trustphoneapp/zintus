@@ -55,7 +55,6 @@ id = "e37d30031cb2409daa2fd5d44003ec0c"
 #    Update id above with the returned ID.
 #
 # 4. Set secrets:
-#      bunx wrangler secret put RELAY_AUTH_SECRET   # openssl rand -hex 32
 #      bunx wrangler secret put GOOGLE_CLIENT_ID
 #      bunx wrangler secret put GOOGLE_CLIENT_SECRET
 #      bunx wrangler secret put RESEND_API_KEY
@@ -75,7 +74,6 @@ id = "e37d30031cb2409daa2fd5d44003ec0c"
 #      curl -I https://relay.zintus.ai/health
 #
 # Secrets — set via: bunx wrangler secret put <NAME>
-# RELAY_AUTH_SECRET   — openssl rand -hex 32
 # GOOGLE_CLIENT_ID    — from console.cloud.google.com
 # GOOGLE_CLIENT_SECRET
 # RESEND_API_KEY      — from resend.com

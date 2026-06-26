@@ -12,6 +12,9 @@ import {
   MAGIC_LINK_EMAIL_WINDOW_SECS,
   MAGIC_LINK_IP_LIMIT,
   MAGIC_LINK_IP_WINDOW_SECS,
+  usageReportKey,
+  USAGE_REPORT_LIMIT,
+  USAGE_REPORT_WINDOW_SECS,
 } from "../src/rate-limit.js";
 
 // Minimal in-memory KV implementing only the get/put surface the limiter uses.
@@ -80,6 +83,29 @@ describe("magic-link key builders", () => {
     expect(MAGIC_LINK_EMAIL_LIMIT).toBe(3);
     expect(MAGIC_LINK_IP_LIMIT).toBe(10);
     expect(MAGIC_LINK_EMAIL_LIMIT).toBeLessThan(MAGIC_LINK_IP_LIMIT);
+  });
+});
+
+describe("self-reported usage limit (B-Lane fix 7)", () => {
+  it("namespaces the key per user", () => {
+    expect(usageReportKey("u1")).toBe("rl:usage:u1");
+    expect(usageReportKey("u1")).not.toBe(usageReportKey("u2"));
+  });
+
+  it("has a bounded, generous cap (well above honest report rates)", () => {
+    expect(USAGE_REPORT_LIMIT).toBeGreaterThan(0);
+    expect(USAGE_REPORT_WINDOW_SECS).toBeGreaterThan(0);
+  });
+
+  it("blocks once a single user crosses the cap within the window", async () => {
+    const kv = fakeKV();
+    const key = usageReportKey("u1");
+    for (let i = 0; i < USAGE_REPORT_LIMIT; i++) {
+      expect(await kvRateLimitOk(kv, key, USAGE_REPORT_LIMIT, USAGE_REPORT_WINDOW_SECS)).toBe(true);
+    }
+    expect(await kvRateLimitOk(kv, key, USAGE_REPORT_LIMIT, USAGE_REPORT_WINDOW_SECS)).toBe(false);
+    // A different user is unaffected.
+    expect(await kvRateLimitOk(kv, usageReportKey("u2"), USAGE_REPORT_LIMIT, USAGE_REPORT_WINDOW_SECS)).toBe(true);
   });
 });
 
