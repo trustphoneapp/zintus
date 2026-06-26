@@ -44,7 +44,7 @@ import {
   type SessionPayload,
 } from "./auth.js";
 import { createCheckoutSession, createPortalSession, handleStripeWebhook } from "./billing.js";
-import { MANAGED_KEYS_AVAILABLE, MANAGED_KEY_TIERS } from "./tiers.js";
+import { checkoutAvailability } from "./tiers.js";
 import { corsOrigin, validateRedirectTo } from "./http-security.js";
 import { enforceQuota, recordUsage, getQuotaUsed } from "./middleware/quota.js";
 import { createErrorSink } from "./observability.js";
@@ -58,6 +58,9 @@ import {
   MAGIC_LINK_EMAIL_WINDOW_SECS,
   MAGIC_LINK_IP_LIMIT,
   MAGIC_LINK_IP_WINDOW_SECS,
+  usageReportKey,
+  USAGE_REPORT_LIMIT,
+  USAGE_REPORT_WINDOW_SECS,
 } from "./rate-limit.js";
 
 // Re-export the Durable Object classes for wrangler to find.
@@ -195,23 +198,33 @@ async function requireSession(
   return verifySessionToken(c.env.KV, cookie);
 }
 
-async function findOrCreateUser(
+// Exported for unit tests (duplicate-prevention). Normalises the email before
+// both the lookup and the insert so case/whitespace variants of the SAME address
+// (e.g. "User@Example.com " vs "user@example.com") resolve to one row instead of
+// silently creating duplicate users. The rate-limit path already lowercases the
+// email (magicLinkEmailKey); the persisted user row must agree, or two "users"
+// share one inbox. Gmail-style dot/plus aliasing is intentionally NOT collapsed
+// (those are distinct addresses at many providers) — only case + surrounding
+// whitespace, which never change identity.
+export async function findOrCreateUser(
   db: D1Database,
-  email: string,
+  rawEmail: string,
 ): Promise<UserRow> {
+  const email = rawEmail.trim().toLowerCase();
   const existing = await db
     .prepare("SELECT * FROM zintus_users WHERE email = ?")
     .bind(email)
     .first<UserRow>();
   if (existing) return existing;
   const id = crypto.randomUUID();
+  const createdAt = Date.now();
   await db
     .prepare(
       "INSERT INTO zintus_users (id, email, created_at) VALUES (?, ?, ?)",
     )
-    .bind(id, email, Date.now())
+    .bind(id, email, createdAt)
     .run();
-  return { id, email, created_at: Date.now() };
+  return { id, email, created_at: createdAt };
 }
 
 async function createUserSession(
@@ -754,20 +767,15 @@ app.post('/api/billing/checkout', async (c) => {
     return c.json({ error: 'Invalid tier' }, 400);
   }
 
-  // Managed-key tiers (starter/growth/scale) sell Zintus-managed key custody,
-  // whose backend was removed (scaffold, never wired). Until it actually ships
-  // these are NOT purchasable — block checkout so no one pays for an unbuilt
-  // feature. Single re-enable toggle: MANAGED_KEYS_AVAILABLE in tiers.ts.
-  if (!MANAGED_KEYS_AVAILABLE && (MANAGED_KEY_TIERS as readonly string[]).includes(tier)) {
-    return c.json(
-      {
-        error: {
-          code: 'managed_keys_unavailable',
-          message: 'Managed-key tiers are coming soon and not yet available for purchase.',
-        },
-      },
-      503,
-    );
+  // Pre-flight gate (see checkoutAvailability in tiers.ts). Returns 503 when:
+  //   • managed-key tiers are gated off (MANAGED_KEYS_AVAILABLE=false — the
+  //     backend was removed; no one pays for an unbuilt feature), OR
+  //   • the flag is flipped on but STRIPE_PRICES are still `price_FILL…`
+  //     placeholders — a clear "billing not configured" 503 instead of a 500
+  //     bubbling up from the Stripe API.
+  const block = checkoutAvailability(tier);
+  if (block) {
+    return c.json({ error: { code: block.code, message: block.message } }, block.status);
   }
 
   const user = await c.env.DB.prepare('SELECT email FROM zintus_users WHERE id = ?')
@@ -861,6 +869,15 @@ app.get('/api/usage/history', async (c) => {
 app.post('/api/usage/report', async (c) => {
   const session = await requireSession(c);
   if (!session) return c.json({ error: 'Unauthorized' }, 401);
+
+  // Per-user cap on the self-reported usage path (BYOK trust boundary). Keeps a
+  // compromised/abusive cookie from flooding D1 + the QuotaCounter DO; honest
+  // report rates stay well under the cap. See rate-limit.ts for the rationale.
+  if (!(await kvRateLimitOk(
+    c.env.KV, usageReportKey(session.user_id), USAGE_REPORT_LIMIT, USAGE_REPORT_WINDOW_SECS,
+  ))) {
+    return c.json({ error: 'Rate limit exceeded' }, 429);
+  }
 
   const { provider, model, input_tokens, output_tokens } = await c.req.json<{
     provider: string; model: string; input_tokens: number; output_tokens: number;

@@ -40,14 +40,18 @@ bug (closed by the `/health`→`/v1/status` split).
 
 ### Exhaustion is NOT a 429 from the gateway
 When no provider can serve, the router **throws**
-`"No providers available. Configure API keys or start Ollama."` (`factory.ts:432`)
-or `"All providers exhausted"` (`factory.ts:694`). For a **streaming** request
-this surfaces as an SSE `data: {"error":{"message":…}}` frame, then `[DONE]`.
+`"No providers available. Configure API keys or start Ollama."` (`factory.ts:474`)
+or `"All providers exhausted"` (`factory.ts:749`). For a **non-streaming**
+request the handler's catch chain maps that throw to **HTTP 400**
+`{"error":{"message":"No providers available…"}}` (`handler.ts:963`). This is
+pinned by a test — `gateway-flow.integration.test.ts:80` ("no eligible provider
+(no key) returns HTTP 400 'No providers available' — NOT 429") asserts status
+`400` and a null `Retry-After` (`gateway-flow.integration.test.ts:92`). For a
+**streaming** request it surfaces instead as an SSE
+`data: {"error":{"message":…}}` frame, then `[DONE]`.
 The gateway does **not** emit `429` / `Retry-After` for exhaustion — that belongs
-to the **relay's managed-tier quota** only (`workers/relay/src/index.ts:688`,
+to the **relay's managed-tier quota** only (`workers/relay/src/index.ts:696`,
 429 + `Retry-After` + `X-Quota-*`). Keep these two paths distinct.
-> The exact non-streaming HTTP status for the no-providers throw is not pinned by
-> a test today — read the current `handler.ts` catch chain before asserting it.
 
 ### SSE streaming
 Each chunk: `data: {…"object":"chat.completion.chunk"…}\n\n`; terminal:

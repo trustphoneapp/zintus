@@ -310,7 +310,7 @@ export function Sidebar({
             <span>{gatewayConnected ? "Gateway connected" : "Gateway offline"}</span>
           </div>
           <div className="sidebar-substatus">
-            {gatewayConnected ? getGatewayUrl() : "Start: bun run dev:gateway"}
+            {gatewayConnected ? getGatewayUrl() : "Start: zintus serve"}
           </div>
         </div>
       ) : null}

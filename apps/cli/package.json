@@ -1,6 +1,6 @@
 {
   "name": "zintus",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "description": "Multi-provider AI CLI — route chat, code, and agent workloads across providers with quota-aware failover.",
   "license": "BUSL-1.1",
   "type": "module",

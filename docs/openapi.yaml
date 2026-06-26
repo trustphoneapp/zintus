@@ -43,7 +43,7 @@ info:
     name: BUSL-1.1
     url: https://mariadb.com/bsl11/
 servers:
-  - url: http://localhost:8787
+  - url: http://localhost:8788
     description: Local gateway (default Bun server port)
   - url: https://gateway.example.com
     description: Self-hosted deployment (replace with your host)

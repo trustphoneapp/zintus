@@ -100,7 +100,7 @@ code path is wired.
 | Relay Cloudflare Worker (`workers/relay/`) | ✅ code shipped | Needs `wrangler d1 create` + `wrangler kv namespace create` + `wrangler deploy` |
 | D1 database provisioned | 🟡 | Run `wrangler d1 create zintus-relay`; paste ID into `wrangler.toml` |
 | KV namespace provisioned | 🟡 | Run `wrangler kv namespace create RELAY_KV`; paste ID into `wrangler.toml` |
-| Secrets set | 🟡 | `wrangler secret put RELAY_AUTH_SECRET/GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/RESEND_API_KEY` |
+| Secrets set | 🟡 | `wrangler secret put GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/RESEND_API_KEY` |
 | Google OAuth credentials | 🟡 | Create in console.cloud.google.com; set callback URL to `<relay>/api/auth/google/callback` |
 | Resend account + domain | 🟡 | auth@zintus.app sender domain must be verified at resend.com |
 | `NEXT_PUBLIC_RELAY_URL` on Vercel | 🟡 | Set to deployed relay worker URL in Vercel project settings |

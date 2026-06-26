@@ -251,7 +251,9 @@ export default function ComparePage() {
 
       {!gatewayConnected ? (
         <p className="chat-empty-offline">
-          ⚠ Gateway offline — start it with <code>bun run dev:gateway</code>.
+          No gateway connected — Zintus is local-first, so start your gateway
+          with <code>zintus serve</code>, then reload.{" "}
+          <a href="/docs#self-host">Self-host guide →</a>
         </p>
       ) : null}
 

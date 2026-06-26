@@ -12,10 +12,15 @@ describe("sitemap", () => {
 
   it("includes every key public marketing route", () => {
     const paths = entries.map((e) => new URL(e.url).pathname);
-    for (const route of ["/", "/pricing", "/docs", "/changelog", "/contact", "/privacy", "/terms", "/security", "/about", "/blog"]) {
+    for (const route of ["/", "/pricing", "/docs", "/developers", "/changelog", "/contact", "/privacy", "/terms", "/security", "/about"]) {
       const expected = route === "/" ? "/" : route;
       expect(paths).toContain(expected);
     }
+  });
+
+  it("excludes the noindex /blog stub from the sitemap", () => {
+    const paths = entries.map((e) => new URL(e.url).pathname);
+    expect(paths).not.toContain("/blog");
   });
 
   it("has one entry per PUBLIC_ROUTE with absolute https URLs and priorities", () => {
@@ -45,7 +50,25 @@ describe("robots", () => {
     );
     expect(disallow).toContain("/dashboard");
     expect(disallow).toContain("/api/");
+    // Private app-shell routes under app/(app) must never be indexed.
+    expect(disallow).toContain("/compare");
+    expect(disallow).toContain("/research");
   });
+});
+
+describe("marketing anchor links are root-relative", () => {
+  // Bare `#section` anchors break from any non-home page (they resolve against
+  // the current path). Marketing nav/footer must use `/#section`.
+  const COMPONENTS = join(import.meta.dir, "..", "components", "marketing");
+
+  for (const file of ["Footer.tsx", "Navbar.tsx"]) {
+    it(`${file} uses /#… not bare #… anchors`, () => {
+      const src = readFileSync(join(COMPONENTS, file), "utf8");
+      // Match href="#…" / href: "#…" where the value starts with a bare hash.
+      const bare = src.match(/href\s*[:=]\s*["']#[^"']/g) ?? [];
+      expect(bare).toEqual([]);
+    });
+  }
 });
 
 describe("privacy / no leaked personal email", () => {

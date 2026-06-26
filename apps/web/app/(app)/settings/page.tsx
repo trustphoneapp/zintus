@@ -382,7 +382,7 @@ export default function SettingsPage() {
         <h2>About</h2>
         <p>Zintus v0.1.0</p>
         <p className="muted">Client-side free-tier orchestrator</p>
-        <p className="muted">Run gateway: <code>bun run dev:gateway</code></p>
+        <p className="muted">Run gateway: <code>zintus serve</code></p>
       </div>
 
       <div className="settings-card">

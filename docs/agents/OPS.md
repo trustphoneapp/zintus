@@ -50,8 +50,39 @@ gateway-smoke · build-apps · docker-smoke · load-test · diff-coverage`
 - `build-apps` runs **only on `main`** (`if: github.ref == 'refs/heads/main'`).
 - `docker-smoke` (build + `docker run` + `curl /health` + asserts non-root) and
   `load-test` (k6 against `/health` + `/v1/chat/completions`) run on **PRs**.
-- `security` = gitleaks (uses `GITHUB_TOKEN`, no license needed on an org repo).
+- `security` = `bun audit` (non-gating, see below) + gitleaks (uses `GITHUB_TOKEN`, no license needed on an org repo).
 - The exact required-to-stay-green set is whatever `ci.yml` defines — read it, don't guess.
+
+### CI decisions (documented, not guessed) — `ci.yml` line refs
+
+All 12 jobs above are real. Three are deliberately non-blocking or scoped; the
+reasons are recorded here so nobody "fixes" them by accident:
+
+**(a) `build-apps` is main-only.** `if: github.ref == 'refs/heads/main'`
+(`ci.yml:210`). It runs the real deployable builds — `tsc -b tsconfig.build.json`
++ `next build` for `@zintus/web` (`ci.yml:225,229`) — which earlier CI skipped
+(the audit's H5: PR CI only *typechecked* web, so a broken `next build` could
+merge). Kept off PRs because the full Next.js build is the slow step and the
+Docker image build is already covered on PRs by `docker-smoke`.
+> **Recommendation:** add a lighter PR-only `next build` step (or move
+> `build-apps` to also run on PRs) so a broken production web build is caught
+> *before* merge, not just post-merge on `main`. Tracked as an accepted gap.
+
+**(b) `bun audit` is non-gating.** The `Dependency audit (high+)` step is
+`continue-on-error: true` (`ci.yml:42`, runs `bun audit --audit-level=high`).
+**Accepted risk:** the known transitive highs are `undici` (via `wrangler`) and
+`xmldom` (via `expo`) — not in a runtime-exploitable path for us, and not yet
+upstream-fixed. **Path to gate:** once `bun audit --audit-level=high` is clean,
+remove `continue-on-error` so the step blocks. gitleaks in the same job **is**
+gating (fails on any finding).
+
+**(c) `diff-coverage` is report-only at 80%.** The gate runs
+`diff-cover --fail-under=80` against `origin/main` but is `continue-on-error:
+true` (`ci.yml:335`, PR-only via `ci.yml:316`). **Waiver:** it surfaces untested
+*new* lines as a signal without blocking merges while coverage on touched code
+stabilizes. The merged-lcov pipeline it consumes (`scripts/coverage.ts`, job
+`coverage`) is the enforcing one. Flip `continue-on-error` to gate once new-line
+coverage reliably clears 80%.
 
 ## Rules
 - **Never push to `main`.** Never edit `ci.yml` without reading the whole file.

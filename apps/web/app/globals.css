@@ -3093,9 +3093,54 @@ select:focus-visible {
   color: var(--color-text-muted);
 }
 .chat-empty-offline {
-  margin-top: 18px;
+  margin-top: 22px;
+  max-width: 440px;
+  text-align: left;
+  padding: 16px 18px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-sub);
+}
+.chat-empty-offline-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 6px;
+}
+.chat-empty-offline-cmd {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--color-elevated);
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  color: var(--color-text);
+  overflow-x: auto;
+}
+.chat-empty-offline-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 12px;
+}
+.chat-empty-offline-links a {
+  color: var(--color-accent);
+  font-weight: 500;
+}
+.chat-empty-offline-hint {
+  margin-top: 12px;
   font-size: 12px;
-  color: var(--color-yellow);
+  color: var(--color-text-muted);
+}
+.chat-empty-offline-hint code,
+.chat-empty-offline p code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-elevated);
+  font-size: 12px;
 }
 
 /* ── Redesign: message actions ────────────────────────────────────────── */

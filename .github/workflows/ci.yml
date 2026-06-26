@@ -163,7 +163,16 @@ jobs:
           bun-version: latest
       - run: bun install
       - run: bun run --filter tokzen build
-      - run: cd apps/cli && bun run dev -- --help
+      # Mirror release-cli.yml: smoke the real publish artifact (dist/cli.js),
+      # not `bun run dev`, so CI can't pass on a bundle that fails to build/boot.
+      - name: Build bundle
+        run: cd apps/cli && bun run build
+      - name: Smoke test (bin runs + prints version)
+        run: |
+          out="$(bun apps/cli/dist/cli.js --version)"
+          echo "zintus --version -> $out"
+          test -n "$out"
+      - run: bun apps/cli/dist/cli.js --help
 
   gateway-smoke:
     runs-on: ubuntu-latest

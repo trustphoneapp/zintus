@@ -95,7 +95,6 @@ async function buildEnvWithCookie() {
     DB: fakeDb(starterSub),
     QUOTA_COUNTER: fakeCounter(600_000), // starter cap is 500k → over budget
     GATEWAY_SESSION: fakeGateway,
-    RELAY_AUTH_SECRET: "test-secret",
   } as unknown as Env;
   return { env, cookie: `zintus_session=${token}` };
 }

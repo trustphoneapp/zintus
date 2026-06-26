@@ -52,3 +52,19 @@ export function magicLinkEmailKey(email: string): string {
 export function magicLinkIpKey(ip: string): string {
   return `rl:ml:ip:${ip}`;
 }
+
+// ── Self-reported usage limit ───────────────────────────────────────────────
+// POST /api/usage/report is the gateway's self-reported token usage (cookie
+// auth) — the documented BYOK trust boundary. It performs one write per LLM
+// call, so legitimate traffic is bursty but bounded; an unbounded path lets a
+// compromised/abusive cookie flood D1 + the QuotaCounter DO with writes. A
+// per-user cap dampens that without hurting real bursts. 600/min (= 10/s) is far
+// above any honest report rate yet caps a flood hard. KV is best-effort (see the
+// storage-choice note above) — fine here, this is abuse-dampening not accounting.
+
+export const USAGE_REPORT_LIMIT = 600;
+export const USAGE_REPORT_WINDOW_SECS = 60; // 1 minute
+
+export function usageReportKey(userId: string): string {
+  return `rl:usage:${userId}`;
+}

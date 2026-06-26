@@ -55,8 +55,39 @@ export async function createPortalSession(stripeCustomerId: string, env: Env): P
     },
     body: params,
   });
+  // Fail loud on the Stripe error path: a non-2xx response body has no `url`, so
+  // reading it blindly would return `undefined` and hand the caller a broken
+  // portal link (or throw deep in JSON parsing). Mirror createCheckoutSession.
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Stripe portal error: ${err}`);
+  }
   const portal = await res.json() as { url: string };
   return portal.url;
+}
+
+// Stripe's libraries reject events whose signed timestamp is more than 5 minutes
+// (300s) from now, to bound replay of an intercepted (validly-signed) request.
+// The `t` value is inside the signed payload, so it can't be moved without
+// breaking the v1 HMAC — but a captured request replayed within seconds is still
+// valid forever without this window. 300s matches Stripe's default tolerance.
+//   https://docs.stripe.com/webhooks (Prevent replay attacks)
+export const STRIPE_SIGNATURE_TOLERANCE_SECS = 300;
+
+/**
+ * True when the signed `t=` timestamp is within ±`toleranceSecs` of `nowSecs`.
+ * Rejects (false) a missing/garbage timestamp. Separate from signature
+ * verification so the HMAC check stays a pure function of (body, sig, secret).
+ */
+export function withinReplayWindow(
+  sigHeader: string,
+  nowSecs: number,
+  toleranceSecs = STRIPE_SIGNATURE_TOLERANCE_SECS,
+): boolean {
+  const parts = Object.fromEntries(sigHeader.split(',').map(p => p.split('=')));
+  const t = parseInt(parts['t'] ?? '', 10);
+  if (!Number.isFinite(t)) return false;
+  return Math.abs(nowSecs - t) <= toleranceSecs;
 }
 
 /** Verify Stripe webhook HMAC-SHA256 signature. */
@@ -95,6 +126,14 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
 
   const valid = await verifyStripeSignature(body, sig, env.STRIPE_WEBHOOK_SECRET);
   if (!valid) return new Response('Invalid signature', { status: 400 });
+
+  // Replay window: reject a (correctly-signed) event whose timestamp is stale or
+  // future-dated beyond tolerance, BEFORE any DB write. Bounds replay of a
+  // captured request. Must run after the signature check (a forged `t` fails the
+  // HMAC) but before JSON.parse/persistence so a rejected event writes nothing.
+  if (!withinReplayWindow(sig, Math.floor(Date.now() / 1000))) {
+    return new Response('Timestamp outside tolerance', { status: 400 });
+  }
 
   const event = JSON.parse(body) as StripeEvent;
   const obj = event.data.object;
@@ -159,7 +198,18 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
       ).bind(subscriptionId).first<{ user_id: string }>();
       if (!sub) break;
 
-      // Reset monthly token counter
+      // Reset the DENORMALISED D1 counter (reporting only). NOTE (quota period):
+      // quota ENFORCEMENT does not read this column — it reads the QuotaCounter
+      // DO, which is keyed on the calendar UTC month (`billingPeriod()` in
+      // middleware/quota.ts). So the effective budget window is the calendar
+      // month, by design: a new UTC month routes to a fresh DO instance (= a
+      // clean reset) and `periodResetUnix()` reports that boundary. This D1 reset
+      // on `invoice.paid` only realigns the cosmetic `tokens_used_this_period`
+      // shown on the dashboard; it deliberately does NOT touch the DO. Aligning
+      // the DO to the Stripe subscription anniversary would mean re-keying the DO
+      // on the subscription period (a much larger change) and is moot while paid
+      // tiers are disabled (MANAGED_KEYS_AVAILABLE=false). The calendar-month
+      // contract is pinned by quota-middleware.test.ts (period-boundary test).
       await env.DB.prepare(
         'UPDATE subscriptions SET tokens_used_this_period=0, status=\'active\', updated_at=unixepoch() WHERE stripe_subscription_id=?'
       ).bind(subscriptionId).run();

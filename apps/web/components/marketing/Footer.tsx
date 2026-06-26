@@ -7,14 +7,15 @@ const LINKS = {
     { label: "Pricing", href: "/pricing" },
     { label: "Changelog", href: "/changelog" },
     { label: "Chat", href: "/chat" },
-    { label: "Desktop App", href: "#install" },
+    { label: "Desktop App", href: "/#install" },
   ],
   Developers: [
     { label: "Docs", href: "/docs" },
     { label: "Developers", href: "/developers" },
     { label: "GitHub", href: "https://github.com/trustphoneapp/zintus" },
-    { label: "CLI Install", href: "#install" },
+    { label: "CLI Install", href: "/#install" },
     { label: "API Reference", href: "/docs" },
+    { label: "llms.txt", href: "/llms.txt" },
   ],
   Company: [
     { label: "About", href: "/about" },

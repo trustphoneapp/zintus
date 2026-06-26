@@ -121,6 +121,72 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+/**
+ * Wrap an async iterable with the same mid-stream idle watchdog the chat
+ * streaming path applies inline: every pull is raced against an idle deadline
+ * that RESETS on each received item; when it fires we abort the upstream (via
+ * `abort`, releasing the socket + any in-flight quota reservation) and throw
+ * `StreamIdleTimeoutError`, which the caller surfaces as that endpoint's error
+ * shape. An optional `startMs` (> 0) bounds the FIRST pull separately — the
+ * connect/start window — mirroring the chat path's `withTimeout(routeAndStream)`
+ * before per-chunk idle protection takes over. Timers are always cleared in a
+ * `finally` (no leak), and the source generator's `return()` is nudged so it can
+ * run cleanup. Set `idleMs <= 0` to disable the per-item watchdog.
+ *
+ * Reuses the same env-derived windows as chat (`requestTimeoutMs` /
+ * `streamIdleTimeoutMs`) and the same `StreamIdleTimeoutError`; it invents no new
+ * knobs. Used by the buffered non-streaming chat branch and `/v1/research`. The
+ * chat *streaming* branch keeps its already-tested inline loop unchanged.
+ */
+async function* withIdleWatchdog<T>(
+  source: AsyncIterable<T>,
+  opts: { idleMs: number; startMs?: number; abort: AbortController },
+): AsyncGenerator<T> {
+  const iterator = source[Symbol.asyncIterator]();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const clear = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+  let first = true;
+  try {
+    for (;;) {
+      const windowMs =
+        first && opts.startMs != null ? opts.startMs : opts.idleMs;
+      let step: IteratorResult<T>;
+      if (windowMs > 0) {
+        const guard = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            opts.abort.abort();
+            reject(new StreamIdleTimeoutError(windowMs));
+          }, windowMs);
+          (timer as { unref?: () => void }).unref?.();
+        });
+        try {
+          step = await Promise.race([iterator.next(), guard]);
+        } finally {
+          clear();
+        }
+      } else {
+        step = await iterator.next();
+      }
+      first = false;
+      if (step.done) {
+        return;
+      }
+      yield step.value;
+    }
+  } finally {
+    clear();
+    // Best-effort: let a generator that honors return() close its upstream
+    // reader. Fire-and-forget — awaiting could deadlock behind a pending next()
+    // whose fetch we already aborted above.
+    void iterator.return?.().catch(() => {});
+  }
+}
+
 export interface GatewayHandlerDeps {
   engine: Engine;
   config: GatewayConfig;
@@ -445,9 +511,27 @@ export function createGatewayHandler(
     });
 
     if (body.stream === false) {
+      // The start timeout above only bounds engine.routeAndStream() RESOLVING
+      // (connect/TTFB) — it does NOT cover consuming the stream below. A provider
+      // that opens the socket then stalls mid-aggregation would otherwise hang
+      // this buffered read forever. Apply the same per-chunk idle watchdog the
+      // streaming branch uses (same streamIdleTimeoutMs); on idle it aborts the
+      // upstream and we return 408, consistent with the start-timeout response.
       let content = "";
-      for await (const chunk of result.stream) {
-        content += chunk;
+      try {
+        for await (const chunk of withIdleWatchdog(result.stream, {
+          idleMs: streamIdleTimeoutMs,
+          abort: upstreamAbort,
+        })) {
+          content += chunk;
+        }
+      } catch (error) {
+        if (error instanceof StreamIdleTimeoutError) {
+          metrics.recordError();
+          log("warn", "chat.idle_timeout", { requestId });
+          return json(request, { error: { message: error.message } }, 408);
+        }
+        throw error;
       }
       return json(
         request,
@@ -707,6 +791,10 @@ export function createGatewayHandler(
             { role: "user", content: `Sources:\n${context}\n\nQuestion: ${q}` },
           ],
           stream: true,
+          // Thread the abort so an idle/disconnect tears down the synthesis
+          // fetch (decompose's collectText already passes this signal; synthesis
+          // is the longest-running upstream call, so it matters most here).
+          signal: researchAbort.signal,
         });
         for await (const chunk of result.stream) {
           yield chunk;
@@ -720,7 +808,21 @@ export function createGatewayHandler(
       async start(controller) {
         const encoder = new TextEncoder();
         try {
-          for await (const event of deepResearch(query, { depth }, deps)) {
+          // Same protection as the chat path, applied to the research event
+          // generator: `startMs` bounds time-to-first-event (the connect/start
+          // window, reusing requestTimeoutMs) and `idleMs` is the mid-stream
+          // idle watchdog (streamIdleTimeoutMs) that RESETS on every event. On
+          // either, withIdleWatchdog aborts researchAbort — tearing down the
+          // in-flight decompose/synthesis fetches — and throws into the catch
+          // below, which emits this endpoint's existing SSE error shape.
+          for await (const event of withIdleWatchdog(
+            deepResearch(query, { depth }, deps),
+            {
+              startMs: requestTimeoutMs,
+              idleMs: streamIdleTimeoutMs,
+              abort: researchAbort,
+            },
+          )) {
             controller.enqueue(
               encoder.encode(
                 `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
@@ -742,6 +844,14 @@ export function createGatewayHandler(
         } finally {
           controller.close();
         }
+      },
+      // Client disconnected (the ReadableStream consumer cancelled): abort the
+      // upstream research work so we stop pulling tokens nobody is reading.
+      // Mirrors the chat streaming branch's cancel(). Per WHATWG Streams, the
+      // source cancel() callback runs on consumer cancellation; we use it to
+      // propagate via AbortController to the in-flight engine fetches.
+      cancel() {
+        researchAbort.abort();
       },
     });
 

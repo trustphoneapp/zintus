@@ -13,7 +13,7 @@ const program = new Command();
 program
   .name("zintus")
   .description("Multi-provider AI CLI")
-  .version("0.0.1");
+  .version("0.2.0");
 
 interface ChatCliOptions {
   mode?: string;

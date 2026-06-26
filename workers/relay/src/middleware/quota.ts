@@ -1,16 +1,22 @@
 import type { Env, SubscriptionRow } from '../types.js';
 import { TIERS, type Tier } from '../tiers.js';
 
+// Quota period is the CALENDAR UTC month, by design. The QuotaCounter DO is
+// keyed on `${userId}:${billingPeriod()}` so a new UTC month routes to a fresh
+// DO instance — that IS the budget reset (no explicit zeroing needed). Stripe's
+// `invoice.paid` resets only the cosmetic D1 `tokens_used_this_period`, never the
+// DO; aligning enforcement to the subscription anniversary would require re-keying
+// the DO and is moot while paid tiers are disabled. See billing.ts invoice.paid.
+// `now` is injectable so the month-boundary behaviour is unit-testable.
+
 /** Current billing period key, `YYYY-MM` in UTC. Shared by all readers/writers. */
-export function billingPeriod(): string {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+export function billingPeriod(now: Date = new Date()): string {
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
 }
 
 /** Unix-seconds timestamp of the next period reset (first of next month, UTC). */
-export function periodResetUnix(): number {
-  const d = new Date();
-  return Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1) / 1000);
+export function periodResetUnix(now: Date = new Date()): number {
+  return Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1) / 1000);
 }
 
 // ── Atomic quota counter (Durable Object) ──────────────────────────────────
