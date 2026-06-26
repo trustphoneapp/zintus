@@ -42,10 +42,12 @@ const latestAsset = (name: string) => `${RELEASES_URL}/latest/download/${name}`;
 const MAC_DMG_NAME = "Zintus_<version>_universal.dmg";
 const WIN_MSI_NAME = "Zintus_<version>_x64_en-US.msi";
 
-// NOTE: no GitHub release exists yet (`gh release list` → []), and the desktop
-// workflow currently uploads to Actions artifacts, not Releases. Keep desktop
-// badges as Beta/"download from Releases" until a `desktop-v*` release attaches
-// these assets. Do NOT claim "signed"/"notarized" — neither is true yet.
+// NOTE: release-desktop.yml now PUBLISHES a GitHub Release (tauri-action) on a
+// `desktop-v*` tag, but no release has been cut yet (`gh release list` → []).
+// Keep desktop badges as Beta / "download from Releases" until the first
+// `desktop-v*` release attaches these assets — then the direct latest/download
+// URLs below resolve. Do NOT claim "signed"/"notarized" — neither is true yet
+// (macOS notarization + the Windows signCommand are [HUMAN]; see docs/store).
 
 const sectionStyle: React.CSSProperties = {
   marginBottom: "2.75rem",

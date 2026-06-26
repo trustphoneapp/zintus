@@ -8,9 +8,10 @@ referenced").
 
 > Grounded in `docs/agents/MOBILE.md`, `docs/agents/DESKTOP.md`,
 > `docs/agents/OPS.md`, `apps/mobile/app.json`, and
-> `apps/desktop/src-tauri/tauri.conf.json`. Names marked **[planned]** are not
-> wired yet (the signing/submit steps don't exist in the workflows today) — add
-> them when wiring the corresponding step.
+> `apps/desktop/src-tauri/tauri.conf.json`. **Wired in the workflows today:** the
+> gated mobile `eas-submit` job and the desktop macOS signing env (both read these
+> secrets via `release-desktop.yml` / `release-mobile.yml`). What's still missing
+> is config + certs, not workflow plumbing — flagged inline per section.
 
 ---
 
@@ -21,6 +22,7 @@ referenced").
 | `EXPO_TOKEN` | Secret | Authenticates `eas build` / `eas submit` to the Expo account. | `release-mobile.yml` (per MOBILE.md) |
 | `EXPO_PUBLIC_VALIDATE_URL` | Variable | Build-time (`EXPO_PUBLIC_*` inlined). Deployed web `/api/validate` URL used by `apps/mobile/lib/limits.ts`. Defaults to `http://localhost:3000/api/validate` for dev. | `release-mobile.yml`, `lib/limits.ts` |
 | `EXPO_PUBLIC_RELAY_URL` | Variable | Build-time relay base URL the app's gateway-URL resolution / relay client uses (`https://relay.zintus.ai`). Inlined at build. | mobile build env |
+| `MOBILE_SUBMIT_ENABLED` | Variable | Gate for the `eas-submit` job — set `true` to auto-submit after a build (off by default; the build job runs regardless). | `release-mobile.yml` |
 
 ### iOS submit credentials — **[planned]** (re-add `eas.json submit` only with real creds)
 Prefer an **App Store Connect API key** over Apple ID/password (per MOBILE.md).
@@ -49,7 +51,8 @@ Prefer an **App Store Connect API key** over Apple ID/password (per MOBILE.md).
 | `TAURI_SIGNING_PRIVATE_KEY` | Secret | Contents (or path) of `~/.tauri/zintus.key` — signs updater artifacts. No-op while `updater.active = false`. | `release-desktop.yml` (per DESKTOP.md) |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Secret | Password set at `tauri signer generate`. | `release-desktop.yml` |
 
-### macOS OS code-signing + notarization — **[planned]** (NOT wired; see `mac-distribution.md`)
+### macOS OS code-signing + notarization — **CI env wired** in `release-desktop.yml` (needs a Developer ID cert + notarization creds — [HUMAN]; see `mac-distribution.md`)
+`tauri-action` reads these env names; signing + notarization run automatically once the cert/secrets exist.
 | Name | Kind | Purpose |
 |---|---|---|
 | `APPLE_CERTIFICATE` | Secret | Base64 Developer ID Application cert (`.p12`) for `codesign`. |
@@ -60,11 +63,16 @@ Prefer an **App Store Connect API key** over Apple ID/password (per MOBILE.md).
 | `APPLE_TEAM_ID` | Secret | Team id for notarization. |
 | (or reuse ASC API key trio) `ASC_API_KEY_P8` / `ASC_API_KEY_ID` / `ASC_API_KEY_ISSUER_ID` | Secret | `notarytool` auth via ASC API key (preferred over Apple ID/password). |
 
-### Windows Authenticode signing — **[planned]** (NOT wired; OV is fine for SmartScreen)
+### Windows Authenticode signing — **needs config + cert** ([HUMAN])
+`release-desktop.yml` passes **Azure Trusted Signing** env, but Tauri will **not**
+sign Windows until `bundle.windows.signCommand` is added to `tauri.conf.json` to
+invoke the signer — passing the env alone is not enough. Pick ONE approach and add
+the matching `signCommand`:
+
 | Name | Kind | Purpose |
 |---|---|---|
-| `WINDOWS_CERTIFICATE` | Secret | Base64 Authenticode code-signing cert (`.pfx`). |
-| `WINDOWS_CERTIFICATE_PASSWORD` | Secret | Password for the `.pfx`. |
+| `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` / `AZURE_TENANT_ID` | Secret | Azure Trusted Signing service principal (the approach the workflow wires today). Requires a `signCommand` calling `trusted-signing-cli` / `azuresigntool`. |
+| `WINDOWS_CERTIFICATE` / `WINDOWS_CERTIFICATE_PASSWORD` | Secret | Alternative: a traditional OV `.pfx` (base64) + password with a `signtool`-based `signCommand`. OV is sufficient for SmartScreen (EV stopped bypassing it in 2024); reputation accrues by download volume. |
 
 ---
 

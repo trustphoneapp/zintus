@@ -56,7 +56,9 @@ EXPO_PUBLIC_VALIDATE_URL=https://your-app.vercel.app/api/validate bun run start
 
 1. Log in: `eas login`
 2. Link project (first time): `eas init` — updates `app.json` `extra.eas.projectId`
-3. Configure credentials in `eas.json` submit section
+3. Set up store credentials: `eas credentials` (EAS-managed signing). There is no
+   `submit` block in `eas.json` — submit creds live in EAS / GitHub secrets, never
+   the repo (see `TESTING.md`).
 4. Build:
 
 ```bash
