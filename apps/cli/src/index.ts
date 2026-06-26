@@ -157,9 +157,10 @@ cloud
   .command("login")
   .description("Sign in to zintus.app and save credentials to ~/.zintus/cloud.json")
   .option("--relay-url <url>", "Custom relay URL (default: https://relay.zintus.ai)")
-  .action(async (options: { relayUrl?: string }) => {
+  .option("--web-url <url>", "Custom web app URL for browser sign-in (default: https://www.zintus.ai)")
+  .action(async (options: { relayUrl?: string; webUrl?: string }) => {
     const { runCloudLogin } = await import("./commands/cloud.js");
-    await runCloudLogin({ relayUrl: options.relayUrl });
+    await runCloudLogin({ relayUrl: options.relayUrl, webUrl: options.webUrl });
   });
 
 cloud
