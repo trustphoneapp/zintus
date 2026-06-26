@@ -38,7 +38,7 @@ export async function streamChat(params: {
 
   if (!gatewayUp) {
     throw new Error(
-      "Gateway is offline. In the project root run: bun run dev:gateway — then add keys with: bun run dev:cli -- keys set groq <your-key>",
+      "No gateway connected. Zintus is local-first — start your gateway with `zintus serve`, then add a provider key (zintus keys set groq <your-key>). Self-host guide: /docs#self-host",
     );
   }
 

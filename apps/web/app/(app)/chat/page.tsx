@@ -439,10 +439,27 @@ export default function ChatPage() {
               ))}
             </div>
             {!gatewayConnected ? (
-              <p className="chat-empty-offline">
-                ⚠ Gateway offline — start it with{" "}
-                <code>bun run dev:gateway</code>.
-              </p>
+              <div className="chat-empty-offline" role="status">
+                <p className="chat-empty-offline-title">
+                  No gateway connected
+                </p>
+                <p>
+                  Zintus is local-first and BYOK — you run the gateway on your
+                  machine and your provider keys never leave your device. Start
+                  it, then this chat connects automatically.
+                </p>
+                <pre className="chat-empty-offline-cmd">
+                  <code>zintus serve</code>
+                </pre>
+                <p className="chat-empty-offline-links">
+                  <a href="/docs#self-host">Self-host guide →</a>
+                  <a href="/download">Download Zintus →</a>
+                </p>
+                <p className="chat-empty-offline-hint">
+                  Already running it elsewhere? Point{" "}
+                  <code>NEXT_PUBLIC_GATEWAY_URL</code> at that host.
+                </p>
+              </div>
             ) : null}
           </div>
         ) : (

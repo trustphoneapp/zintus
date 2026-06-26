@@ -59,7 +59,7 @@ export default function TerminalPage() {
 
   function showStatus() {
     if (!gatewayConnected) {
-      print("Gateway offline. Start it: bun run dev:gateway", "warning");
+      print("No gateway connected. Start it: zintus serve", "warning");
       return;
     }
     print("PROVIDER      KEY   AVAILABLE   QUOTA", "muted");

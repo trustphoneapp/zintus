@@ -176,8 +176,10 @@ export default function ResearchPage() {
 
       {!gatewayConnected ? (
         <p className="chat-empty-offline">
-          ⚠ Gateway offline — start it with <code>bun run dev:gateway</code>.
-          Deep research also needs a Tavily or Serper key on the gateway.
+          No gateway connected — Zintus is local-first, so start your gateway
+          with <code>zintus serve</code>, then reload.{" "}
+          <a href="/docs#self-host">Self-host guide →</a>. Deep research also
+          needs a Tavily or Serper key on the gateway.
         </p>
       ) : null}
 
