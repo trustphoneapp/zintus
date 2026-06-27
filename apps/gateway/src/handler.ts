@@ -846,6 +846,7 @@ export function createGatewayHandler(
       streaming: body.stream !== false,
       cacheHit: result.cacheHit ?? "miss",
       failoverCount: result.failoverCount ?? 0,
+      images: imageTotal,
     });
 
     if (body.stream === false) {
