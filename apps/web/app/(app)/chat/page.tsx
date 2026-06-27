@@ -223,6 +223,13 @@ export default function ChatPage() {
     [],
   );
 
+  // A fresh/empty thread has no image context — drop any lingering composer
+  // notice (e.g. the "Image analyzed by …" confirmation carried over from a
+  // previous conversation after "New chat").
+  useEffect(() => {
+    if (messages.length === 0) setNotice(null);
+  }, [messages.length]);
+
   /** Remove one attachment, revoking its preview URL when it's an image. */
   const removeAttachment = useCallback((id: string) => {
     setAttachments((prev) => {
