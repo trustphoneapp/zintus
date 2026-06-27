@@ -216,7 +216,11 @@ export function buildGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
     corsOrigins: resolveDefaultCors(env.GATEWAY_CORS_ORIGIN, token),
     maxBodyBytes: parsePositiveInt(
       env.GATEWAY_MAX_BODY_BYTES,
-      1_000_000,
+      // 25MB — the EFFECTIVE default (this always wins over handler's
+      // DEFAULT_MAX_BODY_BYTES). Must cover base64 image payloads: up to 4 images
+      // × 4MB raw ≈ 21MB once base64-encoded. Per-image size + max-4 count are
+      // still enforced after parsing. Override via GATEWAY_MAX_BODY_BYTES.
+      25_000_000,
       "GATEWAY_MAX_BODY_BYTES",
     ),
     maxMessages: parsePositiveInt(
