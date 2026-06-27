@@ -96,24 +96,32 @@ export function ProviderPicker() {
   const rows = PROVIDERS.map((provider) => {
     const gateway = gatewayProviders.find((item) => item.id === provider.id);
     const vault = vaultProviders.find((item) => item.id === provider.id);
-    const hasKey = gatewayConnected
-      ? Boolean(gateway?.hasKey)
-      : Boolean(vault?.hasKey) ||
-        provider.id === "ollama" ||
-        provider.id === "lmstudio";
+    const gatewayHasKey = Boolean(gateway?.hasKey);
+    const vaultHasKey = Boolean(vault?.hasKey);
+    // Configured if the gateway holds the key server-side OR the browser vault
+    // holds it (vault keys are sent per-request to the loopback gateway). Reading
+    // only the gateway showed a vault-saved key as "no key" even though it works.
+    const hasKey =
+      gatewayHasKey ||
+      vaultHasKey ||
+      provider.id === "ollama" ||
+      provider.id === "lmstudio";
     const available = gatewayConnected
-      ? Boolean(gateway?.available)
+      ? Boolean(gateway?.available) || vaultHasKey
       : Boolean(vault?.enabled);
-    const quota = gatewayConnected
-      ? getRemainingQuotaPercent({
-          hasKey,
-          available,
-          quotaUsed: gateway?.quotaUsed,
-          quotaLimit: gateway?.quotaLimit,
-        })
-      : hasKey
-        ? 100
-        : 0;
+    const quota =
+      gatewayConnected && gatewayHasKey
+        ? getRemainingQuotaPercent({
+            hasKey,
+            available,
+            quotaUsed: gateway?.quotaUsed,
+            quotaLimit: gateway?.quotaLimit,
+          })
+        : gatewayConnected && vaultHasKey
+          ? null
+          : hasKey
+            ? 100
+            : 0;
     return {
       ...provider,
       hasKey,
@@ -189,7 +197,11 @@ export function ProviderPicker() {
               />
               <span className={row.hasKey ? "" : "muted"}>{row.name}</span>
               <span className="composer-picker-quota">
-                {row.hasKey ? `${Math.round(row.quota ?? 0)}%` : "no key"}
+                {row.hasKey
+                  ? row.quota == null
+                    ? "ready"
+                    : `${Math.round(row.quota)}%`
+                  : "no key"}
               </span>
             </button>
           ))}
