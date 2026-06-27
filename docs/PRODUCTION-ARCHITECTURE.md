@@ -145,7 +145,7 @@ Ordered by **risk-reduction per hour**, not by audit number. Phase 0 is the "sto
 - [ ] Remediate `bun audit` highs (`bun update` undici/wrangler/xmldom chain), then flip audit job to gating. *(#7)*
 - [ ] P0 tests: relay `billing.ts`, `keychain/storage.ts`, `memory-store.ts` CRUD. *(`crypto.ts`/`managed-keys.ts` removed.)* *(#17)*
 - [ ] Extract `handler.ts` (769→thin router + `routes/` + `http-helpers.ts`); split `memory-store.ts`, `cache.ts`, `factory.ts/selection.ts`. *(#16)*
-- [ ] Root `.env.example`, `CHANGELOG.md`, OpenAPI spec for `/v1/*`, rollback runbook. *(#19,#20)*
+- [ ] Root `.env.example`, `CHANGELOG.md`, OpenAPI spec for `/v1/*`. **Backup + restore + rollback runbook ✅** → [`DR-RUNBOOK.md`](./DR-RUNBOOK.md) (daily relay D1/KV backup workflow with an automatic restore drill). *(#19,#20)*
 
 ---
 

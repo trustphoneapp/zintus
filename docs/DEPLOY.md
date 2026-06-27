@@ -132,6 +132,20 @@ and [Get started with monitoring](https://betterstack.com/docs/uptime/monitoring
 - [ ] **[HUMAN]** Publish a status page (both providers offer a hosted one) if you want a public uptime URL.
 - [ ] Keep monitors pointed at `/health` only — never the auth-gated endpoints.
 
+## Backups & disaster recovery
+
+The relay's D1 + KV are backed up **daily** (04:17 UTC) by
+[`.github/workflows/backup-relay.yml`](../.github/workflows/backup-relay.yml),
+which also **restore-drills** each fresh dump and uploads a 90-day artifact.
+Full restore (dump or D1 Time Travel), KV bulk-restore, and relay rollback
+procedures live in [`DR-RUNBOOK.md`](./DR-RUNBOOK.md).
+
+- [ ] **[HUMAN]** Add repo secrets `CLOUDFLARE_API_TOKEN` (scoped `D1:Read` +
+      `Workers KV Storage:Read`) and `CLOUDFLARE_ACCOUNT_ID` so the backup job
+      runs (it no-ops with a warning until then).
+- [ ] **[HUMAN]** Run `scripts/relay-restore-drill.sh` monthly and after any
+      schema migration — an unrehearsed backup is not a backup.
+
 ## Per-release-workflow preflight
 
 Each artifact has its own tag-triggered workflow. Confirm the secrets/vars exist

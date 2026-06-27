@@ -1,0 +1,73 @@
+name: Backup relay (D1 + KV)
+
+# Disaster-recovery backup of the Cloudflare relay's durable state:
+#   - D1 database `zintus-relay` (users, subscriptions, referrals, auth tokens,
+#     sessions, usage log)
+#   - KV namespace (referral-code -> user maps, rate-limit counters)
+# Durable Objects (GATEWAY_SESSION, QUOTA_COUNTER) are NOT backed up — they are
+# ephemeral/self-healing (sessions reconnect; quota is per-period). See
+# docs/DR-RUNBOOK.md.
+#
+# Every run also RESTORE-DRILLS the fresh D1 dump into a scratch SQLite DB
+# (scripts/relay-restore-drill.sh) so a backup that can't be restored fails loudly.
+#
+# Requires two repo secrets (Settings -> Secrets and variables -> Actions) — [HUMAN]:
+#   CLOUDFLARE_API_TOKEN  — token scoped to D1:read + Workers KV Storage:read
+#   CLOUDFLARE_ACCOUNT_ID — the Cloudflare account id
+# Without them the job no-ops (so forks / credential-less runs don't fail red).
+
+on:
+  schedule:
+    - cron: "17 4 * * *" # daily 04:17 UTC (off-peak, off the top of the hour)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backup-relay
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    # Don't run on forks (they won't have the prod account/secrets).
+    if: ${{ github.repository == 'trustphoneapp/zintus' }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      KV_NAMESPACE_ID: e37d30031cb2409daa2fd5d44003ec0c
+      D1_DATABASE: zintus-relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+
+      - name: Guard — require Cloudflare credentials
+        id: guard
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID not set — skipping relay backup."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Backup D1 + KV
+        if: ${{ steps.guard.outputs.skip != 'true' }}
+        run: bash scripts/relay-backup.sh "$GITHUB_WORKSPACE/backup"
+
+      - name: Restore drill (verify the D1 dump loads)
+        if: ${{ steps.guard.outputs.skip != 'true' }}
+        run: bash scripts/relay-restore-drill.sh "$GITHUB_WORKSPACE/backup"
+
+      - name: Upload backup artifact
+        if: ${{ steps.guard.outputs.skip != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-backup-${{ github.run_id }}
+          path: backup/
+          retention-days: 90
+          if-no-files-found: error

@@ -22,3 +22,5 @@ workers/relay/.dev.vars
 coverage/
 # Local agent/editor scratch (worktrees, settings).
 .claude/
+# Local relay DR backups (scripts/relay-backup.sh)
+/backup/
