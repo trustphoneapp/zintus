@@ -68,6 +68,24 @@ export function isLoopbackOrigin(origin: string): boolean {
   }
 }
 
+/**
+ * True only for loopback BIND hosts — `localhost`, the 127.0.0.0/8 range, or
+ * IPv6 `::1`. Every other value (`0.0.0.0`, `::`, a LAN IP like 192.168.x / 10.x,
+ * a public IP, or a hostname) is network-exposed and must require a
+ * GATEWAY_TOKEN. Takes a bare host (unlike `isLoopbackOrigin`, which takes a URL).
+ */
+export function isLoopbackHost(host: string): boolean {
+  const h = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[/, "")
+    .replace(/\]$/, "");
+  if (h === "localhost") return true;
+  if (h === "::1" || h === "0:0:0:0:0:0:0:1") return true;
+  // 127.0.0.0/8 — the whole loopback range, not just 127.0.0.1.
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
 export function resolveCorsOrigin(
   origins: string[] | "*" | "loopback",
   requestOrigin: string | null,
@@ -177,11 +195,17 @@ export function buildGatewayConfig(env: NodeJS.ProcessEnv): GatewayConfig {
 
   const token = env.GATEWAY_TOKEN?.trim() ?? "";
   const host = env.GATEWAY_HOST?.trim() || "127.0.0.1";
-  const exposesNetwork = host === "0.0.0.0" || host === "::";
+  // ANY non-loopback bind is network-exposed — not just 0.0.0.0/::. A tokenless
+  // gateway on a LAN IP (e.g. 192.168.x, set to reach it from a phone) is an open
+  // denial-of-wallet: a no-Origin LAN client skips the CORS/Origin guard and can
+  // burn the user's BYOK quota / read responses. Require a token for all of them.
+  const exposesNetwork = !isLoopbackHost(host);
   if (exposesNetwork && !token) {
     throw new Error(
-      "Refusing to bind to a public interface without GATEWAY_TOKEN set. " +
-        "Set GATEWAY_TOKEN to require authentication, or bind to 127.0.0.1.",
+      `Refusing to bind the gateway to a non-loopback host (${host}) without ` +
+        "GATEWAY_TOKEN set — that exposes your BYOK gateway to the LAN/internet " +
+        "(denial-of-wallet, prompt/response exposure). Set GATEWAY_TOKEN to " +
+        "require authentication, or bind to 127.0.0.1.",
     );
   }
 

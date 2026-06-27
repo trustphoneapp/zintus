@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   bearerAuthorized,
   buildGatewayConfig,
+  isLoopbackHost,
   parseCorsOrigins,
   resolveCorsOrigin,
   resolveDefaultCors,
@@ -75,6 +76,41 @@ describe("buildGatewayConfig", () => {
     expect(config.token).toBe("secret");
   });
 
+  test("refuses a LAN-IP bind without a token (denial-of-wallet hardening)", () => {
+    // The pre-fix guard only caught 0.0.0.0/:: — a LAN IP slipped through and
+    // left a tokenless gateway open to no-Origin LAN clients.
+    for (const host of ["192.168.1.5", "10.0.0.2", "172.16.4.4"]) {
+      expect(() =>
+        buildGatewayConfig({ GATEWAY_HOST: host } as NodeJS.ProcessEnv),
+      ).toThrow(/GATEWAY_TOKEN/);
+    }
+  });
+
+  test("allows a LAN-IP bind once a token is set", () => {
+    const config = buildGatewayConfig({
+      GATEWAY_HOST: "192.168.1.5",
+      GATEWAY_TOKEN: "secret",
+    } as NodeJS.ProcessEnv);
+    expect(config.host).toBe("192.168.1.5");
+    expect(config.token).toBe("secret");
+  });
+
+  test("allows loopback hosts without a token (localhost / 127.x / ::1)", () => {
+    for (const host of ["127.0.0.1", "localhost", "127.0.0.5", "::1", "[::1]"]) {
+      const config = buildGatewayConfig({
+        GATEWAY_HOST: host,
+      } as NodeJS.ProcessEnv);
+      expect(config.host).toBe(host);
+      expect(config.token).toBe("");
+    }
+  });
+
+  test("refuses a hostname bind without a token", () => {
+    expect(() =>
+      buildGatewayConfig({ GATEWAY_HOST: "gateway.local" } as NodeJS.ProcessEnv),
+    ).toThrow(/GATEWAY_TOKEN/);
+  });
+
   test("rejects an invalid port", () => {
     expect(() =>
       buildGatewayConfig({ GATEWAY_PORT: "70000" } as NodeJS.ProcessEnv),
@@ -117,6 +153,33 @@ describe("buildGatewayConfig", () => {
         GATEWAY_CORS_ORIGIN: "https://app.example.com",
       } as NodeJS.ProcessEnv).corsOrigins,
     ).toEqual(["https://app.example.com"]);
+  });
+});
+
+describe("isLoopbackHost", () => {
+  test("true only for localhost / 127.0.0.0/8 / ::1", () => {
+    for (const h of [
+      "localhost",
+      "127.0.0.1",
+      "127.5.6.7",
+      "::1",
+      "[::1]",
+      "0:0:0:0:0:0:0:1",
+    ]) {
+      expect(isLoopbackHost(h)).toBe(true);
+    }
+    for (const h of [
+      "0.0.0.0",
+      "::",
+      "192.168.1.5",
+      "10.0.0.1",
+      "172.16.0.9",
+      "8.8.8.8",
+      "gateway.local",
+      "example.com",
+    ]) {
+      expect(isLoopbackHost(h)).toBe(false);
+    }
   });
 });
 
