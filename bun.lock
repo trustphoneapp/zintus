@@ -41,6 +41,7 @@
         "@zintus/keychain": "workspace:*",
         "@zintus/providers": "workspace:*",
         "@zintus/router": "workspace:*",
+        "@zintus/search": "workspace:*",
         "@zintus/types": "workspace:*",
         "chalk": "^5.4.1",
         "commander": "^12.1.0",

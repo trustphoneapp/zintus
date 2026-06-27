@@ -57,6 +57,30 @@ program
   });
 
 program
+  .command("research")
+  .description(
+    "Deep web research with cited sources (needs TAVILY_API_KEY or SERPER_API_KEY)",
+  )
+  .argument("<query>", "Research question")
+  .option("--depth <depth>", "quick | standard | deep", "standard")
+  .option("--json", "Output the result as JSON")
+  .action(
+    async (
+      query: string,
+      options: { depth?: string; json?: boolean },
+    ) => {
+      const { runResearch } = await import("./commands/research.js");
+      const depth =
+        options.depth === "quick" ||
+        options.depth === "deep" ||
+        options.depth === "standard"
+          ? options.depth
+          : "standard";
+      await runResearch(query, { depth, json: options.json });
+    },
+  );
+
+program
   .argument("[prompt]", "Shorthand for chat")
   .option("--mode <mode>", "Context mode (fast|smart|deep)")
   .option(

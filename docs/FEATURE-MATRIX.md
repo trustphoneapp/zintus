@@ -28,7 +28,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 12 | cost saved estimate | ✅ | 🟡 | ❌ | ❌ | mobile surfaces saved-vs-Claude; others partial |
 | 13 | quota remaining | ✅ | ✅ | ✅ | ✅ | `QuotaBar` / `status` |
 | 14 | route-options actions | ✅ | ✅ | ✅ | ❌ | `RouteOptionsPanel` on web+desktop; not in CLI |
-| 15 | Deep Research | ✅ | ✅ | ✅ | ❌ | desktop `/research` (stages, sources, export); CLI still missing |
+| 15 | Deep Research | ✅ | ✅ | ✅ | ✅ | all 4; CLI `zintus research <q>` rebuilds the engine deps in-process (`--depth`, `--json`). Execution needs a Tavily/Serper key (same gate as the others) — command verified by typecheck/build/help, not a live run |
 | 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
 | 17 | projects / workspaces | ✅ | ✅ | ✅ | ❌ | mobile+desktop+web (store+screen, instructions→leading system msg, defaults applied); CLI missing |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
