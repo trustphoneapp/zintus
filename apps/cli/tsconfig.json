@@ -9,6 +9,7 @@
   "include": ["src/**/*"],
   "references": [
     { "path": "../../packages/types" },
+    { "path": "../../packages/media" },
     { "path": "../../packages/providers" },
     { "path": "../../packages/keychain" },
     { "path": "../../packages/router" },

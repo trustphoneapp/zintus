@@ -2,10 +2,11 @@ import chalk from "chalk";
 import ora from "ora";
 import { tryGitDiff } from "@zintus/context-compiler";
 import { listKeys } from "@zintus/keychain";
-import type { ContextMode } from "@zintus/types";
+import type { ContextMode, ImageContentBlock } from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
 import { getActiveProject } from "../lib/projects.js";
+import { buildChatContent, loadImages, normalizeChatError } from "./chat-content.js";
 
 export interface ChatOptions {
   mode?: ContextMode;
@@ -14,6 +15,9 @@ export interface ChatOptions {
   workspaceDir?: string;
   /** Include the current git diff (best-effort) as turn context. */
   diff?: boolean;
+  /** Image file paths to attach (repeatable `--image`, max 4). Processed
+   *  locally into vision content blocks before routing. */
+  images?: string[];
 }
 
 export async function runChat(
@@ -53,6 +57,21 @@ export async function runChat(
     );
   }
 
+  // Process any --image attachments BEFORE routing. This is local, fail-fast
+  // work (magic-byte mime + EXIF strip via @zintus/media's Node path) and never
+  // touches the network. Image bytes/base64 are never printed; on failure we
+  // surface a clear, base64-free message and exit non-zero.
+  let imageBlocks: ImageContentBlock[] = [];
+  if (options?.images && options.images.length > 0) {
+    try {
+      imageBlocks = await loadImages(options.images);
+    } catch (error) {
+      console.error(chalk.red(normalizeChatError(error)));
+      process.exit(1);
+    }
+  }
+  const hasImages = imageBlocks.length > 0;
+
   const spinner = ora("Routing request").start();
   const config = await loadConfig();
   const engine = createAppEngine(config, {
@@ -63,8 +82,15 @@ export async function runChat(
     // The working git diff is included by default (opt-out via --no-diff). It's
     // best-effort: outside a repo or with no changes tryGitDiff returns nothing
     // and we route without diff context — no noise, no empty thread.
+    //
+    // With images attached we DELIBERATELY skip diff/codebase context: the
+    // engine compiles threaded context from the user turn's TEXT only
+    // (newUserMessage is a string), so routing an image request through the
+    // compile path would silently drop the image blocks. Sending the message
+    // verbatim keeps the vision blocks intact (and the router enforces a
+    // vision-capable provider). Image queries are standalone anyway.
     let diffText: string | undefined;
-    if (options?.diff !== false) {
+    if (!hasImages && options?.diff !== false) {
       const diff = await tryGitDiff(process.cwd());
       if (diff && diff.trim().length > 0) {
         diffText = diff;
@@ -74,7 +100,8 @@ export async function runChat(
     // The engine only compiles codebase/diff context for threaded requests, so
     // when context is actually available we create a thread up front and pass
     // its id (the engine's own auto-thread is created too late to compile).
-    const useContext = Boolean(options?.workspaceDir) || Boolean(diffText);
+    const useContext =
+      !hasImages && (Boolean(options?.workspaceDir) || Boolean(diffText));
     const threadId = useContext
       ? engine.createThread(prompt.slice(0, 48)).id
       : undefined;
@@ -86,9 +113,12 @@ export async function runChat(
     // when a thread/diff context compiles, the engine rebuilds messages and only
     // re-reads the last user message, so a leading system message would be
     // silently dropped. Folding into the user content survives both paths.
-    const userContent = project?.instructions
+    const userText = project?.instructions
       ? `${project.instructions}\n\n---\n\n${prompt}`
       : prompt;
+    // Text prompt FIRST, then the image blocks in order. With no images this is
+    // just the plain string (unchanged text-only shape).
+    const userContent = buildChatContent(userText, imageBlocks);
     const result = await engine.routeAndStream({
       messages: [{ role: "user", content: userContent }],
       provider: forcedProvider,
@@ -121,9 +151,9 @@ export async function runChat(
     }
   } catch (error) {
     spinner.fail("Request failed");
-    console.error(
-      chalk.red(error instanceof Error ? error.message : String(error)),
-    );
+    // Normalize the router's bare `unsupported_capability` into the honest
+    // vision-capability error + provider suggestions (other errors pass through).
+    console.error(chalk.red(normalizeChatError(error)));
     process.exit(1);
   }
 }

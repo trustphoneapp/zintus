@@ -26,6 +26,13 @@ interface ChatCliOptions {
   // long flag (`workspace`): `true` when bare, a path string when given.
   workspace?: string | boolean;
   diff?: boolean;
+  // Repeatable `--image <path>`, collected into an array (max enforced in chat).
+  image?: string[];
+}
+
+// Commander collector: accumulate each repeated `--image` into one array.
+function collectImage(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
 
 function toChatOptions(options: ChatCliOptions): ChatOptions {
@@ -39,7 +46,7 @@ function toChatOptions(options: ChatCliOptions): ChatOptions {
   } else if (typeof options.workspace === "string") {
     workspaceDir = options.workspace;
   }
-  return { mode, workspaceDir, diff: options.diff };
+  return { mode, workspaceDir, diff: options.diff, images: options.image };
 }
 
 program
@@ -52,6 +59,12 @@ program
     "Index a workspace for codebase-aware context (default: current dir)",
   )
   .option("--no-diff", "Don't auto-include the working git diff as context")
+  .option(
+    "--image <path>",
+    "Attach an image for a vision-capable model (repeatable, max 4)",
+    collectImage,
+    [],
+  )
   .action(async (prompt: string, options: ChatCliOptions) => {
     await runChat(prompt, toChatOptions(options));
   });
@@ -88,6 +101,12 @@ program
     "Index a workspace for codebase-aware context (default: current dir)",
   )
   .option("--no-diff", "Don't auto-include the working git diff as context")
+  .option(
+    "--image <path>",
+    "Attach an image for a vision-capable model (repeatable, max 4)",
+    collectImage,
+    [],
+  )
   .action(async (prompt: string | undefined, options: ChatCliOptions) => {
     if (!prompt) {
       program.help();
