@@ -258,17 +258,19 @@ cloud
 cloud
   .command("status")
   .description("Show cloud connection status")
-  .action(async () => {
+  .option("--json", "Output the status as JSON for automation")
+  .action(async (options: { json?: boolean }) => {
     const { runCloudStatus } = await import("./commands/cloud.js");
-    await runCloudStatus();
+    await runCloudStatus({ json: options.json });
   });
 
 cloud
   .command("logout")
-  .description("Sign out and remove ~/.zintus/cloud.json")
-  .action(async () => {
+  .description("Sign out (revoke the server session) and remove ~/.zintus/cloud.json")
+  .option("--json", "Output the result as JSON for automation")
+  .action(async (options: { json?: boolean }) => {
     const { runCloudLogout } = await import("./commands/cloud.js");
-    await runCloudLogout();
+    await runCloudLogout({ json: options.json });
   });
 
 program
