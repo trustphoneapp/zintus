@@ -1,25 +1,55 @@
 import type {
   ChatMessage,
+  ContentBlock,
   Provider,
   StreamChatOptions,
   StreamChatResult,
   StreamChunk,
 } from "@zintus/types";
+import { isContentBlockArray, textOf } from "@zintus/types";
 import { assertOkResponse, validateWithFetch } from "../utils.js";
 import { usageFromProviderFields } from "../token-estimate.js";
 
 const GEMINI_BASE =
   "https://generativelanguage.googleapis.com/v1beta/models";
 
-function splitGeminiMessages(messages: ChatMessage[]) {
+type GeminiPart =
+  | { text: string }
+  | { inlineData: { mimeType: string; data: string } };
+
+/** Map a USER message's content to Gemini parts — text → {text}, image →
+ *  {inlineData}, order preserved. */
+function userParts(content: string | ContentBlock[]): GeminiPart[] {
+  if (typeof content === "string") return [{ text: content }];
+  return content.map((block) =>
+    block.type === "image"
+      ? { inlineData: { mimeType: block.mimeType, data: block.data } }
+      : { text: block.text },
+  );
+}
+
+export function splitGeminiMessages(messages: ChatMessage[]) {
   const systemParts = messages
     .filter((message) => message.role === "system")
-    .map((message) => message.content);
+    .map((message) => {
+      // Images are not allowed in a system message — reject, never silently drop.
+      if (
+        isContentBlockArray(message.content) &&
+        message.content.some((block) => block.type === "image")
+      ) {
+        throw new Error("Image content is not allowed in a system message");
+      }
+      return textOf(message.content);
+    });
   const contents = messages
     .filter((message) => message.role !== "system")
     .map((message) => ({
       role: message.role === "assistant" ? "model" : "user",
-      parts: [{ text: message.content }],
+      // Assistant turns stay text-only (v1); user turns carry text + images.
+      parts:
+        message.role === "assistant"
+          ? [{ text: textOf(message.content) }]
+          : userParts(message.content),
     }));
 
   return {
