@@ -28,7 +28,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 12 | cost saved estimate | ✅ | 🟡 | ❌ | ❌ | mobile surfaces saved-vs-Claude; others partial |
 | 13 | quota remaining | ✅ | ✅ | ✅ | ✅ | `QuotaBar` / `status` |
 | 14 | route-options actions | ✅ | ✅ | ✅ | ❌ | `RouteOptionsPanel` on web+desktop; not in CLI |
-| 15 | Deep Research | ✅ | ✅ | ✅ | ✅ | all 4; CLI `zintus research <q>` rebuilds the engine deps in-process (`--depth`, `--json`). Execution needs a Tavily/Serper key (same gate as the others) — command verified by typecheck/build/help, not a live run |
+| 15 | Deep Research | ✅ | ✅ | ✅ | 🟡 | CLI `zintus research <q>` rebuilds the engine deps in-process (`--depth`,`--json`); a brutal audit confirmed the deps are line-by-line faithful to the gateway (+ bundle), but it's **never been executed** (key-gated) — 🟡 until one keyed run. No idle watchdog yet (stalled upstream → Ctrl-C) |
 | 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
 | 17 | projects / workspaces | ✅ | ✅ | ✅ | ✅ | all 4; CLI `projects list/create/use/clear/delete` (CRUD live-verified) + `chat` injects the active project's instructions + default provider |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
@@ -99,6 +99,23 @@ bug) and the image refusal is honest end-to-end, but caught two P1s — both fix
   first-send with no indicator. Added a 📁 project chip on the chat page with a ×
   off-switch. Also made the project `strategy` field actually applied + corrected
   the lib comment (was a dead field / false claim).
+
+## Brutal audit fixes (CLI, post-review)
+
+A CLI audit (line-by-line deps diff + a real bundle, not just typecheck) confirmed
+`research`'s in-process deps are faithful to the gateway and `keys list --json`
+leaks no raw key — but caught a P1 + P2, both fixed:
+- **P1 — project instructions were silently dropped on the default chat path.**
+  `chat` injected them as a system message, but the git-diff context (on by
+  default) compiles a thread → the engine rebuilds messages + only re-reads the
+  last user message, dropping the system message. Now folded into the user turn
+  (survives both paths).
+- **P2 — a keyless pinned provider killed failover** (forced route → every chat
+  fails). `chat` now only pins the project's provider when it's keyed (or local),
+  else falls back to auto with a warning.
+- Honesty: CLI `research` (#15) downgraded ✅→🟡 — faithful but never run.
+- Known: research has no idle-watchdog/abort yet (gateway does) — a stalled
+  upstream hangs until Ctrl-C.
 
 ## Hard-rule audit (this branch)
 

@@ -22,7 +22,8 @@ export async function runChat(
 ): Promise<void> {
   // Zero-config nudge: if no keys are stored, point at the guided wizard. We
   // still proceed (a local Ollama may serve), so this is a hint, not a hard stop.
-  if ((await listKeys()).length === 0) {
+  const storedKeys = await listKeys();
+  if (storedKeys.length === 0) {
     console.error(
       chalk.dim("No API keys configured — run `zintus setup` to add free providers."),
     );
@@ -33,6 +34,23 @@ export async function runChat(
   const project = await getActiveProject();
   if (project) {
     console.error(chalk.dim(`📁 project: ${project.name}`));
+  }
+  // Only pin the project's provider if it's actually keyed (or a local runtime):
+  // forcing a keyless provider disables failover and fails every request.
+  const keyed = new Set(storedKeys.map((k) => k.provider));
+  const forcedProvider =
+    project?.defaultProvider &&
+    (keyed.has(project.defaultProvider) ||
+      project.defaultProvider === "ollama" ||
+      project.defaultProvider === "lmstudio")
+      ? project.defaultProvider
+      : undefined;
+  if (project?.defaultProvider && !forcedProvider) {
+    console.error(
+      chalk.yellow(
+        `  (project provider ${project.defaultProvider} has no key — using auto routing)`,
+      ),
+    );
   }
 
   const spinner = ora("Routing request").start();
@@ -64,14 +82,16 @@ export async function runChat(
       spinner.text = "Routing request (with working git diff)";
     }
 
+    // Fold project instructions into the USER turn rather than a system message:
+    // when a thread/diff context compiles, the engine rebuilds messages and only
+    // re-reads the last user message, so a leading system message would be
+    // silently dropped. Folding into the user content survives both paths.
+    const userContent = project?.instructions
+      ? `${project.instructions}\n\n---\n\n${prompt}`
+      : prompt;
     const result = await engine.routeAndStream({
-      messages: project?.instructions
-        ? [
-            { role: "system", content: project.instructions },
-            { role: "user", content: prompt },
-          ]
-        : [{ role: "user", content: prompt }],
-      provider: project?.defaultProvider ?? undefined,
+      messages: [{ role: "user", content: userContent }],
+      provider: forcedProvider,
       mode: options?.mode ?? config.contextMode,
       threadId,
       diffText,
