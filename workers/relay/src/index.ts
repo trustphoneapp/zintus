@@ -678,6 +678,43 @@ app.delete("/api/account", async (c) => {
     // Best effort — continue with the D1 deletion.
   }
 
+  // Force-disconnect every LIVE gateway session for this user BEFORE the rows are
+  // deleted: closes the relay WebSocket, revokes its relay_token (DO storage + KV
+  // `relay:<hash>`) and marks it offline — otherwise an active relay would keep
+  // serving the now-deleted account until the 1h token TTL. Best-effort per
+  // session (mirrors the per-session DELETE); a DO hiccup must not strand the wipe.
+  const gwSessions = await c.env.DB.prepare(
+    "SELECT id FROM gateway_sessions WHERE user_id = ?",
+  )
+    .bind(userId)
+    .all<{ id: string }>();
+  for (const row of gwSessions.results ?? []) {
+    try {
+      const stub = c.env.GATEWAY_SESSION.get(
+        c.env.GATEWAY_SESSION.idFromName(row.id),
+      );
+      await stub.fetch(
+        new Request(`http://do/force-disconnect?session_id=${row.id}`, {
+          method: "POST",
+        }),
+      );
+    } catch {
+      // A DO hiccup must not block the account deletion.
+    }
+  }
+
+  // Delete this user's referral-code → user_id KV maps (referral.ts writes
+  // `referral_code:<code>` on creation). The D1 DELETE below drops the rows;
+  // without this the KV entries orphan, still resolving to a now-deleted user.
+  const referralCodes = await c.env.DB.prepare(
+    "SELECT code FROM referral_codes WHERE user_id = ?",
+  )
+    .bind(userId)
+    .all<{ code: string }>();
+  for (const row of referralCodes.results ?? []) {
+    await c.env.KV.delete(`referral_code:${row.code}`);
+  }
+
   // Delete every D1 row owned by THIS user. Children first, the users row last
   // (matches the FK order; explicit so it works whether or not D1 enforces the
   // ON DELETE CASCADE in schema.sql). All scoped to the session's user id/email.

@@ -19,6 +19,7 @@ interface FakeRow {
   referred_id?: string;
   email?: string;
   id?: string;
+  code?: string;
   stripe_subscription_id?: string | null;
 }
 
@@ -37,6 +38,25 @@ function fakeDb(seed: FakeRow[]) {
             return (found ? { stripe_subscription_id: found.stripe_subscription_id } : null) as T | null;
           }
           return null as T | null;
+        },
+        all: async <T,>() => {
+          if (/SELECT id FROM gateway_sessions WHERE user_id/i.test(sql)) {
+            const uid = args[0] as string;
+            return {
+              results: rows
+                .filter((r) => r.table === "gateway_sessions" && r.user_id === uid)
+                .map((r) => ({ id: r.id })),
+            } as { results: T[] };
+          }
+          if (/SELECT code FROM referral_codes WHERE user_id/i.test(sql)) {
+            const uid = args[0] as string;
+            return {
+              results: rows
+                .filter((r) => r.table === "referral_codes" && r.user_id === uid)
+                .map((r) => ({ code: r.code })),
+            } as { results: T[] };
+          }
+          return { results: [] as T[] };
         },
         run: async () => {
           const before = rows.length;
@@ -100,7 +120,32 @@ const noopGateway = {
   get: () => ({ fetch: async () => new Response("{}") }),
 };
 
-async function seededEnv(rows: FakeRow[], opts?: { stripe?: boolean; counter?: ReturnType<typeof fakeCounter> }) {
+// GATEWAY_SESSION stub that records which session ids received /force-disconnect.
+function recordingGateway() {
+  const disconnects: string[] = [];
+  return {
+    disconnects,
+    idFromName: () => ({}),
+    get: () => ({
+      fetch: async (req: Request) => {
+        const u = new URL(req.url);
+        if (u.pathname === "/force-disconnect") {
+          disconnects.push(u.searchParams.get("session_id") ?? "");
+        }
+        return new Response("{}");
+      },
+    }),
+  };
+}
+
+async function seededEnv(
+  rows: FakeRow[],
+  opts?: {
+    stripe?: boolean;
+    counter?: ReturnType<typeof fakeCounter>;
+    gateway?: ReturnType<typeof recordingGateway>;
+  },
+) {
   const kv = fakeKV();
   const db = fakeDb(rows);
   const counter = opts?.counter ?? fakeCounter();
@@ -108,7 +153,7 @@ async function seededEnv(rows: FakeRow[], opts?: { stripe?: boolean; counter?: R
     KV: kv,
     DB: db,
     QUOTA_COUNTER: counter,
-    GATEWAY_SESSION: noopGateway,
+    GATEWAY_SESSION: opts?.gateway ?? noopGateway,
     COOKIE_DOMAIN: "",
     STRIPE_SECRET_KEY: opts?.stripe ? "sk_test_x" : "",
   } as unknown as Env;
@@ -127,12 +172,12 @@ async function cookieFor(kv: ReturnType<typeof fakeKV>, userId: string, email: s
 function userRows(userId: string, email: string): FakeRow[] {
   return [
     { table: "zintus_users", id: userId, email },
-    { table: "gateway_sessions", user_id: userId },
+    { table: "gateway_sessions", user_id: userId, id: `gw-${userId}` },
     { table: "user_sessions", user_id: userId },
     { table: "subscriptions", user_id: userId, stripe_subscription_id: null },
     { table: "usage_log", user_id: userId },
     { table: "referrals", referrer_id: userId, referred_id: "other" },
-    { table: "referral_codes", user_id: userId },
+    { table: "referral_codes", user_id: userId, code: `code-${userId}` },
     { table: "auth_tokens", email },
   ];
 }
@@ -204,6 +249,31 @@ describe("DELETE /api/account", () => {
 
     await app.request("http://relay.test/api/account", { method: "DELETE", headers: { Cookie: cookie } }, env);
     expect(counter.calls).toContain("POST /reset");
+  });
+
+  test("force-disconnects live gateway sessions and deletes referral-code KV maps", async () => {
+    const gateway = recordingGateway();
+    const rows: FakeRow[] = [
+      { table: "zintus_users", id: "u1", email: "u1@example.com" },
+      { table: "gateway_sessions", user_id: "u1", id: "gw-1" },
+      { table: "gateway_sessions", user_id: "u1", id: "gw-2" },
+      { table: "referral_codes", user_id: "u1", code: "ABC123" },
+    ];
+    const { env, kv } = await seededEnv(rows, { gateway });
+    // The KV map referral.ts writes on code creation — must not orphan post-delete.
+    await kv.put("referral_code:ABC123", "u1");
+    const cookie = await cookieFor(kv, "u1", "u1@example.com");
+
+    const res = await app.request(
+      "http://relay.test/api/account",
+      { method: "DELETE", headers: { Cookie: cookie } },
+      env,
+    );
+    expect(res.status).toBe(200);
+    // Both live sessions were force-disconnected (closes WS + revokes relay_token).
+    expect(gateway.disconnects.sort()).toEqual(["gw-1", "gw-2"]);
+    // The referral-code KV map is gone — no orphan resolving to a deleted user.
+    expect(kv.store.has("referral_code:ABC123")).toBe(false);
   });
 
   test("an independent still-valid session token for a deleted user is rejected (401) by the tombstone", async () => {
