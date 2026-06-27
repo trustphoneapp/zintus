@@ -27,8 +27,8 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 4 | provider override | ✅ | ✅ | ✅ | ✅ | web `ProviderPicker`, desktop `ProviderRail` |
 | 5 | auto routing | ✅ | ✅ | ✅ | ✅ | omit provider → gateway strategy |
 | 6 | routing strategy | ✅ | ✅ | ✅ | ✅ | all 4; desktop now has a Fastest/Capability/Cheapest select in the composer |
-| 7 | markdown rendering | ✅ | ⚠️ | ✅ | 🟡 | desktop/mobile use dep-free `Markdown.tsx`; **web does NOT** — `MessageBubble.tsx:11-34` strips ```` ``` ```` fences, renders only `- ` bullets (no headers/bold/tables/inline-code). See Audit corrections. |
-| 8 | code block copy | ✅ | ❌ | ✅ | 🚫 | desktop code blocks have Copy; **web has none** (only whole-message copy, `MessageBubble.tsx:52`); CLI = terminal |
+| 7 | markdown rendering | ✅ | ✅ | ✅ | 🟡 | all UIs use the dep-free `Markdown.tsx` (web ported it 2026-06-26 — headings/lists/tables/inline + fenced code); CLI = terminal |
+| 8 | code block copy | ✅ | ✅ | ✅ | 🚫 | web + desktop fenced blocks have a per-block Copy (`Markdown.tsx` CodeBlock); CLI = terminal |
 | 9 | response intelligence footer | ✅ | ✅ | ✅ | 🟡 | desktop now parses the `metadata` SSE frame (latency/saved-vs-Claude/out-tokens/strategy) + compression badge; route-options live in a side panel. CLI partial |
 | 10 | compression % | ✅ | ✅ | ✅ | 🟡 | `X-Zintus-*` headers everywhere |
 | 11 | tokens saved | ✅ | ✅ | 🟡 | 🟡 | |
@@ -59,7 +59,8 @@ Several rows above were stale/optimistic. Corrected inline; recorded here with c
   `apps/web/app/_components/MessageBubble.tsx:11-34` strips ```` ``` ```` fences and
   renders only `- ` bullets (no headers/bold/tables/inline-code); the only
   whole-message copy is at line 52. Web never got the `Markdown.tsx` desktop/mobile
-  use. (#7 web ✅→⚠️, #8 web 🟡→❌.)
+  use. (#7 web ✅→⚠️, #8 web 🟡→❌.) **RESOLVED 2026-06-26** — web now ports
+  `Markdown.tsx` (real markdown + per-code-block copy); both rows back to ✅.
 - **Desktop provider-key management (#19) is broken — but the keyring *backend*
   exists.** `apps/desktop/lib/tauri.ts:13,28,36` imports `tauri-plugin-keyring-api`
   (→ `plugin:keyring|*`), but that plugin is **not initialized** — `src-tauri/src/lib.rs:58-60`

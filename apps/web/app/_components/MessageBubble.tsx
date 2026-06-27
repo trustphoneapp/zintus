@@ -7,31 +7,7 @@ import type { UiMessage } from "@/lib/app-store";
 import { Icon } from "./Icons";
 import { TransparencyStrip } from "./TransparencyStrip";
 import { CompressionBadge } from "./CompressionBadge";
-
-function renderLine(line: string, index: number) {
-  if (line.startsWith("```")) {
-    return null;
-  }
-
-  if (line.startsWith("- ")) {
-    return (
-      <div key={index} className="message-list-item">
-        <span className="message-bullet">▸</span>
-        <span>{line.slice(2)}</span>
-      </div>
-    );
-  }
-
-  if (line.trim()) {
-    return (
-      <p key={index} className="message-paragraph">
-        {line}
-      </p>
-    );
-  }
-
-  return <div key={index} className="message-spacer" />;
-}
+import { Markdown } from "./Markdown";
 
 export function MessageBubble({
   message,
@@ -78,7 +54,13 @@ export function MessageBubble({
       <div className={`message-bubble${isUser ? " user" : ""}`}>
         {message.content ? (
           <>
-            {message.content.split("\n").map((line, index) => renderLine(line, index))}
+            {isUser ? (
+              <p className="message-paragraph" style={{ whiteSpace: "pre-wrap" }}>
+                {message.content}
+              </p>
+            ) : (
+              <Markdown content={message.content} />
+            )}
             {isStreaming ? <span className="stream-caret" aria-hidden /> : null}
           </>
         ) : (
