@@ -44,7 +44,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |
 | 22 | one-tap local runtime | ✅ | ❌ | ❌ | 🚫 | CLI = `--provider ollama` |
 | 23 | file input | ✅ | ✅ | ✅ | 🟡 | mobile+web+desktop on-device text extraction (images refused honestly — no multimodal path); CLI partial |
-| 24 | image input | ❌ | 🚫 | ❌ | 🚫 | web image attach **removed** (was a silent no-op that injected a fake "[Image: …]" note); now text-only + an honest "images unsupported" notice. Multimodal = `docs/multimodal-image-plan.md` |
+| 24 | image input | ❌ | 🟡 | ❌ | 🟡 | **shipped** (`feat/multimodal-image-input`): web picker/drag-drop/paste + CLI `--image` send real **EXIF-stripped** image blocks to a **vision-capable** model (Gemini). Router hard-errors (`unsupported_capability` + provider suggestions) when none is available — **never** a silent text-only fallback or `[Image:]` fake. Image bytes never touch the relay and are never logged. **🟡 = code + tests + web build green, but the keyed end-to-end run (browser canvas → Gemini) is the [HUMAN] smoke gate** (§ final gate). Mobile/desktop image UI deferred. See `docs/multimodal-image-input.md` |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
 | 27 | report AI response | ✅ | ❌ | ✅ | ❌ | desktop has the Gen-AI flag control; **web has none** (no report UI in `MessageBubble.tsx`); CLI n/a |
@@ -103,11 +103,13 @@ structured/JSON output.**
 
 ## Cross-surface issues to resolve (ranked)
 
-1. **✅ FIXED — web image no-op.** Was the cardinal sin: the UI injected a fake
-   "[Image: … see attached]" note AND sent base64 the gateway strips, so the model
-   was told an image was attached and got none. Now web attach is **text-only**
-   (images refused with an honest notice); no fake notes. Full multimodal stays a
-   separate PR (`docs/multimodal-image-plan.md`).
+1. **✅ FIXED, then ✅ SHIPPED — web image input.** The cardinal sin was a fake
+   "[Image: …]" note + base64 the gateway stripped (model told an image was
+   attached, got none). First fixed to honest text-only refusal; **now real
+   multimodal is shipped** (`feat/multimodal-image-input`, PR1–7): web + CLI send
+   EXIF-stripped image blocks to a vision-capable model, hard-erroring instead of
+   any silent text-only fallback. 🟡 pending the keyed end-to-end smoke. See
+   `docs/multimodal-image-input.md`.
 2. **Desktop parity — essentially closed on this branch.** Shipped markdown+
    code-copy, regenerate, export, consent gate, Private Mode, Deep Research,
    report, projects, **file input (#23)**, **response footer (#9)**, **first-run
