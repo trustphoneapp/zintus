@@ -122,7 +122,12 @@ export type ErrorHook = (
 
 const noopLog: LogFn = () => {};
 
-const DEFAULT_MAX_BODY_BYTES = 1_000_000;
+// Text-only requests are tiny, but a vision request carries base64 image bytes:
+// up to 4 images × 4 MB raw ≈ 16 MB, which is ~21 MB once base64-encoded in JSON.
+// 25 MB covers that plus accompanying text. Per-image size + the max-4-image
+// count are still enforced after parsing (below), so this only bounds the raw
+// transport size. Operators can override via GATEWAY_MAX_BODY_BYTES.
+const DEFAULT_MAX_BODY_BYTES = 25_000_000;
 const DEFAULT_MAX_MESSAGES = 200;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 

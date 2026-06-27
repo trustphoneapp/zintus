@@ -106,25 +106,37 @@ export default function ProvidersPage() {
   const rows = PROVIDERS.map((provider) => {
     const gateway = gatewayProviders.find((item) => item.id === provider.id);
     const vault = providers.find((item) => item.id === provider.id);
-    const hasKey = gatewayConnected
-      ? Boolean(gateway?.hasKey)
-      : Boolean(vault?.hasKey) ||
-        provider.id === "ollama" ||
-        provider.id === "lmstudio";
+    const gatewayHasKey = Boolean(gateway?.hasKey);
+    const vaultHasKey = Boolean(vault?.hasKey);
+    // A key is "configured" if the gateway holds it server-side OR the browser
+    // vault holds it — vault keys are sent per-request to the loopback gateway,
+    // so a vault-only key is just as usable as a server-side one. (Previously,
+    // when gateway-connected this read ONLY the gateway, so a key saved in the
+    // browser vault showed "No Key" even though chat worked.)
+    const hasKey =
+      gatewayHasKey ||
+      vaultHasKey ||
+      provider.id === "ollama" ||
+      provider.id === "lmstudio";
     const available = gatewayConnected
-      ? Boolean(gateway?.available)
+      ? Boolean(gateway?.available) || vaultHasKey
       : Boolean(vault?.enabled);
     const inCooldown = gatewayConnected ? Boolean(gateway?.inCooldown) : false;
-    const quota = gatewayConnected
-      ? getRemainingQuotaPercent({
-          hasKey,
-          available,
-          quotaUsed: gateway?.quotaUsed,
-          quotaLimit: gateway?.quotaLimit,
-        })
-      : hasKey
-        ? 100
-        : 0;
+    // The gateway only tracks quota for keys IT holds. A vault-only key's quota
+    // is unknown to the gateway, so show "—" rather than a misleading 0%.
+    const quota =
+      gatewayConnected && gatewayHasKey
+        ? getRemainingQuotaPercent({
+            hasKey,
+            available,
+            quotaUsed: gateway?.quotaUsed,
+            quotaLimit: gateway?.quotaLimit,
+          })
+        : gatewayConnected && vaultHasKey
+          ? null
+          : hasKey
+            ? 100
+            : 0;
 
     return {
       ...provider,
@@ -287,7 +299,7 @@ export default function ProvidersPage() {
             type="password"
             value={draftKey}
             onChange={(event) => setDraftKey(event.target.value)}
-            placeholder="sk-..."
+            placeholder={`Paste your ${PROVIDER_BY_ID[selected].name} API key`}
           />
         </label>
         <div className="actions">
