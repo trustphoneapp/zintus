@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/types" },
+    { "path": "./packages/media" },
     { "path": "./packages/schemas" },
     { "path": "./packages/crypto-e2e" },
     { "path": "./packages/providers" },

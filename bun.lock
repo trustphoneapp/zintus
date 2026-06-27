@@ -247,6 +247,17 @@
         "@zintus/types": "workspace:*",
       },
     },
+    "packages/media": {
+      "name": "@zintus/media",
+      "version": "0.0.1",
+      "dependencies": {
+        "@zintus/types": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^22.0.0",
+        "@zintus/schemas": "workspace:*",
+      },
+    },
     "packages/memory": {
       "name": "@zintus/memory",
       "version": "0.0.1",
@@ -1162,6 +1173,8 @@
     "@zintus/gateway": ["@zintus/gateway@workspace:apps/gateway"],
 
     "@zintus/keychain": ["@zintus/keychain@workspace:packages/keychain"],
+
+    "@zintus/media": ["@zintus/media@workspace:packages/media"],
 
     "@zintus/memory": ["@zintus/memory@workspace:packages/memory"],
 
