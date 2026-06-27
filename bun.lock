@@ -39,6 +39,7 @@
         "@zintus/engine": "workspace:*",
         "@zintus/gateway": "workspace:*",
         "@zintus/keychain": "workspace:*",
+        "@zintus/media": "workspace:*",
         "@zintus/providers": "workspace:*",
         "@zintus/router": "workspace:*",
         "@zintus/search": "workspace:*",
