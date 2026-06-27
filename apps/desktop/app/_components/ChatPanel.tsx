@@ -23,6 +23,23 @@ import { Badge } from "./ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { MessageBubble } from "./MessageBubble";
 
+// Text-like files we can extract on-device (parity with web/mobile). Images are
+// NOT supported end-to-end (no multimodal gateway path) so they're refused.
+const TEXT_EXT =
+  /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|env|tsx?|jsx?|mjs|cjs|py|go|rs|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|scala|sh|bash|zsh|sql|html?|xml|css|scss|less|log|conf)$/i;
+
+interface TextAttachment {
+  id: string;
+  name: string;
+  content: string;
+}
+
+function attachmentBlocks(atts: TextAttachment[]): string {
+  return atts
+    .map((a) => `[File: ${a.name}]\n\`\`\`\n${a.content}\n\`\`\``)
+    .join("\n\n");
+}
+
 export function ChatPanel() {
   const { settings, hydrate, update } = useSettingsStore();
   const {
@@ -50,9 +67,35 @@ export function ChatPanel() {
   const [consentOpen, setConsentOpen] = useState(false);
   const [pendingPrompt, setPendingPrompt] = useState<string | null>(null);
   const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<TextAttachment[]>([]);
+  const [imageNotice, setImageNotice] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setActiveProjectName(getActiveProject()?.name ?? null);
+  }, []);
+
+  const handleFiles = useCallback((files: FileList | null) => {
+    if (!files) return;
+    for (const file of Array.from(files)) {
+      if (file.type.startsWith("image/")) {
+        setImageNotice(true);
+        continue;
+      }
+      if (!TEXT_EXT.test(file.name)) continue;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            name: file.name,
+            content: String(e.target?.result ?? ""),
+          },
+        ]);
+      };
+      reader.readAsText(file);
+    }
   }, []);
 
   useEffect(() => {
@@ -114,23 +157,26 @@ export function ChatPanel() {
         messages.length === 0 && project?.instructions
           ? [{ role: "system" as const, content: project.instructions }]
           : [];
+      const blocks = attachmentBlocks(attachments);
+      const userContent = blocks ? `${blocks}\n\n${trimmed}`.trim() : trimmed;
       const history: ChatMessage[] = [
         ...leading,
         ...messages.map((m) => ({ role: m.role, content: m.content })),
-        { role: "user" as const, content: trimmed },
+        { role: "user" as const, content: userContent },
       ];
-      appendMessage(createChatMessage("user", trimmed));
+      appendMessage(createChatMessage("user", userContent));
       const assistant = createChatMessage("assistant", "");
       appendMessage(assistant);
       setPrompt("");
+      setAttachments([]);
       await runTurn(history, assistant.id);
     },
-    [messages, appendMessage, setPrompt, runTurn],
+    [messages, attachments, appendMessage, setPrompt, runTurn],
   );
 
   const send = useCallback(() => {
     const trimmed = prompt.trim();
-    if (!trimmed || loading) {
+    if ((!trimmed && attachments.length === 0) || loading) {
       return;
     }
     // Consent before the first send to a third-party provider (parity w/ mobile).
@@ -140,7 +186,7 @@ export function ChatPanel() {
       return;
     }
     void doSend(trimmed);
-  }, [prompt, loading, doSend]);
+  }, [prompt, attachments, loading, doSend]);
 
   function grantAndSend() {
     grantProviderSendConsent();
@@ -318,6 +364,33 @@ export function ChatPanel() {
             )}
           </div>
 
+          {imageNotice ? (
+            <div style={{ fontSize: 12, color: "var(--color-warn, #f59e0b)", display: "flex", alignItems: "center", gap: 8 }}>
+              Images aren&apos;t supported yet — attach text files (txt, md, code, json…).
+              <button type="button" onClick={() => setImageNotice(false)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer" }}>×</button>
+            </div>
+          ) : null}
+          {attachments.length > 0 ? (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {attachments.map((a) => (
+                <span key={a.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, background: "var(--color-elevated)", border: "1px solid var(--color-border)", borderRadius: 8, padding: "4px 8px" }}>
+                  📄 {a.name}
+                  <button type="button" aria-label={`Remove ${a.name}`} onClick={() => setAttachments((prev) => prev.filter((x) => x.id !== a.id))} style={{ background: "none", border: "none", color: "var(--color-text-muted)", cursor: "pointer", padding: 0 }}>×</button>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          <input
+            type="file"
+            ref={fileInputRef}
+            accept=".txt,.md,.markdown,.csv,.json,.yaml,.yml,.toml,.ts,.tsx,.js,.jsx,.py,.go,.rs,.sh,.sql,.html,.css,.xml"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              handleFiles(e.target.files);
+              e.target.value = "";
+            }}
+          />
           <Textarea
             rows={3}
             value={prompt}
@@ -332,7 +405,14 @@ export function ChatPanel() {
           />
 
           <div className="flex gap-2">
-            <Button type="button" onClick={() => void send()} disabled={loading || !prompt.trim()}>
+            <Button type="button" variant="secondary" onClick={() => fileInputRef.current?.click()}>
+              ＋ File
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void send()}
+              disabled={loading || (!prompt.trim() && attachments.length === 0)}
+            >
               {loading ? "Streaming..." : "Send"}
             </Button>
             {loading && (

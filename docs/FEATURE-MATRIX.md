@@ -36,7 +36,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 20 | provider key test | ✅ | 🟡 | 🟡 | ✅ | mobile explicit Test; CLI now has `zintus keys test <provider>`; web/desktop validate-on-save only |
 | 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |
 | 22 | one-tap local runtime | ✅ | ❌ | ❌ | 🚫 | CLI = `--provider ollama` |
-| 23 | file input | ✅ | ✅ | ❌ | 🟡 | web text+image picker (drag/paste); desktop none |
+| 23 | file input | ✅ | ✅ | ✅ | 🟡 | mobile+web+desktop on-device text extraction (images refused honestly — no multimodal path); CLI partial |
 | 24 | image input | ❌ | 🚫 | ❌ | 🚫 | web image attach **removed** (was a silent no-op that injected a fake "[Image: …]" note); now text-only + an honest "images unsupported" notice. Multimodal = `docs/multimodal-image-plan.md` |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
