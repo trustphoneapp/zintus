@@ -898,7 +898,14 @@ export default function ChatPage() {
               ref={inputRef}
               rows={1}
               value={input}
-              onChange={(event) => setInput(event.target.value)}
+              onChange={(event) => {
+                setInput(event.target.value);
+                // Drop the lingering post-send "Image analyzed by …" confirmation
+                // once the user starts a new message, so it never implies an image
+                // is still attached (it isn't — images clear on send; re-attach for
+                // a new one).
+                setNotice((n) => (n?.tone === "ok" ? null : n));
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
