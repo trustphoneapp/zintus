@@ -216,6 +216,24 @@ export async function fetchRouteOptions(
   }
 }
 
+/**
+ * Per-response transparency signals from the gateway's `metadata` SSE frame
+ * (emitted right before [DONE]). Derived integers/ratios only — never keys or
+ * prompt content. Drives the response footer alongside CompressionStats.
+ */
+export interface ResponseMeta {
+  inputTokens?: number;
+  outputTokens?: number;
+  /** End-to-end provider latency for this turn (ms). */
+  latencyMs?: number;
+  /** Estimate-only USD this turn cost (0 on free tiers). */
+  costUsd?: number;
+  /** Estimate-only USD this turn would have cost on a Claude Sonnet baseline. */
+  savedVsBaselineUsd?: number;
+  /** Routing strategy the gateway actually used (e.g. "fastest"). */
+  routingStrategy?: string;
+}
+
 interface GatewayChunk {
   id?: string;
   provider?: ProviderId;
@@ -223,6 +241,13 @@ interface GatewayChunk {
   thread_id?: string;
   choices?: Array<{ delta?: { content?: string } }>;
   error?: { message?: string };
+  // Per-response metadata frame (type:"metadata", choices:[]).
+  type?: string;
+  tokens?: { input?: number; output?: number };
+  latency_ms?: number;
+  cost_usd?: number;
+  saved_vs_claude_sonnet?: number;
+  routing_strategy?: string;
 }
 
 export async function streamGatewayChat(params: {
@@ -242,6 +267,7 @@ export async function streamGatewayChat(params: {
   threadId?: string;
   traceId?: string;
   compression?: CompressionStats;
+  meta?: ResponseMeta;
 }> {
   const gatewayUrl = await resolveGatewayUrl();
   if (!gatewayUrl) {
@@ -290,6 +316,7 @@ export async function streamGatewayChat(params: {
   let resolvedThreadId = params.threadId;
   let traceId: string | undefined;
   let output = "";
+  const meta: ResponseMeta = {};
 
   while (true) {
     const { done, value } = await reader.read();
@@ -320,6 +347,20 @@ export async function streamGatewayChat(params: {
       model = chunk.model ?? model;
       resolvedThreadId = chunk.thread_id ?? resolvedThreadId;
 
+      if (chunk.type === "metadata") {
+        if (chunk.tokens?.input != null) meta.inputTokens = chunk.tokens.input;
+        if (chunk.tokens?.output != null) meta.outputTokens = chunk.tokens.output;
+        if (chunk.latency_ms != null) meta.latencyMs = chunk.latency_ms;
+        if (chunk.cost_usd != null) meta.costUsd = chunk.cost_usd;
+        if (chunk.saved_vs_claude_sonnet != null) {
+          meta.savedVsBaselineUsd = chunk.saved_vs_claude_sonnet;
+        }
+        if (chunk.routing_strategy != null) {
+          meta.routingStrategy = chunk.routing_strategy;
+        }
+        continue;
+      }
+
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) {
         output += delta;
@@ -338,5 +379,6 @@ export async function streamGatewayChat(params: {
     threadId: resolvedThreadId,
     traceId,
     compression,
+    meta: Object.keys(meta).length > 0 ? meta : undefined,
   };
 }

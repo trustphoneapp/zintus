@@ -3,6 +3,7 @@ import {
   streamGatewayChat,
   resolveGatewayUrl,
   type CompressionStats,
+  type ResponseMeta,
 } from "./gateway";
 
 export interface ChatMessage {
@@ -16,6 +17,8 @@ export interface StreamChatResult {
   source: "gateway";
   /** Tokzen savings for this response, when the gateway reported real compression. */
   compression?: CompressionStats;
+  /** Per-response transparency signals (latency, saved-vs-baseline, strategy). */
+  meta?: ResponseMeta;
 }
 
 export async function isGatewayAvailable(): Promise<boolean> {
@@ -51,5 +54,6 @@ export async function streamChat(params: {
     model: result.model,
     source: "gateway",
     compression: result.compression,
+    meta: result.meta,
   };
 }

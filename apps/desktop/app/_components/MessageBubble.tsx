@@ -5,6 +5,10 @@ import type { ChatMessageUi } from "@/lib/store";
 import { CompressionBadge } from "./CompressionBadge";
 import { Markdown } from "./Markdown";
 
+function formatUsd(value: number): string {
+  return value < 0.01 ? `~$${value.toFixed(4)}` : `~$${value.toFixed(2)}`;
+}
+
 /**
  * Renders a single chat message. Assistant messages render Markdown (parity with
  * web/mobile), show routed provider/model metadata + the compression badge, and
@@ -80,6 +84,25 @@ export function MessageBubble({
         )}
       </div>
       {message.compression ? <CompressionBadge stats={message.compression} /> : null}
+      {message.meta ? (
+        <div className="response-meta-strip">
+          {message.meta.routingStrategy ? (
+            <span>via {message.meta.routingStrategy}</span>
+          ) : null}
+          {message.meta.latencyMs != null ? (
+            <span>{message.meta.latencyMs} ms</span>
+          ) : null}
+          {message.meta.outputTokens != null ? (
+            <span>{message.meta.outputTokens} out tok</span>
+          ) : null}
+          {message.meta.savedVsBaselineUsd != null &&
+          message.meta.savedVsBaselineUsd > 0 ? (
+            <span className="response-meta-saved">
+              ≈ {formatUsd(message.meta.savedVsBaselineUsd)} vs Claude Sonnet
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       {hasContent ? (
         <div className="chat-bubble-actions">
           <button type="button" className="chat-bubble-action" onClick={() => void copy()}>

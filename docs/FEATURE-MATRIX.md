@@ -22,7 +22,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 6 | routing strategy | ✅ | ✅ | 🟡 | ✅ | web presets+settings; desktop has the value, no chip |
 | 7 | markdown rendering | ✅ | ✅ | ✅ | 🟡 | desktop now uses dep-free `Markdown.tsx` (parity with mobile) |
 | 8 | code block copy | ✅ | 🟡 | ✅ | 🚫 | desktop code blocks have Copy; verify web; CLI = terminal |
-| 9 | response intelligence footer | ✅ | ✅ | 🟡 | 🟡 | web `meta`+`compression` in MessageBubble; desktop only `CompressionBadge` |
+| 9 | response intelligence footer | ✅ | ✅ | ✅ | 🟡 | desktop now parses the `metadata` SSE frame (latency/saved-vs-Claude/out-tokens/strategy) + compression badge; route-options live in a side panel. CLI partial |
 | 10 | compression % | ✅ | ✅ | ✅ | 🟡 | `X-Zintus-*` headers everywhere |
 | 11 | tokens saved | ✅ | ✅ | 🟡 | 🟡 | |
 | 12 | cost saved estimate | ✅ | 🟡 | ❌ | ❌ | mobile surfaces saved-vs-Claude; others partial |

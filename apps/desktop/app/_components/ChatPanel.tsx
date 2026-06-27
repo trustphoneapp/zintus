@@ -131,6 +131,7 @@ export function ChatPanel() {
           providerId: result.providerId,
           model: result.model,
           compression: result.compression,
+          meta: result.meta,
         });
         setActiveProvider(result.providerId);
         void refresh();
