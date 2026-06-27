@@ -50,6 +50,8 @@ function createTestRouter(providers: Provider[]) {
       id === "deepseek" ||
       id === "xai" ||
       id === "huggingface",
+    // Only gemini is vision-capable in these tests (matches the real default).
+    supportsVision: (id: ProviderId, _model?: string) => id === "gemini",
   }));
 
   return createRouter({
@@ -206,6 +208,65 @@ describe("createRouter failover", () => {
       // drain
     }
     expect(result.privacyHonored).toBeUndefined();
+  });
+
+  const imageMessages = [
+    {
+      role: "user" as const,
+      content: [
+        { type: "text" as const, text: "what is this?" },
+        {
+          type: "image" as const,
+          data: "AAA",
+          mimeType: "image/png" as const,
+          bytes: 10,
+          exifStripped: true as const,
+        },
+      ],
+    },
+  ];
+
+  test("vision: an image request routes to a vision-capable provider", async () => {
+    const router = createTestRouter([
+      stubProvider("groq", 1, async () => ({
+        stream: (async function* () { yield { content: "no" }; })(),
+      })),
+      stubProvider("gemini", 2, async () => ({
+        stream: (async function* () { yield { content: "a cat" }; })(),
+      })),
+    ]);
+    // groq (priority 1) is filtered out for lacking vision → gemini serves it.
+    const result = await router.routeAndStream({ messages: imageMessages });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(result.providerId).toBe("gemini");
+  });
+
+  test("vision: an image request with NO vision provider throws unsupported_capability", async () => {
+    const router = createTestRouter([
+      stubProvider("groq", 1, async () => ({
+        stream: (async function* () { yield { content: "x" }; })(),
+      })),
+    ]);
+    await expect(
+      router.routeAndStream({ messages: imageMessages }),
+    ).rejects.toThrow(/unsupported_capability/);
+  });
+
+  test("vision: a forced non-vision provider on an image request fails (no silent switch)", async () => {
+    const router = createTestRouter([
+      stubProvider("groq", 1, async () => ({
+        stream: (async function* () { yield { content: "x" }; })(),
+      })),
+      stubProvider("gemini", 2, async () => ({
+        stream: (async function* () { yield { content: "y" }; })(),
+      })),
+    ]);
+    // User explicitly forced groq — must NOT be silently re-routed to gemini.
+    await expect(
+      router.routeAndStream({ messages: imageMessages, provider: "groq" }),
+    ).rejects.toThrow(/unsupported_capability/);
   });
 
   test("BYOK: a per-request key makes a key-less provider eligible and is used", async () => {

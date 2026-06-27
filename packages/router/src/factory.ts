@@ -16,6 +16,8 @@ import {
   mayTrainOnUserData,
   ProviderHttpError,
 } from "@zintus/providers";
+import { supportsVision } from "@zintus/providers";
+import { requiresVision } from "@zintus/types";
 import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
 import { redactSecrets } from "./redact.js";
@@ -471,6 +473,20 @@ export function createRouter(config: RouterConfig = {}): Router {
         );
         if (filtered.length > 0) {
           candidates = filtered;
+        }
+      }
+
+      // Vision routing: an image request MUST go to a vision-capable
+      // provider+model. Filter candidates to vision-capable ones; never silently
+      // drop image blocks or fall back to text-only. If none remain (including an
+      // explicitly-forced non-vision provider), throw `unsupported_capability`,
+      // which the gateway maps to the honest capability error + suggestions.
+      if (requiresVision(request.messages)) {
+        candidates = candidates.filter((candidate) =>
+          supportsVision(candidate.id, request.model),
+        );
+        if (candidates.length === 0) {
+          throw new Error("unsupported_capability");
         }
       }
 

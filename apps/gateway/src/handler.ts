@@ -4,6 +4,7 @@ import {
   getModelPricing,
   estimateCostUsd,
 } from "@zintus/providers";
+import { supportsVision } from "@zintus/providers";
 import type { Engine } from "@zintus/engine";
 import {
   detectLocalRuntimes as defaultDetectLocalRuntimes,
@@ -15,7 +16,12 @@ import type {
   ProviderId,
   RouteUsage,
 } from "@zintus/types";
-import { textOf, type ContentBlock } from "@zintus/types";
+import {
+  textOf,
+  imageCount,
+  isContentBlockArray,
+  type ContentBlock,
+} from "@zintus/types";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
@@ -82,6 +88,26 @@ function buildUsageMetadata(
       : {}),
   };
 }
+
+// Returned when an image request can't reach a vision-capable provider/model.
+// No upsell, no paid-route nudge — just honest, actionable provider suggestions.
+const UNSUPPORTED_VISION_ERROR = {
+  error: {
+    type: "unsupported_capability",
+    message:
+      "Image input requires a vision-capable provider or local vision model.",
+    required: ["vision"],
+    suggestions: [
+      { provider: "gemini", reason: "Add a Gemini API key for image understanding." },
+      { provider: "openrouter", reason: "Choose a vision-capable OpenRouter model." },
+      {
+        provider: "ollama",
+        reason:
+          "Run a local vision model such as LLaVA, Qwen-VL, Moondream, or Gemma vision.",
+      },
+    ],
+  },
+} as const;
 
 export type LogFn = (
   level: "info" | "warn" | "error",
@@ -283,7 +309,8 @@ export function createGatewayHandler(
         "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, " +
         "X-Zintus-Original-Tokens, X-Zintus-Compressed-Tokens, " +
         "X-Zintus-Tokens-Saved, X-Zintus-Compression-Ratio, " +
-        "X-Zintus-Cost-Saved-Usd, X-Zintus-Private-Honored",
+        "X-Zintus-Cost-Saved-Usd, X-Zintus-Private-Honored, " +
+        "X-Zintus-Vision-Provider, X-Zintus-Images, X-Zintus-Image-Bytes, X-Zintus-Exif-Stripped",
       Vary: "Origin",
     };
     if (origin) {
@@ -562,6 +589,36 @@ export function createGatewayHandler(
       );
     }
 
+    // ── Multimodal image input ─────────────────────────────────────────────
+    // The schema already validated each image (mime/exif/size/base64). Here we
+    // bound the COUNT and gate vision routing. Image bytes are never logged,
+    // never sent to the relay, and never passed through Tokzen (see below).
+    const imageTotal = imageCount(messages);
+    if (imageTotal > 4) {
+      return json(
+        request,
+        { error: { message: "Too many images (max 4 per request)" } },
+        413,
+      );
+    }
+    const hasImages = imageTotal > 0;
+    // Explicit-provider gate: if the user PICKED a provider, never silently send
+    // their image elsewhere — fail clearly if that provider/model can't see it.
+    if (hasImages && body.provider && !supportsVision(body.provider, body.model)) {
+      return json(request, UNSUPPORTED_VISION_ERROR, 422);
+    }
+    const imageBytes = messages.reduce(
+      (sum, m) =>
+        sum +
+        (isContentBlockArray(m.content)
+          ? m.content.reduce(
+              (s, b) => s + (b.type === "image" ? b.bytes : 0),
+              0,
+            )
+          : 0),
+      0,
+    );
+
     // Web search: apply the provider-appropriate strategy BEFORE Tokzen runs,
     // so any injected search context gets compressed like everything else.
     //   groq        → switch model to a compound model (native, free)
@@ -610,36 +667,40 @@ export function createGatewayHandler(
       metrics.recordSearch(strategy);
     }
 
-    // Tokzen: compress system + assistant messages before routing
+    // Tokzen: compress system + assistant TEXT before routing. SKIPPED entirely
+    // for image requests — image base64 never passes through compression, and no
+    // (fake) compression savings are reported for image bytes. The original
+    // messages (with image blocks intact) flow to the router instead.
     const selectedProvider = body.provider;
-    const quotaRemaining = selectedProvider ? (getQuotaRemaining?.(selectedProvider) ?? 1.0) : 1.0;
-    const tokzenProvider =
-      selectedProvider === "groq" ? "groq" as const
-      : selectedProvider === "gemini" ? "gemini" as const
-      : "openai" as const;
-    const tokzenResult = await compress(
-      // Tokzen compresses TEXT only — flatten each message's content to text for
-      // the compressor (image blocks are never sent through compression; PR3
-      // preserves them on the routing path, not here).
-      { messages: searchMessages.map((m) => ({ role: m.role as "system" | "user" | "assistant" | "tool", content: textOf(m.content) })) },
-      {
-        provider: tokzenProvider,
-        model: body.model ?? "unknown",
-        quotaRemaining,
-        tokenBudget: 8000,
-        sessionId: body.thread_id,
-      },
-    );
-    const compressedMessages: ChatMessage[] = tokzenResult.messages
-      .filter((m): m is { role: "system" | "user" | "assistant"; content: string } =>
-        m.role === "system" || m.role === "user" || m.role === "assistant",
+    let tokzenResult: Awaited<ReturnType<typeof compress>> | undefined;
+    let compressedMessages: ChatMessage[] = [];
+    if (!hasImages) {
+      const quotaRemaining = selectedProvider ? (getQuotaRemaining?.(selectedProvider) ?? 1.0) : 1.0;
+      const tokzenProvider =
+        selectedProvider === "groq" ? "groq" as const
+        : selectedProvider === "gemini" ? "gemini" as const
+        : "openai" as const;
+      tokzenResult = await compress(
+        { messages: searchMessages.map((m) => ({ role: m.role as "system" | "user" | "assistant" | "tool", content: textOf(m.content) })) },
+        {
+          provider: tokzenProvider,
+          model: body.model ?? "unknown",
+          quotaRemaining,
+          tokenBudget: 8000,
+          sessionId: body.thread_id,
+        },
       );
-    metrics.recordTokzenSavings(
-      tokzenResult.totalResult.originalTokens,
-      tokzenResult.totalResult.compressedTokens,
-      tokzenResult.totalResult.ratio,
-      selectedProvider,
-    );
+      compressedMessages = tokzenResult.messages
+        .filter((m): m is { role: "system" | "user" | "assistant"; content: string } =>
+          m.role === "system" || m.role === "user" || m.role === "assistant",
+        );
+      metrics.recordTokzenSavings(
+        tokzenResult.totalResult.originalTokens,
+        tokzenResult.totalResult.compressedTokens,
+        tokzenResult.totalResult.ratio,
+        selectedProvider,
+      );
+    }
 
     // Per-request abort controller. Aborting it tears down the upstream
     // provider fetch (signal is threaded RouteRequest -> router -> provider),
@@ -710,6 +771,11 @@ export function createGatewayHandler(
         log("warn", "chat.timeout", { requestId });
         return json(request, { error: { message: error.message } }, 408);
       }
+      // The router rejected an image request with no vision-capable candidate
+      // (auto-routing case). Surface the honest capability error, not a 500.
+      if (error instanceof Error && error.message === "unsupported_capability") {
+        return json(request, UNSUPPORTED_VISION_ERROR, 422);
+      }
       throw error;
     }
 
@@ -724,6 +790,14 @@ export function createGatewayHandler(
     if (result.privacyHonored !== undefined) {
       metaHeaders["X-Zintus-Private-Honored"] = String(result.privacyHonored);
     }
+    // Multimodal: surface how an image request was actually served (which
+    // vision provider, how many images, total processed bytes, EXIF stripped).
+    if (hasImages) {
+      metaHeaders["X-Zintus-Vision-Provider"] = result.providerId;
+      metaHeaders["X-Zintus-Images"] = String(imageTotal);
+      metaHeaders["X-Zintus-Image-Bytes"] = String(imageBytes);
+      metaHeaders["X-Zintus-Exif-Stripped"] = "true";
+    }
 
     // Surface Tokzen compression savings as derived-only response headers so
     // web/desktop can show "compressed N%, saved ~X tokens (~$Y)". Emit ONLY
@@ -732,7 +806,7 @@ export function createGatewayHandler(
     // These carry purely derived integers/ratios — never keys, prompt content,
     // or secrets. They're known before the answer streams, so they ride along
     // as HTTP headers on both the streaming and non-streaming responses.
-    {
+    if (tokzenResult) {
       const { originalTokens, compressedTokens, ratio } =
         tokzenResult.totalResult;
       if (compressedTokens < originalTokens && ratio < 1) {
