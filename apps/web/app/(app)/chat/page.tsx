@@ -161,6 +161,10 @@ export default function ChatPage() {
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Image blocks of the most recent user turn — kept in memory (NOT persisted to
+  // thread history, where only text + metadata live) so Regenerate can re-send
+  // the same image instead of silently dropping it.
+  const lastSentImagesRef = useRef<ImageContentBlock[]>([]);
 
   // File attachments
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -469,6 +473,8 @@ export default function ChatPage() {
     const imageBlocks = attachments
       .filter((a): a is ImageAttachment => a.kind === "image")
       .map((a) => a.block);
+    // Remember this turn's images so Regenerate can re-send them (see regenerate()).
+    lastSentImagesRef.current = imageBlocks;
 
     // Vision guard: a concrete non-vision provider can't read images — warn and
     // hold the message (don't waste a request, don't drop the image). Auto
@@ -574,6 +580,25 @@ export default function ChatPage() {
       return;
     }
 
+    // Regenerate must re-send the same image. The bytes aren't in history; they
+    // live in lastSentImagesRef. If they're gone (e.g. after a reload), say so
+    // rather than silently regenerating text-only.
+    const reuseImages =
+      lastUser.images && lastUser.images.length > 0
+        ? lastSentImagesRef.current
+        : [];
+    if (
+      lastUser.images &&
+      lastUser.images.length > 0 &&
+      reuseImages.length === 0
+    ) {
+      setNotice({
+        tone: "warn",
+        text: "Re-attach the image to regenerate this turn — images aren't kept after a reload.",
+      });
+      return;
+    }
+
     dropLastAssistant();
     const assistant = createAssistantPlaceholder();
     appendMessage(assistant);
@@ -585,11 +610,24 @@ export default function ChatPage() {
       .filter((message) => message.id !== assistant.id && message.content)
       .map((message) => ({ role: message.role, content: message.content }));
 
+    const lastUserContent: string | ContentBlock[] =
+      reuseImages.length > 0
+        ? buildImageMessageContent(lastUser.content, reuseImages)
+        : lastUser.content;
     const sendMessages: ChatMessage[] =
       threadId == null
-        ? priorMessages
-        : [{ role: "user", content: lastUser.content }];
-    await streamAssistant(assistant.id, sendMessages, lastUser.content, false);
+        ? priorMessages.map((m, i) =>
+            i === priorMessages.length - 1 && m.role === "user"
+              ? { ...m, content: lastUserContent }
+              : m,
+          )
+        : [{ role: "user", content: lastUserContent }];
+    await streamAssistant(
+      assistant.id,
+      sendMessages,
+      lastUser.content,
+      reuseImages.length > 0,
+    );
   }, [appendMessage, dropLastAssistant, loading, messages, streamAssistant, threadId]);
 
   const stop = useCallback(() => {
