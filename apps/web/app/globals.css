@@ -1599,7 +1599,9 @@ textarea:focus-visible,
 select:focus-visible {
   outline: none;
   border-color: var(--color-purple-bright);
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--color-purple-bright) 30%, transparent);
+  /* Clearly-visible keyboard focus ring (not :focus → no ring on mouse click),
+     matching the .composer-picker-option / .provider-card rings above. */
+  box-shadow: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-purple-bright);
 }
 
 .strategy-list {

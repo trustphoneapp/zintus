@@ -1,12 +1,17 @@
 "use client";
 
+import { useId, useRef } from "react";
 import { DATA_FLOW } from "@/lib/consent";
+import { useFocusTrap } from "@/app/_components/useFocusTrap";
 
 /**
  * Shared pre-send consent dialog (Apple 5.1.2(i) / good practice). Every surface
  * that sends prompts/files to a provider — chat, compare, research, terminal —
  * gates the first send through this so the data-destination disclosure can't be
  * silently skipped on a secondary screen.
+ *
+ * a11y: labelled by its title, Escape cancels, focus is trapped inside and
+ * restored to the trigger on close (see useFocusTrap).
  */
 export function ConsentDialog({
   open,
@@ -17,19 +22,31 @@ export function ConsentDialog({
   onCancel: () => void;
   onGrant: () => void;
 }) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const bodyId = useId();
+  // Escape cancels — same as Cancel / backdrop, so consent is never granted by
+  // dismissal.
+  useFocusTrap(open, cardRef, onCancel);
   if (!open) return null;
   return (
-    <div
-      className="consent-backdrop"
-      role="dialog"
-      aria-modal="true"
-      onClick={onCancel}
-    >
-      <div className="consent-card" onClick={(e) => e.stopPropagation()}>
-        <h2 className="consent-title">Before your first send</h2>
-        <p className="consent-body">
-          Your message goes to the AI provider you choose, routed through your own
-          gateway. Here&apos;s exactly where data travels:
+    <div className="consent-backdrop" onClick={onCancel}>
+      <div
+        ref={cardRef}
+        className="consent-card"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={bodyId}
+        tabIndex={-1}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="consent-title" id={titleId}>
+          Before your first send
+        </h2>
+        <p className="consent-body" id={bodyId}>
+          Your message goes to the AI provider you choose, routed through your
+          own gateway. Here&apos;s exactly where data travels:
         </p>
         <div className="consent-flow">
           {DATA_FLOW.map((item) => (
@@ -44,7 +61,12 @@ export function ConsentDialog({
           <button type="button" className="chat-tool-toggle" onClick={onCancel}>
             Cancel
           </button>
-          <button type="button" className="chat-tool-toggle" onClick={onGrant}>
+          <button
+            type="button"
+            className="chat-tool-toggle"
+            data-autofocus
+            onClick={onGrant}
+          >
             Got it — send
           </button>
         </div>
