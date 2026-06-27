@@ -11,6 +11,7 @@ import {
   createAssistantPlaceholder,
   createUserMessage,
   useAppStore,
+  type UiImageMeta,
 } from "@/lib/app-store";
 import {
   streamChat,
@@ -502,9 +503,20 @@ export default function ChatPage() {
       { role: "user", content: userMessageContent },
     ];
 
-    // The stored/displayed user bubble is text only (image thumbnails live in the
-    // composer and are cleared on send).
-    appendMessage(createUserMessage(userText));
+    // The stored user bubble carries image METADATA (never base64) so it honestly
+    // shows which image(s) this turn included (the composer thumbnails clear on
+    // send). See UiMessage.images.
+    const sentImageMeta: UiImageMeta[] = attachments
+      .filter((a): a is ImageAttachment => a.kind === "image")
+      .map((a) => ({
+        name: a.block.name ?? a.name,
+        mimeType: a.block.mimeType,
+        bytes: a.block.bytes,
+        width: a.block.width,
+        height: a.block.height,
+        exifStripped: a.block.exifStripped,
+      }));
+    appendMessage(createUserMessage(userText, sentImageMeta));
     const assistant = createAssistantPlaceholder();
     appendMessage(assistant);
     setInput("");
@@ -954,7 +966,7 @@ export default function ChatPage() {
                 <button
                   type="button"
                   className="chat-send"
-                  disabled={!input.trim()}
+                  disabled={!input.trim() && attachments.length === 0}
                   onClick={() => void send()}
                   aria-label="Send message"
                 >

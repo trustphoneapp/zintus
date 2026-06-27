@@ -8,6 +8,17 @@ import type {
   GatewaySavings,
 } from "./gateway";
 
+/** Image-attachment metadata shown on a sent user bubble. Metadata ONLY — the
+ *  base64 image bytes are never persisted in chat history. */
+export interface UiImageMeta {
+  name: string;
+  mimeType: string;
+  bytes: number;
+  width?: number;
+  height?: number;
+  exifStripped: boolean;
+}
+
 export interface UiMessage {
   id: string;
   role: "user" | "assistant";
@@ -19,6 +30,8 @@ export interface UiMessage {
   meta?: ChatMeta;
   /** Compression savings for this response (present only on a real hit). */
   compression?: CompressionStats;
+  /** Image attachments sent with THIS user turn — metadata only, never base64. */
+  images?: UiImageMeta[];
   time: string;
 }
 
@@ -333,11 +346,15 @@ export const useAppStore = create<AppState>()(
   ),
 );
 
-export function createUserMessage(content: string): UiMessage {
+export function createUserMessage(
+  content: string,
+  images?: UiImageMeta[],
+): UiMessage {
   return {
     id: crypto.randomUUID(),
     role: "user",
     content,
+    ...(images && images.length > 0 ? { images } : {}),
     time: nowLabel(),
   };
 }

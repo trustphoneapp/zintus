@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
 import type { UiMessage } from "@/lib/app-store";
+import { formatImageBytes } from "@/lib/image-attachments";
 import { Icon } from "./Icons";
 import { TransparencyStrip } from "./TransparencyStrip";
 import { CompressionBadge } from "./CompressionBadge";
@@ -63,12 +64,50 @@ export function MessageBubble({
             )}
             {isStreaming ? <span className="stream-caret" aria-hidden /> : null}
           </>
-        ) : (
+        ) : !isUser ? (
           <span className="message-thinking">
             <span className="thinking-dot" aria-hidden />
             Thinking…
           </span>
-        )}
+        ) : null}
+        {message.images && message.images.length > 0 ? (
+          <div
+            className="message-images"
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 6,
+              marginTop: message.content ? 8 : 0,
+            }}
+          >
+            {message.images.map((img, idx) => (
+              <span
+                key={idx}
+                className="message-image-chip"
+                title={`${img.mimeType}${
+                  img.width && img.height
+                    ? ` · ${img.width}×${img.height}`
+                    : ""
+                }`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  fontSize: 11,
+                  color: "#94a3b8",
+                  background: "rgba(255,255,255,0.05)",
+                  border: "1px solid #232a36",
+                  borderRadius: 6,
+                  padding: "2px 8px",
+                }}
+              >
+                <Icon name="paperclip" size={11} />
+                {img.name} · {formatImageBytes(img.bytes)}
+                {img.exifStripped ? " · EXIF stripped" : ""}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </div>
       {!isUser && message.compression ? (
         <CompressionBadge stats={message.compression} />
