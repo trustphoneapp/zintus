@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquarePlus } from "lucide-react";
-import type { ProviderId } from "@zintus/types";
+import type { ProviderId, RoutingStrategy } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
 import { streamChat, type ChatMessage } from "@/lib/chat-client";
 import {
@@ -310,6 +310,18 @@ export function ChatPanel() {
             >
               🛡 {settings.blockTrainingProviders ? "Private on" : "Private"}
             </button>
+            <select
+              value={settings.routingStrategy}
+              onChange={(e) =>
+                update({ routingStrategy: e.target.value as RoutingStrategy })
+              }
+              className="h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-elevated)] px-2 text-sm"
+              title="Routing strategy (used in Auto mode)"
+            >
+              <option value="fastest">Fastest</option>
+              <option value="capability">Capability</option>
+              <option value="economy">Cheapest</option>
+            </select>
           </div>
 
           <div
