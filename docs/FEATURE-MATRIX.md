@@ -86,6 +86,19 @@ no per-response "not honored" badge yet. Export's Tauri runtime is unverified
 (#29 🟡). The 3 s AppShell health poll and bundle-baked `NEXT_PUBLIC_GATEWAY_TOKEN`
 are pre-existing.
 
+## Brutal audit fixes (web, post-review)
+
+A web audit confirmed projects-injection genuinely fires (not the desktop reset
+bug) and the image refusal is honest end-to-end, but caught two P1s — both fixed:
+- **Consent gate now covers every send surface.** It previously guarded only the
+  chat composer; `/compare`, `/research`, and `/terminal` sent to providers
+  ungated. Extracted a shared `ConsentDialog` and gated all four (5.1.2(i)).
+- **Active project is no longer sticky+invisible.** It used to clear only on
+  deleting the project, silently injecting its instructions into every later
+  first-send with no indicator. Added a 📁 project chip on the chat page with a ×
+  off-switch. Also made the project `strategy` field actually applied + corrected
+  the lib comment (was a dead field / false claim).
+
 ## Hard-rule audit (this branch)
 
 - `MANAGED_KEYS_AVAILABLE = false` holds: the only `createCheckout` call site

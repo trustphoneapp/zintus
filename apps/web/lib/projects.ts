@@ -4,8 +4,9 @@ import type { ProviderId, RoutingStrategy } from "@zintus/types";
  * Projects / workspaces — shared instructions + routing defaults for a set of
  * chats. localStorage-backed (parity with mobile + desktop). The active
  * project's `instructions` are injected as a leading system message in the chat
- * composer (alongside memory/presets), and its defaults seed provider/strategy/
- * privacy. Pure client feature; no gateway change.
+ * composer (alongside memory/presets), and its provider + privacy defaults are
+ * applied when a chat starts in it (strategy too, when set). Pure client
+ * feature; no gateway change.
  */
 
 const KEY = "zintus:web-projects.v1";

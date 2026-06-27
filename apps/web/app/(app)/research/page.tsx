@@ -8,6 +8,11 @@ import {
   type ResearchSource,
 } from "@/lib/gateway";
 import { downloadFile } from "@/lib/download";
+import {
+  grantProviderSendConsent,
+  hasProviderSendConsent,
+} from "@/lib/consent";
+import { ConsentDialog } from "@/app/_components/ConsentDialog";
 import { useAppStore } from "@/lib/app-store";
 import {
   createAssistantPlaceholder,
@@ -42,6 +47,7 @@ export default function ResearchPage() {
   const [sources, setSources] = useState<ResearchSource[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [lastQuery, setLastQuery] = useState("");
+  const [consentOpen, setConsentOpen] = useState(false);
 
   const controllerRef = useRef<AbortController | null>(null);
 
@@ -52,6 +58,11 @@ export default function ResearchPage() {
   const run = useCallback(async () => {
     const trimmed = query.trim();
     if (!trimmed || running) {
+      return;
+    }
+    // Consent before the first send to providers/search (parity w/ chat).
+    if (!hasProviderSendConsent()) {
+      setConsentOpen(true);
       return;
     }
     setRunning(true);
@@ -262,6 +273,15 @@ export default function ResearchPage() {
           ) : null}
         </div>
       ) : null}
+      <ConsentDialog
+        open={consentOpen}
+        onCancel={() => setConsentOpen(false)}
+        onGrant={() => {
+          grantProviderSendConsent();
+          setConsentOpen(false);
+          void run();
+        }}
+      />
     </div>
   );
 }

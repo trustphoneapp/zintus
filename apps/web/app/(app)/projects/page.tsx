@@ -62,6 +62,7 @@ export default function ProjectsPage() {
     // and apply its routing defaults.
     newChat(false);
     if (project.defaultProvider) setSelectedProvider(project.defaultProvider);
+    if (project.strategy) updateSettings({ routingStrategy: project.strategy });
     if (project.privateDefault) updateSettings({ blockTrainingProviders: true });
     router.push("/chat");
   }

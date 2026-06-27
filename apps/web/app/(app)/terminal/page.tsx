@@ -5,6 +5,11 @@ import { PROVIDERS } from "@/lib/providers";
 import { useAppStore } from "@/lib/app-store";
 import { streamChat } from "@/lib/chat-client";
 import {
+  grantProviderSendConsent,
+  hasProviderSendConsent,
+} from "@/lib/consent";
+import { ConsentDialog } from "@/app/_components/ConsentDialog";
+import {
   getGatewayUrl,
   fetchGatewayModels,
   fetchGatewayThreads,
@@ -39,6 +44,8 @@ export default function TerminalPage() {
   const { keys } = useProviderStatusStore();
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
+  const [consentOpen, setConsentOpen] = useState(false);
+  const pendingMsgRef = useRef<string | null>(null);
   const historyRef = useRef<string[]>([]);
   const historyIndexRef = useRef<number>(-1);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -180,6 +187,11 @@ export default function TerminalPage() {
       print("Usage: chat <message>", "muted");
       return;
     }
+    if (!hasProviderSendConsent()) {
+      pendingMsgRef.current = message;
+      setConsentOpen(true);
+      return;
+    }
     setRunning(true);
     print("→ routing…", "accent");
     try {
@@ -257,6 +269,17 @@ export default function TerminalPage() {
           autoComplete="off"
         />
       </div>
+      <ConsentDialog
+        open={consentOpen}
+        onCancel={() => setConsentOpen(false)}
+        onGrant={() => {
+          grantProviderSendConsent();
+          setConsentOpen(false);
+          const m = pendingMsgRef.current;
+          pendingMsgRef.current = null;
+          if (m) void runChat(m);
+        }}
+      />
     </div>
   );
 }

@@ -5,6 +5,11 @@ import { useRouter } from "next/navigation";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID, PROVIDERS } from "@/lib/providers";
 import { streamChat } from "@/lib/chat-client";
+import {
+  grantProviderSendConsent,
+  hasProviderSendConsent,
+} from "@/lib/consent";
+import { ConsentDialog } from "@/app/_components/ConsentDialog";
 import type { ChatMeta } from "@/lib/gateway";
 import {
   createAssistantPlaceholder,
@@ -47,6 +52,7 @@ export default function ComparePage() {
   const [results, setResults] = useState<Record<string, ColumnResult>>({});
   const [prompt, setPrompt] = useState("");
   const [running, setRunning] = useState(false);
+  const [consentOpen, setConsentOpen] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [lastPrompt, setLastPrompt] = useState("");
 
@@ -108,6 +114,10 @@ export default function ComparePage() {
   const runCompare = useCallback(async () => {
     const trimmed = prompt.trim();
     if (!trimmed || running) {
+      return;
+    }
+    if (!hasProviderSendConsent()) {
+      setConsentOpen(true);
       return;
     }
     setRunning(true);
@@ -369,6 +379,15 @@ export default function ComparePage() {
           );
         })}
       </div>
+      <ConsentDialog
+        open={consentOpen}
+        onCancel={() => setConsentOpen(false)}
+        onGrant={() => {
+          grantProviderSendConsent();
+          setConsentOpen(false);
+          void runCompare();
+        }}
+      />
     </div>
   );
 }

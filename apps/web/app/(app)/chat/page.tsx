@@ -20,7 +20,7 @@ import {
   grantProviderSendConsent,
   hasProviderSendConsent,
 } from "@/lib/consent";
-import { getActiveProject } from "@/lib/projects";
+import { getActiveProject, setActiveProjectId } from "@/lib/projects";
 import { loadPresets, type Preset } from "@/lib/presets";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
 
@@ -113,6 +113,7 @@ export default function ChatPage() {
   const [keyManagerOpen, setKeyManagerOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
   const [imageUnsupported, setImageUnsupported] = useState(false);
+  const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [activePreset, setActivePreset] = useState<Preset | null>(null);
   // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
@@ -139,6 +140,7 @@ export default function ChatPage() {
     void unlock();
     setLocalMode(!document.cookie.includes("zintus_session="));
     setPresets(loadPresets());
+    setActiveProjectName(getActiveProject()?.name ?? null);
   }, [hydrate, unlock]);
 
   const applyPreset = useCallback(
@@ -564,6 +566,25 @@ export default function ChatPage() {
                 title="Privacy mode — only routing to providers that don't train on your data"
               >
                 🛡 Privacy
+              </span>
+            ) : null}
+            {activeProjectName ? (
+              <span
+                className="chat-privacy-chip"
+                title="Active project — its instructions lead each new chat. Click × to leave."
+              >
+                📁 {activeProjectName}
+                <button
+                  type="button"
+                  aria-label="Leave project"
+                  onClick={() => {
+                    setActiveProjectId(null);
+                    setActiveProjectName(null);
+                  }}
+                  style={{ marginLeft: 6, background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0 }}
+                >
+                  ×
+                </button>
               </span>
             ) : null}
             <button
