@@ -286,8 +286,13 @@ export class ResponseCache {
     }
     try {
       const rows = this.db.select().from(schema.chatCache).all();
+      // vec0 rejects INSERT OR REPLACE — DELETE-then-INSERT (Linux CI fix,
+      // mirrors memory-store.ts / codebase-indexer).
+      const del = this.sqlite.query(
+        "DELETE FROM chat_cache_vectors WHERE rowid = ?",
+      );
       const statement = this.sqlite.query(
-        "INSERT OR REPLACE INTO chat_cache_vectors(rowid, embedding) VALUES (?, ?)",
+        "INSERT INTO chat_cache_vectors(rowid, embedding) VALUES (?, ?)",
       );
       for (const row of rows) {
         const embedding = decodeEmbedding(row.embedding);
@@ -295,6 +300,7 @@ export class ResponseCache {
           continue;
         }
         const rowId = this.resolveVectorRowId(row.id);
+        del.run(rowId);
         statement.run(rowId, JSON.stringify(embedding));
       }
     } catch {
@@ -336,8 +342,12 @@ export class ResponseCache {
       // autoincrement integer via chat_cache_vector_map (no hash collisions,
       // no unregistered SQL function in the search join).
       const rowId = this.resolveVectorRowId(cacheId);
+      // vec0 rejects INSERT OR REPLACE — DELETE-then-INSERT (Linux CI fix).
       this.sqlite
-        .query("INSERT OR REPLACE INTO chat_cache_vectors(rowid, embedding) VALUES (?, ?)")
+        .query("DELETE FROM chat_cache_vectors WHERE rowid = ?")
+        .run(rowId);
+      this.sqlite
+        .query("INSERT INTO chat_cache_vectors(rowid, embedding) VALUES (?, ?)")
         .run(rowId, JSON.stringify(embedding));
     } catch {
       this.sqliteVecAvailable = false;
