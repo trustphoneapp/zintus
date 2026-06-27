@@ -63,8 +63,9 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
    notarization are [HUMAN] (see docs/RELEASE-CHECKLIST.md).
 3. **(Resolved) Projects (#17) + consent gate (#26) now on mobile + desktop + web.**
    CLI projects (#17) remains.
-4. **CLI: `research` (#15) + `projects` (#17) + `keys test` (#20) done.** Only a
-   broad `--json` automation mode remains (research already has `--json`).
+4. **CLI: `research` (#15) + `projects` (#17) + `keys test` (#20) done; `--json`
+   on `research` + `keys list`.** A broader `--json` across status/doctor (ink
+   TUIs) is the only CLI item left.
 
 ## Brutal audit fixes (desktop, post-review)
 

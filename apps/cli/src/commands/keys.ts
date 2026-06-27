@@ -76,8 +76,13 @@ export async function runKeysSet(
   console.log(chalk.green(`✓ Stored key for ${provider}`));
 }
 
-export async function runKeysList(): Promise<void> {
+export async function runKeysList(options?: { json?: boolean }): Promise<void> {
   const keys = await listKeys();
+
+  if (options?.json) {
+    console.log(JSON.stringify(keys));
+    return;
+  }
 
   if (keys.length === 0) {
     console.log(chalk.dim("No API keys stored."));

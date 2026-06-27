@@ -122,8 +122,9 @@ keys
 keys
   .command("list")
   .description("List stored API keys (masked)")
-  .action(async () => {
-    await runKeysList();
+  .option("--json", "Output as JSON for automation")
+  .action(async (options: { json?: boolean }) => {
+    await runKeysList(options);
   });
 
 keys
