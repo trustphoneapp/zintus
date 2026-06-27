@@ -142,6 +142,60 @@ keys
     await runKeysRemove(provider);
   });
 
+const projects = program
+  .command("projects")
+  .description("Workspaces: shared instructions + a default provider for chats");
+
+projects
+  .command("list")
+  .description("List projects (● marks the active one)")
+  .action(async () => {
+    const { runProjectsList } = await import("./commands/projects.js");
+    await runProjectsList();
+  });
+
+projects
+  .command("create")
+  .description("Create a project")
+  .argument("<name>", "Project name")
+  .option("--instructions <text>", "System instructions injected into each chat")
+  .option("--provider <id>", "Default provider for the project")
+  .action(
+    async (
+      name: string,
+      options: { instructions?: string; provider?: string },
+    ) => {
+      const { runProjectsCreate } = await import("./commands/projects.js");
+      await runProjectsCreate(name, options);
+    },
+  );
+
+projects
+  .command("use")
+  .description("Set the active project (its instructions lead each chat)")
+  .argument("<name>", "Project name")
+  .action(async (name: string) => {
+    const { runProjectsUse } = await import("./commands/projects.js");
+    await runProjectsUse(name);
+  });
+
+projects
+  .command("clear")
+  .description("Deactivate the active project")
+  .action(async () => {
+    const { runProjectsClear } = await import("./commands/projects.js");
+    await runProjectsClear();
+  });
+
+projects
+  .command("delete")
+  .description("Delete a project")
+  .argument("<name>", "Project name")
+  .action(async (name: string) => {
+    const { runProjectsDelete } = await import("./commands/projects.js");
+    await runProjectsDelete(name);
+  });
+
 program
   .command("config")
   .description("Configure routing strategy via interactive wizard")

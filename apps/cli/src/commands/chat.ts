@@ -5,6 +5,7 @@ import { listKeys } from "@zintus/keychain";
 import type { ContextMode } from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
+import { getActiveProject } from "../lib/projects.js";
 
 export interface ChatOptions {
   mode?: ContextMode;
@@ -25,6 +26,13 @@ export async function runChat(
     console.error(
       chalk.dim("No API keys configured — run `zintus setup` to add free providers."),
     );
+  }
+
+  // Active project (if any): its instructions lead the chat and its default
+  // provider is preferred. Surfaced on stderr so it's never a silent injection.
+  const project = await getActiveProject();
+  if (project) {
+    console.error(chalk.dim(`📁 project: ${project.name}`));
   }
 
   const spinner = ora("Routing request").start();
@@ -57,7 +65,13 @@ export async function runChat(
     }
 
     const result = await engine.routeAndStream({
-      messages: [{ role: "user", content: prompt }],
+      messages: project?.instructions
+        ? [
+            { role: "system", content: project.instructions },
+            { role: "user", content: prompt },
+          ]
+        : [{ role: "user", content: prompt }],
+      provider: project?.defaultProvider ?? undefined,
       mode: options?.mode ?? config.contextMode,
       threadId,
       diffText,
