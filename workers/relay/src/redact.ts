@@ -21,5 +21,20 @@ export function redactSecrets(input: string): string {
     .replace(/AIza[a-zA-Z0-9_\-]{35}/g, "AIza****REDACTED****")
     .replace(/gsk_[a-zA-Z0-9]{50,}/g, "gsk_****REDACTED****")
     .replace(/xai-[a-zA-Z0-9_-]{16,}/g, "xai-****REDACTED****")
-    .replace(/hf_[a-zA-Z0-9]{20,}/g, "hf_****REDACTED****");
+    .replace(/hf_[a-zA-Z0-9]{20,}/g, "hf_****REDACTED****")
+    // JWTs (Google id_token / access tokens): three base64url segments.
+    .replace(
+      /eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
+      "****REDACTED-JWT****",
+    )
+    // Session / relay / OAuth tokens by KEY NAME (key=value, key: value,
+    // "key":"value", cookie). Context-aware on purpose: only well-known secret
+    // keys with a value >= 8 chars, so user_id / thread_id and short values like
+    // code=200 are NOT touched.
+    .replace(
+      /\b(access_token|refresh_token|id_token|relay_token|gateway_secret|session_token|auth_token|zintus_session)(["']?\s*[:=]\s*["']?)([A-Za-z0-9._-]{8,})/gi,
+      "$1$2****REDACTED****",
+    )
+    // OAuth authorization code / state in a callback URL (long opaque values).
+    .replace(/\b(code|state)=([A-Za-z0-9._%/-]{16,})/g, "$1=****REDACTED****");
 }
