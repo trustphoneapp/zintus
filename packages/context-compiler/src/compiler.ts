@@ -1,4 +1,4 @@
-import type { ChatMessage, ThreadMessage } from "@zintus/types";
+import { textOf, type ChatMessage, type ThreadMessage } from "@zintus/types";
 import { allocateTokenBudget } from "./budget.js";
 import {
   FactSummaryBlock,
@@ -199,7 +199,7 @@ export async function compileContext(request: CompileRequest): Promise<CompileRe
 
     handoffBlock = buildHandoffBlock(threadState, request.lastModel);
     if (handoffBlock) {
-      if (estimateTokens(handoffBlock.content) <= budget.handoff) {
+      if (estimateTokens(textOf(handoffBlock.content)) <= budget.handoff) {
         sections.push(handoffBlock);
         includedSections.push("handoff");
       } else {
@@ -279,7 +279,7 @@ export async function compileContext(request: CompileRequest): Promise<CompileRe
   sections.push({ role: "user", content: request.newUserMessage });
 
   const tokenEstimate = sections.reduce(
-    (sum, message) => sum + estimateTokens(message.content),
+    (sum, message) => sum + estimateTokens(textOf(message.content)),
     0,
   );
 

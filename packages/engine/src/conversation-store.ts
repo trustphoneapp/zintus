@@ -12,6 +12,7 @@ import type {
   ThreadMessage,
   TraceAttempt,
 } from "@zintus/types";
+import { textOf } from "@zintus/types";
 import * as schema from "./schema.js";
 
 const DEFAULT_CONVERSATIONS_PATH = join(
@@ -132,7 +133,7 @@ export class ConversationStore {
       id: randomUUID(),
       threadId,
       role: message.role,
-      content: message.content,
+      content: textOf(message.content),
       providerId: meta?.providerId,
       model: meta?.model,
       traceId: meta?.traceId,

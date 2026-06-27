@@ -66,7 +66,34 @@ export function providerCapabilityTier(providerId: ProviderId): number {
   return MODEL_CAPABILITIES[providerId]?.capabilityTier ?? 50;
 }
 
-/** True when the provider's default model natively accepts image input. */
-export function supportsVision(providerId: ProviderId): boolean {
+// Per-provider sets of model ids known to accept image input. Deliberately
+// narrow and MODEL-SPECIFIC: a provider is never globally vision-capable just
+// because one of its models is. Add an entry only when verified against the
+// provider's API. OpenRouter/xAI vision is model-specific and stays UNMAPPED
+// until a route is explicitly verified + tested. Local providers (ollama/
+// lmstudio) require a runtime-DETECTED local vision model — never asserted here.
+const VISION_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
+  gemini: new Set([
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash",
+  ]),
+};
+
+/**
+ * Model-aware vision check.
+ * - With a `model`: true ONLY if that specific model is known to accept image
+ *   input (never a whole-provider assumption).
+ * - Without a `model` (the provider's default): the default model's `vision`
+ *   flag from the registry.
+ * Local providers (ollama/lmstudio) return false here — they require a
+ * runtime-detected local vision model, decided at the gateway, not statically.
+ */
+export function supportsVision(providerId: ProviderId, model?: string): boolean {
+  if (model) {
+    return VISION_MODELS[providerId]?.has(model) ?? false;
+  }
   return MODEL_CAPABILITIES[providerId]?.vision ?? false;
 }

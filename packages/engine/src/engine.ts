@@ -33,6 +33,7 @@ import type {
   ThreadMessage,
   TraceAttempt,
 } from "@zintus/types";
+import { textOf } from "@zintus/types";
 import { getKey } from "@zintus/keychain";
 import { ConversationStore } from "./conversation-store.js";
 import { exportRequestTrace } from "./otel.js";
@@ -378,8 +379,9 @@ export function createEngine(config: EngineConfig = {}): Engine {
       let compileTraceId: string | undefined;
       let compileTokenEstimate: number | undefined;
       const effectiveMode = request.mode ?? "smart";
-      const latestUserInput =
-        latestMessage?.content ?? initialMessages.at(-1)?.content ?? "";
+      const latestUserInput = textOf(
+        latestMessage?.content ?? initialMessages.at(-1)?.content ?? "",
+      );
 
       // When a thread is supplied, compile context from memory + server-side
       // history (the server owns conversation history). The new user input is
@@ -446,7 +448,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
 
       if (persistConversations && lastUser) {
         if (!threadId) {
-          threadId = conversations.createThread(lastUser.content.slice(0, 48)).id;
+          threadId = conversations.createThread(textOf(lastUser.content).slice(0, 48)).id;
         }
         conversations.appendMessage(threadId, lastUser, { traceId });
       }
@@ -477,7 +479,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
         let cachedResponse = cache.getL1(cacheKey);
         if (cachedResponse === null && lastUser) {
           cachedResponse = await cache.getL2(
-            lastUser.content,
+            textOf(lastUser.content),
             targetModel,
             targetProvider,
             0.12,
@@ -631,7 +633,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
           ? undefined
           : typeof input.message === "string"
             ? { role: "user" as const, content: input.message }
-            : { role: input.message.role, content: input.message.content };
+            : { role: input.message.role, content: textOf(input.message.content) };
       const compiled = await compileContext({
         threadId: input.threadId,
         newUserMessage: latest?.content ?? "",

@@ -15,9 +15,44 @@ import { z } from "zod";
 
 export const ChatRole = z.enum(["system", "user", "assistant"]);
 
+// Processed image cap (mirrors packages/media's default maxOutputBytes). The
+// gateway re-checks this server-side; this is the edge guard.
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+
+const TextBlockSchema = z.object({
+  type: z.literal("text"),
+  text: z.string(),
+});
+
+// image/jpeg|png|webp only — the enum rejects svg/gif/video/pdf at the edge.
+const ImageBlockSchema = z.object({
+  type: z.literal("image"),
+  // Raw base64 ONLY — reject a `data:` URI prefix.
+  data: z
+    .string()
+    .min(1)
+    .refine((s) => !s.startsWith("data:"), {
+      message: "image.data must be raw base64 with no data: prefix",
+    }),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  bytes: z.number().int().positive().max(MAX_IMAGE_BYTES),
+  width: z.number().int().positive().optional(),
+  height: z.number().int().positive().optional(),
+  // Must be literally true — a missing/false flag is rejected (no un-stripped images).
+  exifStripped: z.literal(true),
+  name: z.string().optional(),
+});
+
+const ContentBlockSchema = z.discriminatedUnion("type", [
+  TextBlockSchema,
+  ImageBlockSchema,
+]);
+
 export const ChatMessageSchema = z.object({
   role: ChatRole,
-  content: z.string(),
+  // Backward compatible: a plain string (original shape) OR a non-empty array of
+  // content blocks (multimodal). Existing string clients are unaffected.
+  content: z.union([z.string(), z.array(ContentBlockSchema).min(1)]),
 });
 
 // Exact ProviderId union (mirrors @zintus/types ProviderId) so an unknown

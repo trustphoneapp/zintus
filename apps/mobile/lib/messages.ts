@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@zintus/types";
+import { textOf, type ChatMessage } from "@zintus/types";
 import type { ProviderId } from "@zintus/types";
 
 export interface UiMessage extends ChatMessage {
@@ -25,7 +25,7 @@ export function createAssistantPlaceholder(): UiMessage {
 
 export function toChatMessages(messages: UiMessage[]): ChatMessage[] {
   return messages
-    .filter((message) => message.content.trim().length > 0)
+    .filter((message) => textOf(message.content).trim().length > 0)
     .map(({ role, content }) => ({ role, content }));
 }
 

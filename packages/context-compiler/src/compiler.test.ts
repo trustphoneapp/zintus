@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { textOf } from "@zintus/types";
 import type {
   MemoryChunkHit,
   MemoryFact,
@@ -120,16 +121,16 @@ describe("compileContext", () => {
     });
 
     const systemBlocks = result.messages.filter((message) => message.role === "system");
-    expect(systemBlocks.some((message) => message.content.includes("Working summary:")))
+    expect(systemBlocks.some((message) => textOf(message.content).includes("Working summary:")))
       .toBe(true);
-    expect(systemBlocks.some((message) => message.content.includes("Top facts:"))).toBe(
+    expect(systemBlocks.some((message) => textOf(message.content).includes("Top facts:"))).toBe(
       true,
     );
     expect(
-      systemBlocks.some((message) => message.content.includes("[RETRIEVED_MEMORY]")),
+      systemBlocks.some((message) => textOf(message.content).includes("[RETRIEVED_MEMORY]")),
     ).toBe(true);
     expect(
-      systemBlocks.some((message) => message.content.includes("System handoff context:")),
+      systemBlocks.some((message) => textOf(message.content).includes("System handoff context:")),
     ).toBe(true);
     expect(result.compileTrace.mode).toBe("smart");
     expect(result.compileTrace.selectedTurnCount).toBe(3);

@@ -1,4 +1,4 @@
-import type { ChatMessage, MemoryChunkHit, MemoryFact, MemoryThreadState } from "@zintus/types";
+import { textOf, type ChatMessage, type MemoryChunkHit, type MemoryFact, type MemoryThreadState } from "@zintus/types";
 import type { BudgetBreakdown } from "../types.js";
 
 export type ContextBlockSectionId = "working-summary" | "top-facts" | "retrieved-memory";
@@ -45,7 +45,7 @@ export function mergeBlocks(input: MergeBlocksInput): MergeBlocksResult {
     if (!message) {
       continue;
     }
-    const tokens = input.estimateTokens(message.content);
+    const tokens = input.estimateTokens(textOf(message.content));
     if (tokens > remaining[block.budgetKey]) {
       droppedSections.push(`${block.sectionId} over budget`);
       continue;

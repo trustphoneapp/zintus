@@ -1,16 +1,16 @@
-import type { ChatMessage } from "@zintus/types";
+import { textOf, type ChatMessage } from "@zintus/types";
 
 export function summarizeTurns(previousSummary: string, newTurns: ChatMessage[]): string {
   const userTurns = newTurns.filter((turn) => turn.role === "user").slice(-2);
   const assistantTurns = newTurns.filter((turn) => turn.role === "assistant").slice(-2);
 
   const userSnippet = userTurns
-    .map((turn) => turn.content.trim())
+    .map((turn) => textOf(turn.content).trim())
     .filter(Boolean)
     .map((text) => text.slice(0, 160))
     .join(" | ");
   const assistantSnippet = assistantTurns
-    .map((turn) => turn.content.trim())
+    .map((turn) => textOf(turn.content).trim())
     .filter(Boolean)
     .map((text) => text.slice(0, 160))
     .join(" | ");

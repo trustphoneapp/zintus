@@ -1,4 +1,4 @@
-import type { ChatMessage, TokenUsage } from "@zintus/types";
+import { textOf, type ChatMessage, type TokenUsage } from "@zintus/types";
 
 /**
  * Local token estimation used ONLY when a provider does not report usage.
@@ -23,7 +23,7 @@ export function estimateTokensFromText(text: string): number {
 export function estimateInputTokens(messages: ChatMessage[]): number {
   let total = 0;
   for (const message of messages) {
-    total += estimateTokensFromText(message.content) + PER_MESSAGE_OVERHEAD_TOKENS;
+    total += estimateTokensFromText(textOf(message.content)) + PER_MESSAGE_OVERHEAD_TOKENS;
   }
   return total;
 }

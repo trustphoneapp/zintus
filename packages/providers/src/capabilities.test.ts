@@ -23,6 +23,27 @@ describe("model capability registry", () => {
     }
   });
 
+  test("supportsVision is model-aware — model-specific, never whole-provider", () => {
+    // gemini default + its known vision models
+    expect(supportsVision("gemini")).toBe(true);
+    expect(supportsVision("gemini", "gemini-2.5-flash")).toBe(true);
+    expect(supportsVision("gemini", "gemini-1.5-pro")).toBe(true);
+    // a non-vision model name, even on a vision provider → false
+    expect(supportsVision("gemini", "some-text-only-model")).toBe(false);
+    // groq is never vision, with or without a model
+    expect(supportsVision("groq")).toBe(false);
+    expect(supportsVision("groq", "llama-3.3-70b-versatile")).toBe(false);
+    // openrouter / xai vision is model-specific and currently UNMAPPED → false
+    expect(
+      supportsVision("openrouter", "meta-llama/llama-3.2-90b-vision-instruct"),
+    ).toBe(false);
+    expect(supportsVision("xai", "grok-2-vision")).toBe(false);
+    // local providers are never globally vision (need runtime detection)
+    expect(supportsVision("ollama")).toBe(false);
+    expect(supportsVision("ollama", "llava")).toBe(false);
+    expect(supportsVision("lmstudio")).toBe(false);
+  });
+
   test("context windows are real positive token counts", () => {
     for (const id of IDS) {
       expect(MODEL_CAPABILITIES[id]!.contextWindow).toBeGreaterThan(0);

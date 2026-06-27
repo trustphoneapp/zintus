@@ -7,7 +7,9 @@ export interface Thread {
   updatedAt: Date;
 }
 
-export interface ThreadMessage extends ChatMessage {
+export interface ThreadMessage extends Omit<ChatMessage, "content"> {
+  /** Stored conversation turns are text-only in v1 (images aren't persisted). */
+  content: string;
   id: string;
   threadId: string;
   providerId?: string;

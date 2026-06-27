@@ -1,12 +1,12 @@
-import type { ChatMessage } from "@zintus/types";
+import { textOf, type ChatMessage } from "@zintus/types";
 import type { SearchResult } from "./types.js";
 
 /** The last user message is the search query. */
 export function extractSearchQuery(messages: ChatMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
-    if (message && message.role === "user" && message.content.trim()) {
-      return message.content.trim();
+    if (message && message.role === "user" && textOf(message.content).trim()) {
+      return textOf(message.content).trim();
     }
   }
   return "";

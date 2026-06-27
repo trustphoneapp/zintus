@@ -15,6 +15,7 @@ import type {
   ProviderId,
   RouteUsage,
 } from "@zintus/types";
+import { textOf, type ContentBlock } from "@zintus/types";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
@@ -617,7 +618,10 @@ export function createGatewayHandler(
       : selectedProvider === "gemini" ? "gemini" as const
       : "openai" as const;
     const tokzenResult = await compress(
-      { messages: searchMessages.map((m) => ({ ...m, role: m.role as "system" | "user" | "assistant" | "tool" })) },
+      // Tokzen compresses TEXT only — flatten each message's content to text for
+      // the compressor (image blocks are never sent through compression; PR3
+      // preserves them on the routing path, not here).
+      { messages: searchMessages.map((m) => ({ role: m.role as "system" | "user" | "assistant" | "tool", content: textOf(m.content) })) },
       {
         provider: tokzenProvider,
         model: body.model ?? "unknown",
@@ -1399,8 +1403,8 @@ export function createGatewayHandler(
 }
 
 function parseMessages(body: {
-  messages?: Array<{ role: string; content: string }>;
-  message?: { role?: string; content: string } | string;
+  messages?: Array<{ role: string; content: string | ContentBlock[] }>;
+  message?: { role?: string; content: string | ContentBlock[] } | string;
   thread_id?: string;
 }): ChatMessage[] {
   if (body.messages?.length) {

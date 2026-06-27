@@ -17,10 +17,21 @@ export type { QuotaEntry, QuotaWindow } from "./quota.js";
 export type { ProviderStatus } from "./router.js";
 export type {
   ChatMessage,
+  ContentBlock,
+  TextContentBlock,
+  ImageContentBlock,
   RouteRequest,
   RouteResponse,
   RouteStreamResult,
   RouteUsage,
+} from "./route.js";
+export {
+  isContentBlockArray,
+  textOf,
+  imageCount,
+  hasImages,
+  requiresVision,
+  sanitizeForLogs,
 } from "./route.js";
 export type {
   CacheHints,

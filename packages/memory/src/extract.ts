@@ -1,4 +1,4 @@
-import type { ChatMessage, MemoryFact } from "@zintus/types";
+import { textOf, type ChatMessage, type MemoryFact } from "@zintus/types";
 
 const preferencePatterns: Array<{
   keyPrefix: string;
@@ -87,7 +87,7 @@ export function extractFacts(turns: ChatMessage[]): MemoryFact[] {
   const candidates = turns
     .filter((turn) => turn.role === "user")
     .flatMap((turn) => {
-      const text = turn.content;
+      const text = textOf(turn.content);
       return [
         ...parseByPatterns(text, preferencePatterns, 0.82),
         ...parseByPatterns(text, decisionPatterns, 0.72),

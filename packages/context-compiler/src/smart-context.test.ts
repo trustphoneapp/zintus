@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { textOf } from "@zintus/types";
 import type {
   MemoryChunkHit,
   MemoryFact,
@@ -46,7 +47,7 @@ describe("Smart Context Engine blocks", () => {
       codeSearch: async () => codeHits(2),
     });
     expect(result.compileTrace.includedSections).toContain("code-recall");
-    const block = result.messages.find((m) => m.content.includes("WORKSPACE CODE"));
+    const block = result.messages.find((m) => textOf(m.content).includes("WORKSPACE CODE"));
     expect(block).toBeDefined();
     // Security (OWASP LLM01): untrusted context must NOT have system authority.
     expect(block!.role).toBe("user");
@@ -65,7 +66,7 @@ describe("Smart Context Engine blocks", () => {
     ].join("\n");
     const result = await compileContext({ ...base, diffText: diff });
     expect(result.compileTrace.includedSections).toContain("diff");
-    const block = result.messages.find((m) => m.content.includes("GIT DIFF"));
+    const block = result.messages.find((m) => textOf(m.content).includes("GIT DIFF"));
     expect(block).toBeDefined();
     expect(block!.role).toBe("user");
   });
@@ -82,7 +83,7 @@ describe("Smart Context Engine blocks", () => {
       codeSearch: async () => codeHits(20),
     });
     const codeLen = (r: Awaited<ReturnType<typeof compileContext>>) =>
-      r.messages.find((m) => m.content.includes("WORKSPACE CODE"))?.content.length ?? 0;
+      r.messages.find((m) => textOf(m.content).includes("WORKSPACE CODE"))?.content.length ?? 0;
     // The small-window compile must fit less code than the large-window one.
     expect(codeLen(small)).toBeLessThan(codeLen(big));
   });

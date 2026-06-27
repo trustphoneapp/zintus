@@ -5,7 +5,7 @@ import { Database } from "bun:sqlite";
 import { load as loadSqliteVec } from "sqlite-vec";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { eq, and } from "drizzle-orm";
-import type { ChatMessage } from "@zintus/types";
+import { textOf, type ChatMessage } from "@zintus/types";
 import * as schema from "./schema.js";
 import crypto from "node:crypto";
 
@@ -526,9 +526,9 @@ export class ResponseCache {
     // Per-call ttlMs wins; otherwise fall back to the configured L1 default.
     const effectiveTtl = options.ttlMs ?? this.l1TtlMs ?? undefined;
     const expiresAt = effectiveTtl ? now + effectiveTtl : null;
-    const lastUser = [...messages]
-      .reverse()
-      .find((m) => m.role === "user")?.content ?? "";
+    const lastUser = textOf(
+      [...messages].reverse().find((m) => m.role === "user")?.content ?? "",
+    );
     const embedding = await embedText(lastUser);
 
     this.db
