@@ -1,20 +1,11 @@
 import type { Provider, ProviderId, RoutingStrategy } from "@zintus/types";
+import { providerCapabilityTier } from "@zintus/providers";
 
-/** Lower rank = higher model capability (used by `capability` strategy). */
-const CAPABILITY_RANK: Record<ProviderId, number> = {
-  gemini: 1,
-  openrouter: 2,
-  fireworks: 3,
-  xai: 4,
-  deepseek: 5,
-  mistral: 6,
-  huggingface: 7,
-  cohere: 8,
-  cerebras: 9,
-  groq: 10,
-  lmstudio: 98,
-  ollama: 99,
-};
+// Model-capability ranking now lives in the data-driven registry
+// (`@zintus/providers` capabilities.ts) so vision/tools/json/contextWindow and
+// the routing tier share one source of truth. `providerCapabilityTier` returns
+// the same numbers the old inline CAPABILITY_RANK did (lower = preferred,
+// unknown → 50), so routing order is unchanged.
 
 function byUserPriority(
   a: Provider,
@@ -89,13 +80,13 @@ export function sortProviders(
     case "capability":
       return [...providers].sort(
         (a, b) =>
-          CAPABILITY_RANK[a.id] - CAPABILITY_RANK[b.id] ||
+          providerCapabilityTier(a.id) - providerCapabilityTier(b.id) ||
           byUserPriority(a, b, providerPriority),
       );
     case "quality": {
       // Largest context window first (proxied by capability rank DESC),
       // then lowest latency P95 as tie-break.
-      const cap = (id: Provider["id"]) => CAPABILITY_RANK[id] ?? 50;
+      const cap = (id: Provider["id"]) => providerCapabilityTier(id);
       const latScore = (id: Provider["id"]) =>
         latencyP95?.(id) ?? UNKNOWN_LATENCY_MS;
       return [...providers].sort(
@@ -108,7 +99,9 @@ export function sortProviders(
     case "balanced": {
       // Weighted score: 40% capability, 30% economy (cost), 30% speed (latency).
       // All normalized to 0-1 range; lower score wins.
-      const maxCap = Math.max(...providers.map((p) => CAPABILITY_RANK[p.id] ?? 50));
+      const maxCap = Math.max(
+        ...providers.map((p) => providerCapabilityTier(p.id)),
+      );
       const costs = providers.map((p) => costPerMillion?.(p.id) ?? 0);
       const maxCost = Math.max(...costs, 1);
       const latencies = providers.map(
@@ -117,7 +110,7 @@ export function sortProviders(
       const maxLat = Math.max(...latencies, 1);
 
       const score = (p: Provider) => {
-        const capNorm = (CAPABILITY_RANK[p.id] ?? 50) / maxCap;
+        const capNorm = providerCapabilityTier(p.id) / maxCap;
         const costNorm = (costPerMillion?.(p.id) ?? 0) / maxCost;
         const latNorm = (latencyP95?.(p.id) ?? UNKNOWN_LATENCY_MS) / maxLat;
         return 0.4 * capNorm + 0.3 * costNorm + 0.3 * latNorm;

@@ -31,6 +31,13 @@ export {
   type TrainingBadge,
 } from "./data-policies.js";
 export {
+  MODEL_CAPABILITIES,
+  modelCapabilities,
+  providerCapabilityTier,
+  supportsVision,
+  type ModelCapabilities,
+} from "./capabilities.js";
+export {
   PRICING_CATALOG,
   getModelPricing,
   listPricing,
