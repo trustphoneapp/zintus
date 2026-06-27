@@ -51,16 +51,16 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
    was told an image was attached and got none. Now web attach is **text-only**
    (images refused with an honest notice); no fake notes. Full multimodal stays a
    separate PR (`docs/multimodal-image-plan.md`).
-2. **Desktop parity — largely closed on this branch.** Added markdown+code-copy,
-   regenerate, export, consent gate, Private Mode, Deep Research, report,
-   projects, real multi-res app icons (were stubs), and Cmd+N/Cmd+,/Cmd+Shift+F
-   shortcuts (all typecheck + `next build` green). Remaining desktop 🟡/gaps:
-   full footer/route-reason+meta (#9, compression badge only), history
-   search/rename UI (#16 — sidebar already lists recent threads), a routing-
-   strategy chip (#6), onboarding, the Tauri **native menu** items (About/
-   Preferences/New Research/etc., need the Rust menu in lib.rs — [HUMAN]/native),
-   and file input (#23). Windows `bundle.windows.signCommand` missing + signing/
-   notarization are [HUMAN] (see docs/RELEASE-CHECKLIST.md).
+2. **Desktop parity — essentially closed on this branch.** Shipped markdown+
+   code-copy, regenerate, export, consent gate, Private Mode, Deep Research,
+   report, projects, **file input (#23)**, **response footer (#9)**, **first-run
+   onboarding overlay**, real multi-res app icons (were stubs), and Cmd+N/Cmd+,/
+   Cmd+Shift+F shortcuts (all typecheck + `next build` green). Remaining desktop:
+   history search/rename UI (#16 — sidebar already lists recent threads), a
+   routing-strategy chip (#6), and the Tauri **native menu** items (About/
+   Preferences/New Research/…, need the Rust menu in lib.rs — [HUMAN]/native).
+   Windows `bundle.windows.signCommand` missing + signing/notarization are
+   [HUMAN] (see docs/RELEASE-CHECKLIST.md).
 3. **(Resolved) Projects (#17) + consent gate (#26) now on mobile + desktop + web.**
    CLI projects (#17) remains.
 4. **CLI: `research` (#15) + `projects` (#17) + `keys test` (#20) done; `--json`

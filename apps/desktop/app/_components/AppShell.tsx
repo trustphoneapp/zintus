@@ -5,6 +5,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
 import { useChatStore } from "@/lib/store";
+import { hasCompletedOnboarding } from "@/lib/onboarding";
+import { OnboardingOverlay } from "./OnboardingOverlay";
 import { Tooltip } from "./ui/tooltip";
 
 const NAV = [
@@ -30,6 +32,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   });
 
   const { threads, activeThreadId, switchThread, newChat } = useChatStore();
+
+  // Loaded after mount (localStorage is client-only) to avoid an SSR flash.
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  useEffect(() => {
+    setShowOnboarding(!hasCompletedOnboarding());
+  }, []);
 
   const recentThreads = [...threads]
     .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -84,6 +92,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", minHeight: "100vh" }}>
+      {showOnboarding ? (
+        <OnboardingOverlay onDone={() => setShowOnboarding(false)} />
+      ) : null}
       <header
         style={{
           display: "flex",
