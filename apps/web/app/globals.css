@@ -4267,6 +4267,44 @@ body:has(.dashboard-container) {
 .chat-attachment-remove:hover {
   color: var(--color-text);
 }
+/* Image attachment chips carry a thumbnail, size and an EXIF-stripped badge,
+   so they need more room than a plain text-file chip. */
+.chat-attachment-chip.is-image {
+  max-width: 280px;
+}
+.chat-attachment-meta {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+.chat-attachment-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.12);
+  color: #16a34a;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.chat-composer-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 4px;
+  font-size: 12px;
+}
+.chat-composer-notice.is-error {
+  color: #ef4444;
+}
+.chat-composer-notice.is-warn {
+  color: #f59e0b;
+}
+.chat-composer-notice.is-ok {
+  color: #16a34a;
+}
 /* ── Web search toggle ──────────────────────────────────────────────────── */
 .chat-tool-toggle {
   display: flex;

@@ -12,7 +12,21 @@ import {
   createUserMessage,
   useAppStore,
 } from "@/lib/app-store";
-import { streamChat, type ChatMessage } from "@/lib/chat-client";
+import {
+  streamChat,
+  UnsupportedCapabilityError,
+  type ChatMessage,
+} from "@/lib/chat-client";
+import { processImage, MediaError } from "@zintus/media";
+import type { ContentBlock, ImageContentBlock } from "@zintus/types";
+import {
+  acceptImageFile,
+  buildImageMessageContent,
+  formatImageBytes,
+  imageSlotsRemaining,
+  isImageMime,
+  providerCanSeeImages,
+} from "@/lib/image-attachments";
 import { memorySystemMessage } from "@/lib/memory";
 import { downloadFile } from "@/lib/download";
 import {
@@ -36,12 +50,36 @@ const TEXT_EXTENSIONS = new Set([
   ".json", ".sh", ".yaml", ".toml", ".rs", ".go", ".css",
 ]);
 
-interface Attachment {
+/** A text file is extracted to a string and folded into the prompt. */
+interface TextAttachment {
   id: string;
+  kind: "text";
   name: string;
-  type: "image" | "text";
   content: string;
   mimeType: string;
+}
+
+/** An image is processed by @zintus/media into an `ImageContentBlock` that we
+ *  SEND; `previewUrl` is a local object URL of the ORIGINAL file, for the
+ *  thumbnail only (never sent). */
+interface ImageAttachment {
+  id: string;
+  kind: "image";
+  name: string;
+  previewUrl: string;
+  block: ImageContentBlock;
+}
+
+type Attachment = TextAttachment | ImageAttachment;
+
+/** Inline composer notice (rejections, vision warnings, success). */
+interface ComposerNotice {
+  tone: "error" | "warn" | "ok";
+  text: string;
+}
+
+function capitalize(s: string): string {
+  return s.length > 0 ? s[0]!.toUpperCase() + s.slice(1) : s;
 }
 
 /**
@@ -112,7 +150,7 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [keyManagerOpen, setKeyManagerOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
-  const [imageUnsupported, setImageUnsupported] = useState(false);
+  const [notice, setNotice] = useState<ComposerNotice | null>(null);
   const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [activePreset, setActivePreset] = useState<Preset | null>(null);
@@ -126,6 +164,12 @@ export default function ChatPage() {
   // File attachments
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Mirror of `attachments` for synchronous reads (the async file handler needs
+  // the live image count; closing over state would be stale) and unmount cleanup.
+  const attachmentsRef = useRef<Attachment[]>([]);
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
 
   // Web search toggle (persisted to localStorage)
   const [webSearchEnabled, setWebSearchEnabled] = useState(() => {
@@ -169,22 +213,95 @@ export default function ChatPage() {
   // Abort any in-flight stream when leaving the page (mirrors /compare, /research).
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  const handleFiles = useCallback((files: FileList | File[]) => {
-    const fileArray = Array.from(files);
-    for (const file of fileArray) {
-      const ext = "." + (file.name.split(".").pop()?.toLowerCase() ?? "");
-      const isImage = file.type.startsWith("image/");
-      const isText = TEXT_EXTENSIONS.has(ext);
+  // Revoke any outstanding image preview object URLs when the page unmounts.
+  useEffect(
+    () => () => {
+      for (const a of attachmentsRef.current) {
+        if (a.kind === "image") URL.revokeObjectURL(a.previewUrl);
+      }
+    },
+    [],
+  );
 
-      // Images are NOT wired end-to-end yet: the gateway has no multimodal path
-      // (content is z.string()). Refuse them rather than silently drop the bytes
-      // AND inject a fake "[Image: … see attached]" note the model never gets.
-      // Text files DO work (extracted + sent inline). See docs/multimodal-image-plan.md.
-      if (isImage) {
-        setImageUnsupported(true);
+  /** Remove one attachment, revoking its preview URL when it's an image. */
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => {
+      const target = prev.find((a) => a.id === id);
+      if (target?.kind === "image") URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((a) => a.id !== id);
+    });
+  }, []);
+
+  /** Drop all attachments, revoking every image preview URL. */
+  const clearAttachments = useCallback(() => {
+    setAttachments((prev) => {
+      for (const a of prev) {
+        if (a.kind === "image") URL.revokeObjectURL(a.previewUrl);
+      }
+      return [];
+    });
+  }, []);
+
+  const handleFiles = useCallback(async (files: FileList | File[]) => {
+    const fileArray = Array.from(files);
+    // Live image count from the ref so multi-file drops respect the max-4 cap.
+    let imageCount = attachmentsRef.current.filter(
+      (a) => a.kind === "image",
+    ).length;
+
+    for (const file of fileArray) {
+      // ── Image branch — process HONESTLY via @zintus/media ──────────────────
+      if (isImageMime(file.type)) {
+        if (!acceptImageFile(file.type)) {
+          setNotice({
+            tone: "error",
+            text: `${file.type || "That image type"} isn't supported — use PNG, JPEG, or WebP.`,
+          });
+          continue;
+        }
+        if (imageSlotsRemaining(imageCount) === 0) {
+          setNotice({
+            tone: "warn",
+            text: "You can attach up to 4 images per message.",
+          });
+          continue;
+        }
+        try {
+          // Real processing: canvas decode/resize/re-encode + EXIF strip in the
+          // browser. The returned block is what we SEND; the preview uses the
+          // original file. Image bytes are NEVER logged.
+          const block = await processImage(file, { name: file.name });
+          const id = crypto.randomUUID();
+          const previewUrl = URL.createObjectURL(file);
+          imageCount += 1;
+          setAttachments((prev) => [
+            ...prev,
+            { id, kind: "image", name: file.name, previewUrl, block },
+          ]);
+          setNotice(null);
+        } catch (error) {
+          // MediaError messages are safe (sizes/dimensions/mime only — no bytes).
+          const reason =
+            error instanceof MediaError
+              ? error.message
+              : "couldn't be processed";
+          setNotice({
+            tone: "error",
+            text: `Couldn't attach ${file.name}: ${reason}`,
+          });
+        }
         continue;
       }
-      if (!isText) continue;
+
+      // ── Text branch — extracted + sent inline (unchanged) ──────────────────
+      const ext = "." + (file.name.split(".").pop()?.toLowerCase() ?? "");
+      if (!TEXT_EXTENSIONS.has(ext)) {
+        setNotice({
+          tone: "error",
+          text: `${file.name} isn't a supported file — attach an image (PNG/JPEG/WebP) or a text file.`,
+        });
+        continue;
+      }
 
       const id = crypto.randomUUID();
       const reader = new FileReader();
@@ -192,7 +309,13 @@ export default function ChatPage() {
         const content = e.target?.result as string;
         setAttachments((prev) => [
           ...prev,
-          { id, name: file.name, type: "text", content, mimeType: file.type || "text/plain" },
+          {
+            id,
+            kind: "text",
+            name: file.name,
+            content,
+            mimeType: file.type || "text/plain",
+          },
         ]);
       };
       reader.readAsText(file);
@@ -204,7 +327,7 @@ export default function ChatPage() {
       assistantId: string,
       sendMessages: ChatMessage[],
       promptForLog: string,
-      sendImages: Array<{ data: string; mimeType: string; name: string }>,
+      hadImages: boolean,
     ) => {
       setLoading(true);
       setActiveProvider(null);
@@ -232,7 +355,6 @@ export default function ChatPage() {
             : settings,
           webSearch: webSearchEnabled,
           temperature: activePreset?.temperature,
-          images: sendImages,
           signal: controller.signal,
           onChunk: (text) => updateMessage(assistantId, text),
         });
@@ -251,11 +373,31 @@ export default function ChatPage() {
           text: `→ routed to ${result.providerId} (${result.model}) via ${result.source}`,
           tone: "success",
         });
+        // Multimodal: confirm which provider actually read the image(s).
+        if (hadImages) {
+          setNotice({
+            tone: "ok",
+            text: `Image analyzed by ${result.meta?.provider ?? result.providerId}`,
+          });
+        }
         if (result.source === "gateway") {
           await loadLastTrace();
         }
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
+          return;
+        }
+        // The gateway refused the image route (no vision-capable provider on
+        // auto): render its honest message + suggestions instead of crashing.
+        if (error instanceof UnsupportedCapabilityError) {
+          const lines = [
+            error.message,
+            "",
+            "Try a vision-capable provider:",
+            ...error.suggestions.map((s) => `- **${s.provider}** — ${s.reason}`),
+          ];
+          updateMessage(assistantId, lines.join("\n"));
+          pushTerminalLine({ text: `✗ ${error.message}`, tone: "warning" });
           return;
         }
         const message =
@@ -283,7 +425,9 @@ export default function ChatPage() {
   );
 
   const send = useCallback(async () => {
-    if (!input.trim() || loading) {
+    // Allow a send when there's text OR at least one attachment (an image with
+    // an empty prompt is valid — the image is the request).
+    if ((!input.trim() && attachments.length === 0) || loading) {
       return;
     }
     // No usable keys anywhere (browser vault locked/empty AND gateway unconfigured)
@@ -304,29 +448,60 @@ export default function ChatPage() {
     }
     const prompt = input.trim();
 
-    // Build user content from text attachments only (images are unsupported
-    // end-to-end — see handleFiles; no fake image notes are injected).
+    // Text-file attachments fold into the prompt (extracted text). Images do NOT
+    // — they ride as real content blocks below; no fake "[Image: …]" note.
     let textPrefix = "";
     for (const att of attachments) {
+      if (att.kind !== "text") continue;
       const ext = att.name.split(".").pop() ?? "txt";
       textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
     }
+    const userText = (textPrefix + prompt).trim();
 
-    const userContent = (textPrefix + prompt.trim()).trim();
+    const imageBlocks = attachments
+      .filter((a): a is ImageAttachment => a.kind === "image")
+      .map((a) => a.block);
+
+    // Vision guard: a concrete non-vision provider can't read images — warn and
+    // hold the message (don't waste a request, don't drop the image). Auto
+    // routing (no explicit provider) is allowed; the router/gateway decides.
+    const effectiveProvider =
+      selectedProvider ?? settings.defaultProvider ?? null;
+    if (
+      imageBlocks.length > 0 &&
+      effectiveProvider &&
+      !providerCanSeeImages(effectiveProvider)
+    ) {
+      setNotice({
+        tone: "warn",
+        text: `${capitalize(effectiveProvider)} can't read images — switch to a vision provider (e.g. Gemini) or remove the image.`,
+      });
+      return;
+    }
+    setNotice(null);
+
+    // The SENT user content: a block array (text first, then images) when images
+    // are attached, else plain text. The gateway reads images from these blocks.
+    const userMessageContent: string | ContentBlock[] =
+      imageBlocks.length > 0
+        ? buildImageMessageContent(userText, imageBlocks)
+        : userText;
 
     const history: ChatMessage[] = [
       ...messages.map((message) => ({
         role: message.role,
         content: message.content,
       })),
-      { role: "user", content: userContent },
+      { role: "user", content: userMessageContent },
     ];
 
-    appendMessage(createUserMessage(userContent));
+    // The stored/displayed user bubble is text only (image thumbnails live in the
+    // composer and are cleared on send).
+    appendMessage(createUserMessage(userText));
     const assistant = createAssistantPlaceholder();
     appendMessage(assistant);
     setInput("");
-    setAttachments([]);
+    clearAttachments();
 
     // Leading system messages, injected once at the start of a new conversation
     // (full history sent; server owns context afterwards). Incognito skips memory.
@@ -347,9 +522,27 @@ export default function ChatPage() {
     const sendMessages: ChatMessage[] =
       threadId == null
         ? [...leading, ...history]
-        : [{ role: "user", content: userContent }];
-    await streamAssistant(assistant.id, sendMessages, prompt, []);
-  }, [activePreset, appendMessage, attachments, incognito, input, loading, messages, streamAssistant, threadId]);
+        : [{ role: "user", content: userMessageContent }];
+    await streamAssistant(
+      assistant.id,
+      sendMessages,
+      prompt || "image attached",
+      imageBlocks.length > 0,
+    );
+  }, [
+    activePreset,
+    appendMessage,
+    attachments,
+    clearAttachments,
+    incognito,
+    input,
+    loading,
+    messages,
+    selectedProvider,
+    settings,
+    streamAssistant,
+    threadId,
+  ]);
 
   const regenerate = useCallback(async () => {
     if (loading) {
@@ -377,7 +570,7 @@ export default function ChatPage() {
       threadId == null
         ? priorMessages
         : [{ role: "user", content: lastUser.content }];
-    await streamAssistant(assistant.id, sendMessages, lastUser.content, []);
+    await streamAssistant(assistant.id, sendMessages, lastUser.content, false);
   }, [appendMessage, dropLastAssistant, loading, messages, streamAssistant, threadId]);
 
   const stop = useCallback(() => {
@@ -536,7 +729,7 @@ export default function ChatPage() {
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
             e.preventDefault();
-            handleFiles(e.dataTransfer.files);
+            void handleFiles(e.dataTransfer.files);
           }}
         >
           <div className="chat-composer-top">
@@ -629,16 +822,13 @@ export default function ChatPage() {
               Search
             </button>
           </div>
-          {imageUnsupported && (
-            <div className="chat-attachments" style={{ alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 12, color: "#f59e0b" }}>
-                Images aren&apos;t supported yet — attach text files (txt, md, code,
-                json…).
-              </span>
+          {notice && (
+            <div className={`chat-composer-notice is-${notice.tone}`} role="status">
+              <span>{notice.text}</span>
               <button
                 type="button"
                 className="chat-attachment-remove"
-                onClick={() => setImageUnsupported(false)}
+                onClick={() => setNotice(null)}
                 aria-label="Dismiss"
               >
                 <Icon name="x" size={11} />
@@ -648,20 +838,40 @@ export default function ChatPage() {
           {attachments.length > 0 && (
             <div className="chat-attachments">
               {attachments.map((att) => (
-                <div key={att.id} className="chat-attachment-chip">
-                  {att.type === "image" ? (
-                    <img src={att.content} alt={att.name} className="chat-attachment-thumb" />
+                <div
+                  key={att.id}
+                  className={`chat-attachment-chip${att.kind === "image" ? " is-image" : ""}`}
+                >
+                  {att.kind === "image" ? (
+                    <>
+                      {/* Preview = original file (object URL). We SEND att.block. */}
+                      <img
+                        src={att.previewUrl}
+                        alt={att.name}
+                        className="chat-attachment-thumb"
+                      />
+                      <span className="chat-attachment-name">{att.name}</span>
+                      <span className="chat-attachment-meta">
+                        {formatImageBytes(att.block.bytes)}
+                      </span>
+                      <span
+                        className="chat-attachment-badge"
+                        title="EXIF/GPS metadata was removed before this image is sent"
+                      >
+                        <Icon name="check" size={10} /> EXIF stripped
+                      </span>
+                    </>
                   ) : (
-                    <Icon name="paperclip" size={12} />
+                    <>
+                      <Icon name="paperclip" size={12} />
+                      <span className="chat-attachment-name">{att.name}</span>
+                    </>
                   )}
-                  <span className="chat-attachment-name">{att.name}</span>
                   <Tooltip content={`Remove ${att.name}`}>
                     <button
                       type="button"
                       className="chat-attachment-remove"
-                      onClick={() =>
-                        setAttachments((prev) => prev.filter((a) => a.id !== att.id))
-                      }
+                      onClick={() => removeAttachment(att.id)}
                       aria-label={`Remove ${att.name}`}
                     >
                       <Icon name="x" size={11} />
@@ -675,10 +885,14 @@ export default function ChatPage() {
             <input
               type="file"
               ref={fileInputRef}
-              accept=".txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
+              accept="image/jpeg,image/png,image/webp,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
               multiple
               style={{ display: "none" }}
-              onChange={(e) => e.target.files && handleFiles(e.target.files)}
+              onChange={(e) => {
+                if (e.target.files) void handleFiles(e.target.files);
+                // Reset so picking the same file again re-triggers onChange.
+                e.target.value = "";
+              }}
             />
             <textarea
               ref={inputRef}
@@ -695,17 +909,17 @@ export default function ChatPage() {
               }}
               onPaste={(e) => {
                 if (e.clipboardData.files.length > 0) {
-                  handleFiles(e.clipboardData.files);
+                  void handleFiles(e.clipboardData.files);
                 }
               }}
               placeholder="Ask anything — routed automatically across your free providers"
             />
-            <Tooltip content="Attach a text file (images not supported yet)">
+            <Tooltip content="Attach an image (PNG/JPEG/WebP) or a text file">
               <button
                 type="button"
                 className="chat-attach"
                 onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach a text file"
+                aria-label="Attach an image or text file"
               >
                 <Icon name="paperclip" size={15} />
               </button>

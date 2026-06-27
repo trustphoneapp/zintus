@@ -1,4 +1,9 @@
-import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
+import type {
+  ContentBlock,
+  ContextMode,
+  ProviderId,
+  RoutingStrategy,
+} from "@zintus/types";
 
 export const GATEWAY_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";
@@ -411,8 +416,42 @@ export interface ChatMeta {
   privacyHonored?: boolean;
 }
 
+/** One actionable provider suggestion from the gateway's capability error. */
+export interface CapabilitySuggestion {
+  provider: string;
+  reason: string;
+}
+
+/**
+ * Thrown when the gateway refuses a request because the chosen route can't serve
+ * a required capability (today: vision). Carries the gateway's honest, no-upsell
+ * `message` + `suggestions` so the UI can render them instead of crashing on a
+ * generic error. Mirrors the 422 `{error:{type:"unsupported_capability",…}}`
+ * body from apps/gateway/src/handler.ts.
+ */
+export class UnsupportedCapabilityError extends Error {
+  readonly required: string[];
+  readonly suggestions: CapabilitySuggestion[];
+  constructor(
+    message: string,
+    required: string[],
+    suggestions: CapabilitySuggestion[],
+  ) {
+    super(message);
+    this.name = "UnsupportedCapabilityError";
+    this.required = required;
+    this.suggestions = suggestions;
+  }
+}
+
 export async function streamGatewayChat(params: {
-  messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  // Content is `string` (text-only) OR an ordered `ContentBlock[]` (multimodal:
+  // a text block followed by image blocks). The gateway reads images from these
+  // blocks — there is NO separate `images` field (it would be stripped).
+  messages: Array<{
+    role: "user" | "assistant" | "system";
+    content: string | ContentBlock[];
+  }>;
   providerId?: ProviderId;
   defaultProvider?: ProviderId;
   strategy?: RoutingStrategy;
@@ -424,7 +463,6 @@ export async function streamGatewayChat(params: {
   allowTraining?: ProviderId[];
   keys?: Partial<Record<ProviderId, string>>;
   temperature?: number;
-  images?: Array<{ data: string; mimeType: string; name: string }>;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<{
@@ -461,15 +499,32 @@ export async function streamGatewayChat(params: {
         Object.keys(params.keys).length > 0
           ? params.keys
           : undefined,
-      images: params.images ?? [],
     }),
     signal: params.signal,
   });
 
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
-      error?: { message?: string };
+      error?: {
+        message?: string;
+        type?: string;
+        required?: string[];
+        suggestions?: CapabilitySuggestion[];
+      };
     } | null;
+    // A vision request that can't reach a vision-capable route comes back as a
+    // structured 422 — surface its message + suggestions instead of a crash.
+    if (
+      response.status === 422 &&
+      body?.error?.type === "unsupported_capability"
+    ) {
+      throw new UnsupportedCapabilityError(
+        body.error.message ??
+          "Image input requires a vision-capable provider or local vision model.",
+        body.error.required ?? ["vision"],
+        body.error.suggestions ?? [],
+      );
+    }
     throw new Error(body?.error?.message ?? `Gateway error ${response.status}`);
   }
 

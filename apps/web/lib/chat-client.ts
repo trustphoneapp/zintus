@@ -1,4 +1,9 @@
-import type { AppConfig, ContextMode, ProviderId } from "@zintus/types";
+import type {
+  AppConfig,
+  ContentBlock,
+  ContextMode,
+  ProviderId,
+} from "@zintus/types";
 import {
   fetchGatewayHealth,
   streamGatewayChat,
@@ -6,9 +11,12 @@ import {
   type CompressionStats,
 } from "./gateway";
 
+export { UnsupportedCapabilityError } from "./gateway";
+
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
-  content: string;
+  /** Plain text, OR an ordered content-block array (text first, then images). */
+  content: string | ContentBlock[];
 }
 
 export interface StreamChatResult {
@@ -36,7 +44,6 @@ export async function streamChat(params: {
   settings?: AppConfig;
   webSearch?: boolean;
   temperature?: number;
-  images?: Array<{ data: string; mimeType: string; name: string }>;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<StreamChatResult> {
@@ -60,7 +67,6 @@ export async function streamChat(params: {
     allowTraining: params.settings?.allowTrainingProviders,
     keys: params.apiKeys,
     temperature: params.temperature,
-    images: params.images,
     signal: params.signal,
     onChunk: params.onChunk,
   });
