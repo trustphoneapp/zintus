@@ -11,6 +11,13 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 > **UNVERIFIABLE from this branch** — its cited `apps/mobile/BUILD-STATUS.md` lives
 > on that branch, not here. Treat the mobile column as *claimed, not certified*
 > until that branch is checked out or merged.
+>
+> **Audit 2026-06-26:** a re-audit confirmed the rich mobile features (markdown,
+> projects, research, consent gate, history, file/voice, report) are **ABSENT on
+> `feat/cross-surface-parity`** and exist only on `feat/mobile-serious-app`
+> (+4497 lines / 18 files). Every Mobile ✅ below is *that branch*, not this one;
+> the on-branch app is a basic single-screen text chat. See "Audit corrections"
+> below.
 
 | # | Feature | Mobile | Web | Desktop | CLI | Notes / source |
 |---|---------|:---:|:---:|:---:|:---:|----------------|
@@ -20,8 +27,8 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 4 | provider override | ✅ | ✅ | ✅ | ✅ | web `ProviderPicker`, desktop `ProviderRail` |
 | 5 | auto routing | ✅ | ✅ | ✅ | ✅ | omit provider → gateway strategy |
 | 6 | routing strategy | ✅ | ✅ | ✅ | ✅ | all 4; desktop now has a Fastest/Capability/Cheapest select in the composer |
-| 7 | markdown rendering | ✅ | ✅ | ✅ | 🟡 | desktop now uses dep-free `Markdown.tsx` (parity with mobile) |
-| 8 | code block copy | ✅ | 🟡 | ✅ | 🚫 | desktop code blocks have Copy; verify web; CLI = terminal |
+| 7 | markdown rendering | ✅ | ⚠️ | ✅ | 🟡 | desktop/mobile use dep-free `Markdown.tsx`; **web does NOT** — `MessageBubble.tsx:11-34` strips ```` ``` ```` fences, renders only `- ` bullets (no headers/bold/tables/inline-code). See Audit corrections. |
+| 8 | code block copy | ✅ | ❌ | ✅ | 🚫 | desktop code blocks have Copy; **web has none** (only whole-message copy, `MessageBubble.tsx:52`); CLI = terminal |
 | 9 | response intelligence footer | ✅ | ✅ | ✅ | 🟡 | desktop now parses the `metadata` SSE frame (latency/saved-vs-Claude/out-tokens/strategy) + compression badge; route-options live in a side panel. CLI partial |
 | 10 | compression % | ✅ | ✅ | ✅ | 🟡 | `X-Zintus-*` headers everywhere |
 | 11 | tokens saved | ✅ | ✅ | 🟡 | 🟡 | |
@@ -32,7 +39,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
 | 17 | projects / workspaces | ✅ | ✅ | ✅ | ✅ | all 4; CLI `projects list/create/use/clear/delete` (CRUD live-verified) + `chat` injects the active project's instructions + default provider |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
-| 19 | provider key management | ✅ | ✅ | ✅ | ✅ | web `LocalKeyManager`, desktop `ProvidersScreen`, CLI `keys` |
+| 19 | provider key management | ✅ | ✅ | ⚠️ | ✅ | web `LocalKeyManager`, CLI `keys` work; **desktop `ProvidersScreen` is broken** — frontend (`lib/tauri.ts`) calls the uninitialized `tauri-plugin-keyring-api` plugin instead of the shipped Rust `keyring_*` cmds (`lib.rs:11-34`), so "Save key" fails; also no key→gateway sync (gateway reads service `zintus`, desktop writes `com.zintus.desktop`). See Audit corrections. |
 | 20 | provider key test | ✅ | 🟡 | 🟡 | ✅ | mobile explicit Test; CLI now has `zintus keys test <provider>`; web/desktop validate-on-save only |
 | 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |
 | 22 | one-tap local runtime | ✅ | ❌ | ❌ | 🚫 | CLI = `--provider ollama` |
@@ -40,9 +47,58 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 24 | image input | ❌ | 🚫 | ❌ | 🚫 | web image attach **removed** (was a silent no-op that injected a fake "[Image: …]" note); now text-only + an honest "images unsupported" notice. Multimodal = `docs/multimodal-image-plan.md` |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
-| 27 | report AI response | ✅ | 🟡 | ✅ | ❌ | mobile + desktop have the Gen-AI flag control; verify web |
+| 27 | report AI response | ✅ | ❌ | ✅ | ❌ | desktop has the Gen-AI flag control; **web has none** (no report UI in `MessageBubble.tsx`); CLI n/a |
 | 28 | account / session / cloud remote | ✅ | ✅ | 🟡 | ✅ | web login/session; CLI `cloud`+`remote` |
 | 29 | export / share | ✅ | ✅ | 🟡 | ❌ | web works; desktop uses Blob+`a.download` — **unverified in the Tauri webview** (may need an fs/dialog plugin), test on a packaged build; CLI none |
+
+## ⚠️ Audit corrections (2026-06-26 war-room re-audit + human cross-check)
+
+Several rows above were stale/optimistic. Corrected inline; recorded here with cites:
+
+- **Web markdown (#7) is not real, and web code-copy (#8) is absent.**
+  `apps/web/app/_components/MessageBubble.tsx:11-34` strips ```` ``` ```` fences and
+  renders only `- ` bullets (no headers/bold/tables/inline-code); the only
+  whole-message copy is at line 52. Web never got the `Markdown.tsx` desktop/mobile
+  use. (#7 web ✅→⚠️, #8 web 🟡→❌.)
+- **Desktop provider-key management (#19) is broken — but the keyring *backend*
+  exists.** `apps/desktop/lib/tauri.ts:13,28,36` imports `tauri-plugin-keyring-api`
+  (→ `plugin:keyring|*`), but that plugin is **not initialized** — `src-tauri/src/lib.rs:58-60`
+  registers only pty+updater. The app *does* ship working Rust keyring commands
+  (`lib.rs:11-34` `keyring_get/set/delete`, wired into the invoke handler), so the fix
+  is to **repoint the frontend to `invoke("keyring_*")`** — *not* "no keyring backend."
+  Separately there is **no key→gateway sync**: desktop uses service `com.zintus.desktop`
+  while the gateway reads `zintus` (`packages/keychain/src/storage.ts:6`), so desktop
+  keys aren't visible to the chat path even once stored. (#19 desktop ✅→⚠️.)
+- **Web report-AI (#27) is absent**, not partial — no report control in
+  `MessageBubble.tsx`. (#27 web 🟡→❌.)
+- **Desktop icons:** the prior "real multi-res icons" wording (here) and the
+  "299 B/321 B stubs" note (`RELEASE-CHECKLIST.md §1`) were *both* stale. Current truth:
+  icons were regenerated to **multi-resolution** (`icon.ico` = 6 sizes incl. 16/32 px,
+  ~2 KB; `icon.icns` ~12.6 KB) — no longer single-size stubs — but still **small /
+  low-fidelity placeholders**, not a release-quality 1024²-sourced set. [HUMAN] art
+  still required.
+- **Desktop shortcuts/menu:** ⌘N/⌘,/⌘⇧F exist as **frontend keydown handlers**
+  (`apps/desktop/src/AppShell.tsx:64-83`), but there is **no native Tauri menu** and
+  ⌘⇧F "Find" is a stub that just navigates to `/chat` (no search). `RELEASE-CHECKLIST.md`'s
+  "not present" is wrong; "present as JS, no native menu, Find is fake" is right.
+- **`docs/multimodal-image-plan.md`** (referenced in row #24 + the issues list below)
+  is **absent on this branch**; it exists on `feat/mobile-serious-app`. Branch drift,
+  not a missing-forever plan.
+- **Project `strategy`:** the apply-path works *if* a strategy is set, but the **web
+  project form exposes no strategy control** (`apps/web/app/projects/page.tsx`), so
+  web-created projects are always `strategy: null`. The "made strategy actually applied"
+  note (web fixes, below) was overstated for web.
+- **Private Mode** is best-effort and **not fully honest**: `"unknown"`-training
+  providers aren't filtered (`packages/providers/src/data-policies.ts:131`) and there's
+  no per-response "not honored" signal — tracked as a P0 honesty fix (separate PR).
+- **Whole Mobile column = `feat/mobile-serious-app`, not this branch** (see caveat at
+  top): the rich features are confirmed **absent** here; the on-branch app is a basic
+  single-screen text chat.
+
+Verified green at audit time: `bun run typecheck` exit 0; full `bun run test` exit 0
+(**0 failures**; exact test count not asserted here — capture from CI). Capability gaps
+confirmed absent stack-wide: **tool/function calling, multimodal image input,
+structured/JSON output.**
 
 ## Cross-surface issues to resolve (ranked)
 
@@ -54,7 +110,8 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 2. **Desktop parity — essentially closed on this branch.** Shipped markdown+
    code-copy, regenerate, export, consent gate, Private Mode, Deep Research,
    report, projects, **file input (#23)**, **response footer (#9)**, **first-run
-   onboarding overlay**, real multi-res app icons (were stubs), and Cmd+N/Cmd+,/
+   onboarding overlay**, multi-res app icons (regenerated from single-size stubs but
+   still placeholder-grade — see Audit corrections), and Cmd+N/Cmd+,/
    Cmd+Shift+F shortcuts (all typecheck + `next build` green). Remaining desktop:
    history search/rename UI (#16 — sidebar already lists recent threads), a
    routing-strategy chip (#6), and the Tauri **native menu** items (About/

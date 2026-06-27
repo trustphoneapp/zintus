@@ -38,9 +38,11 @@ Apple requires every developer to declare, in App Store Connect, what data the
 app **and its third-party SDKs** collect and how it's used — required to submit
 any new app or update. Ground the answers in the BYOK reality:
 
-- Provider **API keys**: stored on-device only (OS keyring); pushed to the
-  user's own gateway as opaque **x25519 ciphertext** via the relay — the relay
-  **cannot read them**. Not "collected" by Zintus.
+- Provider **API keys**: stored on-device only (OS keyring); on **mobile**,
+  pushed to the user's own gateway as opaque **x25519 ciphertext** via the relay
+  — the relay **cannot read them**. (Audit 2026-06-26: this x25519 push is the
+  *mobile* path; the **desktop** has no key→gateway push yet, and its keyring
+  write path is currently broken — see §3.1.) Not "collected" by Zintus.
 - **Prompts / chat content**: device → gateway → chosen provider; not collected
   by Zintus servers on the BYOK/LAN path.
 - **Relay**: auth + routing + quota metadata only (+ optional Sentry). No prompt
@@ -113,7 +115,7 @@ Full reviewer script is in [`store/review-notes.md`](./store/review-notes.md).
 ### 3.1 Where data goes
 | Data | Stored / sent where | Touches Zintus servers? |
 |---|---|---|
-| Provider API keys | OS keyring (`com.zintus.desktop`); pushed to user's gateway as x25519 ciphertext via relay | Relay forwards ciphertext only — **cannot read** |
+| Provider API keys | OS keyring (service `com.zintus.desktop`) on-device. **Audit 2026-06-26:** the desktop has **no** key→gateway push — the "x25519 ciphertext via relay" flow is the *mobile* model, **not implemented on desktop**; and the desktop keyring write path is currently broken (frontend calls an uninitialized `tauri-plugin-keyring-api` plugin instead of the shipped Rust `keyring_*` commands). The gateway reads keys from its own keychain (service `zintus`), set via the CLI. | Keys never leave device; **relay not involved on the desktop key path** |
 | Prompts / chat | device → local/own gateway → user-chosen provider | **No** (BYOK/LAN path) |
 | Auth / session | relay (Google sign-in, cookie) — optional, only for Remote/Cloud | Yes (auth metadata only) |
 | Quota / usage counts | gateway owns the ledger; relay counts quota | Metadata only — no prompt bodies |

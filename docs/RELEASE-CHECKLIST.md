@@ -33,12 +33,12 @@ Read from `apps/desktop/src-tauri/tauri.conf.json`, `Cargo.toml`,
 | `identifier` | `app.zintus.desktop` | Present and valid — **not** empty. |
 | `bundle.targets` | `"all"` | → macOS `app`+`dmg`, Windows `nsis`+`msi`, Linux `deb`+`rpm`+`appimage`. |
 | `bundle.publisher` | `YS Ventures LLC` | |
-| `bundle.icon` | `32x32.png, 128x128.png, 128x128@2x.png, icon.icns, icon.ico` | **All are placeholder stubs** (`icon.icns` 299 B, `icon.ico` 321 B, PNGs 104–665 B) — must be regenerated from a real 1024² master before any public release (see §1). |
+| `bundle.icon` | `32x32.png, 128x128.png, 128x128@2x.png, icon.icns, icon.ico` | **Multi-resolution but low-fidelity placeholders** (updated 2026-06-26: `icon.icns` ~12.6 KB, `icon.ico` = 6 sizes incl. 16/32 px ~2 KB — no longer single-size stubs, but tiny/low-detail). Still regenerate from a real 1024² master before any public release (see §1). |
 | `bundle.createUpdaterArtifacts` | `false` | Auto-update fully OFF. |
 | `plugins.updater` block | **absent** | `tauri-plugin-updater` is compiled in (`Cargo.toml`) + granted (`updater:default`) + registered (`lib.rs`), but inert without endpoints/pubkey. |
 | `bundle.macOS` block | **absent** | No `signingIdentity`/`entitlements`/`hardenedRuntime`/`minimumSystemVersion` set → Tauri defaults + env-supplied identity apply (see §2). |
 | `bundle.windows.signCommand` | **absent** | ⚠️ Windows ships **UNSIGNED** even though `AZURE_*` env is wired (see §3.2). |
-| App menu / shortcuts | only `Cmd/Ctrl+Enter` (send, `ChatPanel.tsx`) | No `New`/`Find`/`Preferences` items or accelerators in `lib.rs` or the frontend (see §2.6). |
+| App menu / shortcuts | `Cmd/Ctrl+Enter` (send) + ⌘N/⌘,/⌘⇧F **frontend keydowns** (`AppShell.tsx:64-83`) | **No native Tauri menu** (`lib.rs` has no `MenuBuilder`); the JS shortcuts exist but ⌘⇧F "Find" is a **stub** that just navigates to `/chat` (no search). Corrected 2026-06-26 — prior "not present" was wrong (see §2.6). |
 | CSP `connect-src` | `localhost:8787` + `localhost:8788` + provider hosts | Local gateway + direct provider domains; no `api.anthropic.com`/`api.openai.com` (those route through the gateway). |
 | CI matrix | `universal-apple-darwin` / `x86_64-pc-windows-msvc` / `x86_64-unknown-linux-gnu` | macOS is **universal** (Intel + Apple Silicon). No arm64 Windows, no aarch64 Linux. |
 
@@ -181,14 +181,16 @@ Hide / Hide Others / Show All, **Quit ⌘Q**), **Edit** (Undo/Redo/Cut/Copy/Past
 Select All), **Window** (Minimize, Zoom, **Close ⌘W**), View, Help. `lib.rs`
 sets **no** custom menu, so those are the *only* items.
 
-**Not implemented — must be built** (native `MenuBuilder` accelerators in
-`lib.rs` and/or frontend `keydown`):
+**Native menu not implemented** — these exist as frontend `keydown` handlers
+(`AppShell.tsx:64-83`) but have **no native `MenuBuilder` items in `lib.rs`**, and
+⌘⇧F "Find" is a stub (navigates to `/chat`, no search). To build: native menu +
+a real Find:
 
 | Shortcut | Action | Status |
 |---|---|---|
-| ⌘N | New chat | 🔑 [HUMAN] add — not present |
-| ⌘⇧F | Find / search | 🔑 [HUMAN] add — not present |
-| ⌘, | Preferences/Settings | 🔑 [HUMAN] add — not present (the macOS-conventional Preferences item is absent) |
+| ⌘N | New chat | 🟡 present as a **frontend keydown** (`AppShell.tsx:64-83`), **not** a native menu item |
+| ⌘⇧F | Find / search | ⚠️ keydown exists but is a **stub** — just navigates to `/chat`, no search UI; no native menu item |
+| ⌘, | Preferences/Settings | 🟡 present as a **frontend keydown**, **not** a native menu item (macOS-conventional Preferences menu still absent) |
 | ⌘W | Close window | ✅ provided by default Window menu |
 | ⌘Q | Quit | ✅ provided by default App menu |
 | ⌘↵ | Send message | ✅ implemented (`ChatPanel.tsx`) |

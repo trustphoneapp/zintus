@@ -3,6 +3,13 @@
 Audit date: June 16, 2026
 Repo: `/Users/yashwanthsurabhi/Projects/zintus`
 
+> ⚠️ **Superseded in places (2026-06-26).** A war-room re-audit found several ✅
+> here are now stale — notably **Desktop key management is broken** (frontend
+> calls an uninitialized keyring plugin) and "strategy wired" doesn't hold for the
+> web project form. For current honest status see
+> [`docs/FEATURE-MATRIX.md`](docs/FEATURE-MATRIX.md) → "Audit corrections". The
+> "128 tests" figure below is also stale (suite is green; exact count not asserted).
+
 Legend: ✅ done · 🟡 partial / needs config · ❌ missing
 
 This is an honest status sheet, not a sales sheet. "Done" means the behavior
