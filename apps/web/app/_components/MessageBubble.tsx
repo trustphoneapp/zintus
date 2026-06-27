@@ -35,6 +35,30 @@ export function MessageBubble({
     }
   }
 
+  function report() {
+    // Play Gen-AI policy / Apple 1.2: an in-app way to flag offensive AI content.
+    // Parity with desktop — saved on-device (same key/shape), not sent anywhere.
+    const ok = window.confirm(
+      "Flag this AI-generated response as offensive, unsafe, or inaccurate? " +
+        "This stays on your device and helps you track problem providers.",
+    );
+    if (!ok) return;
+    try {
+      const KEY = "zintus:reported-responses.v1";
+      const list = JSON.parse(localStorage.getItem(KEY) ?? "[]") as unknown[];
+      list.push({
+        providerId: message.providerId ?? null,
+        model: message.model ?? null,
+        at: Date.now(),
+        excerpt: message.content.slice(0, 280),
+      });
+      localStorage.setItem(KEY, JSON.stringify(list));
+      window.alert("Reported — flagged and saved on this device.");
+    } catch {
+      window.alert("Reported.");
+    }
+  }
+
   return (
     <div className={`message-row${isUser ? " user" : ""}`}>
       {!isUser && provider ? (
@@ -92,6 +116,16 @@ export function MessageBubble({
               >
                 <Icon name="refresh" size={13} />
                 Regenerate
+              </button>
+            ) : null}
+            {!isUser ? (
+              <button
+                type="button"
+                className="message-action"
+                onClick={report}
+                title="Flag this AI response as offensive, unsafe, or inaccurate"
+              >
+                Report
               </button>
             ) : null}
           </div>
