@@ -199,8 +199,11 @@ leaks no raw key — but caught a P1 + P2, both fixed:
   ledger/transfer code exists** (referral `commission_cents` is tracked but nothing
   moves money, and no referral row can be created while checkout is gated).
   web/desktop/cli POST prompts straight to the gateway; BYOK keys go only to a
-  loopback gateway (`isLoopbackGateway` guard) or E2E-encrypted; relay logs are
-  redacted. Single execution plane (`@zintus/engine`).
+  loopback gateway (`isLoopbackGateway` guard) or E2E-encrypted — **with one
+  documented exception: the hosted-web "test key" path transits a plaintext key
+  to the validate-key worker (SECURITY.md §key-validation); validate locally on
+  the gateway to avoid it**; relay logs are redacted. Single execution plane
+  (`@zintus/engine`).
 - **Security baseline strong** (redacted logs, OS keychain, web vault AES-GCM +
   PBKDF2-600k, Stripe HMAC + replay window, scoped account deletion).
 - **✅ FIXED — open tokenless gateway (was P1; two layers).** A brutal cross-check
