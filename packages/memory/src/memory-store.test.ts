@@ -62,6 +62,33 @@ describe("MemoryStore facts", () => {
     }).not.toThrow();
   });
 
+  test("re-opening the db re-inserts existing vec0 rowids (upsert path) without crashing", async () => {
+    const reopenDir = mkdtempSync(join(tmpdir(), "zintus-mem-reopen-"));
+    const dbPath = join(reopenDir, "memory.db");
+    try {
+      const first = new MemoryStore(dbPath);
+      first.init();
+      await first.embedAndStoreChunk("t1", "bun install fetches the project dependencies");
+      await first.embedAndStoreChunk("t1", "sqlite keeps data in one local file");
+      (first as unknown as { sqlite: { close(): void } }).sqlite.close();
+
+      // Re-open: init() -> restoreVectorTable() -> backfillVectorTable() re-inserts
+      // every already-persisted rowid into the vec0 table. INSERT OR REPLACE raises
+      // a UNIQUE constraint on the vec0 vtable on Linux CI; DELETE-then-INSERT is
+      // the supported upsert idiom, so the re-insert must not throw...
+      const second = new MemoryStore(dbPath);
+      expect(() => second.init()).not.toThrow();
+
+      // ...and the rows survive the upsert and stay retrievable.
+      const matches = await second.searchChunks("t1", "how do I install bun dependencies?", 2);
+      expect(matches.length).toBeGreaterThan(0);
+      expect(matches.some((m) => m.content.includes("bun install"))).toBe(true);
+      (second as unknown as { sqlite: { close(): void } }).sqlite.close();
+    } finally {
+      rmSync(reopenDir, { recursive: true, force: true });
+    }
+  });
+
   test("appendChunk round-trips the embedding it was given", () => {
     const embedding = [0.1, 0.2, 0.3, 0.4];
     const row = store.appendChunk({ threadId: "t1", content: "x", embedding });
