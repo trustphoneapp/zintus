@@ -745,7 +745,7 @@ code {
   color: var(--color-text);
 }
 
-/* Compression savings badge — under an assistant message (Tokzen proof). */
+/* Compression savings badge — under an assistant message (compression proof). */
 .compression-badge {
   display: inline-flex;
   align-items: center;

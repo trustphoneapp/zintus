@@ -98,7 +98,7 @@ paths:
       summary: Create a chat completion (streaming or non-streaming)
       description: |
         OpenAI-compatible chat completion. Routes the request across configured
-        free-tier providers, optionally compresses context (Tokzen) and injects
+        free-tier providers, optionally compresses context (intelligent compression) and injects
         web-search results before calling the upstream.
 
         Provide either `messages`, or `message` together with `thread_id`.

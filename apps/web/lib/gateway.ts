@@ -108,7 +108,7 @@ export async function fetchGatewayHealth(): Promise<GatewayHealth | null> {
 }
 
 /**
- * Tokzen compression savings for a single chat response, parsed from the
+ * Compression savings for a single chat response, parsed from the
  * gateway's derived-only `X-Zintus-*` headers. The gateway emits these ONLY
  * when real compression happened (compressedTokens < originalTokens); the USD
  * figure is an ESTIMATE off a non-billing pricing table.

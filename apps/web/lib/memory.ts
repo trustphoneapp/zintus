@@ -25,7 +25,7 @@ export function saveMemory(entries: string[]): void {
 /**
  * Memory as a system message to prepend at the start of a conversation. Wrapped
  * in a tag so the model treats it as background, not an instruction to obey
- * blindly. Tokzen on the gateway compresses it like any other context.
+ * blindly. The gateway compresses it like any other context.
  */
 export function memorySystemMessage(): ChatMessage | null {
   const entries = loadMemory();

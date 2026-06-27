@@ -44,7 +44,7 @@ const RELEASES: Release[] = [
       {
         heading: "Deployment",
         items: [
-          "Docker image is now self-contained and hardened: builds tokzen's dist in-image, multi-stage, non-root USER bun, HEALTHCHECK, digest-pinned base. CI runs a docker run + /health smoke on PRs and main.",
+          "Docker image is now self-contained and hardened: multi-stage, non-root USER bun, HEALTHCHECK, digest-pinned base. CI runs a docker run + /health smoke on PRs and main.",
         ],
       },
       {

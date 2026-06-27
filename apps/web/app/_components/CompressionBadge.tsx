@@ -6,7 +6,7 @@ function fmtUsd(value: number): string {
 }
 
 /**
- * Honest, per-response proof that Tokzen compression saved tokens before the
+ * Honest, per-response proof that intelligent compression saved tokens before the
  * prompt hit the provider — e.g. "Compressed 64% · saved 8,200 tokens (~$0.03
  * est)". Rendered ONLY when the gateway sent real savings (the parent passes a
  * non-null `compression`); the dollar figure is labelled an estimate because
@@ -23,7 +23,7 @@ export function CompressionBadge({ stats }: { stats: CompressionStats }) {
   return (
     <div
       className="compression-badge"
-      title="Tokzen compressed your prompt before sending it to the provider. The cost figure is an estimate, not a charge."
+      title="Your prompt was compressed before sending it to the provider. The cost figure is an estimate, not a charge."
     >
       <span className="compression-badge-icon" aria-hidden>
         ⤵

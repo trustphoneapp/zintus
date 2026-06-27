@@ -17,7 +17,7 @@ export interface UiMessage {
   compileTokens?: number;
   /** Per-response transparency metadata (tokens, latency, savings). */
   meta?: ChatMeta;
-  /** Tokzen compression savings for this response (present only on a real hit). */
+  /** Compression savings for this response (present only on a real hit). */
   compression?: CompressionStats;
   time: string;
 }
