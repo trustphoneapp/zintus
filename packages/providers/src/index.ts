@@ -26,6 +26,7 @@ export {
 export {
   DATA_POLICIES,
   trainsOnUserData,
+  mayTrainOnUserData,
   type DataPolicy,
   type TrainingBadge,
 } from "./data-policies.js";

@@ -390,6 +390,7 @@ interface GatewayChunk {
   cost_usd?: number;
   saved_vs_claude_sonnet?: number;
   routing_strategy?: string;
+  private_mode_honored?: boolean;
 }
 
 /** Per-response transparency metadata (parsed from the SSE metadata event). */
@@ -402,6 +403,12 @@ export interface ChatMeta {
   costUsd: number;
   savedUsd: number;
   routingStrategy: string;
+  /**
+   * Privacy-mode honesty: `undefined` when private mode was off, `true` when
+   * honored, `false` when the gateway had to use a may-train/"unknown" provider
+   * anyway. The UI shows a "Private Mode not honored" warning when `false`.
+   */
+  privacyHonored?: boolean;
 }
 
 export async function streamGatewayChat(params: {
@@ -496,6 +503,7 @@ export async function streamGatewayChat(params: {
         costUsd: chunk.cost_usd ?? 0,
         savedUsd: chunk.saved_vs_claude_sonnet ?? 0,
         routingStrategy: chunk.routing_strategy ?? "auto",
+        privacyHonored: chunk.private_mode_honored,
       };
       return;
     }

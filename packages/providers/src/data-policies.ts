@@ -131,3 +131,14 @@ export const DATA_POLICIES: Record<ProviderId, DataPolicy> = {
 export function trainsOnUserData(providerId: ProviderId): boolean {
   return DATA_POLICIES[providerId]?.trainsOnData === true;
 }
+
+/**
+ * Privacy-mode predicate: true when a provider MAY train on free-tier data — it
+ * trains OR its policy is `"unknown"` (conservative). Used to filter candidates
+ * under `blockTrainingProviders`, so an undocumented ("unknown") provider is NOT
+ * silently treated as private-safe. Distinct from `trainsOnUserData` (strict,
+ * badge-only). A provider with no policy entry is treated as may-train.
+ */
+export function mayTrainOnUserData(providerId: ProviderId): boolean {
+  return DATA_POLICIES[providerId]?.trainsOnData !== false;
+}

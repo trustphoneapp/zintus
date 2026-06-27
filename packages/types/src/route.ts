@@ -72,4 +72,15 @@ export interface RouteStreamResult {
   providerId: ProviderId;
   model: string;
   stream: AsyncIterable<string>;
+  /**
+   * Privacy-mode honesty signal. `undefined` when `blockTrainingProviders` was
+   * not requested. `true` when the winning provider is privacy-safe (does not
+   * train, or was explicitly allowed). `false` when private mode could NOT be
+   * honored — every available provider may train (or has an "unknown" policy)
+   * and one was used anyway because filtering would have stranded the request.
+   * Surfaces MUST render a "Private Mode not honored — used <provider>" signal
+   * when this is `false`; silently using a training provider is the bug this
+   * field exists to prevent.
+   */
+  privacyHonored?: boolean;
 }

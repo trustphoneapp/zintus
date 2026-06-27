@@ -621,6 +621,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
         compileTokenEstimate,
         cacheHit: "miss",
         failoverCount: attempts.filter((a) => a.status === "fail").length,
+        privacyHonored: result.privacyHonored,
       };
     },
 

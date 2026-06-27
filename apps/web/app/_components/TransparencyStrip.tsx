@@ -59,6 +59,14 @@ export function TransparencyStrip({ meta }: { meta: ChatMeta }) {
             saved ~{fmtUsd(meta.savedUsd)}
           </span>
         ) : null}
+        {meta.privacyHonored === false ? (
+          <span
+            style={{ color: "#f59e0b", fontWeight: 600 }}
+            title="Private Mode was on, but every available provider may train on data (or has an undocumented policy), so one was used anyway. Add a no-training provider key (e.g. Groq, Cerebras, Mistral) or run Ollama locally."
+          >
+            ⚠ Private Mode not honored
+          </span>
+        ) : null}
         <span className="transparency-caret">{open ? "▾ details" : "▸ details"}</span>
       </button>
 
@@ -80,6 +88,22 @@ export function TransparencyStrip({ meta }: { meta: ChatMeta }) {
           <dd className="transparency-saved">~{fmtUsd(meta.savedUsd)}</dd>
           <dt>Routing strategy</dt>
           <dd>{strategy}</dd>
+          {meta.privacyHonored !== undefined ? (
+            <>
+              <dt>Private Mode</dt>
+              <dd
+                style={
+                  meta.privacyHonored
+                    ? undefined
+                    : { color: "#f59e0b", fontWeight: 600 }
+                }
+              >
+                {meta.privacyHonored
+                  ? "Honored — no-training provider"
+                  : `Not honored — used ${provider?.name ?? meta.provider} (may train / undocumented)`}
+              </dd>
+            </>
+          ) : null}
         </dl>
       ) : null}
     </div>

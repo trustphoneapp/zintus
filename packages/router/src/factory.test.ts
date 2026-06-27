@@ -40,6 +40,16 @@ function createTestRouter(providers: Provider[]) {
     estimateUsage,
     // Match the real trainers used by the privacy filter (see data-policies.ts).
     trainsOnUserData: (id: ProviderId) => id === "gemini" || id === "cohere",
+    // may-train = trains OR an "unknown" policy (openrouter/deepseek/xai/
+    // huggingface). The privacy filter uses THIS predicate, so an undocumented
+    // provider is dropped under private mode rather than silently leaking.
+    mayTrainOnUserData: (id: ProviderId) =>
+      id === "gemini" ||
+      id === "cohere" ||
+      id === "openrouter" ||
+      id === "deepseek" ||
+      id === "xai" ||
+      id === "huggingface",
   }));
 
   return createRouter({
@@ -110,6 +120,8 @@ describe("createRouter failover", () => {
     }
     expect(result.providerId).toBe("groq");
     expect(calls).not.toContain("gemini");
+    // groq is a no-training provider → privacy was honored.
+    expect(result.privacyHonored).toBe(true);
   });
 
   test("allowTrainingProviders re-admits a blocked provider", async () => {
@@ -129,6 +141,71 @@ describe("createRouter failover", () => {
     }
     // Only gemini exists; the allow-list keeps it, so the request still routes.
     expect(result.providerId).toBe("gemini");
+    // The user explicitly allowed gemini → privacy is considered honored.
+    expect(result.privacyHonored).toBe(true);
+  });
+
+  test("privacyHonored=false when only may-train providers remain (strand fallback)", async () => {
+    // Only gemini (a trainer) is available and it is NOT allow-listed. Filtering
+    // would strand the request, so the router uses it anyway — but must FLAG that
+    // privacy could not be honored instead of silently training on the prompt.
+    const router = createTestRouter([
+      stubProvider("gemini", 1, async () => ({
+        stream: (async function* () { yield { content: "g" }; })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({
+      messages,
+      blockTrainingProviders: true,
+    });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(result.providerId).toBe("gemini");
+    expect(result.privacyHonored).toBe(false);
+  });
+
+  test("privacy mode excludes 'unknown'-policy providers when a safe one exists", async () => {
+    // openrouter has an "unknown" training policy. Before the fix it slipped
+    // through (the filter used trainsOnUserData, true only for documented
+    // trainers); now it is treated as may-train and dropped in favor of groq.
+    const calls: string[] = [];
+    const router = createTestRouter([
+      stubProvider("openrouter", 1, async () => {
+        calls.push("openrouter");
+        return { stream: (async function* () { yield { content: "o" }; })() };
+      }),
+      stubProvider("groq", 2, async () => {
+        calls.push("groq");
+        return { stream: (async function* () { yield { content: "ok" }; })() };
+      }),
+    ]);
+
+    const result = await router.routeAndStream({
+      messages,
+      blockTrainingProviders: true,
+    });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(result.providerId).toBe("groq");
+    expect(calls).not.toContain("openrouter");
+    expect(result.privacyHonored).toBe(true);
+  });
+
+  test("privacyHonored is undefined when private mode is off", async () => {
+    const router = createTestRouter([
+      stubProvider("gemini", 1, async () => ({
+        stream: (async function* () { yield { content: "g" }; })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({ messages });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(result.privacyHonored).toBeUndefined();
   });
 
   test("BYOK: a per-request key makes a key-less provider eligible and is used", async () => {

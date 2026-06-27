@@ -13,8 +13,8 @@ import type {
 import {
   estimateUsage,
   listProviders,
+  mayTrainOnUserData,
   ProviderHttpError,
-  trainsOnUserData,
 } from "@zintus/providers";
 import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
@@ -456,13 +456,18 @@ export function createRouter(config: RouterConfig = {}): Router {
 
       let candidates = await selectCandidates(request, groupOrder);
 
-      // Privacy mode: drop providers that may train on user data, keeping any the
-      // user explicitly allowed. Skip the filter if it would strand the request.
+      // Privacy mode: drop providers that may train on user data — trains OR an
+      // "unknown" policy (conservative; an undocumented provider is NOT treated
+      // as private-safe) — keeping any the user explicitly allowed. Skip the
+      // filter if it would strand the request; in that case privacy could NOT be
+      // honored and the winner below carries `privacyHonored: false` so surfaces
+      // can say so instead of silently using a training provider.
+      const allowedTraining = new Set(request.allowTrainingProviders ?? []);
       if (request.blockTrainingProviders) {
-        const allowed = new Set(request.allowTrainingProviders ?? []);
         const filtered = candidates.filter(
           (candidate) =>
-            allowed.has(candidate.id) || !trainsOnUserData(candidate.id),
+            allowedTraining.has(candidate.id) ||
+            !mayTrainOnUserData(candidate.id),
         );
         if (filtered.length > 0) {
           candidates = filtered;
@@ -681,6 +686,13 @@ export function createRouter(config: RouterConfig = {}): Router {
               providerId: provider.id,
               model,
               stream: textStream(),
+              // Honesty signal: under private mode, true iff the winner is
+              // privacy-safe or user-allowed; false when the strand-fallback had
+              // to use a may-train/"unknown" provider. undefined when not private.
+              privacyHonored: request.blockTrainingProviders
+                ? allowedTraining.has(provider.id) ||
+                  !mayTrainOnUserData(provider.id)
+                : undefined,
             };
           } catch (error) {
             lastError = error instanceof Error ? error : new Error(String(error));

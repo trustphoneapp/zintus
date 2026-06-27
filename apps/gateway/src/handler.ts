@@ -60,6 +60,7 @@ function savedVsClaudeSonnet(inputTokens: number, outputTokens: number): number 
 function buildUsageMetadata(
   usage: RouteUsage,
   strategy: string | undefined,
+  privacyHonored?: boolean,
 ): Record<string, unknown> {
   return {
     type: "metadata",
@@ -73,6 +74,11 @@ function buildUsageMetadata(
       usage.outputTokens,
     ),
     routing_strategy: strategy ?? "auto",
+    // Privacy-mode honesty signal — only present when private mode was requested
+    // (block_training). false = the request could not avoid a may-train provider.
+    ...(privacyHonored !== undefined
+      ? { private_mode_honored: privacyHonored }
+      : {}),
   };
 }
 
@@ -276,7 +282,7 @@ export function createGatewayHandler(
         "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, " +
         "X-Zintus-Original-Tokens, X-Zintus-Compressed-Tokens, " +
         "X-Zintus-Tokens-Saved, X-Zintus-Compression-Ratio, " +
-        "X-Zintus-Cost-Saved-Usd",
+        "X-Zintus-Cost-Saved-Usd, X-Zintus-Private-Honored",
       Vary: "Origin",
     };
     if (origin) {
@@ -708,6 +714,12 @@ export function createGatewayHandler(
       "X-Cache-Hit": result.cacheHit ?? "miss",
       "X-Failover-Count": String(result.failoverCount ?? 0),
     };
+    // Privacy-mode honesty: surface whether private mode was honored so clients
+    // can warn "used <provider> — Private Mode not honored" instead of failing
+    // silently. Present only when block_training was requested.
+    if (result.privacyHonored !== undefined) {
+      metaHeaders["X-Zintus-Private-Honored"] = String(result.privacyHonored);
+    }
 
     // Surface Tokzen compression savings as derived-only response headers so
     // web/desktop can show "compressed N%, saved ~X tokens (~$Y)". Emit ONLY
@@ -793,7 +805,13 @@ export function createGatewayHandler(
             },
           ],
           ...(capturedUsage
-            ? { metadata: buildUsageMetadata(capturedUsage, body.strategy) }
+            ? {
+                metadata: buildUsageMetadata(
+                  capturedUsage,
+                  body.strategy,
+                  result.privacyHonored,
+                ),
+              }
             : {}),
         },
         200,
@@ -862,7 +880,11 @@ export function createGatewayHandler(
           // frames; the Zintus web client still discriminates it via type:"metadata".
           if (capturedUsage) {
             const usagePayload = {
-              ...buildUsageMetadata(capturedUsage, body.strategy),
+              ...buildUsageMetadata(
+                capturedUsage,
+                body.strategy,
+                result.privacyHonored,
+              ),
               object: "chat.completion.chunk",
               model: result.model,
               provider: result.providerId,
