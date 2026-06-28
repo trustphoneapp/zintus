@@ -1,4 +1,12 @@
-import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
+import type {
+  ContentBlock,
+  ContextMode,
+  ProviderId,
+  RoutingStrategy,
+  ToolCallContentBlock,
+  ToolChoice,
+  ToolDefinition,
+} from "@zintus/types";
 
 const DEFAULT_GATEWAY_URL = "http://localhost:8788";
 const ENV_GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL?.trim() || null;
@@ -239,7 +247,17 @@ interface GatewayChunk {
   provider?: ProviderId;
   model?: string;
   thread_id?: string;
-  choices?: Array<{ delta?: { content?: string } }>;
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        type?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+  }>;
   error?: { message?: string };
   // Per-response metadata frame (type:"metadata", choices:[]).
   type?: string;
@@ -250,8 +268,105 @@ interface GatewayChunk {
   routing_strategy?: string;
 }
 
+/** One actionable provider suggestion from the gateway's capability error. */
+export interface CapabilitySuggestion {
+  provider: string;
+  reason: string;
+}
+
+/**
+ * Thrown when the gateway refuses a request because the chosen route can't serve
+ * a required capability (today: vision). Carries the gateway's honest, no-upsell
+ * `message` + `suggestions` so the UI can render them instead of crashing on a
+ * generic error. Mirrors the 422 `{error:{type:"unsupported_capability",…}}`
+ * body and the web client's `UnsupportedCapabilityError`.
+ */
+export class UnsupportedCapabilityError extends Error {
+  readonly required: string[];
+  readonly suggestions: CapabilitySuggestion[];
+  constructor(
+    message: string,
+    required: string[],
+    suggestions: CapabilitySuggestion[],
+  ) {
+    super(message);
+    this.name = "UnsupportedCapabilityError";
+    this.required = required;
+    this.suggestions = suggestions;
+  }
+}
+
+/** One streamed tool-call fragment from a chat delta (`choices[].delta.tool_calls[]`).
+ *  The gateway emits the call's `name` once and its `arguments` as a (possibly
+ *  fragmented) JSON string; fragments are keyed/ordered by `index`. */
+export interface ToolCallDelta {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/** Mutable per-`index` accumulator for streamed tool-call fragments. */
+export type ToolCallAccumulator = Map<
+  number,
+  { id: string; name: string; args: string }
+>;
+
+/**
+ * Fold one chunk's `delta.tool_calls` fragments into the index-keyed accumulator.
+ * Concatenates argument fragments in arrival order; a later non-undefined `id`/
+ * `name` wins over an earlier blank (the gateway sends name once, args in pieces).
+ * Pure + exported so the reassembly can be unit-tested without mocking `fetch`.
+ */
+export function accumulateToolCallDeltas(
+  acc: ToolCallAccumulator,
+  deltas: ToolCallDelta[] | undefined,
+): void {
+  for (const tc of deltas ?? []) {
+    const index = tc.index ?? 0;
+    const existing = acc.get(index) ?? { id: "", name: "", args: "" };
+    acc.set(index, {
+      id: tc.id ?? existing.id,
+      name: tc.function?.name ?? existing.name,
+      args: existing.args + (tc.function?.arguments ?? ""),
+    });
+  }
+}
+
+/**
+ * Finalize the accumulator into ordered `ToolCallContentBlock[]`. Sorted by
+ * `index` for deterministic multi-call ordering; malformed/partial argument JSON
+ * degrades to `{}` rather than throwing, so a garbled tool call never crashes the
+ * chat stream. Pure + exported.
+ */
+export function finalizeToolCalls(
+  acc: ToolCallAccumulator,
+): ToolCallContentBlock[] {
+  return [...acc.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, call]) => {
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        parsedArgs = call.args
+          ? (JSON.parse(call.args) as Record<string, unknown>)
+          : {};
+      } catch {
+        parsedArgs = {};
+      }
+      return {
+        type: "tool_call" as const,
+        id: call.id || `call_${call.name}_${index}`,
+        name: call.name,
+        arguments: parsedArgs,
+      };
+    });
+}
+
 export async function streamGatewayChat(params: {
-  messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+  messages: Array<{
+    role: "user" | "assistant" | "system";
+    content: string | ContentBlock[];
+  }>;
   providerId?: ProviderId;
   defaultProvider?: ProviderId;
   strategy?: RoutingStrategy;
@@ -259,6 +374,10 @@ export async function streamGatewayChat(params: {
   threadId?: string;
   /** Private Mode: refuse providers that train on user data. */
   blockTraining?: boolean;
+  /** Tool/function definitions for this turn. Requires a tool-capable provider —
+   *  the gateway returns a 422 UnsupportedCapabilityError otherwise. */
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<{
@@ -268,6 +387,9 @@ export async function streamGatewayChat(params: {
   traceId?: string;
   compression?: CompressionStats;
   meta?: ResponseMeta;
+  /** Tool calls the model made this turn (empty for a normal text turn). The
+   *  caller runs the tools and sends results back as `tool_result` blocks. */
+  toolCalls?: ToolCallContentBlock[];
 }> {
   const gatewayUrl = await resolveGatewayUrl();
   if (!gatewayUrl) {
@@ -290,14 +412,34 @@ export async function streamGatewayChat(params: {
       mode: params.mode,
       thread_id: params.threadId,
       block_training: params.blockTraining,
+      tools: params.tools,
+      tool_choice: params.toolChoice,
     }),
     signal: params.signal,
   });
 
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
-      error?: { message?: string };
+      error?: {
+        message?: string;
+        type?: string;
+        required?: string[];
+        suggestions?: CapabilitySuggestion[];
+      };
     } | null;
+    // A request that can't reach a capable route (e.g. vision) comes back as a
+    // structured 422 — surface its message + suggestions instead of a crash.
+    if (
+      response.status === 422 &&
+      body?.error?.type === "unsupported_capability"
+    ) {
+      throw new UnsupportedCapabilityError(
+        body.error.message ??
+          "This request needs a capability the chosen provider can't serve.",
+        body.error.required ?? ["vision"],
+        body.error.suggestions ?? [],
+      );
+    }
     throw new Error(body?.error?.message ?? `Gateway error ${response.status}`);
   }
 
@@ -317,6 +459,11 @@ export async function streamGatewayChat(params: {
   let traceId: string | undefined;
   let output = "";
   const meta: ResponseMeta = {};
+  // Accumulate streamed tool-call fragments by their `index`. The gateway emits
+  // each call's name once and its arguments as a (possibly fragmented) JSON
+  // string; we concatenate then parse once the stream ends. The fold + finalize
+  // are pure helpers (accumulateToolCallDeltas / finalizeToolCalls).
+  const toolCallsByIndex: ToolCallAccumulator = new Map();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -366,12 +513,19 @@ export async function streamGatewayChat(params: {
         output += delta;
         params.onChunk(output);
       }
+
+      accumulateToolCallDeltas(
+        toolCallsByIndex,
+        chunk.choices?.[0]?.delta?.tool_calls,
+      );
     }
   }
 
   if (!provider) {
     throw new Error("Gateway stream ended without provider metadata");
   }
+
+  const toolCalls = finalizeToolCalls(toolCallsByIndex);
 
   return {
     providerId: provider,
@@ -380,5 +534,6 @@ export async function streamGatewayChat(params: {
     traceId,
     compression,
     meta: Object.keys(meta).length > 0 ? meta : undefined,
+    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
   };
 }

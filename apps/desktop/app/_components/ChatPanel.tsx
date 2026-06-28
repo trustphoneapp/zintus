@@ -4,13 +4,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { MessageSquarePlus } from "lucide-react";
 import type { ProviderId, RoutingStrategy } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
-import { streamChat, type ChatMessage } from "@/lib/chat-client";
+import {
+  streamChat,
+  sanitizeSendHistory,
+  UnsupportedCapabilityError,
+  type ChatMessage,
+} from "@/lib/chat-client";
 import {
   createChatMessage,
   useChatStore,
   useProviderStatusStore,
   useSettingsStore,
 } from "@/lib/store";
+import {
+  BUILTIN_TOOL_DEFINITIONS,
+  BUILTIN_WEB_TOOLS,
+  executeWebToolCall,
+} from "@/lib/web-tools";
 import {
   DATA_FLOW,
   grantProviderSendConsent,
@@ -71,6 +81,16 @@ export function ChatPanel() {
   const [imageNotice, setImageNotice] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Tools toggle (persisted): when on, the built-in browser-safe tools
+  // (calculator, current_datetime, random_number) are offered to the model and
+  // executed locally in a bounded loop. Requires a tool-capable provider.
+  const [toolsEnabled, setToolsEnabled] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:desktop-tools") === "true";
+    }
+    return false;
+  });
+
   useEffect(() => {
     setActiveProjectName(getActiveProject()?.name ?? null);
   }, []);
@@ -106,7 +126,14 @@ export function ChatPanel() {
     outputRef.current?.scrollTo(0, outputRef.current.scrollHeight);
   }, [messages]);
 
-  // Shared streaming path used by both send and regenerate.
+  // Shared streaming path used by both send and regenerate. When Tools is on, runs
+  // a BOUNDED (max 5 rounds) STATELESS execute->feed-back loop: on returned
+  // toolCalls we stamp them on the current bubble, run each tool locally, append
+  // an assistant turn (text + tool_call blocks) and a user turn (tool_result
+  // blocks) to a local conversation, spawn a fresh assistant bubble and re-stream
+  // until the model stops calling tools. Desktop is gateway-only and already
+  // stateless (the full history is sent every turn), so there is no threadId to
+  // drop. Mirrors web's streamAssistant.
   const runTurn = useCallback(
     async (history: ChatMessage[], assistantId: string) => {
       abortRef.current?.abort();
@@ -114,39 +141,129 @@ export function ChatPanel() {
       abortRef.current = controller;
       setLoading(true);
       setActiveProvider(null);
+
+      const convo: ChatMessage[] = [...history];
+      let currentAssistantId = assistantId;
+      const MAX_TOOL_ROUNDS = 5;
+
       try {
-        const result = await streamChat({
-          messages: history,
-          settings,
-          providerId: selectedProvider ?? undefined,
-          mode: settings.contextMode,
-          signal: controller.signal,
-          onChunk: (text) => {
-            if (!controller.signal.aborted) {
-              updateMessage(assistantId, { content: text });
+        for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+          let streamedText = "";
+          const result = await streamChat({
+            messages: convo,
+            settings,
+            providerId: selectedProvider ?? undefined,
+            mode: settings.contextMode,
+            tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
+            signal: controller.signal,
+            onChunk: (text) => {
+              if (!controller.signal.aborted) {
+                streamedText = text;
+                updateMessage(currentAssistantId, { content: text });
+              }
+            },
+          });
+          updateMessage(currentAssistantId, {
+            providerId: result.providerId,
+            model: result.model,
+            compression: result.compression,
+            meta: result.meta,
+          });
+          setActiveProvider(result.providerId);
+          void refresh();
+
+          const calls = result.toolCalls ?? [];
+          if (calls.length === 0) break;
+
+          // Render the tool calls on the current assistant bubble.
+          updateMessage(currentAssistantId, {
+            toolCalls: calls.map((c) => ({
+              id: c.id,
+              name: c.name,
+              arguments: c.arguments,
+            })),
+          });
+
+          if (round === MAX_TOOL_ROUNDS) {
+            if (!streamedText.trim()) {
+              updateMessage(currentAssistantId, {
+                content: `_Stopped after ${MAX_TOOL_ROUNDS} tool rounds._`,
+              });
             }
-          },
-        });
-        updateMessage(assistantId, {
-          providerId: result.providerId,
-          model: result.model,
-          compression: result.compression,
-          meta: result.meta,
-        });
-        setActiveProvider(result.providerId);
-        void refresh();
+            break;
+          }
+
+          // Execute each call locally (built-in, browser-safe tools) and feed the
+          // results back on the next request as tool_result blocks.
+          const results = calls.map((c) =>
+            executeWebToolCall({
+              id: c.id,
+              name: c.name,
+              arguments: c.arguments,
+            }),
+          );
+
+          convo.push({
+            role: "assistant",
+            content: [
+              ...(streamedText.trim()
+                ? [{ type: "text" as const, text: streamedText }]
+                : []),
+              ...calls,
+            ],
+          });
+          convo.push({
+            role: "user",
+            content: results.map((r) => ({
+              type: "tool_result" as const,
+              toolCallId: r.toolCallId,
+              content: r.content,
+              isError: r.isError,
+            })),
+          });
+
+          // A fresh assistant bubble for the next round's answer.
+          const next = createChatMessage("assistant", "");
+          appendMessage(next);
+          currentAssistantId = next.id;
+        }
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
           return;
         }
-        updateMessage(assistantId, {
+        // The gateway refused the route for a missing capability (e.g. vision):
+        // render its honest message + suggestions instead of a bare error.
+        if (error instanceof UnsupportedCapabilityError) {
+          const lines = [
+            error.message,
+            ...(error.suggestions.length > 0
+              ? [
+                  "",
+                  "Try a different provider:",
+                  ...error.suggestions.map((s) => `- ${s.provider} — ${s.reason}`),
+                ]
+              : []),
+          ];
+          updateMessage(currentAssistantId, { content: lines.join("\n") });
+          return;
+        }
+        updateMessage(currentAssistantId, {
           content: error instanceof Error ? error.message : "Request failed",
         });
       } finally {
         setLoading(false);
       }
     },
-    [settings, selectedProvider, setActiveProvider, setLoading, updateMessage, refresh],
+    [
+      settings,
+      selectedProvider,
+      toolsEnabled,
+      setActiveProvider,
+      setLoading,
+      updateMessage,
+      refresh,
+      appendMessage,
+    ],
   );
 
   const doSend = useCallback(
@@ -160,10 +277,16 @@ export function ChatPanel() {
           : [];
       const blocks = attachmentBlocks(attachments);
       const userContent = blocks ? `${blocks}\n\n${trimmed}`.trim() : trimmed;
+      // Sanitize the store-derived history: the tools loop can leave empty
+      // assistant bubbles and adjacent same-role turns. Desktop is stateless
+      // (no threadId), so this store IS the history — replaying it raw would ship
+      // a malformed conversation that a strict role-alternation provider rejects.
       const history: ChatMessage[] = [
         ...leading,
-        ...messages.map((m) => ({ role: m.role, content: m.content })),
-        { role: "user" as const, content: userContent },
+        ...sanitizeSendHistory([
+          ...messages.map((m) => ({ role: m.role, content: m.content })),
+          { role: "user" as const, content: userContent },
+        ]),
       ];
       appendMessage(createChatMessage("user", userContent));
       const assistant = createChatMessage("assistant", "");
@@ -202,11 +325,14 @@ export function ChatPanel() {
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
     if (!lastAssistant) return;
     const idx = messages.findIndex((m) => m.id === lastAssistant.id);
-    const history = messages
-      .slice(0, idx)
-      .map((m) => ({ role: m.role, content: m.content }));
+    // Sanitize: drop empty/dangling tool-round assistant bubbles and merge
+    // adjacent same-role turns so Regenerate never replays a malformed
+    // conversation (this also adds the `&& content` filter web has).
+    const history = sanitizeSendHistory(
+      messages.slice(0, idx).map((m) => ({ role: m.role, content: m.content })),
+    );
     if (history.length === 0) return;
-    updateMessage(lastAssistant.id, { content: "" });
+    updateMessage(lastAssistant.id, { content: "", toolCalls: undefined });
     await runTurn(history, lastAssistant.id);
   }, [loading, messages, runTurn, updateMessage]);
 
@@ -310,6 +436,32 @@ export function ChatPanel() {
             >
               🛡 {settings.blockTrainingProviders ? "Private on" : "Private"}
             </button>
+            <button
+              type="button"
+              onClick={() =>
+                setToolsEnabled((v) => {
+                  const next = !v;
+                  if (typeof localStorage !== "undefined") {
+                    localStorage.setItem("zintus:desktop-tools", String(next));
+                  }
+                  return next;
+                })
+              }
+              aria-pressed={toolsEnabled}
+              className="h-9 rounded-md border px-3 text-sm"
+              style={{
+                borderColor: toolsEnabled
+                  ? "var(--color-good, #34d399)"
+                  : "var(--color-border)",
+                color: toolsEnabled
+                  ? "var(--color-good, #34d399)"
+                  : "var(--color-text-muted)",
+                background: "var(--color-elevated)",
+              }}
+              title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally on this device; needs a tool-capable provider.`}
+            >
+              🔧 {toolsEnabled ? "Tools on" : "Tools"}
+            </button>
             <select
               value={settings.routingStrategy}
               onChange={(e) =>
@@ -369,6 +521,7 @@ export function ChatPanel() {
                 <MessageBubble
                   key={message.id}
                   message={message}
+                  toolCalls={message.toolCalls}
                   onRegenerate={
                     message.id === lastAssistantId && !loading ? regenerate : undefined
                   }

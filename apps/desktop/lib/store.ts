@@ -26,6 +26,15 @@ interface ProviderStatusState {
   setActiveProvider: (id: ProviderId | null) => void;
 }
 
+/** A tool the model asked to call this turn, stamped on the assistant bubble so the
+ *  UI can show what ran. Mirrors the web app's rendered tool calls. `arguments` is
+ *  optional here (display-only); the execution path always carries a parsed object. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments?: Record<string, unknown>;
+}
+
 export interface ChatMessageUi {
   id: string;
   role: "user" | "assistant";
@@ -36,6 +45,8 @@ export interface ChatMessageUi {
   compression?: CompressionStats;
   /** Per-response transparency signals (latency, saved-vs-baseline, strategy). */
   meta?: ResponseMeta;
+  /** Tool calls the model made on this assistant turn (when Tools is enabled). */
+  toolCalls?: ToolCall[];
 }
 
 export interface Thread {
