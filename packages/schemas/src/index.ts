@@ -159,6 +159,47 @@ export const ToolChoiceSchema = z.union([
   z.object({ type: z.literal("tool"), name: z.string() }),
 ]);
 
+// ── MCP (Model Context Protocol) — gateway-hosted, server-side tool calling ──
+// How to reach an MCP server. Discriminated on `transport` — mirrors
+// @zintus/mcp's `MCPServerConfig`. `stdio` spawns a LOCAL user process (its
+// command is the user's own config; the loopback gateway hosts it). `sse`/`http`
+// reach a remote MCP endpoint. Validated at the edge so a malformed config is
+// rejected before it reaches the registry.
+export const MCPServerConfigSchema = z.discriminatedUnion("transport", [
+  z.object({
+    transport: z.literal("stdio"),
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+  }),
+  z.object({
+    transport: z.literal("sse"),
+    url: z.string().url(),
+    headers: z.record(z.string(), z.string()).optional(),
+  }),
+  z.object({
+    transport: z.literal("http"),
+    url: z.string().url(),
+    headers: z.record(z.string(), z.string()).optional(),
+  }),
+]);
+
+// Optional chat-request block: the gateway connects each MCP server, gathers its
+// tools (filtered by `enabledTools` when present), and runs a SERVER-SIDE bounded
+// tool loop. Bounded server count keeps a single request from spawning unbounded
+// child processes / connections.
+export const MCPRequestSchema = z.object({
+  servers: z.array(MCPServerConfigSchema).max(16),
+  enabledTools: z.array(z.string()).optional(),
+});
+
+// Body for the standalone discover / disconnect endpoints.
+export const MCPDiscoverRequestSchema = z.object({
+  config: MCPServerConfigSchema,
+});
+
+export type MCPServerConfigInput = z.infer<typeof MCPServerConfigSchema>;
+
 /**
  * Structured-output request (`response_format`). Mirrors @zintus/types
  * `ResponseFormat`. `json_schema` asks for schema-conformant JSON; `json_object`
@@ -221,6 +262,10 @@ export const ChatCompletionRequestSchema = z.object({
   // Structured / JSON output. Absent ⇒ plain text (unchanged behavior). A
   // `json_schema` request without a `schema` is rejected by ResponseFormatSchema.
   response_format: ResponseFormatSchema.optional(),
+  // MCP (Model Context Protocol) — additive. When present, the gateway hosts the
+  // listed MCP servers, merges their tools with any client `tools`, and runs a
+  // bounded server-side tool loop. Absent ⇒ the existing flow is byte-identical.
+  mcp: MCPRequestSchema.optional(),
 });
 
 export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
