@@ -218,6 +218,113 @@ describe("gateway handler", () => {
     expect(res.status).toBe(200);
   });
 
+  test("GET /v1/models returns a RICH per-model catalog (OpenAI-compat triple + metadata)", async () => {
+    const handler = makeHandler();
+    const res = await handler(new Request("http://x/v1/models", { method: "GET" }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      data: Array<Record<string, unknown>>;
+    };
+    expect(body.object).toBe("list");
+    expect(body.data.length).toBeGreaterThan(0);
+
+    // OpenAI-compat triple intact on every entry.
+    for (const m of body.data) {
+      expect(typeof m.id).toBe("string");
+      expect(m.object).toBe("model");
+      expect(typeof m.owned_by).toBe("string");
+    }
+
+    // A known model carries the additive metadata.
+    const flash = body.data.find((m) => m.id === "gemini-2.5-flash") as
+      | {
+          context_window: number;
+          capabilities: { vision: boolean; tools: boolean; structured_output: string };
+          pricing: { input_per_1m: number | null; output_per_1m: number | null };
+          free: boolean;
+          local: boolean;
+          data_policy: Record<string, unknown>;
+        }
+      | undefined;
+    expect(flash).toBeDefined();
+    expect(flash?.context_window).toBe(1_000_000);
+    expect(flash?.capabilities.vision).toBe(true);
+    expect(flash?.capabilities.tools).toBe(true);
+    expect(flash?.capabilities.structured_output).toBe("json_schema");
+    expect(flash?.pricing.input_per_1m).toBe(0.3);
+    expect(flash?.pricing.output_per_1m).toBe(2.5);
+    // `free` = a free tier/quota exists (the catalog's honest semantic); Gemini
+    // 2.5 Flash has both paid list pricing AND a free tier, so free:true.
+    expect(flash?.free).toBe(true);
+    expect(flash?.local).toBe(false);
+    expect(typeof flash?.data_policy).toBe("object");
+    expect(flash?.data_policy.tag).toBeDefined();
+  });
+
+  test("GET /v1/models?vision=true narrows the catalog to vision-capable models", async () => {
+    const handler = makeHandler();
+    const all = (await (
+      await handler(new Request("http://x/v1/models", { method: "GET" }))
+    ).json()) as { data: unknown[] };
+    const visionRes = await handler(
+      new Request("http://x/v1/models?vision=true", { method: "GET" }),
+    );
+    expect(visionRes.status).toBe(200);
+    const vision = (await visionRes.json()) as {
+      data: Array<{ id: string; capabilities: { vision: boolean } }>;
+    };
+    expect(vision.data.length).toBeGreaterThan(0);
+    expect(vision.data.length).toBeLessThan(all.data.length); // actually narrowed
+    expect(vision.data.every((m) => m.capabilities.vision === true)).toBe(true);
+    expect(vision.data.some((m) => m.id === "gemini-2.5-flash")).toBe(true);
+  });
+
+  test("GET /v1/models?provider= filters to a single provider", async () => {
+    const handler = makeHandler();
+    const res = await handler(
+      new Request("http://x/v1/models?provider=groq", { method: "GET" }),
+    );
+    const body = (await res.json()) as {
+      data: Array<{ owned_by: string; id: string }>;
+    };
+    expect(body.data.length).toBeGreaterThan(0);
+    expect(body.data.every((m) => m.owned_by === "Groq")).toBe(true);
+  });
+
+  test("GET /v1/pricing returns priced models and is auth-gated", async () => {
+    // Auth-gated when a token is configured.
+    const guarded = makeHandler({ token: "secret" });
+    expect(
+      (await guarded(new Request("http://x/v1/pricing", { method: "GET" }))).status,
+    ).toBe(401);
+
+    const handler = makeHandler();
+    const res = await handler(new Request("http://x/v1/pricing", { method: "GET" }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      data: Array<{
+        id: string;
+        provider: string;
+        input_per_1m: number;
+        output_per_1m: number;
+        free: boolean;
+      }>;
+    };
+    expect(body.object).toBe("list");
+    expect(body.data.length).toBeGreaterThan(0);
+    // Every entry has a concrete (non-null) price.
+    for (const p of body.data) {
+      expect(typeof p.input_per_1m).toBe("number");
+      expect(typeof p.output_per_1m).toBe("number");
+      expect(typeof p.provider).toBe("string");
+    }
+    const flash = body.data.find((p) => p.id === "gemini-2.5-flash");
+    expect(flash?.input_per_1m).toBe(0.3);
+    expect(flash?.output_per_1m).toBe(2.5);
+  });
+
   test("GET /v1/traces?limit= returns recent traces and is auth-gated", async () => {
     const startedAt = new Date();
     const engine = fakeEngine({

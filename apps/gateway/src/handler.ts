@@ -3,6 +3,10 @@ import {
   listProviders,
   getModelPricing,
   estimateCostUsd,
+  DATA_POLICIES,
+  PROVIDER_METADATA,
+  listCatalogModels,
+  type CatalogModel,
 } from "@zintus/providers";
 import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
 import { redactSecrets } from "@zintus/router";
@@ -48,6 +52,53 @@ import {
   type ResearchDepth,
   type DeepResearchDeps,
 } from "@zintus/search";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model / pricing catalog — the data behind the OpenRouter-grade `/v1/models`
+// and `/v1/pricing` routes.
+//
+// The per-model catalog is owned by @zintus/providers (`listCatalogModels` /
+// `CatalogModel`) — the single source of truth for the OpenRouter-grade
+// `/v1/models` + `/v1/pricing` routes. Capability flags there are test-asserted to
+// mirror the chat gates, and prices are null when unknown (no invention).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Map a catalog model to the enriched, OpenAI-compatible `/v1/models` entry.
+ *  The `{ id, object:"model", owned_by }` triple is preserved (OpenAI-compat
+ *  contract); every other field is additive metadata. */
+function toModelEntry(m: CatalogModel) {
+  return {
+    // OpenAI-compatible triple — DO NOT drop (contracts.test.ts pins these).
+    id: m.id,
+    object: "model" as const,
+    owned_by: PROVIDER_METADATA[m.provider]?.name ?? m.provider,
+    // ── additive, OpenRouter-grade metadata ──
+    display_name: m.displayName,
+    context_window: m.contextWindow,
+    capabilities: {
+      vision: m.vision,
+      tools: m.tools,
+      structured_output: m.structuredOutput,
+    },
+    // USD per 1M tokens; null when unknown (honest — no invented prices).
+    pricing: {
+      input_per_1m: m.inputPer1M,
+      output_per_1m: m.outputPer1M,
+    },
+    free: m.free,
+    local: m.local,
+    // The catalog carries a coarse tag (`m.dataPolicy`); the rich fields come from
+    // the provider's DATA_POLICIES entry (gateway-local, authoritative).
+    data_policy: ((dp) => ({
+      tag: m.dataPolicy,
+      trains_on_data: dp?.trainsOnData ?? "unknown",
+      retention: dp?.dataRetention ?? "unknown",
+      zdr: dp?.zdr ?? false,
+      badge: dp?.badge ?? "unknown",
+      policy_url: dp?.policyUrl ?? "",
+    }))(DATA_POLICIES[m.provider]),
+  };
+}
 
 /**
  * Paid-frontier reference pricing (Claude Sonnet 4.6, USD per million tokens),
@@ -1624,15 +1675,48 @@ export function createGatewayHandler(
       return handleRouteOptions(request);
     }
 
+    // Rich, OpenRouter-grade model catalog. OpenAI-compatible envelope
+    // (`{ object:"list", data:[...] }`) with each entry carrying the OpenAI
+    // `{ id, object:"model", owned_by }` triple PLUS per-model metadata
+    // (display_name, context_window, capabilities, pricing, free, local,
+    // data_policy). Optional catalog-UI filters narrow the list server-side:
+    //   ?provider=<id> ?vision=true ?tools=true ?free=true ?local=true
     if (url.pathname === "/v1/models" && request.method === "GET") {
+      const q = url.searchParams;
+      const providerFilter = q.get("provider");
+      const wantVision = q.get("vision") === "true";
+      const wantTools = q.get("tools") === "true";
+      const wantFree = q.get("free") === "true";
+      const wantLocal = q.get("local") === "true";
+
+      const models = listCatalogModels().filter((m) => {
+        if (providerFilter && m.provider !== providerFilter) return false;
+        if (wantVision && !m.vision) return false;
+        if (wantTools && !m.tools) return false;
+        if (wantFree && !m.free) return false;
+        if (wantLocal && !m.local) return false;
+        return true;
+      });
+
       return json(request, {
         object: "list",
-        data: listProviders().map((provider) => ({
-          id: provider.id,
-          object: "model",
-          owned_by: provider.name,
-        })),
+        data: models.map(toModelEntry),
       });
+    }
+
+    // Pricing transparency endpoint. Honest: only models with a KNOWN list price
+    // are returned (unknown prices are omitted, never invented). USD per 1M tokens.
+    if (url.pathname === "/v1/pricing" && request.method === "GET") {
+      const data = listCatalogModels()
+        .filter((m) => m.inputPer1M !== null && m.outputPer1M !== null)
+        .map((m) => ({
+          id: m.id,
+          provider: m.provider,
+          input_per_1m: m.inputPer1M,
+          output_per_1m: m.outputPer1M,
+          free: m.free,
+        }));
+      return json(request, { object: "list", data });
     }
 
     if (url.pathname === "/v1/traces" && request.method === "GET") {
