@@ -833,3 +833,158 @@ describe("gateway handler", () => {
     await res.text();
   });
 });
+
+describe("client-facing error redaction (secrets scrubbed from responses, not just logs)", () => {
+  // Matches the router's redactor rule `sk-[a-zA-Z0-9\-_]{8,}` → `sk-****REDACTED****`.
+  const FAKE_SECRET = "sk-TESTFAKE0123456789abcdefghijklmnopqrstuvwx";
+  const REDACTED = "sk-****REDACTED****";
+
+  test("non-streaming chat: a re-thrown provider error has its embedded key scrubbed from the 400 body", async () => {
+    // Mirrors a provider 401 whose body echoes the offending key verbatim. The
+    // engine rejection propagates to the handler's top-level catch.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error(`upstream auth rejected (401): invalid api key ${FAKE_SECRET}`);
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hi" }],
+          stream: false,
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    // Key gone, redaction marker present, surrounding text preserved.
+    expect(body.error.message).not.toContain(FAKE_SECRET);
+    expect(body.error.message).toContain(REDACTED);
+    expect(body.error.message).toContain("upstream auth rejected (401)");
+  });
+
+  test("streaming chat: a mid-stream provider error has its embedded key scrubbed from the SSE error event", async () => {
+    // routeAndStream resolves, then the stream throws partway through — exercising
+    // the streaming branch's error path that emits an SSE `error` event.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          stream: (async function* () {
+            yield "partial answer";
+            throw new Error(`stream aborted by provider: ${FAKE_SECRET}`);
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // No `stream` field → defaults to streaming SSE.
+        body: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+      }),
+    );
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const text = await res.text();
+    expect(text).toContain("partial answer"); // earlier chunk survived
+    expect(text).toContain('"error"'); // error event emitted
+    expect(text).not.toContain(FAKE_SECRET); // raw key never reaches the client
+    expect(text).toContain(REDACTED);
+  });
+
+  test("research SSE: a key in an upstream failure is scrubbed from the error event", async () => {
+    // deepResearch calls routeAndStream during decompose; the throw surfaces as a
+    // { type: "error", message } event relayed over SSE — which must be scrubbed.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error(`search backend error: leaked ${FAKE_SECRET}`);
+      },
+    });
+    const handler = makeHandler({ tavilyApiKey: "tvly-test" }, engine);
+    const res = await handler(
+      new Request("http://x/v1/research", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: "what is zintus", depth: "standard" }),
+      }),
+    );
+    const text = await res.text();
+    expect(text).toContain('"error"');
+    expect(text).not.toContain(FAKE_SECRET);
+    expect(text).toContain(REDACTED);
+  });
+
+  test("an ordinary error message (no secret) passes through unchanged", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error("model is overloaded, please retry");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "hi" }],
+          stream: false,
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { message: string } };
+    // redactSecrets is a no-op on a clean string — verbatim, including no marker.
+    expect(body.error.message).toBe("model is overloaded, please retry");
+    expect(body.error.message).not.toContain("REDACTED");
+  });
+
+  test("the structured UNSUPPORTED_VISION_ERROR is left intact (carries no secret)", async () => {
+    // Auto-routing rejects an image request with no vision-capable candidate by
+    // throwing "unsupported_capability"; the handler maps it to the structured
+    // 422 error — which redaction must NOT touch.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error("unsupported_capability");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "what is this?" },
+                {
+                  type: "image",
+                  data: "iVBORw0KGgo=",
+                  mimeType: "image/png",
+                  bytes: 1024,
+                  exifStripped: true,
+                },
+              ],
+            },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: { type: string; message: string; required: string[] };
+    };
+    expect(body.error.type).toBe("unsupported_capability");
+    expect(body.error.required).toContain("vision");
+    expect(body.error.message).toContain("vision-capable provider");
+  });
+});

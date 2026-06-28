@@ -5,6 +5,7 @@ import {
   estimateCostUsd,
 } from "@zintus/providers";
 import { supportsVision } from "@zintus/providers";
+import { redactSecrets } from "@zintus/router";
 import type { Engine } from "@zintus/engine";
 import {
   detectLocalRuntimes as defaultDetectLocalRuntimes,
@@ -774,7 +775,11 @@ export function createGatewayHandler(
         // in-flight reservation are released rather than leaked.
         upstreamAbort.abort();
         log("warn", "chat.timeout", { requestId });
-        return json(request, { error: { message: error.message } }, 408);
+        return json(
+          request,
+          { error: { message: redactSecrets(error.message) } },
+          408,
+        );
       }
       // The router rejected an image request with no vision-capable candidate
       // (auto-routing case). Surface the honest capability error, not a 500.
@@ -868,7 +873,11 @@ export function createGatewayHandler(
         if (error instanceof StreamIdleTimeoutError) {
           metrics.recordError();
           log("warn", "chat.idle_timeout", { requestId });
-          return json(request, { error: { message: error.message } }, 408);
+          return json(
+            request,
+            { error: { message: redactSecrets(error.message) } },
+            408,
+          );
         }
         throw error;
       }
@@ -987,8 +996,13 @@ export function createGatewayHandler(
           metrics.recordError();
           onError?.(error, { requestId, path: "/v1/chat/completions" });
           log("error", "chat.stream_failed", { requestId, error: message });
+          // The structured log above is scrubbed by the log fn; the client copy
+          // must be scrubbed here too — a mid-stream provider error can embed key
+          // material, and this SSE error event is returned verbatim otherwise.
           controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify({ error: { message } })}\n\n`),
+            encoder.encode(
+              `data: ${JSON.stringify({ error: { message: redactSecrets(message) } })}\n\n`,
+            ),
           );
         } finally {
           clearIdle();
@@ -1172,9 +1186,18 @@ export function createGatewayHandler(
               abort: researchAbort,
             },
           )) {
+            // deepResearch catches its own upstream failures and yields a
+            // { type: "error", message } event (rather than throwing), so that
+            // raw provider message reaches the client through THIS relay — not
+            // the catch below. Scrub just the message field of an error event;
+            // all other event types (and the answer text) pass through intact.
+            const safeEvent =
+              event.type === "error"
+                ? { ...event, message: redactSecrets(event.message) }
+                : event;
             controller.enqueue(
               encoder.encode(
-                `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+                `event: ${safeEvent.type}\ndata: ${JSON.stringify(safeEvent)}\n\n`,
               ),
             );
           }
@@ -1185,9 +1208,11 @@ export function createGatewayHandler(
           metrics.recordError();
           onError?.(error, { requestId, path: "/v1/research" });
           log("error", "research.failed", { requestId, error: message });
+          // Scrub the client-facing copy (the log fn already scrubs the log line):
+          // research drives upstream provider calls whose error text can carry a key.
           controller.enqueue(
             encoder.encode(
-              `event: error\ndata: ${JSON.stringify({ type: "error", message })}\n\n`,
+              `event: error\ndata: ${JSON.stringify({ type: "error", message: redactSecrets(message) })}\n\n`,
             ),
           );
         } finally {
@@ -1451,7 +1476,10 @@ export function createGatewayHandler(
         metrics.recordError();
         onError?.(error, { requestId, path: url.pathname });
         log("error", "chat.failed", { requestId, error: message });
-        return json(request, { error: { message } }, 400);
+        // Scrub before echoing to the client: a re-thrown provider error (e.g. a
+        // 401 body) can contain key material. The log line above is scrubbed by
+        // the log fn; this is the matching scrub for the HTTP response body.
+        return json(request, { error: { message: redactSecrets(message) } }, 400);
       }
     }
 
@@ -1467,7 +1495,9 @@ export function createGatewayHandler(
         metrics.recordError();
         onError?.(error, { requestId, path: url.pathname });
         log("error", "research.failed", { requestId, error: message });
-        return json(request, { error: { message } }, 400);
+        // Scrub before echoing to the client (see chat.failed above): research
+        // makes upstream provider calls whose error text can carry a key.
+        return json(request, { error: { message: redactSecrets(message) } }, 400);
       }
     }
 
