@@ -4,6 +4,9 @@ import type {
   ProviderId,
   ResponseFormat,
   RoutingStrategy,
+  ToolCallContentBlock,
+  ToolChoice,
+  ToolDefinition,
 } from "@zintus/types";
 
 /**
@@ -77,7 +80,16 @@ export function providerLabel(providerId: ProviderId): string {
  *  content frames carry `choices[].delta.content`. */
 export interface GatewayChunk {
   id?: string;
-  choices?: Array<{ delta?: { content?: string } }>;
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      /** Streamed tool-call fragments (OpenAI-compat shape); the gateway emits
+       *  each call's name once and its arguments as a (possibly fragmented) JSON
+       *  string, keyed/ordered by `index`. */
+      tool_calls?: ToolCallDelta[];
+    };
+    finish_reason?: string | null;
+  }>;
   provider?: ProviderId;
   model?: string;
   thread_id?: string;
@@ -119,7 +131,8 @@ export function parseChatMeta(chunk: GatewayChunk): ChatMeta | undefined {
 /**
  * Build the `/v1/chat/completions` request body. Pure + exported so the
  * provider/strategy/response_format mapping is unit-testable without mocking
- * `fetch`. Mirrors the web/desktop body contract (snake_case `response_format`).
+ * `fetch`. Mirrors the web/desktop body contract (snake_case `response_format`,
+ * `tool_choice`).
  */
 export function buildChatRequestBody(params: {
   messages: ChatMessage[];
@@ -128,6 +141,10 @@ export function buildChatRequestBody(params: {
   mode?: ContextMode;
   threadId?: string;
   responseFormat?: ResponseFormat;
+  /** Tool definitions sent when the Tools toggle is on. Requires a tool-capable
+   *  provider — the gateway returns a structured 422 otherwise. */
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
 }): Record<string, unknown> {
   return {
     messages: params.messages,
@@ -137,5 +154,74 @@ export function buildChatRequestBody(params: {
     mode: params.mode,
     thread_id: params.threadId,
     response_format: params.responseFormat,
+    tools: params.tools,
+    tool_choice: params.toolChoice,
   };
+}
+
+/** One streamed tool-call fragment from a chat delta (`choices[].delta.tool_calls[]`).
+ *  The gateway emits the call's `name` once and its `arguments` as a (possibly
+ *  fragmented) JSON string; fragments are keyed/ordered by `index`. */
+export interface ToolCallDelta {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/** Mutable per-`index` accumulator for streamed tool-call fragments. */
+export type ToolCallAccumulator = Map<
+  number,
+  { id: string; name: string; args: string }
+>;
+
+/**
+ * Fold one chunk's `delta.tool_calls` fragments into the index-keyed accumulator.
+ * Concatenates argument fragments in arrival order; a later non-undefined `id`/
+ * `name` wins over an earlier blank (the gateway sends name once, args in pieces).
+ * Pure + exported so the reassembly is unit-tested without mocking `fetch`.
+ * Mirrors web's `accumulateToolCallDeltas` exactly ("one Zintus").
+ */
+export function accumulateToolCallDeltas(
+  acc: ToolCallAccumulator,
+  deltas: ToolCallDelta[] | undefined,
+): void {
+  for (const tc of deltas ?? []) {
+    const index = tc.index ?? 0;
+    const existing = acc.get(index) ?? { id: "", name: "", args: "" };
+    acc.set(index, {
+      id: tc.id ?? existing.id,
+      name: tc.function?.name ?? existing.name,
+      args: existing.args + (tc.function?.arguments ?? ""),
+    });
+  }
+}
+
+/**
+ * Finalize the accumulator into ordered `ToolCallContentBlock[]`. Sorted by
+ * `index` for deterministic multi-call ordering; malformed/partial argument JSON
+ * degrades to `{}` rather than throwing, so a garbled tool call never crashes the
+ * chat stream. Pure + exported. Mirrors web's `finalizeToolCalls`.
+ */
+export function finalizeToolCalls(
+  acc: ToolCallAccumulator,
+): ToolCallContentBlock[] {
+  return [...acc.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, call]) => {
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        parsedArgs = call.args
+          ? (JSON.parse(call.args) as Record<string, unknown>)
+          : {};
+      } catch {
+        parsedArgs = {};
+      }
+      return {
+        type: "tool_call" as const,
+        id: call.id || `call_${call.name}_${index}`,
+        name: call.name,
+        arguments: parsedArgs,
+      };
+    });
 }

@@ -19,8 +19,15 @@ import {
   loadConfig,
   loadJsonMode,
   loadSelectedProvider,
+  loadToolsMode,
   saveJsonMode,
+  saveToolsMode,
 } from "@/lib/config";
+import {
+  BUILTIN_TOOL_DEFINITIONS,
+  MAX_TOOL_ROUNDS,
+  executeBuiltinToolCall,
+} from "@/lib/builtin-tools";
 import { toChatMessages, type ChatMeta } from "@/lib/messages";
 import { migrateLegacyKeys } from "@/lib/secure-keys";
 import { COLORS } from "@/lib/theme";
@@ -28,6 +35,21 @@ import { COLORS } from "@/lib/theme";
 // "auto" is a UI-only sentinel: it sends NO provider so the gateway routes
 // using the configured strategy.
 type ProviderSelection = ProviderId | "auto";
+
+/** One tool call the model made, rendered transparently in the stream. */
+interface ToolCallView {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/** The locally-executed result for a tool call, shown beneath it. */
+interface ToolResultView {
+  toolCallId: string;
+  name: string;
+  content: string;
+  isError: boolean;
+}
 
 interface Message {
   id: string;
@@ -38,6 +60,19 @@ interface Message {
   model?: string;
   /** Transparency metadata (route reason, latency) for an assistant turn. */
   meta?: ChatMeta;
+  /** Built-in tool calls the model made on this turn (Tools toggle on). */
+  toolCalls?: ToolCallView[];
+  /** Locally-executed results for `toolCalls`, paired by id. */
+  toolResults?: ToolResultView[];
+}
+
+/** Compact one-line render of a tool's arguments object. */
+function formatToolArgs(args: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(args);
+  } catch {
+    return "{…}";
+  }
 }
 
 /** Returns a pretty-printed JSON string iff `content` is a JSON object/array,
@@ -66,10 +101,12 @@ export default function ChatScreen() {
   const [gatewayOnline, setGatewayOnline] = useState(true);
   const [gatewayChecked, setGatewayChecked] = useState(false);
   const [jsonMode, setJsonMode] = useState(false);
+  const [toolsMode, setToolsMode] = useState(false);
 
   useEffect(() => {
     void migrateLegacyKeys();
     setJsonMode(loadJsonMode());
+    setToolsMode(loadToolsMode());
   }, []);
 
   useEffect(() => {
@@ -139,48 +176,156 @@ export default function ChatScreen() {
       ? { type: "json_object" }
       : undefined;
 
+    // Shared routing params for every turn this send makes (the tool loop reuses
+    // them each round). "auto" -> send no provider so the gateway routes by strategy.
+    const routing = {
+      providerId:
+        selectedProvider === "auto" ? undefined : selectedProvider,
+      strategy:
+        selectedProvider === "auto" ? config.routingStrategy : undefined,
+      mode: config.contextMode,
+      responseFormat,
+    } as const;
+
+    // Built-in tool definitions are sent only when the Tools toggle is on; the
+    // chat then runs the bounded execute→feed-back loop locally (the SAME loop
+    // web/desktop/CLI run — "one Zintus" tools-everywhere parity).
+    const tools = toolsMode ? BUILTIN_TOOL_DEFINITIONS : undefined;
+
+    // The bubble the active turn streams into — updated as the tool loop opens a
+    // fresh bubble per round, so a mid-loop error attaches to the right one.
+    let currentAssistantId = assistantId;
+
     try {
-      const result = await streamChat({
-        // "auto" -> send no provider so the gateway routes by strategy.
-        providerId: selectedProvider === "auto" ? undefined : selectedProvider,
-        strategy: selectedProvider === "auto" ? config.routingStrategy : undefined,
-        mode: config.contextMode,
-        responseFormat,
-        messages: toChatMessages([...messages, userMessage]),
-        onChunk: (text) => {
+      // The conversation we feed the gateway. The tool loop appends the model's
+      // assistant tool_call turn and our tool_result turn each round.
+      const convo = toChatMessages([...messages, userMessage]);
+
+      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+        let streamedText = "";
+        const result = await streamChat({
+          ...routing,
+          tools,
+          messages: convo,
+          onChunk: (text) => {
+            streamedText = text;
+            const id = currentAssistantId;
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === id ? { ...message, content: text } : message,
+              ),
+            );
+          },
+        });
+
+        const calls = result.toolCalls ?? [];
+
+        // No tool calls -> this is the final answer; settle the bubble and stop.
+        if (calls.length === 0) {
+          const id = currentAssistantId;
           setMessages((current) =>
             current.map((message) =>
-              message.id === assistantId
-                ? { ...message, content: text }
+              message.id === id
+                ? {
+                    ...message,
+                    streaming: false,
+                    providerId: result.providerId,
+                    model: result.model,
+                    meta: result.meta,
+                    content:
+                      message.content ||
+                      `[${result.providerId}/${result.model}] (empty response)`,
+                  }
                 : message,
             ),
           );
-        },
-      });
+          break;
+        }
 
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantId
-            ? {
-                ...message,
-                streaming: false,
-                providerId: result.providerId,
-                model: result.model,
-                meta: result.meta,
-                content:
-                  message.content ||
-                  `[${result.providerId}/${result.model}] (empty response)`,
-              }
-            : message,
-        ),
-      );
+        // Execute each built-in tool locally; an unknown tool / failure comes
+        // back as an honest isError result the model can recover from.
+        const toolViews: ToolCallView[] = calls.map((c) => ({
+          id: c.id,
+          name: c.name,
+          arguments: c.arguments,
+        }));
+        const results = calls.map((c) =>
+          executeBuiltinToolCall({
+            id: c.id,
+            name: c.name,
+            arguments: c.arguments,
+          }),
+        );
+        const resultViews: ToolResultView[] = results.map((r) => {
+          const call = calls.find((c) => c.id === r.toolCallId);
+          return {
+            toolCallId: r.toolCallId,
+            name: call?.name ?? "tool",
+            content: r.content,
+            isError: r.isError,
+          };
+        });
+
+        const hitCap = round === MAX_TOOL_ROUNDS;
+        const settledId = currentAssistantId;
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === settledId
+              ? {
+                  ...message,
+                  streaming: false,
+                  providerId: result.providerId,
+                  model: result.model,
+                  meta: result.meta,
+                  toolCalls: toolViews,
+                  toolResults: resultViews,
+                  content: hitCap
+                    ? message.content ||
+                      `Stopped after ${MAX_TOOL_ROUNDS} tool rounds.`
+                    : message.content,
+                }
+              : message,
+          ),
+        );
+
+        // Bounded: a model still calling tools at the cap is surfaced, not looped.
+        if (hitCap) break;
+
+        // Feed the assistant tool_call turn + our tool_result turn back, then
+        // open a fresh bubble for the next round's answer.
+        convo.push({
+          role: "assistant",
+          content: [
+            ...(streamedText.trim()
+              ? [{ type: "text" as const, text: streamedText }]
+              : []),
+            ...calls,
+          ],
+        });
+        convo.push({
+          role: "user",
+          content: results.map((r) => ({
+            type: "tool_result" as const,
+            toolCallId: r.toolCallId,
+            content: r.content,
+            isError: r.isError,
+          })),
+        });
+
+        const nextId = `${Date.now()}-assistant-${round}`;
+        currentAssistantId = nextId;
+        setMessages((current) => [
+          ...current,
+          { id: nextId, role: "assistant", content: "", streaming: true },
+        ]);
+      }
     } catch (sendError) {
       const message =
         sendError instanceof Error ? sendError.message : "Request failed";
       setError(message);
       setMessages((current) =>
         current.map((item) =>
-          item.id === assistantId
+          item.id === currentAssistantId
             ? {
                 ...item,
                 streaming: false,
@@ -238,6 +383,28 @@ export default function ChatScreen() {
               style={[styles.chipText, jsonMode && styles.chipTextActive]}
             >
               {"{} JSON"}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [
+              styles.chip,
+              toolsMode && styles.chipActive,
+              pressed && styles.pressed,
+            ]}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: toolsMode }}
+            onPress={() => {
+              setToolsMode((current) => {
+                const next = !current;
+                saveToolsMode(next);
+                return next;
+              });
+            }}
+          >
+            <Text
+              style={[styles.chipText, toolsMode && styles.chipTextActive]}
+            >
+              {"🔧 Tools"}
             </Text>
           </Pressable>
           <Pressable
@@ -324,6 +491,35 @@ export default function ChatScreen() {
                   ) : null}
                 </Text>
               )}
+
+              {item.toolCalls && item.toolCalls.length > 0 ? (
+                <View style={styles.toolBlock}>
+                  {item.toolCalls.map((call) => {
+                    const toolResult = item.toolResults?.find(
+                      (r) => r.toolCallId === call.id,
+                    );
+                    return (
+                      <View key={call.id} style={styles.toolCallRow}>
+                        <Text style={styles.toolCallName} numberOfLines={2}>
+                          {`🔧 ${call.name}(${formatToolArgs(call.arguments)})`}
+                        </Text>
+                        {toolResult ? (
+                          <Text
+                            style={[
+                              styles.toolResult,
+                              toolResult.isError && styles.toolResultError,
+                            ]}
+                            numberOfLines={4}
+                          >
+                            {toolResult.isError ? "error · " : "→ "}
+                            {toolResult.content}
+                          </Text>
+                        ) : null}
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : null}
 
               {!isUser && !item.streaming && item.content ? (
                 <View style={styles.assistantFooter}>
@@ -500,6 +696,30 @@ const styles = StyleSheet.create({
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
   },
   cursor: { color: COLORS.accentBright },
+  toolBlock: {
+    marginTop: 8,
+    gap: 6,
+  },
+  toolCallRow: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 8,
+  },
+  toolCallName: {
+    color: COLORS.accentBright,
+    fontSize: 12,
+    fontWeight: "600",
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  },
+  toolResult: {
+    color: COLORS.muted,
+    fontSize: 12,
+    marginTop: 4,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  },
+  toolResultError: { color: COLORS.error },
   typingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   typingText: { color: COLORS.muted, fontSize: 13 },
   assistantFooter: {

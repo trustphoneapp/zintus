@@ -4,13 +4,19 @@ import type {
   ProviderId,
   ResponseFormat,
   RoutingStrategy,
+  ToolCallContentBlock,
+  ToolChoice,
+  ToolDefinition,
 } from "@zintus/types";
 
 import {
+  accumulateToolCallDeltas,
   buildChatRequestBody,
+  finalizeToolCalls,
   parseChatMeta,
   type ChatMeta,
   type GatewayChunk,
+  type ToolCallAccumulator,
 } from "./messages";
 import { getGatewayUrl } from "./gateway-url";
 
@@ -38,6 +44,11 @@ export interface StreamChatParams {
    *  syntactically-valid JSON; the gateway resolves the best level the chosen
    *  provider can actually serve (never claims more than it returns). */
   responseFormat?: ResponseFormat;
+  /** Tool definitions sent when the Tools toggle is on. Requires a tool-capable
+   *  provider — the gateway returns a structured 422 otherwise. The caller runs
+   *  the returned `toolCalls` locally and feeds `tool_result` blocks back. */
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
   onChunk: (text: string) => void;
   signal?: AbortSignal;
 }
@@ -49,6 +60,8 @@ export async function streamChat({
   messages,
   threadId,
   responseFormat,
+  tools,
+  toolChoice,
   onChunk,
   signal,
 }: StreamChatParams): Promise<{
@@ -57,6 +70,10 @@ export async function streamChat({
   threadId?: string;
   traceId?: string;
   meta?: ChatMeta;
+  /** Tool calls the model made this turn (undefined for a normal text turn). The
+   *  caller runs the built-in tools and feeds the results back as tool_result
+   *  blocks on the next request. */
+  toolCalls?: ToolCallContentBlock[];
 }> {
   const response = await fetch(`${getGatewayUrl()}/v1/chat/completions`, {
     method: "POST",
@@ -69,6 +86,8 @@ export async function streamChat({
         mode,
         threadId,
         responseFormat,
+        tools,
+        toolChoice,
       }),
     ),
     signal,
@@ -94,6 +113,9 @@ export async function streamChat({
   let traceId: string | undefined;
   let meta: ChatMeta | undefined;
   let output = "";
+  // Accumulate streamed tool-call fragments by their `index`; the pure
+  // fold/finalize helpers live in ./messages and are unit-tested directly.
+  const toolCallsByIndex: ToolCallAccumulator = new Map();
 
   while (true) {
     const { done, value } = await reader.read();
@@ -139,6 +161,11 @@ export async function streamChat({
         output += delta;
         onChunk(output);
       }
+
+      accumulateToolCallDeltas(
+        toolCallsByIndex,
+        chunk.choices?.[0]?.delta?.tool_calls,
+      );
     }
   }
 
@@ -146,11 +173,14 @@ export async function streamChat({
     throw new Error("Gateway stream ended without provider metadata");
   }
 
+  const toolCalls = finalizeToolCalls(toolCallsByIndex);
+
   return {
     providerId: provider,
     model,
     threadId: resolvedThreadId,
     traceId,
     meta,
+    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
   };
 }

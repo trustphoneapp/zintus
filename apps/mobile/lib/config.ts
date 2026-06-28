@@ -10,6 +10,7 @@ const storage = createMMKV({ id: "zintus.config" });
 const STORAGE_KEY = "config";
 const SELECTED_PROVIDER_KEY = "selectedProvider";
 const JSON_MODE_KEY = "jsonMode";
+const TOOLS_MODE_KEY = "toolsMode";
 
 export function loadConfig(): AppConfig {
   const raw = storage.getString(STORAGE_KEY);
@@ -54,6 +55,21 @@ export function loadJsonMode(): boolean {
 
 export function saveJsonMode(enabled: boolean): void {
   storage.set(JSON_MODE_KEY, enabled);
+}
+
+/**
+ * Built-in tool-execution toggle for the chat composer, persisted across
+ * launches. When on, a turn sends the eval-free BUILTIN_TOOL_DEFINITIONS and the
+ * chat runs the bounded execute→feed-back loop locally (calculator /
+ * current_datetime / random_number). Mirrors web/desktop/CLI tool support — the
+ * last surface to gain it ("one Zintus" tools-everywhere parity).
+ */
+export function loadToolsMode(): boolean {
+  return storage.getBoolean(TOOLS_MODE_KEY) ?? false;
+}
+
+export function saveToolsMode(enabled: boolean): void {
+  storage.set(TOOLS_MODE_KEY, enabled);
 }
 
 export const ROUTING_STRATEGIES: Array<{
