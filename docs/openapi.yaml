@@ -240,6 +240,141 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/mcp/discover:
+    post:
+      tags: [MCP]
+      operationId: discoverMcpServer
+      summary: Connect (cached) to an MCP server and list its tools/resources/prompts
+      description: |
+        Connects the gateway to a single MCP (Model Context Protocol) server and
+        returns its advertised tools, resources, and prompts — for the UI's
+        Test-connection / tool-list flow. Connections are CACHED + reused. The
+        gateway HOSTS MCP clients server-side (the browser cannot spawn stdio).
+        No-custody: MCP traffic never touches the Zintus relay, and tool
+        args/results are never logged. Tools are returned both raw (`name`) and
+        namespaced (`namespacedName` = `mcp__<serverId>__<tool>`), the name the
+        chat path exposes to the model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "200":
+          description: The server's namespaced tools, resources, and prompts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serverId: { type: string }
+                  tools:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        namespacedName: { type: string }
+                        description: { type: string }
+                        inputSchema: { type: object }
+                  resources: { type: array, items: { type: object } }
+                  prompts: { type: array, items: { type: object } }
+                  connectedAt: { type: integer }
+        "400":
+          description: Invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          description: |
+            The MCP server could not be reached (spawn failed, unreachable, or the
+            handshake timed out). Body is `{ error: { type:"mcp_connect_error", message } }`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/mcp:
+    delete:
+      tags: [MCP]
+      operationId: disconnectMcpServer
+      summary: Disconnect + evict a cached MCP server connection
+      description: |
+        Disconnects a previously-connected MCP server (killing any stdio child)
+        and evicts it from the registry. Idempotent: returns `{ ok:true }` even
+        if the server was never connected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "200":
+          description: Disconnected (or no-op).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: Invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/mcp/disconnect:
+    post:
+      tags: [MCP]
+      operationId: disconnectMcpServerPost
+      summary: Disconnect + evict a cached MCP server connection (POST alias)
+      description: |
+        Identical to `DELETE /v1/mcp` — provided for clients/proxies that cannot
+        send a body with DELETE. Body is `{ config }`; idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "200":
+          description: Disconnected (or no-op).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: Invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/status:
     get:
       tags: [Operations]
@@ -325,6 +460,74 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Savings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/activity:
+    get:
+      tags: [Operations]
+      operationId: listActivity
+      summary: Paginated usage history (auth-gated)
+      description: |
+        OpenRouter-style `/activity`: a paginated feed of recorded request usage,
+        derived from the SAME routing traces as `/v1/traces` and normalized to a
+        stable per-request shape. Free-core: cost is `0` on the free tier and is
+        never fabricated; token counts default to `0` when not recorded,
+        `cache_hit` defaults to `false`, and `route_reason` is OMITTED when the
+        trace did not record one. Returns an empty `data` list when no usage has
+        been recorded.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Max entries to return. Defaults to 50, capped at 200.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: provider
+          in: query
+          required: false
+          description: Filter the page to a single provider id.
+          schema:
+            type: string
+        - name: model
+          in: query
+          required: false
+          description: Filter the page to a single model id.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Recorded usage entries, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/key:
+    get:
+      tags: [Operations]
+      operationId: getKeyStatus
+      summary: Key / quota introspection (auth-gated)
+      description: |
+        OpenRouter-style `/key`: introspection for the authed gateway token.
+        Free-core: `is_free_tier` is always true and `managed_keys_available` is
+        always false (Zintus never custodies provider keys). Per-provider quota is
+        sourced from the SAME live provider status as `/v1/status`. Honest:
+        `quota_limit` is null when the provider does not report a denominator
+        (never a fabricated cap), and `quota_remaining_ratio` is null whenever the
+        limit is unknown.
+      responses:
+        "200":
+          description: Token + per-provider quota status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyStatus"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -420,15 +623,44 @@ paths:
     get:
       tags: [Chat]
       operationId: listModels
-      summary: List available models (OpenAI-compatible, auth-gated)
+      summary: List available models (OpenAI-compatible, enriched, auth-gated)
       description: |
-        OpenAI-compatible model listing. Each Zintus provider is surfaced as one
-        "model" entry whose `id` is the provider id and `owned_by` is the
-        provider's display name. Useful for SDKs that call `/v1/models` for
-        discovery. (Zintus routes per-provider; this is not a per-model catalog.)
+        OpenRouter-grade model catalog. The envelope and each entry's
+        `{ id, object, owned_by }` triple stay OpenAI-compatible, while every
+        entry additionally carries `display_name`, `context_window`,
+        `capabilities` (vision/tools/structured_output), `pricing`
+        (USD per 1M tokens, null when unknown), `free`, `local`, and
+        `data_policy`. Optional query filters narrow the catalog server-side.
+      parameters:
+        - name: provider
+          in: query
+          required: false
+          description: Only models served by this provider id.
+          schema:
+            $ref: "#/components/schemas/ProviderId"
+        - name: vision
+          in: query
+          required: false
+          description: When `true`, only vision-capable models.
+          schema: { type: boolean }
+        - name: tools
+          in: query
+          required: false
+          description: When `true`, only tool/function-calling models.
+          schema: { type: boolean }
+        - name: free
+          in: query
+          required: false
+          description: When `true`, only models whose list price is $0.
+          schema: { type: boolean }
+        - name: local
+          in: query
+          required: false
+          description: When `true`, only local-runtime models (LM Studio, Ollama).
+          schema: { type: boolean }
       responses:
         "200":
-          description: List of provider-backed models.
+          description: Enriched, optionally-filtered model catalog.
           content:
             application/json:
               schema:
@@ -436,8 +668,41 @@ paths:
               example:
                 object: list
                 data:
-                  - { id: groq, object: model, owned_by: Groq }
-                  - { id: gemini, object: model, owned_by: Google Gemini }
+                  - id: gemini-2.5-flash
+                    object: model
+                    owned_by: Gemini
+                    display_name: "Gemini · gemini-2.5-flash"
+                    context_window: 1000000
+                    capabilities: { vision: true, tools: true, structured_output: json_schema }
+                    pricing: { input_per_1m: 0.3, output_per_1m: 2.5 }
+                    free: false
+                    local: false
+                    data_policy: { trains_on_data: true, badge: trains, zdr: false }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/pricing:
+    get:
+      tags: [Operations]
+      operationId: listPricing
+      summary: List per-model pricing (auth-gated)
+      description: |
+        Pricing-transparency catalog. Returns one entry per model with a KNOWN
+        list price (USD per 1M tokens); models with unknown prices are omitted —
+        prices are never invented. This is reference data only: Zintus is BYOK and
+        never bills.
+      responses:
+        "200":
+          description: Per-model list pricing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PricingList"
+              example:
+                object: list
+                data:
+                  - { id: gemini-2.5-flash, provider: gemini, input_per_1m: 0.3, output_per_1m: 2.5, free: false }
+                  - { id: llama3.3, provider: ollama, input_per_1m: 0, output_per_1m: 0, free: true }
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -830,6 +1095,158 @@ components:
           description: Optional diff text for code-aware context compilation.
         search:
           $ref: "#/components/schemas/SearchOptions"
+        tools:
+          type: array
+          description: |
+            Tool/function definitions the model may call this turn. Presence
+            requires a tool-capable provider/model — an unsupported provider
+            yields a 422 `unsupported_capability` (required: ["tools"]).
+          items:
+            $ref: "#/components/schemas/ToolDefinition"
+        tool_choice:
+          description: How the model may use `tools` this turn (default auto).
+          oneOf:
+            - type: string
+              enum: [auto, required, none]
+            - type: object
+              required: [type, name]
+              additionalProperties: false
+              properties:
+                type: { type: string, const: tool }
+                name: { type: string }
+        response_format:
+          $ref: "#/components/schemas/ResponseFormat"
+        mcp:
+          $ref: "#/components/schemas/MCPRequest"
+
+    MCPServerConfig:
+      type: object
+      description: |
+        How to reach an MCP (Model Context Protocol) server. Discriminated on
+        `transport`. `stdio` spawns a LOCAL process from the USER'S OWN config
+        (hosted by the loopback gateway — the browser cannot); `sse`/`http` reach
+        a remote MCP endpoint.
+      oneOf:
+        - type: object
+          required: [transport, command]
+          properties:
+            transport: { type: string, const: stdio }
+            command: { type: string }
+            args: { type: array, items: { type: string } }
+            env:
+              type: object
+              additionalProperties: { type: string }
+        - type: object
+          required: [transport, url]
+          properties:
+            transport: { type: string, const: sse }
+            url: { type: string, format: uri }
+            headers:
+              type: object
+              additionalProperties: { type: string }
+        - type: object
+          required: [transport, url]
+          properties:
+            transport: { type: string, const: http }
+            url: { type: string, format: uri }
+            headers:
+              type: object
+              additionalProperties: { type: string }
+
+    MCPRequest:
+      type: object
+      description: |
+        Additive chat block. When present, the gateway connects each listed MCP
+        server, merges their tools (filtered by `enabledTools`) with any client
+        `tools`, and runs a BOUNDED server-side tool loop (≤ 8 model calls),
+        emitting `mcp_tool_call` / `mcp_tool_result` SSE events. Absent ⇒ the
+        existing flow is unchanged.
+      required: [servers]
+      additionalProperties: false
+      properties:
+        servers:
+          type: array
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/MCPServerConfig"
+        enabledTools:
+          type: array
+          description: |
+            Optional allow-list of tool names to expose (raw `name` or namespaced
+            `mcp__<serverId>__<tool>`). Omit to expose every advertised tool.
+          items: { type: string }
+
+    ResponseFormat:
+      type: object
+      description: |
+        Structured / JSON output request. `json_schema` asks for schema-conformant
+        JSON; `json_object` asks only for syntactically-valid JSON; `text` (default)
+        is free-form. A STRICT `json_schema` request (`strict: true`) DEMANDS a
+        provider that guarantees conformance — an unsupported provider yields a 422
+        `unsupported_capability` (required: ["json_schema"]). Structured requests are
+        BUFFERED and validated, not token-streamed: on the streaming path the text
+        arrives then a single terminal frame carries `parsed` + `structured_output`.
+      required: [type]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum: [text, json_object, json_schema]
+        schema:
+          type: object
+          description: JSON Schema for the output. Required when `type` is `json_schema`.
+        name:
+          type: string
+          description: Human name for the schema (forwarded to providers that want one).
+        strict:
+          type: boolean
+          description: |
+            When true, DEMANDS a provider that GUARANTEES schema conformance; a
+            non-conformant result returns 422 `structured_output_invalid` rather
+            than a 200 with prose.
+        maxRepairAttempts:
+          type: integer
+          minimum: 0
+          maximum: 2
+
+    ToolDefinition:
+      type: object
+      description: A tool the model may call. Mirrors @zintus/types ToolDefinition.
+      required: [name, description, parameters]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          pattern: "^[a-zA-Z0-9_-]{1,64}$"
+        description:
+          type: string
+        parameters:
+          type: object
+          description: JSON Schema for the tool input (passed through to the provider).
+        strict:
+          type: boolean
+
+    ToolCall:
+      type: object
+      description: |
+        A model's request to invoke a tool, OpenAI-shape. On the streaming path
+        these arrive as `choices[].delta.tool_calls[]` (each carrying `index`)
+        followed by a `finish_reason: "tool_calls"` delta; on the non-streaming
+        path they live on the assistant `message.tool_calls`.
+      required: [id, type, function]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        type: { type: string, const: function }
+        function:
+          type: object
+          required: [name, arguments]
+          additionalProperties: false
+          properties:
+            name: { type: string }
+            arguments:
+              type: string
+              description: JSON-stringified arguments object.
 
     ChatCompletionChoice:
       type: object
@@ -838,9 +1255,20 @@ components:
       properties:
         index: { type: integer }
         message:
-          $ref: "#/components/schemas/ChatMessage"
+          allOf:
+            - $ref: "#/components/schemas/ChatMessage"
+            - type: object
+              properties:
+                tool_calls:
+                  type: array
+                  description: |
+                    Present when the assistant turn ended to await tool results
+                    (finish_reason "tool_calls"); `content` may be null.
+                  items:
+                    $ref: "#/components/schemas/ToolCall"
         finish_reason:
           type: string
+          description: '`stop` for a normal answer, `tool_calls` when the turn emitted tool calls.'
           example: stop
 
     ChatCompletion:
@@ -870,6 +1298,43 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ChatCompletionChoice"
+        parsed:
+          description: |
+            The validated, parsed structured-output value. Present only for a
+            structured request (`response_format`) whose output validated.
+        structured_output:
+          $ref: "#/components/schemas/StructuredOutputMeta"
+
+    StructuredOutputMeta:
+      type: object
+      description: |
+        Honesty metadata for a structured-output response. `served_level` is what
+        the chosen provider could actually serve (`prompt` = emulated, never
+        guaranteed); `guaranteed` is true ONLY when `served_level` is `json_schema`.
+      required: [requested, served_level, guaranteed, valid, repair_attempts]
+      additionalProperties: false
+      properties:
+        requested:
+          type: string
+          enum: [json_object, json_schema]
+        served_level:
+          type: string
+          enum: [json_schema, json_object, prompt]
+        guaranteed:
+          type: boolean
+        valid:
+          type: boolean
+        repair_attempts:
+          type: integer
+        issues:
+          type: array
+          items:
+            type: object
+            required: [path, message]
+            additionalProperties: false
+            properties:
+              path: { type: string }
+              message: { type: string }
 
     ChatCompletionChunk:
       type: object
@@ -897,6 +1362,30 @@ components:
                 type: object
                 properties:
                   content: { type: string }
+                  tool_calls:
+                    type: array
+                    description: |
+                      Streamed tool calls. After the text deltas drain, each tool
+                      call is emitted as one chunk carrying a single entry (with
+                      `index`), then a final delta sets `finish_reason: "tool_calls"`.
+                    items:
+                      type: object
+                      required: [index, id, type, function]
+                      additionalProperties: false
+                      properties:
+                        index: { type: integer }
+                        id: { type: string }
+                        type: { type: string, const: function }
+                        function:
+                          type: object
+                          required: [name, arguments]
+                          additionalProperties: false
+                          properties:
+                            name: { type: string }
+                            arguments: { type: string }
+              finish_reason:
+                type: [string, "null"]
+                description: '`tool_calls` on the terminating tool-call delta; null/absent otherwise.'
 
     ResearchRequest:
       type: object
@@ -948,6 +1437,117 @@ components:
         note:
           type: string
           example: "estimate vs. paid-API list pricing"
+
+    ActivityEntry:
+      type: object
+      description: |
+        A single normalized usage record derived from a routing trace. Cost is
+        $0 on the free tier (never fabricated); token counts are 0 when not
+        recorded; `route_reason` is present only when the trace recorded one.
+      required:
+        [id, created, created_at, provider, model, tokens, cost_usd, saved_vs_baseline_usd, latency_ms, cache_hit]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: The trace id of the request.
+        created:
+          type: integer
+          description: Unix timestamp (seconds) when the request started.
+        created_at:
+          type: string
+          format: date-time
+          description: ISO-8601 start timestamp (same instant as `created`).
+        provider:
+          description: Winning provider id, or null when none was recorded.
+          oneOf:
+            - $ref: "#/components/schemas/ProviderId"
+            - type: "null"
+        model:
+          type: [string, "null"]
+        tokens:
+          type: object
+          required: [input, output, total]
+          additionalProperties: false
+          properties:
+            input: { type: integer }
+            output: { type: integer }
+            total: { type: integer }
+        cost_usd:
+          type: number
+          description: Real user cost. Always 0 on the free tier; never invented.
+        saved_vs_baseline_usd:
+          type: number
+          description: Estimated USD saved vs. a paid baseline. 0 when not derivable.
+        latency_ms:
+          type: [number, "null"]
+        cache_hit:
+          type: boolean
+        route_reason:
+          type: string
+          description: Present only when the trace recorded a routing reason.
+
+    ActivityList:
+      type: object
+      required: [object, data, has_more]
+      additionalProperties: false
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityEntry"
+        has_more:
+          type: boolean
+          description: True when more entries exist beyond the returned page.
+
+    KeyStatus:
+      type: object
+      required: [object, label, is_free_tier, providers, managed_keys_available]
+      additionalProperties: false
+      properties:
+        object:
+          type: string
+          const: key_status
+        label:
+          type: string
+          example: zintus-gateway
+        is_free_tier:
+          type: boolean
+          description: Always true — Zintus routes to provider free tiers.
+        providers:
+          type: array
+          items:
+            type: object
+            required:
+              [id, has_key, available, in_cooldown, quota_used, quota_limit, quota_remaining_ratio]
+            additionalProperties: false
+            properties:
+              id:
+                $ref: "#/components/schemas/ProviderId"
+              has_key: { type: boolean }
+              available: { type: boolean }
+              in_cooldown: { type: boolean }
+              quota_used: { type: integer }
+              quota_limit:
+                description: |
+                  The provider's reported quota denominator, or null when the
+                  provider does not report one (never a fabricated cap).
+                type: [integer, "null"]
+              quota_remaining_ratio:
+                description: |
+                  Remaining quota ratio (0..1), or null when `quota_limit` is
+                  unknown.
+                oneOf:
+                  - type: number
+                    minimum: 0
+                    maximum: 1
+                  - type: "null"
+        managed_keys_available:
+          type: boolean
+          description: Always false — Zintus never custodies provider keys.
 
     RouteOptions:
       type: object
@@ -1071,19 +1671,60 @@ components:
 
     Model:
       type: object
-      description: OpenAI-compatible model entry (one per provider).
+      description: |
+        Enriched, OpenRouter-grade model entry. The top-level
+        `{ id, object, owned_by }` triple stays OpenAI-compatible; every other
+        field is additive per-model metadata sourced from the Zintus catalog.
+        Pricing is USD per 1M tokens and is `null` when the list price is unknown
+        (never invented).
       required: [id, object, owned_by]
       additionalProperties: false
       properties:
         id:
           type: string
-          description: Provider id (doubles as the model id for routing).
+          description: Model id exactly as passed to the provider API.
         object:
           type: string
           const: model
         owned_by:
           type: string
           description: Provider display name.
+        display_name:
+          type: string
+          description: Human-facing label ("Provider · model").
+        context_window:
+          type: integer
+          description: Maximum context window in tokens.
+        capabilities:
+          type: object
+          additionalProperties: false
+          properties:
+            vision:
+              type: boolean
+            tools:
+              type: boolean
+            structured_output:
+              type: string
+              enum: [json_schema, json_object, none]
+        pricing:
+          type: object
+          additionalProperties: false
+          description: USD per 1M tokens; null when the price is unknown.
+          properties:
+            input_per_1m:
+              type: [number, "null"]
+            output_per_1m:
+              type: [number, "null"]
+        free:
+          type: boolean
+          description: True when the model's list price is $0 (local or free route).
+        local:
+          type: boolean
+          description: True for local runtimes (LM Studio, Ollama).
+        data_policy:
+          type: object
+          description: Best-effort free-tier data-handling summary for the provider.
+          additionalProperties: true
 
     ModelList:
       type: object
@@ -1097,6 +1738,38 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Model"
+
+    PricingEntry:
+      type: object
+      description: |
+        Per-model list pricing (USD per 1M tokens). Only models with a KNOWN
+        price are listed by `/v1/pricing` — unknown prices are omitted, not guessed.
+      required: [id, provider, input_per_1m, output_per_1m, free]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        provider:
+          $ref: "#/components/schemas/ProviderId"
+        input_per_1m:
+          type: number
+        output_per_1m:
+          type: number
+        free:
+          type: boolean
+
+    PricingList:
+      type: object
+      required: [object, data]
+      additionalProperties: false
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/PricingEntry"
 
     Thread:
       type: object

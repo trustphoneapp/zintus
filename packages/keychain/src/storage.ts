@@ -5,6 +5,13 @@ import { isProviderId, PROVIDER_IDS } from "@zintus/types";
 
 const SERVICE = "zintus";
 const MANIFEST_ACCOUNT = "__manifest__";
+// BYOK fallback keys live in a sidecar account so the PRIMARY key stays in the
+// provider's own account exactly as before (single-key storage is byte-identical
+// and `getKey`/`setKey`/storage.test.ts are untouched). The sidecar holds the
+// ordered tail (keys 1..n) as a JSON array; key 0 is always the primary account.
+function fallbackAccount(providerId: ProviderId): string {
+  return `${providerId}::fallbacks`;
+}
 
 // ── Backend selection ───────────────────────────────────────────────────────
 // The OS keychain relies on @napi-rs/keyring (a native module) plus an OS Secret
@@ -107,6 +114,36 @@ function backendDelete(account: string): void {
   new (loadEntryCtor() as typeof KeyringEntry)(SERVICE, account).deletePassword();
 }
 
+function readFallbacks(providerId: ProviderId): string[] {
+  try {
+    const raw = backendGet(fallbackAccount(providerId));
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    return [];
+  }
+}
+
+// Best-effort sidecar write; an empty tail deletes the sidecar so single-key
+// storage leaves no trace (back-compat with the pre-fallback on-disk shape).
+function writeFallbacks(providerId: ProviderId, keys: string[]): void {
+  try {
+    if (keys.length === 0) {
+      backendDelete(fallbackAccount(providerId));
+      return;
+    }
+    backendSet(fallbackAccount(providerId), JSON.stringify(keys));
+  } catch {
+    // ignore — getKeys() simply returns the primary key alone.
+  }
+}
+
 function readManifest(): string[] {
   try {
     const raw = backendGet(MANIFEST_ACCOUNT);
@@ -159,6 +196,9 @@ export async function setKey(providerId: ProviderId, key: string): Promise<void>
   } catch (error) {
     throw keychainError(error);
   }
+  // setKey sets the SOLE/primary key — clear any fallback tail so the provider
+  // is left with exactly one key (matches the "single key" contract).
+  writeFallbacks(providerId, []);
   const manifest = readManifest();
   if (!manifest.includes(providerId)) {
     writeManifest([...manifest, providerId]);
@@ -177,6 +217,68 @@ export async function getKey(providerId: ProviderId): Promise<string | null> {
   }
 }
 
+/**
+ * Ordered BYOK keys for a provider, primary first. A provider that was only ever
+ * set via `setKey` reads back as a 1-element array (back-compat). Empty when no
+ * key is stored. This is the list the router walks on an auth (401/403) failure.
+ */
+export async function getKeys(providerId: ProviderId): Promise<string[]> {
+  if (!isProviderId(providerId)) {
+    return [];
+  }
+  try {
+    const primary = backendGet(providerId);
+    const tail = readFallbacks(providerId);
+    const all = primary ? [primary, ...tail] : tail;
+    // Dedupe, order-preserving, drop empties — a stray duplicate key must not
+    // cause a redundant retry of the same credential.
+    return Array.from(new Set(all.filter((k) => k.length > 0)));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Replace a provider's ordered key list (primary first). The first element is
+ * stored as the primary (in the provider's own account, so `getKey` still reads
+ * it); the rest go to the sidecar. An empty/blank list deletes every key. No
+ * custody — keys never leave the local OS keychain.
+ */
+export async function setKeys(providerId: ProviderId, keys: string[]): Promise<void> {
+  if (!isProviderId(providerId)) {
+    throw new Error(`Unknown provider: ${providerId}`);
+  }
+  const cleaned = Array.from(
+    new Set(keys.map((k) => k.trim()).filter((k) => k.length > 0)),
+  );
+  const [primary, ...tail] = cleaned;
+  if (primary === undefined) {
+    await deleteKey(providerId);
+    return;
+  }
+  try {
+    backendSet(providerId, primary);
+  } catch (error) {
+    throw keychainError(error);
+  }
+  writeFallbacks(providerId, tail);
+  const manifest = readManifest();
+  if (!manifest.includes(providerId)) {
+    writeManifest([...manifest, providerId]);
+  }
+}
+
+/** Remove the key at `index` from a provider's ordered list (re-promoting the
+ *  next key to primary as needed). Out-of-range indices are a no-op. */
+export async function deleteKeyAt(providerId: ProviderId, index: number): Promise<void> {
+  const keys = await getKeys(providerId);
+  if (index < 0 || index >= keys.length) {
+    return;
+  }
+  keys.splice(index, 1);
+  await setKeys(providerId, keys);
+}
+
 export async function deleteKey(providerId: ProviderId): Promise<void> {
   if (!isProviderId(providerId)) {
     return;
@@ -187,6 +289,8 @@ export async function deleteKey(providerId: ProviderId): Promise<void> {
   } catch {
     // Entry may already be absent.
   }
+  // Drop the fallback tail too so no orphaned keys outlive the primary.
+  writeFallbacks(providerId, []);
 
   writeManifest(readManifest().filter((id) => id !== providerId));
 }

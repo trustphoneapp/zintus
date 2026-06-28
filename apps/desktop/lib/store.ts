@@ -3,7 +3,12 @@ import { persist } from "zustand/middleware";
 import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@zintus/types";
 import { loadConfig, saveConfig } from "./config";
 import { fetchProviderSnapshot, type DesktopProviderInfo } from "./providers";
-import type { CompressionStats, GatewaySavings, ResponseMeta } from "./gateway";
+import type {
+  CompressionStats,
+  GatewaySavings,
+  McpToolEvent,
+  ResponseMeta,
+} from "./gateway";
 
 interface SettingsState {
   settings: AppConfig;
@@ -26,6 +31,29 @@ interface ProviderStatusState {
   setActiveProvider: (id: ProviderId | null) => void;
 }
 
+/** A tool the model asked to call this turn, stamped on the assistant bubble so the
+ *  UI can show what ran. Mirrors the web app's rendered tool calls. `arguments` is
+ *  optional here (display-only); the execution path always carries a parsed object. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments?: Record<string, unknown>;
+}
+
+/** Image METADATA shown on a sent user bubble. Never carries base64 — the bytes
+ *  ride only in the gateway request `content`, never in thread history. The
+ *  `previewUrl` is a local object URL of the original picked file (thumbnail only).
+ *  Mirrors web's UiImageMeta. */
+export interface UiImageMeta {
+  name: string;
+  mimeType: string;
+  bytes: number;
+  width?: number;
+  height?: number;
+  exifStripped: boolean;
+  previewUrl?: string;
+}
+
 export interface ChatMessageUi {
   id: string;
   role: "user" | "assistant";
@@ -36,6 +64,13 @@ export interface ChatMessageUi {
   compression?: CompressionStats;
   /** Per-response transparency signals (latency, saved-vs-baseline, strategy). */
   meta?: ResponseMeta;
+  /** Tool calls the model made on this assistant turn (when Tools is enabled). */
+  toolCalls?: ToolCall[];
+  /** Server-side MCP tool-loop activity for this assistant turn (display only —
+   *  the gateway ran the tools). Calm violet activity; never the raw args/output. */
+  mcpToolEvents?: McpToolEvent[];
+  /** Image metadata for a sent user turn (thumbnails + size only; never base64). */
+  images?: UiImageMeta[];
 }
 
 export interface Thread {
@@ -211,6 +246,12 @@ export const useChatStore = create<ChatState>()(
 export function createChatMessage(
   role: ChatMessageUi["role"],
   content: string,
+  images?: UiImageMeta[],
 ): ChatMessageUi {
-  return { id: createMessageId(), role, content };
+  return {
+    id: createMessageId(),
+    role,
+    content,
+    ...(images && images.length > 0 ? { images } : {}),
+  };
 }

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import {
   MAX_IMAGES,
   buildChatContent,
+  formatQuotaUsage,
+  formatTurnSummary,
   loadImages,
   normalizeChatError,
 } from "./chat-content.js";
@@ -166,6 +168,72 @@ describe("buildChatContent", () => {
     const out = captured.join("");
     expect(out).not.toContain(data);
     expect(out).not.toContain("base64");
+  });
+});
+
+describe("formatQuotaUsage", () => {
+  it("omits the line entirely when there is no usage figure", () => {
+    expect(formatQuotaUsage(undefined, 500_000)).toBeNull();
+  });
+
+  it("prints used/limit when the engine reports a real denominator", () => {
+    expect(formatQuotaUsage(12_500, 500_000)).toBe("quota 12,500/500,000 tok");
+  });
+
+  it("says 'limit unknown' — never a fabricated 1,000,000 — when no cap is reported", () => {
+    const nullLimit = formatQuotaUsage(12_500, null);
+    const undefLimit = formatQuotaUsage(12_500, undefined);
+    for (const line of [nullLimit, undefLimit]) {
+      expect(line).toBe("quota 12,500 tok used today (limit unknown)");
+      expect(line).not.toContain("1,000,000");
+      expect(line).not.toContain("1000000");
+    }
+  });
+});
+
+describe("formatTurnSummary", () => {
+  it("surfaces the route reason as a 'why:' headline when present", () => {
+    const out = formatTurnSummary({
+      providerLabel: "Groq",
+      model: "llama-3.3-70b",
+      routeReason: "cheapest healthy provider for strategy=cost",
+      inputTokens: 100,
+      outputTokens: 42,
+      costUsd: 0,
+      quotaUsed: 5_000,
+      quotaLimit: 200_000,
+    });
+    expect(out).toContain("Groq · llama-3.3-70b");
+    expect(out).toContain("why: cheapest healthy provider for strategy=cost");
+    expect(out).toContain("100 in / 42 out tok");
+    expect(out).toContain("$0 (free tier)");
+    expect(out).toContain("quota 5,000/200,000 tok");
+  });
+
+  it("omits the route-reason line when the engine recorded none", () => {
+    const out = formatTurnSummary({
+      providerLabel: "openai",
+      model: "gpt-4o-mini",
+      outputTokens: 10,
+      inputTokens: 3,
+    });
+    expect(out).not.toContain("why:");
+  });
+
+  it("never prints a fabricated 1,000,000 quota denominator", () => {
+    const out = formatTurnSummary({
+      providerLabel: "openai",
+      model: "gpt-4o-mini",
+      inputTokens: 10,
+      outputTokens: 20,
+      costUsd: 0.0012,
+      quotaUsed: 7_777,
+      quotaLimit: null,
+    });
+    expect(out).toContain("quota 7,777 tok used today (limit unknown)");
+    expect(out).not.toContain("1,000,000");
+    expect(out).not.toContain("1000000");
+    expect(out).toContain("~$0.0012 est");
   });
 });
 

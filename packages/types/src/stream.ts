@@ -1,3 +1,10 @@
+import type {
+  ResolvedResponseFormat,
+  ToolCallContentBlock,
+  ToolChoice,
+  ToolDefinition,
+} from "./route.js";
+
 export interface StreamChatOptions {
   model?: string;
   apiKey?: string;
@@ -11,6 +18,16 @@ export interface StreamChatOptions {
    * ignore it. Groq's native search is selected via the model name instead.
    */
   webSearch?: boolean;
+  /** Tool/function definitions the model may call this turn. Adapters that lack a
+   *  tool mapping ignore these; the router gate ensures only tool-capable models
+   *  receive a tools-bearing request. */
+  tools?: ToolDefinition[];
+  /** How the model may use `tools` this turn (default "auto"). */
+  toolChoice?: ToolChoice;
+  /** Resolved structured-output instruction for THIS provider call. The router has
+   *  already downgraded the caller's request to the level this provider/model can
+   *  serve, so the adapter only emits its native field for `level`. */
+  responseFormat?: ResolvedResponseFormat;
 }
 
 /**
@@ -47,6 +64,14 @@ export interface StreamChunk {
   done?: boolean;
   rateLimit?: RateLimitInfo;
   usage?: TokenUsage;
+  /** A completed tool call from the model. Always carries fully-parsed `arguments`
+   *  (the OpenAI adapter accumulates streamed fragments then parses; Gemini arrives
+   *  whole). Multiple tool calls in one assistant turn are emitted as separate
+   *  chunks. The text path is unaffected — a chunk carries `content` OR `toolCall`. */
+  toolCall?: ToolCallContentBlock;
+  /** Why generation stopped, when the provider reports it. `"tool_calls"` signals
+   *  the assistant turn ended to await tool results. */
+  finishReason?: "stop" | "tool_calls" | "length" | "content_filter";
 }
 
 export interface StreamChatResult {

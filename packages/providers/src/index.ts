@@ -35,7 +35,10 @@ export {
   modelCapabilities,
   providerCapabilityTier,
   supportsVision,
+  supportsTools,
+  structuredOutputLevel,
   type ModelCapabilities,
+  type StructuredLevel,
 } from "./capabilities.js";
 export {
   PRICING_CATALOG,
@@ -44,4 +47,12 @@ export {
   estimateCostUsd,
   type ModelPricing,
 } from "./pricing.js";
+export {
+  MODEL_CATALOG,
+  listCatalogModels,
+  getCatalogModel,
+  catalogModelsForProvider,
+  type CatalogModel,
+  type DataPolicyTag,
+} from "./catalog.js";
 export type { Provider, ProviderId } from "@zintus/types";

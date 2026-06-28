@@ -9,6 +9,7 @@ import type {
   RouteRequest,
   RouteStreamResult,
   RoutingStrategy,
+  ToolCallContentBlock,
 } from "@zintus/types";
 import {
   estimateUsage,
@@ -16,8 +17,41 @@ import {
   mayTrainOnUserData,
   ProviderHttpError,
 } from "@zintus/providers";
-import { supportsVision } from "@zintus/providers";
-import { requiresVision } from "@zintus/types";
+import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
+import {
+  requiresVision,
+  requiresTools,
+  requiresGuaranteedSchema,
+} from "@zintus/types";
+import type { ResponseFormat, ResolvedResponseFormat } from "@zintus/types";
+
+/** Resolve the caller's `ResponseFormat` to the strongest level a given
+ *  provider+model can actually serve. Returns undefined for a text/absent request.
+ *  `json_schema` request → json_schema if the model guarantees it, else json_object
+ *  if it has json-mode, else prompt (emulated). `json_object` request → json_object
+ *  unless the model has no native JSON mode (then prompt). The schema rides along
+ *  for json_schema and prompt so the engine can validate/coerce. */
+function resolveResponseFormat(
+  rf: ResponseFormat | undefined,
+  providerId: ProviderId,
+  model: string,
+): ResolvedResponseFormat | undefined {
+  if (!rf || rf.type === "text") return undefined;
+  const providerLevel = structuredOutputLevel(providerId, model);
+  const name = rf.name ?? "response";
+  let level: ResolvedResponseFormat["level"];
+  if (rf.type === "json_schema") {
+    level =
+      providerLevel === "json_schema"
+        ? "json_schema"
+        : providerLevel === "json_object"
+          ? "json_object"
+          : "prompt";
+  } else {
+    level = providerLevel === "none" ? "prompt" : "json_object";
+  }
+  return { level, schema: rf.schema, name };
+}
 import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
 import { redactSecrets } from "./redact.js";
@@ -45,6 +79,13 @@ export interface RouterConfig {
   providerPriority?: ProviderId[];
   defaultProvider?: ProviderId;
   getApiKey?: (providerId: ProviderId) => Promise<string | null>;
+  /**
+   * BYOK fallback keys: the ORDERED key list (primary first) for a provider. When
+   * supplied, the router tries the next key on a pre-stream AUTH failure (401/403)
+   * before abandoning the provider. Defaults to wrapping {@link getApiKey} as a
+   * 0/1-element list, so existing single-key construction is unchanged.
+   */
+  getApiKeys?: (providerId: ProviderId) => Promise<string[]>;
   onAttempt?: (event: RouteAttemptEvent) => void;
   providerWeights?: Record<ProviderId, number>;
   virtualKey?: string;
@@ -172,6 +213,15 @@ export function createRouter(config: RouterConfig = {}): Router {
       }
       return null;
     });
+  // Ordered BYOK keys (primary first). Defaults to wrapping resolveKey as a
+  // 0/1-element list so a router built with only `getApiKey` behaves exactly as
+  // before (single-key path, one streamChat attempt).
+  const resolveKeys =
+    config.getApiKeys ??
+    (async (providerId: ProviderId) => {
+      const k = await resolveKey(providerId);
+      return k ? [k] : [];
+    });
 
   const cooldownRetries = new Map<ProviderId, number>();
   const stickySessions = new Map<string, ProviderId>();
@@ -239,12 +289,16 @@ export function createRouter(config: RouterConfig = {}): Router {
   // don't hit the OS keychain twice for the same provider.
   const keyResolutionCache = new WeakMap<
     RouteRequest,
-    Map<ProviderId, Promise<string | null>>
+    Map<ProviderId, Promise<string[]>>
   >();
-  function keyFor(
+  // Ordered keys to try for a provider on THIS request: the per-request BYOK key
+  // (if any) takes precedence, then the keychain's ordered list (primary +
+  // fallbacks), deduped, order preserved. Memoized per request so eligibility and
+  // the winning stream call don't hit the OS keychain twice for one provider.
+  function keysFor(
     providerId: ProviderId,
     request: RouteRequest,
-  ): Promise<string | null> {
+  ): Promise<string[]> {
     let cache = keyResolutionCache.get(request);
     if (!cache) {
       cache = new Map();
@@ -252,12 +306,30 @@ export function createRouter(config: RouterConfig = {}): Router {
     }
     let pending = cache.get(providerId);
     if (!pending) {
-      pending = Promise.resolve(
-        request.keys?.[providerId] ?? resolveKey(providerId),
-      );
+      pending = (async () => {
+        const out: string[] = [];
+        const requestKey = request.keys?.[providerId];
+        if (requestKey) {
+          out.push(requestKey);
+        }
+        for (const key of await resolveKeys(providerId)) {
+          if (key) {
+            out.push(key);
+          }
+        }
+        return Array.from(new Set(out));
+      })();
       cache.set(providerId, pending);
     }
     return pending;
+  }
+  // The primary key (eligibility + back-compat). Identical to the old keyFor: for
+  // a request key it returns that; otherwise the first resolved key, else null.
+  async function keyFor(
+    providerId: ProviderId,
+    request: RouteRequest,
+  ): Promise<string | null> {
+    return (await keysFor(providerId, request))[0] ?? null;
   }
 
   async function buildStatus(): Promise<ProviderStatus[]> {
@@ -534,6 +606,38 @@ export function createRouter(config: RouterConfig = {}): Router {
         }
       }
 
+      // Tool routing: a request that supplies tool definitions MUST go to a
+      // tool-capable provider+model. Same discipline as vision — filter to
+      // tool-capable candidates and hard-error (`unsupported_capability`) rather
+      // than silently sending tools to a model that drops them. The per-provider
+      // model fan-out below (groq 70B→8B, openrouter free models) is constrained
+      // to tool-capable models in the attempt loop so failover never lands on a
+      // non-tool model when tools were requested.
+      if (requiresTools(request)) {
+        candidates = candidates.filter((candidate) =>
+          supportsTools(candidate.id, request.model),
+        );
+        if (candidates.length === 0) {
+          throw new Error("unsupported_capability");
+        }
+      }
+
+      // Structured-output routing: a STRICT json_schema request must go to a
+      // provider+model that GUARANTEES schema-constrained decoding. Filter to
+      // json_schema-level candidates and hard-error rather than silently serving
+      // best-effort json-mode. A non-strict structured request is NOT filtered —
+      // it is allowed to fall back to json_object/prompt (resolved per-attempt
+      // below) and is labeled guaranteed:false downstream.
+      if (requiresGuaranteedSchema(request)) {
+        candidates = candidates.filter(
+          (candidate) =>
+            structuredOutputLevel(candidate.id, request.model) === "json_schema",
+        );
+        if (candidates.length === 0) {
+          throw new Error("unsupported_capability");
+        }
+      }
+
       if (candidates.length === 0) {
         throw new Error(
           "No providers available. Configure API keys or start Ollama.",
@@ -585,11 +689,12 @@ export function createRouter(config: RouterConfig = {}): Router {
           halfOpenProbes.delete(provider.id);
         };
 
-        // keyFor() prefers per-request BYOK keys (request.keys) then falls back to
-        // the gateway's configured resolveKey — merges the per-request-keys feature
-        // with the quota-reservation admission gate above.
-        const apiKey = (await keyFor(provider.id, request)) ?? undefined;
-        const modelsToTry =
+        // keysFor() prefers per-request BYOK keys (request.keys) then appends the
+        // keychain's ordered list (primary + fallbacks) — merges the per-request-
+        // keys feature with the quota-reservation admission gate above. The
+        // streamChat call below walks these keys on an auth (401/403) failure.
+        const apiKeys = await keysFor(provider.id, request);
+        let modelsToTry =
           provider.id === "groq"
             ? [requestedModel ?? GROQ_MODEL_70B, GROQ_MODEL_8B]
             : provider.id === "openrouter"
@@ -600,21 +705,89 @@ export function createRouter(config: RouterConfig = {}): Router {
                   ),
                 ]
             : [requestedModel ?? provider.defaultModel];
+        // When tools are requested, never fail over onto a model that can't do
+        // tools (e.g. groq's 8B fallback) — that would silently drop the tools.
+        if (requiresTools(request)) {
+          modelsToTry = modelsToTry.filter((model) =>
+            supportsTools(provider.id, model),
+          );
+          if (modelsToTry.length === 0) {
+            releaseReservation();
+            continue;
+          }
+        }
+        // Same discipline for vision: never fail over onto a model that can't do
+        // vision (e.g. an openrouter vision model failing over to a text-only free
+        // model) — that would silently re-send the image blocks to a blind model.
+        if (requiresVision(request.messages)) {
+          modelsToTry = modelsToTry.filter((model) =>
+            supportsVision(provider.id, model),
+          );
+          if (modelsToTry.length === 0) {
+            releaseReservation();
+            continue;
+          }
+        }
 
         for (const model of modelsToTry) {
           const attemptStarted = Date.now();
           try {
-            const result = await provider.streamChat(request.messages, {
+            // Resolve the caller's structured-output request to the strongest
+            // level THIS provider+model can actually serve (json_schema ≥
+            // json_object ≥ prompt). The adapter emits only its native field for
+            // that level; anything below json_schema is validated (and labeled
+            // not-guaranteed) by the engine. We capture the resolved level here so
+            // the winning result reports the level ACTUALLY served — the engine
+            // must label `served_level`/`guaranteed` from this, not from the raw
+            // provider capability.
+            const resolvedRf = resolveResponseFormat(
+              request.responseFormat,
+              provider.id,
               model,
-              apiKey,
-              webSearch: request.webSearch,
-              temperature: request.temperature,
-              maxTokens: request.maxTokens,
-              cacheHints: request.cachedContentHandle
-                ? { cachedContentHandle: request.cachedContentHandle }
-                : undefined,
-              signal: request.signal,
-            });
+            );
+            // BYOK PRIORITY + FALLBACK: walk the ordered keys for this provider.
+            // A 401/403 is thrown by streamChat PRE-stream (before the first
+            // chunk), so retrying with the next key here is safe — we never retry
+            // a key mid-stream. On such an auth failure WITH a next key available,
+            // retry the SAME provider+model with it (keep the reservation, do not
+            // abandon the provider). Any non-auth error (429/5xx/network/other),
+            // or exhausting the keys, throws to the EXISTING failover/abandon path
+            // below UNCHANGED. With zero or one key the loop runs exactly once →
+            // behavior is identical to the single-key path.
+            const attemptKeys: Array<string | undefined> =
+              apiKeys.length > 0 ? apiKeys : [undefined];
+            let keyIndex = 0;
+            let result!: Awaited<ReturnType<Provider["streamChat"]>>;
+            while (true) {
+              try {
+                result = await provider.streamChat(request.messages, {
+                  model,
+                  apiKey: attemptKeys[keyIndex],
+                  webSearch: request.webSearch,
+                  tools: request.tools,
+                  toolChoice: request.toolChoice,
+                  responseFormat: resolvedRf,
+                  temperature: request.temperature,
+                  maxTokens: request.maxTokens,
+                  cacheHints: request.cachedContentHandle
+                    ? { cachedContentHandle: request.cachedContentHandle }
+                    : undefined,
+                  signal: request.signal,
+                });
+                break;
+              } catch (keyError) {
+                const keyStatus =
+                  keyError instanceof ProviderHttpError
+                    ? keyError.status
+                    : undefined;
+                const isAuthError = keyStatus === 401 || keyStatus === 403;
+                if (isAuthError && keyIndex + 1 < attemptKeys.length) {
+                  keyIndex += 1;
+                  continue;
+                }
+                throw keyError;
+              }
+            }
 
             if (provider.id === "groq" && result.rateLimit) {
               ledger.applyGroqRateLimitFromHeaders(
@@ -642,6 +815,11 @@ export function createRouter(config: RouterConfig = {}): Router {
             // the stream fully drains (below), and a `status: "fail"` if it errors
             // mid-stream, so the recorded outcome reflects reality. Provider
             // selection / cooldown / sticky-session state above are unchanged.
+            // Live tool-call channel (parallel to the text stream): populated as the
+            // stream drains, complete once it's fully consumed. Kept off the text
+            // `stream` so the (string) text path is byte-identical for existing
+            // consumers; the gateway/engine read this AFTER draining the stream.
+            const collectedToolCalls: ToolCallContentBlock[] = [];
             const textStream = async function* (): AsyncGenerator<string> {
               let reportedUsage: TokenUsage | undefined;
               let outputText = "";
@@ -656,6 +834,9 @@ export function createRouter(config: RouterConfig = {}): Router {
                   }
                   if (chunk.usage) {
                     reportedUsage = chunk.usage;
+                  }
+                  if (chunk.toolCall) {
+                    collectedToolCalls.push(chunk.toolCall);
                   }
                   if (chunk.content) {
                     outputText += chunk.content;
@@ -746,6 +927,12 @@ export function createRouter(config: RouterConfig = {}): Router {
               providerId: provider.id,
               model,
               stream: textStream(),
+              // Live tool-call channel — filled as `stream` drains, read after.
+              toolCalls: collectedToolCalls,
+              // The level actually served this turn (json_schema/json_object/prompt
+              // or undefined for text). The engine labels served_level/guaranteed
+              // from THIS, never from the raw provider capability.
+              resolvedStructuredLevel: resolvedRf?.level,
               // Honesty signal: under private mode, true iff the winner is
               // privacy-safe or user-allowed; false when the strand-fallback had
               // to use a may-train/"unknown" provider. undefined when not private.

@@ -5,10 +5,13 @@ import {
 } from "@zintus/types";
 import {
   deleteKey,
+  deleteKeyAt,
   getKey,
+  getKeys,
   listKeys as listStoredKeys,
   probeKeychain,
   setKey,
+  setKeys,
 } from "./storage.js";
 
 export const PROVIDERS = PROVIDER_IDS;
@@ -18,7 +21,15 @@ export function isValidProvider(value: string): value is ProviderId {
   return isProviderId(value);
 }
 
-export { deleteKey, getKey, setKey, probeKeychain };
+export {
+  deleteKey,
+  deleteKeyAt,
+  getKey,
+  getKeys,
+  setKey,
+  setKeys,
+  probeKeychain,
+};
 
 export async function removeKey(provider: ProviderId): Promise<boolean> {
   const existing = await getKey(provider);

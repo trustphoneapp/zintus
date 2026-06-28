@@ -7,7 +7,13 @@ export interface ProviderInfo {
   id: ProviderId;
   name: string;
   color: string;
-  quotaLimit: number;
+  /**
+   * Provider's daily free-tier token cap, or `null` when the engine reports no
+   * denominator. HONESTY: never fabricate a limit (the audit flagged the old
+   * `1_000_000` placeholder) — `null` means "unknown" and the UI renders it as
+   * such rather than against a made-up ceiling.
+   */
+  quotaLimit: number | null;
   quotaUsed: number;
   enabled: boolean;
   hasKey: boolean;
@@ -18,20 +24,17 @@ export interface ProviderInfo {
 export const PROVIDER_META = Object.fromEntries(
   listProviders().map((p) => [
     p.id,
-    { name: p.name, quotaLimit: 1_000_000, color: p.color, priority: p.priority },
+    { name: p.name, color: p.color, priority: p.priority },
   ]),
-) as Record<
-  ProviderId,
-  { name: string; quotaLimit: number; color: string; priority: number }
->;
+) as Record<ProviderId, { name: string; color: string; priority: number }>;
 
 function statusToInfo(status: ProviderStatus): ProviderInfo {
-  const meta = PROVIDER_META[status.id];
   return {
     id: status.id,
     name: status.name,
     color: status.color,
-    quotaLimit: status.tokensLimit ?? meta.quotaLimit,
+    // The engine's reported daily cap, or null when unknown — no fabrication.
+    quotaLimit: status.tokensLimit ?? null,
     quotaUsed: status.tokensToday,
     enabled: status.available,
     hasKey: status.hasKey,

@@ -1,9 +1,16 @@
 import type { NextConfig } from "next";
 
-// Security headers applied on EVERY host, not just Vercel — these used to live
-// ONLY in vercel.json, so a non-Vercel / self-hosted deploy shipped with none.
-// Next's headers() runs on `next start` and any platform. (CSP still carries
-// 'unsafe-inline' — moving to a nonce is a separate, browser-verified change.)
+// Static security headers applied on EVERY host, not just Vercel — these used
+// to live ONLY in vercel.json, so a non-Vercel / self-hosted deploy shipped
+// with none. Next's headers() runs on `next start` and any platform, and these
+// apply to every route (including /api and static assets).
+//
+// The Content-Security-Policy is intentionally NOT here: it now carries a
+// per-request nonce for script-src (dropping 'unsafe-inline'), which a frozen
+// static header cannot do, so it lives in proxy.ts instead. Emitting CSP from
+// both layers would make the browser enforce the INTERSECTION of the two
+// policies and silently break the nonced scripts — so CSP has exactly one home
+// (proxy.ts). None of the headers below need a nonce, so they stay static here.
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
@@ -15,11 +22,6 @@ const securityHeaders = [
   {
     key: "Strict-Transport-Security",
     value: "max-age=63072000; includeSubDomains; preload",
-  },
-  {
-    key: "Content-Security-Policy",
-    value:
-      "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:* http://127.0.0.1:* https://relay.zintus.ai https://*.zintus.ai; worker-src 'self' blob:; frame-src 'none'; upgrade-insecure-requests",
   },
 ];
 

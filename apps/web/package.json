@@ -12,6 +12,7 @@
   "dependencies": {
     "@radix-ui/react-tooltip": "^1.2.10",
     "@zintus/crypto-e2e": "workspace:*",
+    "@zintus/mcp": "workspace:*",
     "@zintus/media": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/types": "workspace:*",
@@ -20,6 +21,7 @@
     "lucide-react": "^1.18.0",
     "next": "^16.2.7",
     "next-themes": "^0.4.6",
+    "pdfjs-dist": "^6.1.200",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "zustand": "^5.0.0"

@@ -4,12 +4,14 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { ArrowRight, Check, Copy, Zap } from "lucide-react";
 
-const INSTALL_CMD = "npm install -g zintus";
+// The CLI runs on Bun (bun:sqlite), so install with Bun — `npm i -g` would put a
+// shim on PATH that can't run under Node. Keep this honest.
+const INSTALL_CMD = "bun install -g zintus";
 
 const TERMINAL_LINES = [
   { delay: 0,    type: "prompt", text: "zintus chat" },
   { delay: 600,  type: "route",  text: "→ routing across 12 providers..." },
-  { delay: 1200, type: "ok",     text: "✓ cerebras/llama-3.3-70b  [42ms]" },
+  { delay: 1200, type: "ok",     text: "✓ routed → fast model  [42ms]" },
   { delay: 1600, type: "muted",  text: "  tokens: 1,247 · quota: 847K/1M remaining" },
   { delay: 2200, type: "ok",     text: "✓ response streamed in 1.2s" },
 ];
@@ -39,44 +41,43 @@ export function Hero() {
           <div className="hero-v2-eyebrow">
             <span className="badge-pill">
               <Zap size={11} />
-              12 free AI providers · zero markup
+              One subscription. Exact tokens. Zero surprises.
             </span>
           </div>
 
           {/* Headline */}
           <h1>
-            The open AI router.<br />
-            <em>Route smarter. Pay nothing.</em>
+            The AI router that tells you<br />
+            <em>exactly what you bought.</em>
           </h1>
 
           {/* Subheadline */}
           <p className="hero-v2-sub">
-            12 free AI providers in one chat. Zintus picks the fastest one with quota
-            left — and switches automatically when one runs out. Your keys stay on
-            your device. We never see them.
+            Most AI subscriptions hide their limits behind rolling windows, compute
+            credits, and message caps. Zintus gives you a number. It doesn&apos;t change.
           </p>
 
           {/* CTAs */}
           <div className="hero-v2-actions">
             <Link href="/chat" className="hero-v2-btn-primary">
-              Try it free
+              Start routing free
               <ArrowRight size={16} />
             </Link>
-            <Link href="/docs" className="hero-v2-btn-secondary">
-              Read the docs
+            <Link href="/pricing" className="hero-v2-btn-secondary">
+              See pricing
             </Link>
           </div>
 
           {/* Reassurance line */}
           <p style={{ marginTop: 14, fontSize: 13, color: "var(--marketing-muted)" }}>
-            No account required · Keys stay on your device · Start chatting with your own keys
+            No account required · Keys stay on your device · Token balance always visible
           </p>
 
           {/* Pricing clarity */}
           <p style={{ marginTop: 6, fontSize: 13, color: "var(--marketing-muted)" }}>
             Free forever with your own API keys ·{" "}
             <Link href="/pricing" style={{ color: "var(--marketing-accent-light)", textDecoration: "none" }}>
-              Managed keys from $15/mo (coming soon) →
+              Managed keys from $15/mo →
             </Link>
           </p>
 
@@ -95,7 +96,7 @@ export function Hero() {
                 <span className="t-cmd">{INSTALL_CMD}</span>
               </div>
               <div style={{ marginBottom: 8 }}>
-                <span className="t-ok">✓ zintus@2.0.0 installed</span>
+                <span className="t-ok">✓ zintus@0.2.0 installed</span>
               </div>
               {/* Animated lines */}
               {TERMINAL_LINES.slice(0, visibleLines).map((line, i) => (

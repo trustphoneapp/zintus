@@ -90,11 +90,29 @@ export default function RootLayout() {
           }}
         />
         <Tabs.Screen
+          name="catalog"
+          options={{
+            title: "Models",
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="cube-outline" size={size} color={color} />
+            ),
+          }}
+        />
+        <Tabs.Screen
           name="usage"
           options={{
             title: "Usage",
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="stats-chart" size={size} color={color} />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="mcp"
+          options={{
+            title: "MCP",
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="construct-outline" size={size} color={color} />
             ),
           }}
         />

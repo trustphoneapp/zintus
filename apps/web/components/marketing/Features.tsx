@@ -1,44 +1,51 @@
 "use client";
 
-import { Zap, Key, Wifi, BarChart2, Terminal, ShieldCheck } from "lucide-react";
+import {
+  Zap,
+  Key,
+  Coins,
+  Shuffle,
+  BarChart2,
+  Terminal,
+} from "lucide-react";
 import { Reveal } from "./Reveal";
 
 const FEATURES = [
   {
-    icon: Zap,
-    color: "#f59e0b",
-    title: "< 5ms routing",
-    body: "In-process quota check. Picks the fastest available provider without an extra network hop.",
+    icon: Coins,
+    color: "#eab308",
+    title: "Exact token balance",
+    body: "Your monthly token budget is a fixed number, shown before you subscribe and visible after every message. It doesn't shrink at peak hours or change based on which model you use.",
+  },
+  {
+    icon: BarChart2,
+    color: "#60a5fa",
+    title: "No silent downgrades",
+    body: "Some AI products swap your model when you hit a limit and don't tell you. Zintus shows which model handled every request. If your budget runs low, we warn you — we never quietly change what you're getting.",
+  },
+  {
+    icon: Shuffle,
+    color: "#3b82f6",
+    title: "Smart routing, real savings",
+    body: "Zintus classifies each request and routes to the best-value provider automatically. Short queries go to the fastest model. Long contexts go to the widest window. Reasoning tasks go to the strongest reasoner.",
   },
   {
     icon: Key,
     color: "#7c3aed",
-    title: "Your keys. Your device.",
-    body: "API keys stored in OS keychain via keyring. Zero-knowledge relay — Zintus never sees them.",
-  },
-  {
-    icon: Wifi,
-    color: "#22c55e",
-    title: "Offline fallback",
-    body: "When all cloud providers are exhausted, Ollama takes over. Always have a response.",
-  },
-  {
-    icon: BarChart2,
-    color: "#3b82f6",
-    title: "Quota tracking",
-    body: "Real-time RPM/TPM windows per provider. Auto-switches before you hit a wall.",
+    title: "Your keys stay on your device",
+    body: "BYOK keys are stored in your OS keychain or browser's encrypted storage. They go directly from your device to the provider — Zintus never sees them. Managed tier keys are Zintus-provided and stay server-side.",
   },
   {
     icon: Terminal,
     color: "#c4b5fd",
-    title: "CLI + Web + Desktop",
-    body: "Terminal-first CLI, browser-based web chat, and a native Tauri desktop app — one config.",
+    title: "50+ providers, one interface",
+    body: "Route across 20+ direct integrations and 70+ more via a model-aggregator key. One config, one dashboard, one token balance — regardless of which provider handles the request.",
   },
   {
-    icon: ShieldCheck,
-    color: "#34d399",
-    title: "OWASP LLM01 hardened",
-    body: "Context blocks delivered as user-role untrusted data. Prompt injection mitigated by design.",
+    icon: Zap,
+    color: "#f59e0b",
+    title: "BYOK frontier on any plan",
+    body: "Add your own key for any frontier model on any paid tier. Route to the most powerful models available at direct provider rates — zero markup, zero restrictions, deducted from your own credits not your Zintus quota.",
   },
 ];
 
@@ -48,9 +55,10 @@ export function Features() {
       <div className="m-shell">
         <Reveal>
           <p className="m-eyebrow">Features</p>
-          <h2 className="m-title">Everything a developer needs.</h2>
+          <h2 className="m-title">A router built around what you actually bought.</h2>
           <p className="m-subtitle" style={{ marginBottom: "2.5rem" }}>
-            Built for the terminal. Works everywhere. No config files, no cloud dependency.
+            Routing, billing, and key handling are built around one idea: you always
+            know which model answered, what it cost, and how much budget is left.
           </p>
         </Reveal>
         <div

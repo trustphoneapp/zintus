@@ -28,6 +28,8 @@ export interface SearchResult {
   content: string;
   /** Relevance score, when the upstream provides one (Tavily). */
   score?: number;
+  /** ISO publish date, when the upstream provides one. Used for recency ranking. */
+  publishedAt?: string;
 }
 
 /**

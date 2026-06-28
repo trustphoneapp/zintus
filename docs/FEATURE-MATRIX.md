@@ -2,7 +2,12 @@
 
 The single shared product contract. Every surface declares each capability so no
 surface **silently claims an unsupported feature**. Verified against code on
-`feat/cross-surface-parity` (off `main`), 2026-06-26.
+`feat/cross-surface-parity` (off `main`), 2026-06-26. The capability statuses
+(tool calling, structured output, multimodal, CSP) were **re-verified against
+code on `feat/desktop-parity`, 2026-06-28** — see the "Capability status"
+section below. Desktop tool/JSON/image UI was re-confirmed **absent** by reading
+`apps/desktop/app/_components/ChatPanel.tsx` (no Tools toggle, no JSON control,
+no image picker on this branch).
 
 Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupported ·
 ⚠️ **present but broken/misleading** (must fix or remove).
@@ -44,7 +49,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |
 | 22 | one-tap local runtime | ✅ | ❌ | ❌ | 🚫 | CLI = `--provider ollama` |
 | 23 | file input | ✅ | ✅ | ✅ | 🟡 | mobile+web+desktop on-device text extraction (images refused honestly — no multimodal path); CLI partial |
-| 24 | image input | ❌ | 🟡 | ❌ | 🟡 | **shipped** (`feat/multimodal-image-input`): web picker/drag-drop/paste + CLI `--image` send real **EXIF-stripped** image blocks to a **vision-capable** model (Gemini). Router hard-errors (`unsupported_capability` + provider suggestions) when none is available — **never** a silent text-only fallback or `[Image:]` fake. Image bytes never touch the relay and are never logged. **🟡 = code + tests + web build green, but the keyed end-to-end run (browser canvas → Gemini) is the [HUMAN] smoke gate** (§ final gate). Mobile/desktop image UI deferred. See `docs/multimodal-image-input.md` |
+| 24 | image input | ❌ | 🟡 | ✅ | 🟡 | **shipped** web + CLI + **desktop** (Phase 7, `feat/zintus-10-10`): picker → real **EXIF-stripped** image blocks to a **vision-capable** model. Router hard-errors (`unsupported_capability` + provider suggestions) when none is available — **never** a silent text-only fallback or `[Image:]` fake. Image bytes never touch the relay and are never logged. **🟡 = code + tests + web build green, but the keyed end-to-end run (browser canvas → Gemini) is the [HUMAN] smoke gate** (§ final gate). Mobile/desktop image UI deferred. See `docs/multimodal-image-input.md` |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
 | 27 | report AI response | ✅ | ✅ | ✅ | ❌ | web + desktop have the Gen-AI flag control (web `MessageBubble` "Report" → on-device `zintus:reported-responses.v1`, parity with desktop); CLI n/a |
@@ -101,9 +106,48 @@ Several rows above were stale/optimistic. Corrected inline; recorded here with c
   single-screen text chat.
 
 Verified green at audit time: `bun run typecheck` exit 0; full `bun run test` exit 0
-(**0 failures**; exact test count not asserted here — capture from CI). Capability gaps
-confirmed absent stack-wide: **tool/function calling, multimodal image input,
-structured/JSON output.**
+(**0 failures**; exact test count not asserted here — capture from CI).
+
+**Capability status — updated post-audit (2026-06-28).** The "absent stack-wide"
+line below was true at audit time but is now stale; the corrected picture:
+
+- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ✅ (built-in tools) · Mobile ❌**.
+  Provider streaming (`packages/providers/src/utils.ts`), Gemini round-trip, and
+  gateway 422-on-unsupported are tested; the CLI `--tools` loader
+  (`apps/cli/src/commands/chat.ts`) is hardened (rejects null/array `parameters`).
+  **Web now closes the loop end-to-end:** a **Tools** toggle in the chat composer
+  offers a small set of **browser-safe built-in tools** (`apps/web/lib/web-tools.ts`
+  — calculator (eval-free, CSP-safe), `current_datetime`, `random_number`); the
+  model's calls render as tool-call cards (`MessageBubble`), execute locally, and
+  feed `tool_result` blocks back in a bounded loop (max 5 rounds) until the model
+  answers (`streamAssistant` in `chat/page.tsx`). Unit-tested
+  (`apps/web/lib/web-tools.test.ts`). **Caveat:** the web set is BUILT-IN only — a
+  UI for *user-defined* tools (arbitrary schemas/executors) is future work; the
+  gateway API + CLI accept arbitrary tool definitions today. **Desktop now has
+  parity:** the same built-in tools + Tools toggle + bounded execute→feed-back loop
+  landed in `apps/desktop/app/_components/ChatPanel.tsx` (`apps/desktop/lib/web-tools.ts`,
+  unit-tested), with tool-call cards in the desktop `MessageBubble`. Same BUILT-IN-only
+  caveat as web. **Mobile has no tool UI (❌).**
+- **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web ❌ (no request UI yet) · Desktop ✅ (JSON toggle, Phase 7) · Mobile ❌**. NOTE the inversion: desktop has a request toggle but web chat does not yet — a known consistency gap (10/10 verdict).
+  Engine validate→repair + gateway strict-422 tested. Conservative: only Gemini is
+  `json_schema` (close to guaranteed-shape); all others are `json_object` /
+  prompt-level, which is **best-effort, not guaranteed** JSON. **Web has no
+  structured-output UI (❌):** the shared `streamGatewayChat` lib *can* carry a
+  `response_format`, but no web chat surface requests one or renders parsed JSON
+  (verified: no `response_format` in `apps/web/app/**`), so there is nothing a
+  user can drive — library plumbing only. **Desktop/mobile have no JSON UI (❌)**.
+- **Multimodal image input** — proven on **web + CLI + desktop** (Phase 7;
+  EXIF-stripped image blocks to a vision-capable model, hard-error rather than silent
+  text-only fallback), and now also **maps to OpenRouter vision models**. **Mobile
+  image UI is still absent (❌)** — the [HUMAN]/device track.
+- **CSP nonce** — relanded in `apps/web/proxy.ts` (per-request nonce, dev-only
+  `'unsafe-eval'` now fail-closed on `NODE_ENV === "development"`, Report-Only
+  toggle). **NOT yet browser-verified** — the in-browser check against
+  `next build && next start` is the remaining [HUMAN] step.
+
+*Original (now-stale) audit-time line, retained for provenance:* "Capability gaps
+confirmed absent stack-wide: tool/function calling, multimodal image input,
+structured/JSON output."
 
 ## Cross-surface issues to resolve (ranked)
 

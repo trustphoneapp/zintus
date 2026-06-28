@@ -48,6 +48,16 @@ function warnKeywordHashFallbackOnce(): void {
   );
 }
 
+/**
+ * TEST-ONLY: reset the process-wide "already warned" latch so a test that asserts
+ * the one-time warning fires can run deterministically regardless of whether an
+ * earlier test in the same bun process already tripped the fallback. Not part of
+ * the public runtime API.
+ */
+export function __resetKeywordHashWarningForTest(): void {
+  warnedKeywordHashFallback = false;
+}
+
 function normalizeOllamaHost(host: string): string {
   return host.endsWith("/") ? host.slice(0, -1) : host;
 }

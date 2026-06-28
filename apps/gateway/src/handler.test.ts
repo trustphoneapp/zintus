@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Engine } from "@zintus/engine";
+import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
@@ -218,6 +222,113 @@ describe("gateway handler", () => {
     expect(res.status).toBe(200);
   });
 
+  test("GET /v1/models returns a RICH per-model catalog (OpenAI-compat triple + metadata)", async () => {
+    const handler = makeHandler();
+    const res = await handler(new Request("http://x/v1/models", { method: "GET" }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      data: Array<Record<string, unknown>>;
+    };
+    expect(body.object).toBe("list");
+    expect(body.data.length).toBeGreaterThan(0);
+
+    // OpenAI-compat triple intact on every entry.
+    for (const m of body.data) {
+      expect(typeof m.id).toBe("string");
+      expect(m.object).toBe("model");
+      expect(typeof m.owned_by).toBe("string");
+    }
+
+    // A known model carries the additive metadata.
+    const flash = body.data.find((m) => m.id === "gemini-2.5-flash") as
+      | {
+          context_window: number;
+          capabilities: { vision: boolean; tools: boolean; structured_output: string };
+          pricing: { input_per_1m: number | null; output_per_1m: number | null };
+          free: boolean;
+          local: boolean;
+          data_policy: Record<string, unknown>;
+        }
+      | undefined;
+    expect(flash).toBeDefined();
+    expect(flash?.context_window).toBe(1_000_000);
+    expect(flash?.capabilities.vision).toBe(true);
+    expect(flash?.capabilities.tools).toBe(true);
+    expect(flash?.capabilities.structured_output).toBe("json_schema");
+    expect(flash?.pricing.input_per_1m).toBe(0.3);
+    expect(flash?.pricing.output_per_1m).toBe(2.5);
+    // `free` = a free tier/quota exists (the catalog's honest semantic); Gemini
+    // 2.5 Flash has both paid list pricing AND a free tier, so free:true.
+    expect(flash?.free).toBe(true);
+    expect(flash?.local).toBe(false);
+    expect(typeof flash?.data_policy).toBe("object");
+    expect(flash?.data_policy.tag).toBeDefined();
+  });
+
+  test("GET /v1/models?vision=true narrows the catalog to vision-capable models", async () => {
+    const handler = makeHandler();
+    const all = (await (
+      await handler(new Request("http://x/v1/models", { method: "GET" }))
+    ).json()) as { data: unknown[] };
+    const visionRes = await handler(
+      new Request("http://x/v1/models?vision=true", { method: "GET" }),
+    );
+    expect(visionRes.status).toBe(200);
+    const vision = (await visionRes.json()) as {
+      data: Array<{ id: string; capabilities: { vision: boolean } }>;
+    };
+    expect(vision.data.length).toBeGreaterThan(0);
+    expect(vision.data.length).toBeLessThan(all.data.length); // actually narrowed
+    expect(vision.data.every((m) => m.capabilities.vision === true)).toBe(true);
+    expect(vision.data.some((m) => m.id === "gemini-2.5-flash")).toBe(true);
+  });
+
+  test("GET /v1/models?provider= filters to a single provider", async () => {
+    const handler = makeHandler();
+    const res = await handler(
+      new Request("http://x/v1/models?provider=groq", { method: "GET" }),
+    );
+    const body = (await res.json()) as {
+      data: Array<{ owned_by: string; id: string }>;
+    };
+    expect(body.data.length).toBeGreaterThan(0);
+    expect(body.data.every((m) => m.owned_by === "Groq")).toBe(true);
+  });
+
+  test("GET /v1/pricing returns priced models and is auth-gated", async () => {
+    // Auth-gated when a token is configured.
+    const guarded = makeHandler({ token: "secret" });
+    expect(
+      (await guarded(new Request("http://x/v1/pricing", { method: "GET" }))).status,
+    ).toBe(401);
+
+    const handler = makeHandler();
+    const res = await handler(new Request("http://x/v1/pricing", { method: "GET" }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      data: Array<{
+        id: string;
+        provider: string;
+        input_per_1m: number;
+        output_per_1m: number;
+        free: boolean;
+      }>;
+    };
+    expect(body.object).toBe("list");
+    expect(body.data.length).toBeGreaterThan(0);
+    // Every entry has a concrete (non-null) price.
+    for (const p of body.data) {
+      expect(typeof p.input_per_1m).toBe("number");
+      expect(typeof p.output_per_1m).toBe("number");
+      expect(typeof p.provider).toBe("string");
+    }
+    const flash = body.data.find((p) => p.id === "gemini-2.5-flash");
+    expect(flash?.input_per_1m).toBe(0.3);
+    expect(flash?.output_per_1m).toBe(2.5);
+  });
+
   test("GET /v1/traces?limit= returns recent traces and is auth-gated", async () => {
     const startedAt = new Date();
     const engine = fakeEngine({
@@ -241,6 +352,288 @@ describe("gateway handler", () => {
     const body = (await res.json()) as { traces: Array<{ traceId: string }> };
     expect(body.traces).toHaveLength(2);
     expect(body.traces[0]?.traceId).toBe("t-0");
+  });
+
+  test("GET /v1/activity returns normalized usage entries, respects ?limit, and is auth-gated", async () => {
+    const startedAt = new Date("2026-06-28T00:00:00.000Z");
+    const engine = fakeEngine({
+      // The handler fetches limit+1 to compute has_more honestly.
+      listTraces: (limit: number) =>
+        Array.from({ length: Math.min(limit, 3) }, (_unused, i) => ({
+          traceId: `act-${i}`,
+          startedAt,
+          attempts: [
+            {
+              providerId: "groq" as const,
+              model: "test-model",
+              status: "success" as const,
+              latencyMs: 42,
+            },
+          ],
+          winner: { providerId: "groq" as const, model: "test-model" },
+          totalLatencyMs: 100,
+        })),
+    });
+
+    // Auth-gated when a token is configured.
+    const guarded = makeHandler({ token: "secret" }, engine);
+    expect(
+      (await guarded(new Request("http://x/v1/activity"))).status,
+    ).toBe(401);
+
+    const handler = makeHandler({}, engine);
+    const res = await handler(new Request("http://x/v1/activity?limit=2"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      has_more: boolean;
+      data: Array<Record<string, unknown>>;
+    };
+    expect(body.object).toBe("list");
+    // Asked for 2 → page of 2, and a 3rd existed → has_more true.
+    expect(body.data).toHaveLength(2);
+    expect(body.has_more).toBe(true);
+
+    const entry = body.data[0] as {
+      id: string;
+      created: number;
+      provider: string;
+      model: string;
+      tokens: { input: number; output: number; total: number };
+      cost_usd: number;
+      saved_vs_baseline_usd: number;
+      latency_ms: number;
+      cache_hit: boolean;
+      route_reason?: string;
+    };
+    expect(entry.id).toBe("act-0");
+    expect(entry.created).toBe(Math.floor(startedAt.getTime() / 1000));
+    expect(entry.provider).toBe("groq");
+    expect(entry.model).toBe("test-model");
+    // No token usage recorded on the trace → honest zeros, never fabricated.
+    expect(entry.tokens).toEqual({ input: 0, output: 0, total: 0 });
+    expect(entry.cost_usd).toBe(0);
+    expect(entry.saved_vs_baseline_usd).toBe(0);
+    expect(entry.latency_ms).toBe(100);
+    expect(entry.cache_hit).toBe(false);
+    // route_reason omitted when the trace did not record one.
+    expect(entry.route_reason).toBeUndefined();
+  });
+
+  test("GET /v1/activity surfaces real recorded usage and is empty when none", async () => {
+    // A trace carrying optional usage telemetry → flows through normalized.
+    const richEngine = fakeEngine({
+      listTraces: () => [
+        {
+          traceId: "act-rich",
+          startedAt: new Date("2026-06-28T00:00:00.000Z"),
+          attempts: [],
+          winner: { providerId: "cerebras" as const, model: "llama" },
+          // Extended fields a trace MAY carry; read defensively.
+          tokens: { input: 10, output: 5, total: 15 },
+          cacheHit: true,
+          routeReason: "cheapest-healthy",
+        } as never,
+      ],
+    });
+    const handler = makeHandler({}, richEngine);
+    const res = await handler(new Request("http://x/v1/activity"));
+    const body = (await res.json()) as { data: Array<Record<string, unknown>> };
+    const entry = body.data[0] as Record<string, unknown>;
+    expect(entry.tokens).toEqual({ input: 10, output: 5, total: 15 });
+    expect(entry.cache_hit).toBe(true);
+    expect(entry.route_reason).toBe("cheapest-healthy");
+    expect(entry.provider).toBe("cerebras");
+
+    // Empty list when no usage has been recorded.
+    const emptyHandler = makeHandler({}, fakeEngine({ listTraces: () => [] }));
+    const emptyRes = await emptyHandler(new Request("http://x/v1/activity"));
+    const emptyBody = (await emptyRes.json()) as {
+      data: unknown[];
+      has_more: boolean;
+    };
+    expect(emptyBody.data).toEqual([]);
+    expect(emptyBody.has_more).toBe(false);
+  });
+
+  test("GET /v1/activity reads the DURABLE store first, honoring ?since/?limit/?provider + retention_days", async () => {
+    const store = new ActivityStore(
+      join(mkdtempSync(join(tmpdir(), "zintus-activity-h-")), "activity.db"),
+    );
+    const base = Math.floor(Date.UTC(2026, 5, 28, 0, 0, 0) / 1000);
+    store.recordActivity({
+      traceId: "d-old",
+      created: base - 10_000,
+      provider: "cerebras",
+      model: "llama-3.1-8b",
+      inputTokens: 5,
+      outputTokens: 2,
+      costUsd: 0,
+      savedVsBaselineUsd: 0,
+      latencyMs: 30,
+      cacheHit: false,
+      routeReason: null,
+    });
+    store.recordActivity({
+      traceId: "d-new",
+      created: base,
+      provider: "groq",
+      model: "llama-3.3-70b-versatile",
+      inputTokens: 10,
+      outputTokens: 5,
+      costUsd: 0,
+      savedVsBaselineUsd: 0.0009,
+      latencyMs: 120,
+      cacheHit: false,
+      routeReason: "cheapest-healthy",
+    });
+
+    // Engine traces are non-empty; the durable store must take precedence.
+    const engine = fakeEngine({
+      listTraces: () => [
+        { traceId: "trace-only", startedAt: new Date(), attempts: [] },
+      ],
+    });
+    const handler = makeHandler({}, engine, { activityStore: store });
+
+    const res = await handler(new Request("http://x/v1/activity"));
+    const body = (await res.json()) as {
+      data: Array<Record<string, unknown>>;
+      has_more: boolean;
+      retention_days: number;
+    };
+    // Durable rows (newest-first), not the trace ring.
+    expect(body.data.map((e) => e.id)).toEqual(["d-new", "d-old"]);
+    expect(body.retention_days).toBe(30);
+    const top = body.data[0] as Record<string, unknown>;
+    expect(top.tokens).toEqual({ input: 10, output: 5, total: 15 });
+    expect(top.cost_usd).toBe(0);
+    expect(top.route_reason).toBe("cheapest-healthy");
+
+    // ?since drops the older row.
+    const sinceRes = await handler(
+      new Request(`http://x/v1/activity?since=${base - 100}`),
+    );
+    const sinceBody = (await sinceRes.json()) as { data: Array<{ id: string }> };
+    expect(sinceBody.data.map((e) => e.id)).toEqual(["d-new"]);
+
+    // ?provider filter.
+    const provRes = await handler(
+      new Request("http://x/v1/activity?provider=cerebras"),
+    );
+    const provBody = (await provRes.json()) as { data: Array<{ id: string }> };
+    expect(provBody.data.map((e) => e.id)).toEqual(["d-old"]);
+
+    // ?limit caps the page and drives has_more honestly.
+    const limitRes = await handler(new Request("http://x/v1/activity?limit=1"));
+    const limitBody = (await limitRes.json()) as {
+      data: unknown[];
+      has_more: boolean;
+    };
+    expect(limitBody.data).toHaveLength(1);
+    expect(limitBody.has_more).toBe(true);
+
+    store.close();
+  });
+
+  test("GET /v1/activity falls back to the trace path when the durable store is empty", async () => {
+    const store = new ActivityStore(
+      join(mkdtempSync(join(tmpdir(), "zintus-activity-e-")), "activity.db"),
+    );
+    const engine = fakeEngine({
+      listTraces: () => [
+        {
+          traceId: "fallback-trace",
+          startedAt: new Date("2026-06-28T00:00:00.000Z"),
+          attempts: [],
+          winner: { providerId: "groq" as const, model: "test-model" },
+          totalLatencyMs: 50,
+        },
+      ],
+    });
+    const handler = makeHandler({}, engine, { activityStore: store });
+    const res = await handler(new Request("http://x/v1/activity"));
+    const body = (await res.json()) as {
+      data: Array<{ id: string }>;
+      retention_days?: number;
+    };
+    // Empty store → trace-derived entry, and no retention_days on the fallback.
+    expect(body.data.map((e) => e.id)).toEqual(["fallback-trace"]);
+    expect(body.retention_days).toBeUndefined();
+    store.close();
+  });
+
+  test("GET /v1/key returns per-provider quota status (null limit when unreported) and is auth-gated", async () => {
+    const engine = fakeEngine({
+      async getProviderStatus() {
+        return [
+          {
+            id: "groq",
+            name: "Groq",
+            color: "#fff",
+            priority: 1,
+            available: true,
+            hasKey: true,
+            inCooldown: false,
+            cooldownUntil: null,
+            requestsToday: 3,
+            tokensToday: 250,
+            lastReset: null,
+            tokensLimit: 1000,
+          },
+          {
+            id: "ollama",
+            name: "Ollama",
+            color: "#000",
+            priority: 2,
+            available: true,
+            hasKey: false,
+            inCooldown: false,
+            cooldownUntil: null,
+            requestsToday: 0,
+            tokensToday: 0,
+            lastReset: null,
+            // No tokensLimit → quota_limit must be null (never fabricated).
+          },
+        ];
+      },
+    });
+
+    // Auth-gated.
+    const guarded = makeHandler({ token: "secret" }, engine);
+    expect((await guarded(new Request("http://x/v1/key"))).status).toBe(401);
+
+    const handler = makeHandler({}, engine);
+    const res = await handler(new Request("http://x/v1/key"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      label: string;
+      is_free_tier: boolean;
+      managed_keys_available: boolean;
+      providers: Array<{
+        id: string;
+        has_key: boolean;
+        quota_used: number;
+        quota_limit: number | null;
+        quota_remaining_ratio: number | null;
+      }>;
+    };
+    expect(body.object).toBe("key_status");
+    expect(body.label).toBe("zintus-gateway");
+    expect(body.is_free_tier).toBe(true);
+    expect(body.managed_keys_available).toBe(false);
+
+    const groq = body.providers.find((p) => p.id === "groq");
+    expect(groq?.quota_limit).toBe(1000);
+    expect(groq?.quota_used).toBe(250);
+    expect(groq?.quota_remaining_ratio).toBeCloseTo(0.75);
+
+    const ollama = body.providers.find((p) => p.id === "ollama");
+    expect(ollama?.has_key).toBe(false);
+    // Honest: no reported denominator → null, not a fabricated cap.
+    expect(ollama?.quota_limit).toBeNull();
+    expect(ollama?.quota_remaining_ratio).toBeNull();
   });
 
   test("streams chat completions as SSE", async () => {
@@ -986,5 +1379,551 @@ describe("client-facing error redaction (secrets scrubbed from responses, not ju
     expect(body.error.type).toBe("unsupported_capability");
     expect(body.error.required).toContain("vision");
     expect(body.error.message).toContain("vision-capable provider");
+  });
+});
+
+describe("tool / function calling", () => {
+  const weatherTool = {
+    name: "get_weather",
+    description: "Get the weather for a city",
+    parameters: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    },
+  };
+  const toolCall = {
+    type: "tool_call" as const,
+    id: "call_x",
+    name: "get_weather",
+    arguments: { city: "Paris" },
+  };
+
+  test("(a) streaming: tool calls are emitted as OpenAI delta.tool_calls + finish_reason:'tool_calls' before [DONE]", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-tc",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "Let me check.";
+          })(),
+          toolCalls: [toolCall],
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: true,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const dataLines = text
+      .split("\n\n")
+      .map((b) => b.replace(/^data: /, "").trim())
+      .filter((l) => l.length > 0 && l !== "[DONE]");
+    const events = dataLines.map((l) => JSON.parse(l) as Record<string, any>);
+
+    // The tool-call chunk carries the OpenAI delta.tool_calls shape.
+    const toolChunk = events.find(
+      (e) => e.choices?.[0]?.delta?.tool_calls,
+    );
+    expect(toolChunk).toBeDefined();
+    const tc = toolChunk!.choices[0].delta.tool_calls[0];
+    expect(tc.index).toBe(0);
+    expect(tc.id).toBe("call_x");
+    expect(tc.type).toBe("function");
+    expect(tc.function.name).toBe("get_weather");
+    expect(JSON.parse(tc.function.arguments)).toEqual({ city: "Paris" });
+
+    // A terminating delta sets finish_reason: "tool_calls".
+    const finish = events.find(
+      (e) => e.choices?.[0]?.finish_reason === "tool_calls",
+    );
+    expect(finish).toBeDefined();
+    expect(finish!.choices[0].delta).toEqual({});
+
+    // …and the stream still terminates with [DONE] after the tool-call frames.
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  test("(b) explicit non-tool provider + tools → 422 UNSUPPORTED_TOOLS_ERROR (never reaches the engine)", async () => {
+    let routed = false;
+    const engine = fakeEngine({
+      async routeAndStream() {
+        routed = true;
+        throw new Error("should not be called");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "huggingface", // tools: false in MODEL_CAPABILITIES
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: { type: string; required: string[]; message: string };
+    };
+    expect(body.error.type).toBe("unsupported_capability");
+    expect(body.error.required).toContain("tools");
+    expect(body.error.message).toContain("Tool/function calling");
+    expect(routed).toBe(false);
+  });
+
+  test("(c) router throws unsupported_capability with tools (no images) → tools error, not vision error", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error("unsupported_capability");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          // No explicit provider → the explicit-provider gate is skipped and the
+          // router (auto-routing) throws unsupported_capability instead.
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: { type: string; required: string[] };
+    };
+    expect(body.error.type).toBe("unsupported_capability");
+    expect(body.error.required).toContain("tools");
+    expect(body.error.required).not.toContain("vision");
+  });
+
+  test("(d) non-streaming returns tool_calls on the assistant message + finish_reason:'tool_calls'", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-tc",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "";
+          })(),
+          toolCalls: [toolCall],
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      choices: Array<{
+        message: {
+          role: string;
+          content: string | null;
+          tool_calls?: Array<{
+            id: string;
+            type: string;
+            function: { name: string; arguments: string };
+          }>;
+        };
+        finish_reason: string;
+      }>;
+    };
+    const choice = body.choices[0]!;
+    expect(choice.finish_reason).toBe("tool_calls");
+    expect(choice.message.content).toBeNull();
+    const calls = choice.message.tool_calls!;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.id).toBe("call_x");
+    expect(calls[0]!.type).toBe("function");
+    expect(calls[0]!.function.name).toBe("get_weather");
+    expect(JSON.parse(calls[0]!.function.arguments)).toEqual({ city: "Paris" });
+  });
+
+  test("(e) round-trip: an OpenAI-native assistant tool_calls turn normalizes to internal tool_call blocks", async () => {
+    // The gateway EMITS `{role:"assistant", content:null, tool_calls:[...]}`. A
+    // stock OpenAI client echoes that turn back as the next request's history.
+    // parseMessages must convert the top-level tool_calls (with a JSON-STRING
+    // arguments) into internal tool_call content blocks, or the call is lost.
+    let received: Array<{ role: string; content: unknown }> | undefined;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        received = request.messages;
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-rt",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "Paris is sunny.";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [
+            { role: "user", content: "weather in Paris?" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_x",
+                  type: "function",
+                  function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+                },
+              ],
+            },
+            { role: "tool", tool_call_id: "call_x", content: '{"tempC":21}' },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(received).toBeDefined();
+    const assistantTurn = received!.find((m) => m.role === "assistant")!;
+    expect(Array.isArray(assistantTurn.content)).toBe(true);
+    const blocks = assistantTurn.content as Array<Record<string, unknown>>;
+    const tcBlock = blocks.find((b) => b.type === "tool_call")!;
+    expect(tcBlock.id).toBe("call_x");
+    expect(tcBlock.name).toBe("get_weather");
+    expect(tcBlock.arguments).toEqual({ city: "Paris" });
+  });
+
+  test("(f) malformed tool_call arguments JSON normalizes to an empty object, not a 400", async () => {
+    let received: Array<{ role: string; content: unknown }> | undefined;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        received = request.messages;
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-rt2",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "ok";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [
+            { role: "user", content: "weather?" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_y",
+                  type: "function",
+                  function: { name: "get_weather", arguments: "{not json" },
+                },
+              ],
+            },
+            { role: "tool", tool_call_id: "call_y", content: "{}" },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const assistantTurn = received!.find((m) => m.role === "assistant")!;
+    const blocks = assistantTurn.content as Array<Record<string, unknown>>;
+    const tcBlock = blocks.find((b) => b.type === "tool_call")!;
+    expect(tcBlock.arguments).toEqual({});
+  });
+});
+
+describe("structured / JSON output", () => {
+  const personSchema = {
+    type: "object",
+    properties: { name: { type: "string" }, age: { type: "number" } },
+    required: ["name", "age"],
+  };
+
+  test("(a) non-streaming structured request surfaces parsed + structured_output", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "gemini",
+          model: "gemini-2.5-flash",
+          traceId: "trace-so",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield '{"name":"Ada","age":36}';
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_schema" as const,
+            guaranteed: true,
+            valid: true,
+            repairAttempts: 0,
+          },
+          parsed: { name: "Ada", age: 36 },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      choices: Array<{ message: { content: string } }>;
+      parsed: unknown;
+      structured_output: {
+        requested: string;
+        served_level: string;
+        guaranteed: boolean;
+        valid: boolean;
+        repair_attempts: number;
+      };
+    };
+    // Raw assistant text is preserved on the message.
+    expect(body.choices[0]?.message.content).toBe('{"name":"Ada","age":36}');
+    // Top-level parsed value + snake_cased metadata.
+    expect(body.parsed).toEqual({ name: "Ada", age: 36 });
+    expect(body.structured_output.requested).toBe("json_schema");
+    expect(body.structured_output.served_level).toBe("json_schema");
+    expect(body.structured_output.guaranteed).toBe(true);
+    expect(body.structured_output.valid).toBe(true);
+    expect(body.structured_output.repair_attempts).toBe(0);
+  });
+
+  test("(b) strict json_schema with an invalid result → 422 structured_output_invalid", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "openrouter",
+          model: "best-effort",
+          traceId: "trace-bad",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "sorry, here is some prose not JSON";
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_object" as const,
+            guaranteed: false,
+            valid: false,
+            repairAttempts: 2,
+            issues: [{ path: "/name", message: "expected string" }],
+          },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          // No explicit provider, so the capability gate is skipped and the engine
+          // result (valid:false) drives the 422 instead.
+          stream: false,
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: {
+        type: string;
+        message: string;
+        structured_output: { valid: boolean; repair_attempts: number };
+      };
+    };
+    expect(body.error.type).toBe("structured_output_invalid");
+    expect(body.error.structured_output.valid).toBe(false);
+    expect(body.error.structured_output.repair_attempts).toBe(2);
+  });
+
+  test("(c) explicit non-json_schema provider + strict → 422 unsupported_capability required ['json_schema']", async () => {
+    // groq's strongest structured level is json_object, not json_schema, so a
+    // strict schema-constrained request against it must hard-error at the gate
+    // (the engine is never reached).
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error("routeAndStream should not be called");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: { type: string; required: string[]; message: string };
+    };
+    expect(body.error.type).toBe("unsupported_capability");
+    expect(body.error.required).toContain("json_schema");
+    expect(body.error.message).toContain("Gemini");
+  });
+
+  test("(d) streaming (default) strict json_schema with an invalid result → 422, NOT a 200 stream", async () => {
+    // The DEFAULT path is streaming (stream omitted). The engine buffers +
+    // validates the structured document before routeAndStream resolves, so a
+    // strict request whose output did not validate must hard-fail 422 BEFORE the
+    // SSE stream opens — never a 200 text/event-stream carrying a valid:false
+    // frame + non-conformant prose.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "openrouter",
+          model: "best-effort",
+          traceId: "trace-bad-stream",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "sorry, here is some prose not JSON";
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_object" as const,
+            guaranteed: false,
+            valid: false,
+            repairAttempts: 2,
+            issues: [{ path: "/name", message: "expected string" }],
+          },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          // stream omitted → defaults to streaming.
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    expect(res.headers.get("content-type") ?? "").not.toContain(
+      "text/event-stream",
+    );
+    const body = (await res.json()) as {
+      error: {
+        type: string;
+        structured_output: { valid: boolean; repair_attempts: number };
+      };
+    };
+    expect(body.error.type).toBe("structured_output_invalid");
+    expect(body.error.structured_output.valid).toBe(false);
+    expect(body.error.structured_output.repair_attempts).toBe(2);
+  });
+
+  test("(e) streaming strict json_schema with a VALID result still streams 200", async () => {
+    // Guard the negative: a strict streaming request that DID validate must keep
+    // its 200 SSE behavior (the pre-stream gate is valid:false-only).
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "gemini",
+          model: "best",
+          traceId: "trace-good-stream",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield '{"name":"Ada","age":36}';
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_schema" as const,
+            guaranteed: true,
+            valid: true,
+            repairAttempts: 0,
+            issues: [],
+            parsed: { name: "Ada", age: 36 },
+          },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
   });
 });

@@ -3,21 +3,185 @@
 import { useState } from "react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
-import type { UiMessage } from "@/lib/app-store";
+import type { McpToolEvent } from "@/lib/gateway";
+import type { UiMessage, ToolCall } from "@/lib/app-store";
 import { formatImageBytes } from "@/lib/image-attachments";
+import { summarizeArtifactBody, type Artifact } from "@/lib/artifacts";
 import { Icon } from "./Icons";
 import { TransparencyStrip } from "./TransparencyStrip";
 import { CompressionBadge } from "./CompressionBadge";
-import { Markdown } from "./Markdown";
+import { Markdown, CodeBlock } from "./Markdown";
+
+export type { ToolCall };
+
+/** Strip a provider/owner suffix for a compact model label in the top line. */
+function shortModel(model: string): string {
+  return model.replace(/\s*\(.*\)\s*$/, "").trim();
+}
+
+/** Pretty, single-line args for the compact call card; multi-line for the pre. */
+function formatArgs(args: unknown, pretty: boolean): string {
+  let value: unknown = args;
+  if (typeof args === "string") {
+    const trimmed = args.trim();
+    if (!trimmed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+      return args;
+    }
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      return args;
+    }
+  }
+  if (value === undefined) return "";
+  try {
+    return JSON.stringify(value, null, pretty ? 2 : undefined) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** Returns a pretty-printed JSON string iff `content` is a JSON object/array. */
+function asStructuredJson(content: string): string | null {
+  const trimmed = content.trim();
+  if (!trimmed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) return null;
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return null;
+  }
+}
+
+function ToolCallCard({ call }: { call: ToolCall }) {
+  const args = formatArgs(call.arguments, false);
+  return (
+    <div
+      className="tool-call-card"
+      style={{
+        display: "flex",
+        alignItems: "baseline",
+        gap: 6,
+        fontFamily: "var(--font-mono, ui-monospace, monospace)",
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        color: "#cbd5e1",
+        background: "rgba(148,163,184,0.06)",
+        border: "1px solid #232a36",
+        borderLeft: "2px solid #6366f1",
+        borderRadius: 8,
+        padding: "6px 10px",
+      }}
+    >
+      <span aria-hidden style={{ fontFamily: "system-ui, sans-serif" }}>
+        🔧
+      </span>
+      <span style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+        <span style={{ color: "#a5b4fc", fontWeight: 600 }}>{call.name}</span>
+        <span style={{ color: "#64748b" }}>(</span>
+        {args}
+        <span style={{ color: "#64748b" }}>)</span>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Server-side MCP tool-loop activity, grouped with the assistant turn that
+ * triggered it. Calm + honest: each real `mcp_tool_call` becomes a "Calling
+ * <tool>…" line; the paired `mcp_tool_result` (matched by id) becomes a "✓ result
+ * (N chars)" or "✗ error: <message>" line. Args/results are summaries only (the
+ * gateway never streamed the raw bodies — see lib/gateway.ts summarizers).
+ */
+function McpToolActivity({ events }: { events: McpToolEvent[] }) {
+  // call id → tool label, so a result line can name the tool it belongs to.
+  const labelById = new Map<string, string>();
+  for (const ev of events) {
+    if (ev.kind === "call") {
+      labelById.set(ev.id, ev.tool || ev.server || "tool");
+    }
+  }
+  const lineStyle: React.CSSProperties = {
+    fontFamily: "var(--font-mono, ui-monospace, monospace)",
+    fontSize: 12.5,
+    lineHeight: 1.5,
+    color: "#94a3b8",
+    wordBreak: "break-word",
+    overflowWrap: "anywhere",
+  };
+  return (
+    <div
+      className="mcp-tool-activity"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        marginTop: 8,
+        padding: "6px 10px",
+        borderLeft: "2px solid #7C3AED",
+        borderRadius: 8,
+        background: "rgba(124,58,237,0.06)",
+      }}
+    >
+      {events.map((ev, i) => {
+        if (ev.kind === "call") {
+          const label = ev.tool || ev.server || "tool";
+          return (
+            <div key={`c-${ev.id}-${i}`} style={lineStyle}>
+              <span aria-hidden style={{ fontFamily: "system-ui, sans-serif" }}>
+                🔧
+              </span>{" "}
+              Calling{" "}
+              <span style={{ color: "#7C3AED", fontWeight: 600 }}>{label}</span>
+              {ev.argsSummary ? (
+                <span style={{ color: "#64748b" }}> ({ev.argsSummary})</span>
+              ) : null}
+              …
+            </div>
+          );
+        }
+        const label = labelById.get(ev.id);
+        const prefix = label ? `${label} ` : "";
+        return (
+          <div key={`r-${ev.id}-${i}`} style={lineStyle}>
+            {ev.ok ? (
+              <span style={{ color: "#22c55e" }}>
+                ✓ {prefix}result ({ev.summary})
+              </span>
+            ) : (
+              <span style={{ color: "#f59e0b" }}>
+                ✗ {prefix}error: {ev.summary}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export function MessageBubble({
   message,
   onRegenerate,
   isStreaming = false,
+  toolCalls,
+  mcpToolEvents,
+  structured,
+  artifacts,
+  onOpenArtifact,
 }: {
   message: UiMessage;
   onRegenerate?: () => void;
   isStreaming?: boolean;
+  /** Tool/function calls emitted by this assistant turn. */
+  toolCalls?: ToolCall[];
+  /** Server-side MCP tool-loop activity for this assistant turn (display only). */
+  mcpToolEvents?: McpToolEvent[];
+  /** Structured / JSON output to render in a labeled code block. */
+  structured?: unknown;
+  /** Artifacts detected in this assistant turn (computed by the chat page). */
+  artifacts?: Artifact[];
+  /** Open the side panel to a given artifact. */
+  onOpenArtifact?: (id: string) => void;
 }) {
   const isUser = message.role === "user";
   const provider = message.providerId
@@ -25,6 +189,28 @@ export function MessageBubble({
     : null;
   const [copied, setCopied] = useState(false);
   const hasContent = Boolean(message.content);
+  const hasToolCalls = !isUser && Array.isArray(toolCalls) && toolCalls.length > 0;
+  const hasMcpEvents =
+    !isUser && Array.isArray(mcpToolEvents) && mcpToolEvents.length > 0;
+  // Explicit structured prop wins; otherwise auto-detect a JSON-only answer
+  // (skipped mid-stream, where a partial body would never parse).
+  const structuredText =
+    structured !== undefined
+      ? JSON.stringify(structured, null, 2)
+      : !isUser && !isStreaming && message.content
+        ? asStructuredJson(message.content)
+        : null;
+  // When the answer body *itself* is JSON, render it as a code block instead of
+  // forcing it through the markdown path (prose paths stay untouched).
+  const contentIsJson = structured === undefined && structuredText !== null;
+  // Substantial code/HTML/SVG blocks move to the side panel; the inline body
+  // keeps a short reference instead of the whole block. (Markdown-document
+  // artifacts stay inline — they ARE the prose.)
+  const hasArtifacts = Array.isArray(artifacts) && artifacts.length > 0;
+  const bodyContent =
+    hasArtifacts && !contentIsJson
+      ? summarizeArtifactBody(message.content, artifacts!)
+      : message.content;
 
   async function copy() {
     try {
@@ -62,18 +248,59 @@ export function MessageBubble({
 
   return (
     <div className={`message-row${isUser ? " user" : ""}`}>
-      {!isUser && provider ? (
-        <div className="message-meta">
-          <span
-            className="message-provider-dot"
-            style={{ background: provider.color }}
-          />
+      {!isUser && (provider || message.meta) ? (
+        <div className="message-meta" style={{ flexWrap: "wrap", rowGap: 4 }}>
+          {provider ? (
+            <span
+              className="message-provider-dot"
+              style={{ background: provider.color }}
+            />
+          ) : null}
           <span>
-            {provider.name.toUpperCase()} · {message.model ?? provider.name}
+            {(provider?.name ?? message.providerId ?? "Assistant").toUpperCase()}
+            {message.model ? ` · ${shortModel(message.model)}` : ""}
             {typeof message.compileTokens === "number"
               ? ` · compile ~${message.compileTokens.toLocaleString()} tok`
               : ""}
           </span>
+          {message.meta?.routeReason ? (
+            // The headline "why this provider/model" — the prominent route reason
+            // (full strip with the rest of the trace stays expandable below).
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "1px 7px",
+                borderRadius: 999,
+                fontWeight: 600,
+                color: "var(--color-purple-light, #7C3AED)",
+                background:
+                  "color-mix(in oklch, var(--color-purple-light, #7C3AED) 12%, transparent)",
+              }}
+              title="Why the router chose this provider and model for this turn"
+            >
+              {message.meta.routeReason}
+            </span>
+          ) : null}
+          {message.meta ? (
+            <span style={{ opacity: 0.85 }}>· {message.meta.latencyMs}ms</span>
+          ) : null}
+          {message.meta?.privacyHonored === true ? (
+            <span
+              style={{ color: "var(--color-green, #22c55e)", fontWeight: 600 }}
+              title="Private mode was on and served by a no-training provider."
+            >
+              · ✓ private
+            </span>
+          ) : message.meta?.privacyHonored === false ? (
+            <span
+              style={{ color: "var(--color-yellow, #f59e0b)", fontWeight: 600 }}
+              title="Private mode was on, but no no-training provider was available."
+            >
+              · ⚠ private not honored
+            </span>
+          ) : null}
         </div>
       ) : null}
       <div className={`message-bubble${isUser ? " user" : ""}`}>
@@ -83,8 +310,10 @@ export function MessageBubble({
               <p className="message-paragraph" style={{ whiteSpace: "pre-wrap" }}>
                 {message.content}
               </p>
+            ) : contentIsJson && structuredText ? (
+              <CodeBlock lang="json" text={structuredText} label="JSON output" />
             ) : (
-              <Markdown content={message.content} />
+              <Markdown content={bodyContent} />
             )}
             {isStreaming ? <span className="stream-caret" aria-hidden /> : null}
           </>
@@ -93,6 +322,39 @@ export function MessageBubble({
             <span className="thinking-dot" aria-hidden />
             Thinking…
           </span>
+        ) : null}
+        {hasArtifacts && onOpenArtifact ? (
+          <button
+            type="button"
+            className="artifact-affordance"
+            onClick={() => onOpenArtifact(artifacts![0]!.id)}
+            title="Open in the artifacts panel"
+            style={{ marginTop: message.content ? 8 : 0 }}
+          >
+            <Icon name="layers" size={13} />
+            {artifacts!.length} artifact{artifacts!.length === 1 ? "" : "s"} · open panel
+          </button>
+        ) : null}
+        {hasToolCalls ? (
+          <div
+            className="tool-call-list"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              marginTop: message.content ? 8 : 0,
+            }}
+          >
+            {toolCalls!.map((call) => (
+              <ToolCallCard key={call.id} call={call} />
+            ))}
+          </div>
+        ) : null}
+        {hasMcpEvents ? <McpToolActivity events={mcpToolEvents!} /> : null}
+        {structured !== undefined && structuredText ? (
+          <div style={{ marginTop: hasContent || hasToolCalls ? 8 : 0 }}>
+            <CodeBlock lang="json" text={structuredText} label="Structured output" />
+          </div>
         ) : null}
         {message.images && message.images.length > 0 ? (
           <div

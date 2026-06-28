@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
 import type { ChatMeta } from "@/lib/gateway";
@@ -23,6 +23,27 @@ const STRATEGY_LABEL: Record<string, string> = {
   weighted: "Weighted",
   auto: "Auto",
 };
+
+/** Shared pill styling for the prominent Private-Mode honesty signal. */
+const privacyPill = (honored: boolean): CSSProperties => {
+  const tone = honored ? "var(--color-green)" : "var(--color-yellow)";
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "1px 8px",
+    borderRadius: 999,
+    border: `0.5px solid color-mix(in oklch, ${tone} 40%, transparent)`,
+    background: `color-mix(in oklch, ${tone} 12%, transparent)`,
+    color: tone,
+    fontWeight: 600,
+  };
+};
+
+const PRIVACY_HONORED_TITLE =
+  "Private Mode was on and the request was served by a provider with a no-training policy. Your prompt is not used to train models.";
+const PRIVACY_BROKEN_TITLE =
+  "Private Mode was on, but every available provider may train on data (or has an undocumented policy), so one was used anyway. Add a no-training provider key (e.g. Groq, Cerebras, Mistral) or run Ollama locally.";
 
 /**
  * Per-response proof of the value prop, shown under every assistant message:
@@ -55,15 +76,16 @@ export function TransparencyStrip({ meta }: { meta: ChatMeta }) {
         <span className="transparency-sep">·</span>
         <span>$0 fees</span>
         {meta.savedUsd > 0 ? (
-          <span className="transparency-saved">
-            saved ~{fmtUsd(meta.savedUsd)}
+          <span className="transparency-saved" title="Estimated savings versus running the same request on Claude Sonnet.">
+            ↓ saved ~{fmtUsd(meta.savedUsd)}
           </span>
         ) : null}
-        {meta.privacyHonored === false ? (
-          <span
-            style={{ color: "#f59e0b", fontWeight: 600 }}
-            title="Private Mode was on, but every available provider may train on data (or has an undocumented policy), so one was used anyway. Add a no-training provider key (e.g. Groq, Cerebras, Mistral) or run Ollama locally."
-          >
+        {meta.privacyHonored === true ? (
+          <span style={privacyPill(true)} title={PRIVACY_HONORED_TITLE}>
+            ✓ Private Mode honored
+          </span>
+        ) : meta.privacyHonored === false ? (
+          <span style={privacyPill(false)} title={PRIVACY_BROKEN_TITLE}>
             ⚠ Private Mode not honored
           </span>
         ) : null}
@@ -85,22 +107,18 @@ export function TransparencyStrip({ meta }: { meta: ChatMeta }) {
           <dt>Cost</dt>
           <dd>{fmtUsd(meta.costUsd)}</dd>
           <dt>Saved vs Claude Sonnet</dt>
-          <dd className="transparency-saved">~{fmtUsd(meta.savedUsd)}</dd>
+          <dd className="transparency-saved">~{fmtUsd(meta.savedUsd)} est</dd>
           <dt>Routing strategy</dt>
           <dd>{strategy}</dd>
           {meta.privacyHonored !== undefined ? (
             <>
               <dt>Private Mode</dt>
-              <dd
-                style={
-                  meta.privacyHonored
-                    ? undefined
-                    : { color: "#f59e0b", fontWeight: 600 }
-                }
-              >
-                {meta.privacyHonored
-                  ? "Honored — no-training provider"
-                  : `Not honored — used ${provider?.name ?? meta.provider} (may train / undocumented)`}
+              <dd>
+                <span style={privacyPill(meta.privacyHonored)}>
+                  {meta.privacyHonored
+                    ? "✓ Honored — no-training provider"
+                    : `⚠ Not honored — used ${provider?.name ?? meta.provider}`}
+                </span>
               </dd>
             </>
           ) : null}

@@ -3,26 +3,48 @@ import {
   listProviders,
   getModelPricing,
   estimateCostUsd,
+  DATA_POLICIES,
+  PROVIDER_METADATA,
+  listCatalogModels,
+  type CatalogModel,
 } from "@zintus/providers";
-import { supportsVision } from "@zintus/providers";
+import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
 import { redactSecrets } from "@zintus/router";
 import type { Engine } from "@zintus/engine";
 import {
   detectLocalRuntimes as defaultDetectLocalRuntimes,
   type LocalRuntimes,
 } from "./local-runtimes.js";
+import {
+  activityRecordToEntry,
+  ACTIVITY_RETENTION_DAYS,
+  type ActivityStore,
+} from "./activity-store.js";
 import type {
   ChatMessage,
   ContextMode,
   ProviderId,
+  RequestTrace,
   RouteUsage,
 } from "@zintus/types";
 import {
   textOf,
   imageCount,
   isContentBlockArray,
+  hasToolTurns,
   type ContentBlock,
+  type ToolResultContentBlock,
+  type ToolDefinition,
 } from "@zintus/types";
+import type { MCPServerConfig } from "@zintus/mcp";
+import { MCPRegistry, configId } from "./mcp-registry.js";
+import {
+  mcpToolsToDefinitions,
+  mcpToolName,
+  executeMcpToolCall,
+  isMcpToolCall,
+} from "./mcp-bridge.js";
+import type { ChatCompletionRequest } from "@zintus/schemas";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
@@ -33,6 +55,7 @@ import type { RateLimiter } from "./rate-limit.js";
 import {
   ChatCompletionRequestSchema,
   ResearchRequestSchema,
+  MCPDiscoverRequestSchema,
   formatIssues,
 } from "@zintus/schemas";
 import { compress } from "tokzen";
@@ -47,6 +70,138 @@ import {
   type ResearchDepth,
   type DeepResearchDeps,
 } from "@zintus/search";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model / pricing catalog — the data behind the OpenRouter-grade `/v1/models`
+// and `/v1/pricing` routes.
+//
+// The per-model catalog is owned by @zintus/providers (`listCatalogModels` /
+// `CatalogModel`) — the single source of truth for the OpenRouter-grade
+// `/v1/models` + `/v1/pricing` routes. Capability flags there are test-asserted to
+// mirror the chat gates, and prices are null when unknown (no invention).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Map a catalog model to the enriched, OpenAI-compatible `/v1/models` entry.
+ *  The `{ id, object:"model", owned_by }` triple is preserved (OpenAI-compat
+ *  contract); every other field is additive metadata. */
+function toModelEntry(m: CatalogModel) {
+  return {
+    // OpenAI-compatible triple — DO NOT drop (contracts.test.ts pins these).
+    id: m.id,
+    object: "model" as const,
+    owned_by: PROVIDER_METADATA[m.provider]?.name ?? m.provider,
+    // ── additive, OpenRouter-grade metadata ──
+    display_name: m.displayName,
+    context_window: m.contextWindow,
+    capabilities: {
+      vision: m.vision,
+      tools: m.tools,
+      structured_output: m.structuredOutput,
+    },
+    // USD per 1M tokens; null when unknown (honest — no invented prices).
+    pricing: {
+      input_per_1m: m.inputPer1M,
+      output_per_1m: m.outputPer1M,
+    },
+    free: m.free,
+    local: m.local,
+    // The catalog carries a coarse tag (`m.dataPolicy`); the rich fields come from
+    // the provider's DATA_POLICIES entry (gateway-local, authoritative).
+    data_policy: ((dp) => ({
+      tag: m.dataPolicy,
+      trains_on_data: dp?.trainsOnData ?? "unknown",
+      retention: dp?.dataRetention ?? "unknown",
+      zdr: dp?.zdr ?? false,
+      badge: dp?.badge ?? "unknown",
+      policy_url: dp?.policyUrl ?? "",
+    }))(DATA_POLICIES[m.provider]),
+  };
+}
+
+/**
+ * Optional usage/telemetry a RequestTrace MAY carry at runtime but that the
+ * typed `RequestTrace` shape does not (yet) declare. The activity feed reads
+ * these defensively: present → surface the REAL recorded value, absent →
+ * an honest zero/false/omit. Nothing here is ever fabricated.
+ */
+interface TraceUsageExtras {
+  tokens?: { input?: number; output?: number; total?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+  };
+  cacheHit?: boolean;
+  routeReason?: string;
+  costUsd?: number;
+  savedVsBaselineUsd?: number;
+}
+
+/**
+ * Normalize a routing trace into an OpenRouter-style `/activity` entry. Built
+ * ONLY from data the gateway already records (the same `RequestTrace` exposed
+ * by `/v1/traces`), plus any optional usage fields the trace happens to carry.
+ * Honest by construction: cost is $0 on the free tier, token counts default to
+ * 0 when not recorded, `cache_hit` defaults to false, and `route_reason` is
+ * OMITTED entirely when the trace does not record one.
+ */
+function toActivityEntry(trace: RequestTrace) {
+  const extras = trace as RequestTrace & TraceUsageExtras;
+  // Winner is authoritative for provider/model; otherwise fall back to the last
+  // successful attempt, then the last attempt recorded.
+  const lastSuccess = [...trace.attempts]
+    .reverse()
+    .find((a) => a.status === "success");
+  const lastAttempt = trace.attempts[trace.attempts.length - 1];
+  const provider: ProviderId | null =
+    trace.winner?.providerId ??
+    lastSuccess?.providerId ??
+    lastAttempt?.providerId ??
+    null;
+  const model: string | null =
+    trace.winner?.model ?? lastSuccess?.model ?? lastAttempt?.model ?? null;
+
+  const inputTokens =
+    extras.tokens?.input ??
+    extras.usage?.inputTokens ??
+    extras.usage?.promptTokens ??
+    0;
+  const outputTokens =
+    extras.tokens?.output ??
+    extras.usage?.outputTokens ??
+    extras.usage?.completionTokens ??
+    0;
+  const totalTokens =
+    extras.tokens?.total ?? extras.usage?.totalTokens ?? inputTokens + outputTokens;
+
+  const latencyMs =
+    trace.totalLatencyMs ??
+    (trace.winner
+      ? lastSuccess?.latencyMs
+      : lastAttempt?.latencyMs) ??
+    null;
+
+  return {
+    id: trace.traceId,
+    // Unix seconds (OpenAI/OpenRouter convention), plus the ISO timestamp for
+    // callers that prefer it.
+    created: Math.floor(trace.startedAt.getTime() / 1000),
+    created_at: trace.startedAt.toISOString(),
+    provider,
+    model,
+    tokens: { input: inputTokens, output: outputTokens, total: totalTokens },
+    // Free-core: requests are served off free tiers, so the user's real cost is
+    // $0. Never invent a non-zero number.
+    cost_usd: extras.costUsd ?? 0,
+    saved_vs_baseline_usd: extras.savedVsBaselineUsd ?? 0,
+    latency_ms: latencyMs,
+    cache_hit: extras.cacheHit ?? false,
+    // route_reason only when the trace genuinely recorded one.
+    ...(extras.routeReason ? { route_reason: extras.routeReason } : {}),
+  };
+}
 
 /**
  * Paid-frontier reference pricing (Claude Sonnet 4.6, USD per million tokens),
@@ -69,6 +224,7 @@ function buildUsageMetadata(
   usage: RouteUsage,
   strategy: string | undefined,
   privacyHonored?: boolean,
+  routeReason?: string,
 ): Record<string, unknown> {
   return {
     type: "metadata",
@@ -82,6 +238,8 @@ function buildUsageMetadata(
       usage.outputTokens,
     ),
     routing_strategy: strategy ?? "auto",
+    // Human "why this provider/model" — surfaced on every platform (consistency).
+    ...(routeReason ? { route_reason: routeReason } : {}),
     // Privacy-mode honesty signal — only present when private mode was requested
     // (block_training). false = the request could not avoid a may-train provider.
     ...(privacyHonored !== undefined
@@ -109,6 +267,81 @@ const UNSUPPORTED_VISION_ERROR = {
     ],
   },
 } as const;
+
+// Returned when a tools-bearing request can't reach a tool-capable provider/model.
+// Mirrors UNSUPPORTED_VISION_ERROR: no upsell, just honest BYOK suggestions.
+const UNSUPPORTED_TOOLS_ERROR = {
+  error: {
+    type: "unsupported_capability",
+    message:
+      "Tool/function calling requires a tool-capable provider or model.",
+    required: ["tools"],
+    suggestions: [
+      { provider: "gemini", reason: "Gemini 2.5 supports function calling." },
+      { provider: "groq", reason: "Llama-3.3-70B on Groq supports tool calls." },
+      { provider: "openrouter", reason: "Pick a tool-capable OpenRouter model." },
+    ],
+  },
+} as const;
+
+// Returned when a STRICT schema-constrained request (`response_format.type ===
+// "json_schema"` with `strict: true`) can't reach a provider/model that
+// GUARANTEES conformance. Mirrors UNSUPPORTED_TOOLS_ERROR: no upsell, just
+// honest BYOK suggestions for providers that DO constrain decoding to a schema.
+const UNSUPPORTED_STRUCTURED_ERROR = {
+  error: {
+    type: "unsupported_capability",
+    message:
+      "Strict schema-constrained output requires a provider that guarantees it (e.g. Gemini).",
+    required: ["json_schema"],
+    suggestions: [
+      {
+        provider: "gemini",
+        reason:
+          "Gemini's responseSchema constrains decoding to your JSON Schema (guaranteed).",
+      },
+    ],
+  },
+} as const;
+
+/**
+ * Structured-output metadata the engine attaches to its stream result for a
+ * structured request. Defined locally as a safe structural type so this file
+ * typechecks independently of when the sibling engine change lands; read off the
+ * result via a narrow cast (`asStructured`). `requested` is the caller's
+ * `response_format.type`; `servedLevel` is what the chosen provider could
+ * actually serve (`prompt` = emulated, never guaranteed). `guaranteed` is true
+ * ONLY when `servedLevel === "json_schema"`.
+ */
+type StructuredOutputMeta = {
+  requested: "json_object" | "json_schema";
+  servedLevel: "json_schema" | "json_object" | "prompt";
+  guaranteed: boolean;
+  valid: boolean;
+  repairAttempts: number;
+  issues?: { path: string; message: string }[];
+};
+
+/** Read the engine result's optional structured-output fields without coupling to
+ *  the (sibling-owned) EngineStreamResult declaration. */
+function asStructured(result: unknown): {
+  structuredOutput?: StructuredOutputMeta;
+  parsed?: unknown;
+} {
+  return result as { structuredOutput?: StructuredOutputMeta; parsed?: unknown };
+}
+
+/** Snake-case the structured metadata for the JSON/SSE wire shape (§2.3). */
+function structuredOutputBody(meta: StructuredOutputMeta): Record<string, unknown> {
+  return {
+    requested: meta.requested,
+    served_level: meta.servedLevel,
+    guaranteed: meta.guaranteed,
+    valid: meta.valid,
+    repair_attempts: meta.repairAttempts,
+    ...(meta.issues ? { issues: meta.issues } : {}),
+  };
+}
 
 export type LogFn = (
   level: "info" | "warn" | "error",
@@ -262,7 +495,28 @@ export interface GatewayHandlerDeps {
    * can assert `use_local` / `localAvailable` without a live runtime.
    */
   detectLocalRuntimes?: () => Promise<LocalRuntimes>;
+  /**
+   * Durable usage-history store (bun:sqlite, ~/.zintus/activity.db). When
+   * provided, GET /v1/activity reads from it first (falling back to the
+   * in-memory trace path when it is empty/unavailable) and each completed turn
+   * is persisted to it best-effort. Omitted in unit tests → behaviour is exactly
+   * the prior trace-derived path. Created in index.ts for production.
+   */
+  activityStore?: ActivityStore;
+  /**
+   * MCP connection registry — the gateway HOSTS the MCP clients (the browser
+   * can't: no stdio). Injected from index.ts so its `disconnectAll()` can be
+   * called on graceful shutdown; a fresh one is created here when omitted (unit
+   * tests pass a fake-client-backed registry). Reused across requests so a
+   * server connects once.
+   */
+  mcpRegistry?: MCPRegistry;
 }
+
+/** Hard cap on SERVER-SIDE MCP tool-loop rounds (model calls) per request. Each
+ *  round may execute MCP tool calls and feed their results back; the cap bounds
+ *  a pathological model that calls tools forever. */
+const MAX_MCP_TOOL_ROUNDS = 8;
 
 /** BYOK-only fallback actions when a provider's quota is low/exhausted. */
 type RouteOption =
@@ -297,6 +551,55 @@ export function createGatewayHandler(
   const getDraining = deps.getDraining;
   const rateLimiter = deps.rateLimiter;
   const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
+  const activityStore = deps.activityStore;
+  const mcpRegistry = deps.mcpRegistry ?? new MCPRegistry();
+
+  /**
+   * Persist a completed turn to the durable activity store (best-effort). A
+   * write failure must NEVER break the chat response — it is logged and
+   * swallowed. Honest: cost is $0 (free-core), tokens/latency/savings stay null
+   * when the turn did not record them (no fabricated values).
+   */
+  function recordTurnActivity(
+    result: {
+      traceId?: string;
+      providerId: string;
+      model: string;
+      cacheHit?: string;
+      routeReason?: string;
+    },
+    usage: RouteUsage | undefined,
+  ): void {
+    if (!activityStore || !result.traceId) {
+      return;
+    }
+    try {
+      const inputTokens = usage?.inputTokens ?? null;
+      const outputTokens = usage?.outputTokens ?? null;
+      activityStore.recordActivity({
+        traceId: result.traceId,
+        created: Math.floor(Date.now() / 1000),
+        provider: usage?.providerId ?? result.providerId ?? null,
+        model: usage?.model ?? result.model ?? null,
+        inputTokens,
+        outputTokens,
+        // Free-core: served off free tiers, so the user's real cost is $0.
+        costUsd: 0,
+        savedVsBaselineUsd:
+          inputTokens != null && outputTokens != null
+            ? savedVsClaudeSonnet(inputTokens, outputTokens)
+            : null,
+        latencyMs: usage?.latencyMs ?? null,
+        cacheHit: result.cacheHit != null && result.cacheHit !== "miss",
+        routeReason: result.routeReason ?? null,
+      });
+    } catch (error) {
+      log("warn", "activity.record_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxMessages = config.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -309,10 +612,10 @@ export function createGatewayHandler(
       request.headers.get("origin"),
     );
     const headers: Record<string, string> = {
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
       "Access-Control-Expose-Headers":
-        "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, " +
+        "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, X-Zintus-Route-Reason, " +
         "X-Zintus-Original-Tokens, X-Zintus-Compressed-Tokens, " +
         "X-Zintus-Tokens-Saved, X-Zintus-Compression-Ratio, " +
         "X-Zintus-Cost-Saved-Usd, X-Zintus-Private-Honored, " +
@@ -560,6 +863,340 @@ export function createGatewayHandler(
     });
   }
 
+  /**
+   * Connect the MCP servers a chat request lists, gather + filter their tools,
+   * and return the merged ToolDefinitions plus a serverId→config map for routing
+   * tool calls back. Throws on connect/list failure so the caller can surface an
+   * honest error BEFORE opening the answer stream. Never logs tool args/results.
+   */
+  async function gatherMcpTools(mcp: NonNullable<ChatCompletionRequest["mcp"]>): Promise<{
+    tools: ToolDefinition[];
+    configsById: Map<string, MCPServerConfig>;
+  }> {
+    const configsById = new Map<string, MCPServerConfig>();
+    const tools: ToolDefinition[] = [];
+    const enabledSet = mcp.enabledTools ? new Set(mcp.enabledTools) : null;
+    for (const config of mcp.servers as MCPServerConfig[]) {
+      const serverId = configId(config);
+      configsById.set(serverId, config);
+      const client = await mcpRegistry.getOrConnect(config);
+      const advertised = await client.listTools();
+      // `enabledTools` may carry either the raw server-local name or the
+      // namespaced `mcp__<id>__<tool>` (whatever the UI surfaced from discover).
+      const filtered = enabledSet
+        ? advertised.filter(
+            (t) =>
+              enabledSet.has(t.name) ||
+              enabledSet.has(mcpToolName(serverId, t.name)),
+          )
+        : advertised;
+      tools.push(...mcpToolsToDefinitions(serverId, filtered));
+    }
+    return { tools, configsById };
+  }
+
+  /**
+   * SERVER-SIDE MCP chat path. Connects the listed MCP servers, merges their
+   * tools with any client `tools`, and runs a BOUNDED tool loop (≤
+   * MAX_MCP_TOOL_ROUNDS model calls): call the provider → if it returns
+   * `mcp__*` tool calls, execute them against the owning server and feed the
+   * results back, repeat → stream the final answer. Per-step tool-call /
+   * tool-result EVENTS are emitted in the SSE stream so the client can show
+   * "calling X / got result". A turn that calls NON-MCP (client) tools is handed
+   * off to the client unchanged (OpenAI tool_calls + finish_reason).
+   *
+   * NO-CUSTODY: MCP config/args/results never touch the relay and are never
+   * logged. stdio servers spawn the user's OWN local processes (their config) —
+   * fine on the loopback gateway (see mcp-registry header).
+   */
+  async function handleMcpChat(
+    request: Request,
+    requestId: string,
+    body: ChatCompletionRequest,
+    messages: ChatMessage[],
+  ): Promise<Response> {
+    let merged: { tools: ToolDefinition[]; configsById: Map<string, MCPServerConfig> };
+    try {
+      merged = await gatherMcpTools(body.mcp!);
+    } catch (error) {
+      metrics.recordError();
+      const message = error instanceof Error ? error.message : String(error);
+      // No tool args/results here — only a connection-level message — but scrub
+      // defensively (a server URL/header echo could carry a token).
+      log("warn", "mcp.connect_failed", { requestId });
+      return json(
+        request,
+        {
+          error: {
+            type: "mcp_connect_error",
+            message: `Failed to connect to an MCP server: ${redactSecrets(message)}`,
+          },
+        },
+        502,
+      );
+    }
+    const mergedTools: ToolDefinition[] = [
+      ...(body.tools ?? []),
+      ...merged.tools,
+    ];
+    const configsById = merged.configsById;
+
+    // Per-request abort: client disconnect OR a connect/start timeout tears down
+    // the in-flight upstream fetch (mirrors handleChatCompletions).
+    const upstreamAbort = new AbortController();
+    if (request.signal) {
+      if (request.signal.aborted) {
+        upstreamAbort.abort();
+      } else {
+        request.signal.addEventListener("abort", () => upstreamAbort.abort(), {
+          once: true,
+        });
+      }
+    }
+
+    metrics.recordChat("mcp" as ProviderId);
+    log("info", "mcp.chat", {
+      requestId,
+      servers: body.mcp!.servers.length,
+      mcpTools: merged.tools.length,
+      clientTools: body.tools?.length ?? 0,
+    });
+
+    const encoder = new TextEncoder();
+    const chunkFrame = (data: Record<string, unknown>): Uint8Array =>
+      encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const working: ChatMessage[] = [...messages];
+        let capturedUsage: RouteUsage | undefined;
+        let lastResult:
+          | Awaited<ReturnType<Engine["routeAndStream"]>>
+          | undefined;
+        try {
+          for (let round = 0; round < MAX_MCP_TOOL_ROUNDS; round++) {
+            const result = await withTimeout(
+              engine.routeAndStream({
+                signal: upstreamAbort.signal,
+                onUsage: (usage) => {
+                  capturedUsage = usage;
+                },
+                messages: working,
+                model: body.model,
+                provider: body.provider,
+                mode: body.mode,
+                tools: mergedTools,
+                toolChoice: body.tool_choice,
+                stream: true,
+                virtualKey: body.virtual_key ?? body.virtualKey,
+                providerWeights: body.provider_weights ?? body.providerWeights,
+                strategy: body.strategy,
+                blockTrainingProviders: body.block_training,
+                allowTrainingProviders: body.allow_training,
+                keys: body.keys,
+                diffText: body.diff,
+                temperature: body.temperature,
+                maxTokens: body.max_tokens,
+              }),
+              requestTimeoutMs,
+            );
+            lastResult = result;
+
+            // Stream this round's text as it arrives (idle-watchdog protected).
+            let roundText = "";
+            for await (const piece of withIdleWatchdog(result.stream, {
+              idleMs: streamIdleTimeoutMs,
+              abort: upstreamAbort,
+            })) {
+              roundText += piece;
+              controller.enqueue(
+                chunkFrame({
+                  id: result.traceId,
+                  object: "chat.completion.chunk",
+                  model: result.model,
+                  provider: result.providerId,
+                  choices: [{ index: 0, delta: { content: piece } }],
+                }),
+              );
+            }
+
+            // Tool calls are fully populated only now that the text drained.
+            const toolCalls = result.toolCalls ?? [];
+            const mcpCalls = toolCalls.filter(isMcpToolCall);
+
+            // Final turn when there are no tool calls, OR the turn mixes in
+            // NON-MCP (client) tools we can't satisfy server-side → hand the
+            // whole turn off to the client via the existing OpenAI channel.
+            if (toolCalls.length === 0 || mcpCalls.length < toolCalls.length) {
+              if (toolCalls.length > 0) {
+                toolCalls.forEach((call, i) => {
+                  controller.enqueue(
+                    chunkFrame({
+                      id: result.traceId,
+                      object: "chat.completion.chunk",
+                      model: result.model,
+                      provider: result.providerId,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: {
+                            tool_calls: [
+                              {
+                                index: i,
+                                id: call.id,
+                                type: "function",
+                                function: {
+                                  name: call.name,
+                                  arguments: JSON.stringify(call.arguments),
+                                },
+                              },
+                            ],
+                          },
+                          finish_reason: null,
+                        },
+                      ],
+                    }),
+                  );
+                });
+                controller.enqueue(
+                  chunkFrame({
+                    id: result.traceId,
+                    object: "chat.completion.chunk",
+                    model: result.model,
+                    provider: result.providerId,
+                    choices: [
+                      { index: 0, delta: {}, finish_reason: "tool_calls" },
+                    ],
+                  }),
+                );
+              }
+              break;
+            }
+
+            // All tool calls are MCP → record the assistant turn, execute the
+            // tools, feed results back, and loop.
+            const assistantBlocks: ContentBlock[] = [];
+            if (roundText.length > 0) {
+              assistantBlocks.push({ type: "text", text: roundText });
+            }
+            for (const call of toolCalls) {
+              assistantBlocks.push(call);
+            }
+            working.push({ role: "assistant", content: assistantBlocks });
+
+            // Emit a "calling X" event per MCP tool call (mirrors the tool-call
+            // channel; carries `type:"mcp_tool_call"` so clients can discriminate).
+            mcpCalls.forEach((call, i) => {
+              controller.enqueue(
+                chunkFrame({
+                  id: result.traceId,
+                  object: "chat.completion.chunk",
+                  type: "mcp_tool_call",
+                  model: result.model,
+                  provider: result.providerId,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: i,
+                            id: call.id,
+                            type: "function",
+                            function: {
+                              name: call.name,
+                              arguments: JSON.stringify(call.arguments),
+                            },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                }),
+              );
+            });
+
+            // Execute server-side. executeMcpToolCall never throws — a failure
+            // comes back as an isError tool_result the model can recover from.
+            const results: ToolResultContentBlock[] = await Promise.all(
+              mcpCalls.map((call) =>
+                executeMcpToolCall(mcpRegistry, configsById, call),
+              ),
+            );
+
+            // Emit a "got result" event per tool result.
+            for (const res of results) {
+              controller.enqueue(
+                chunkFrame({
+                  id: result.traceId,
+                  object: "chat.completion.chunk",
+                  type: "mcp_tool_result",
+                  model: result.model,
+                  provider: result.providerId,
+                  choices: [],
+                  tool_call_id: res.toolCallId,
+                  is_error: res.isError ?? false,
+                  content: res.content,
+                }),
+              );
+            }
+
+            working.push({ role: "user", content: results });
+          }
+
+          // Per-response transparency strip, once final token counts are known.
+          if (capturedUsage && lastResult) {
+            controller.enqueue(
+              chunkFrame({
+                ...buildUsageMetadata(
+                  capturedUsage,
+                  body.strategy,
+                  lastResult.privacyHonored,
+                  lastResult.routeReason,
+                ),
+                object: "chat.completion.chunk",
+                model: lastResult.model,
+                provider: lastResult.providerId,
+                choices: [],
+              }),
+            );
+          }
+          if (lastResult) {
+            recordTurnActivity(lastResult, capturedUsage);
+          }
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Stream failed";
+          metrics.recordError();
+          onError?.(error, { requestId, path: "/v1/chat/completions" });
+          log("error", "mcp.chat_failed", {
+            requestId,
+            error: redactSecrets(message),
+          });
+          controller.enqueue(
+            chunkFrame({ error: { message: redactSecrets(message) } }),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+      cancel() {
+        upstreamAbort.abort();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        ...corsHeaders(request),
+      },
+    });
+  }
+
   async function handleChatCompletions(
     request: Request,
     requestId: string,
@@ -621,10 +1258,46 @@ export function createGatewayHandler(
       );
     }
     const hasImages = imageTotal > 0;
+    const wantsTools = (body.tools?.length ?? 0) > 0;
+    // MCP requested ⇒ the gateway will host the listed servers and add their
+    // tools, so this turn is effectively a tools turn for capability gating.
+    const mcpRequested = (body.mcp?.servers?.length ?? 0) > 0;
     // Explicit-provider gate: if the user PICKED a provider, never silently send
     // their image elsewhere — fail clearly if that provider/model can't see it.
     if (hasImages && body.provider && !supportsVision(body.provider, body.model)) {
       return json(request, UNSUPPORTED_VISION_ERROR, 422);
+    }
+    // Same explicit-provider gate for tools: a tools-bearing request against a
+    // provider/model that can't call tools hard-errors rather than silently
+    // dropping the tools and returning a text-only answer.
+    if (
+      (wantsTools || mcpRequested) &&
+      body.provider &&
+      !supportsTools(body.provider, body.model)
+    ) {
+      return json(request, UNSUPPORTED_TOOLS_ERROR, 422);
+    }
+    // ── MCP server-side tool loop ──────────────────────────────────────────
+    // Additive: present ONLY when the request carries `mcp.servers`. Connects
+    // each server (cached registry), merges their tools with any client `tools`,
+    // and runs a bounded server-side tool loop. The existing flow below is left
+    // byte-identical when `mcp` is absent.
+    if (mcpRequested && !hasImages) {
+      return handleMcpChat(request, requestId, body, messages);
+    }
+    // Same explicit-provider gate for STRICT structured output: a request that
+    // DEMANDS schema-guaranteed JSON (json_schema + strict) against a picked
+    // provider/model whose strongest structured level isn't `json_schema`
+    // hard-errors rather than silently downgrading to best-effort json/prose.
+    const wantsStrictSchema =
+      body.response_format?.type === "json_schema" &&
+      body.response_format.strict === true;
+    if (
+      wantsStrictSchema &&
+      body.provider &&
+      structuredOutputLevel(body.provider, body.model) !== "json_schema"
+    ) {
+      return json(request, UNSUPPORTED_STRUCTURED_ERROR, 422);
     }
     const imageBytes = messages.reduce(
       (sum, m) =>
@@ -693,7 +1366,12 @@ export function createGatewayHandler(
     const selectedProvider = body.provider;
     let tokzenResult: Awaited<ReturnType<typeof compress>> | undefined;
     let compressedMessages: ChatMessage[] = [];
-    if (!hasImages) {
+    // Tokzen flattens every message to text (textOf) and REPLACES the array —
+    // which would destroy tool_call/tool_result blocks. Skip it for tool requests
+    // (definitions this turn OR a continuation turn carrying tool blocks), exactly
+    // as it is skipped for image requests. The original messages flow to the router.
+    const hasTools = wantsTools || hasToolTurns(messages);
+    if (!hasImages && !hasTools) {
       const quotaRemaining = selectedProvider ? (getQuotaRemaining?.(selectedProvider) ?? 1.0) : 1.0;
       const tokzenProvider =
         selectedProvider === "groq" ? "groq" as const
@@ -765,6 +1443,9 @@ export function createGatewayHandler(
           mode: body.mode,
           threadId: body.thread_id,
           webSearch: nativeWebSearch,
+          tools: body.tools,
+          toolChoice: body.tool_choice,
+          responseFormat: body.response_format,
           stream: body.stream !== false,
           virtualKey: body.virtual_key ?? body.virtualKey,
           providerWeights: body.provider_weights ?? body.providerWeights,
@@ -794,10 +1475,20 @@ export function createGatewayHandler(
           408,
         );
       }
-      // The router rejected an image request with no vision-capable candidate
-      // (auto-routing case). Surface the honest capability error, not a 500.
+      // The router rejected the request because no candidate had the required
+      // capability (auto-routing case). The same "unsupported_capability" Error
+      // is thrown for vision, tools, OR strict structured output, so disambiguate
+      // by REQUEST SHAPE: a strict json_schema request with no image/tools maps to
+      // the structured error; a tools-only request (tools present, no images) maps
+      // to the tools error; anything involving an image maps to the vision error.
       if (error instanceof Error && error.message === "unsupported_capability") {
-        return json(request, UNSUPPORTED_VISION_ERROR, 422);
+        const body422 =
+          wantsStrictSchema && !hasImages && !wantsTools
+            ? UNSUPPORTED_STRUCTURED_ERROR
+            : wantsTools && !hasImages
+              ? UNSUPPORTED_TOOLS_ERROR
+              : UNSUPPORTED_VISION_ERROR;
+        return json(request, body422, 422);
       }
       throw error;
     }
@@ -807,6 +1498,15 @@ export function createGatewayHandler(
       "X-Cache-Hit": result.cacheHit ?? "miss",
       "X-Failover-Count": String(result.failoverCount ?? 0),
     };
+    // Human route-reason (why this provider/model) — surfaced on every platform.
+    // Header values must be Latin-1; strip any stray non-ASCII defensively (the
+    // full unicode-safe reason still rides in the metadata SSE/JSON frame).
+    if (result.routeReason) {
+      metaHeaders["X-Zintus-Route-Reason"] = result.routeReason.replace(
+        /[^\x20-\x7E]/g,
+        " ",
+      );
+    }
     // Privacy-mode honesty: surface whether private mode was honored so clients
     // can warn "used <provider> — Private Mode not honored" instead of failing
     // silently. Present only when block_training was requested.
@@ -894,6 +1594,49 @@ export function createGatewayHandler(
         }
         throw error;
       }
+      // Tool calls are populated on result.toolCalls as the stream drains — read
+      // them now (AFTER the loop above) when the live channel is complete. When
+      // present, surface them OpenAI-shape on the assistant message with
+      // finish_reason:"tool_calls"; content is null when the turn was tools-only.
+      const toolCalls = result.toolCalls ?? [];
+      const hasToolCalls = toolCalls.length > 0;
+      const message = hasToolCalls
+        ? {
+            role: "assistant" as const,
+            content: content.length > 0 ? content : null,
+            tool_calls: toolCalls.map((call) => ({
+              id: call.id,
+              type: "function" as const,
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments),
+              },
+            })),
+          }
+        : { role: "assistant" as const, content };
+      // Structured output (§2.3): the engine buffered+validated the response and
+      // attached `structuredOutput` metadata plus the `parsed` value. Surface both
+      // on the JSON body. A STRICT request whose output did NOT validate (after the
+      // engine exhausted repair) is an honest hard failure — return 422 with the
+      // metadata rather than a 200 carrying non-conformant prose.
+      const { structuredOutput, parsed } = asStructured(result);
+      if (structuredOutput && body.response_format?.strict && !structuredOutput.valid) {
+        return json(
+          request,
+          {
+            error: {
+              type: "structured_output_invalid",
+              message:
+                "The model's output did not conform to the requested schema after repair attempts.",
+              structured_output: structuredOutputBody(structuredOutput),
+            },
+          },
+          422,
+          metaHeaders,
+        );
+      }
+      // Durable usage history: this turn completed and its usage is known.
+      recordTurnActivity(result, capturedUsage);
       return json(
         request,
         {
@@ -906,16 +1649,23 @@ export function createGatewayHandler(
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content },
-              finish_reason: "stop",
+              message,
+              finish_reason: hasToolCalls ? "tool_calls" : "stop",
             },
           ],
+          ...(structuredOutput
+            ? {
+                parsed,
+                structured_output: structuredOutputBody(structuredOutput),
+              }
+            : {}),
           ...(capturedUsage
             ? {
                 metadata: buildUsageMetadata(
                   capturedUsage,
                   body.strategy,
                   result.privacyHonored,
+                  result.routeReason,
                 ),
               }
             : {}),
@@ -923,6 +1673,33 @@ export function createGatewayHandler(
         200,
         metaHeaders,
       );
+    }
+
+    // Structured-output honesty on the DEFAULT (streaming) path. The engine
+    // BUFFERS + validates the whole structured document before routeAndStream
+    // resolves, so `structuredOutput.valid` is already known here — BEFORE the
+    // SSE stream opens. A STRICT json_schema request whose output did NOT
+    // validate (after the engine exhausted repair) is an honest hard failure:
+    // return the same 422 the non-streaming branch returns, rather than opening
+    // a 200 stream that emits a `valid:false` frame + non-conformant prose.
+    // Non-strict (json_object / no-strict json_schema) behavior is unchanged.
+    {
+      const { structuredOutput } = asStructured(result);
+      if (wantsStrictSchema && structuredOutput && !structuredOutput.valid) {
+        return json(
+          request,
+          {
+            error: {
+              type: "structured_output_invalid",
+              message:
+                "The model's output did not conform to the requested schema after repair attempts.",
+              structured_output: structuredOutputBody(structuredOutput),
+            },
+          },
+          422,
+          metaHeaders,
+        );
+      }
     }
 
     const stream = new ReadableStream({
@@ -979,6 +1756,58 @@ export function createGatewayHandler(
               encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
             );
           }
+          // Tool calls: result.toolCalls is the LIVE channel — fully populated
+          // only now that the text stream has drained. Emit them OpenAI-shape so
+          // a generic client accumulates `delta.tool_calls` then sees a
+          // finish_reason:"tool_calls" terminating delta — matching how OpenAI
+          // streams tool calls. Each call is its own chunk (index i), then a
+          // final empty delta carries the finish_reason.
+          if (result.toolCalls?.length) {
+            result.toolCalls.forEach((call, i) => {
+              const toolPayload = {
+                id: result.traceId,
+                object: "chat.completion.chunk",
+                model: result.model,
+                provider: result.providerId,
+                thread_id: result.threadId,
+                compile_trace_id: result.compileTraceId,
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: i,
+                          id: call.id,
+                          type: "function",
+                          function: {
+                            name: call.name,
+                            arguments: JSON.stringify(call.arguments),
+                          },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              };
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(toolPayload)}\n\n`),
+              );
+            });
+            const finishPayload = {
+              id: result.traceId,
+              object: "chat.completion.chunk",
+              model: result.model,
+              provider: result.providerId,
+              thread_id: result.threadId,
+              compile_trace_id: result.compileTraceId,
+              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+            };
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(finishPayload)}\n\n`),
+            );
+          }
           // Emit per-response metadata (transparency strip) once the stream
           // completes, when final token counts are known. Wrapped in a valid
           // chat.completion.chunk envelope (object + empty choices) so generic
@@ -1002,6 +1831,33 @@ export function createGatewayHandler(
               encoder.encode(`data: ${JSON.stringify(usagePayload)}\n\n`),
             );
           }
+          // Structured output is BUFFERED, not token-streamed (the engine holds
+          // the whole document to validate/repair it, §5.2). The text already
+          // drained above as a single block; now emit ONE terminal frame carrying
+          // the validated `parsed` value + `structured_output` metadata so the
+          // streaming client gets the same honesty signal as the JSON path. Wrapped
+          // in a chat.completion.chunk envelope to keep the SSE contract uniform.
+          {
+            const { structuredOutput, parsed } = asStructured(result);
+            if (structuredOutput) {
+              const structuredPayload = {
+                object: "chat.completion.chunk",
+                model: result.model,
+                provider: result.providerId,
+                thread_id: result.threadId,
+                compile_trace_id: result.compileTraceId,
+                choices: [],
+                parsed,
+                structured_output: structuredOutputBody(structuredOutput),
+              };
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(structuredPayload)}\n\n`),
+              );
+            }
+          }
+          // The stream drained without error → a real completed turn. Persist
+          // it to the durable activity store (best-effort, never throws here).
+          recordTurnActivity(result, capturedUsage);
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
           const message =
@@ -1046,6 +1902,94 @@ export function createGatewayHandler(
         ...corsHeaders(request),
       },
     });
+  }
+
+  /**
+   * POST /v1/mcp/discover — connect (cached) to one MCP server and return its
+   * advertised tools/resources/prompts for the UI's Test-connection / tool list.
+   * Honest error (502) with a clear message on connect failure. Tool args/results
+   * are not involved here, and nothing is logged about the server's contents.
+   */
+  async function handleMcpDiscover(
+    request: Request,
+    requestId: string,
+  ): Promise<Response> {
+    const parsed = MCPDiscoverRequestSchema.safeParse(
+      await request.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return json(
+        request,
+        {
+          error: {
+            message: "Invalid request body",
+            issues: formatIssues(parsed.error),
+          },
+        },
+        400,
+      );
+    }
+    const config = parsed.data.config as MCPServerConfig;
+    try {
+      const client = await mcpRegistry.getOrConnect(config);
+      const [tools, resources, prompts] = await Promise.all([
+        client.listTools(),
+        client.listResources(),
+        client.listPrompts(),
+      ]);
+      const serverId = configId(config);
+      return json(request, {
+        serverId,
+        // Tools are returned BOTH raw (for display) and namespaced (the name the
+        // model/chat path will see) so the UI can drive `enabledTools`.
+        tools: tools.map((t) => ({
+          name: t.name,
+          namespacedName: mcpToolName(serverId, t.name),
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+        resources,
+        prompts,
+        connectedAt: mcpRegistry.info(config)?.connectedAt ?? Date.now(),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log("warn", "mcp.discover_failed", { requestId });
+      return json(
+        request,
+        {
+          error: {
+            type: "mcp_connect_error",
+            message: `Failed to connect to MCP server: ${redactSecrets(message)}`,
+          },
+        },
+        502,
+      );
+    }
+  }
+
+  /**
+   * DELETE /v1/mcp (body `{ config }`) — disconnect + evict a cached MCP server
+   * connection (idempotent: succeeds even if it was never connected).
+   */
+  async function handleMcpDisconnect(request: Request): Promise<Response> {
+    const parsed = MCPDiscoverRequestSchema.safeParse(
+      await request.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return json(
+        request,
+        {
+          error: {
+            message: "Invalid request body",
+            issues: formatIssues(parsed.error),
+          },
+        },
+        400,
+      );
+    }
+    await mcpRegistry.disconnect(parsed.data.config as MCPServerConfig);
+    return json(request, { ok: true });
   }
 
   /**
@@ -1353,26 +2297,157 @@ export function createGatewayHandler(
       });
     }
 
+    // OpenRouter-style key/quota introspection for the authed gateway token.
+    // Free-core: no managed custody — `managed_keys_available` is always false
+    // and `is_free_tier` always true. Per-provider quota is sourced from the
+    // SAME live provider status as `/v1/status`. Honest: `quota_limit` is null
+    // when the provider does not report a denominator (never a fabricated cap),
+    // and `quota_remaining_ratio` is null whenever the limit is unknown.
+    if (url.pathname === "/v1/key" && request.method === "GET") {
+      const statuses = await engine.getProviderStatus();
+      return json(request, {
+        object: "key_status",
+        label: "zintus-gateway",
+        is_free_tier: true,
+        providers: statuses.map((status) => {
+          const quotaUsed = status.tokensToday;
+          const quotaLimit = status.tokensLimit ?? null;
+          const quotaRemainingRatio =
+            quotaLimit !== null && quotaLimit > 0
+              ? clamp01((quotaLimit - quotaUsed) / quotaLimit)
+              : null;
+          return {
+            id: status.id,
+            has_key: status.hasKey,
+            available: status.available,
+            in_cooldown: status.inCooldown,
+            quota_used: quotaUsed,
+            quota_limit: quotaLimit,
+            quota_remaining_ratio: quotaRemainingRatio,
+          };
+        }),
+        managed_keys_available: false,
+      });
+    }
+
     // Local, BYOK-only quota-exhaustion decision API. Auth-gated above like every
     // other /v1/* route (401 without the gateway token).
     if (url.pathname === "/v1/route/options" && request.method === "GET") {
       return handleRouteOptions(request);
     }
 
+    // Rich, OpenRouter-grade model catalog. OpenAI-compatible envelope
+    // (`{ object:"list", data:[...] }`) with each entry carrying the OpenAI
+    // `{ id, object:"model", owned_by }` triple PLUS per-model metadata
+    // (display_name, context_window, capabilities, pricing, free, local,
+    // data_policy). Optional catalog-UI filters narrow the list server-side:
+    //   ?provider=<id> ?vision=true ?tools=true ?free=true ?local=true
     if (url.pathname === "/v1/models" && request.method === "GET") {
+      const q = url.searchParams;
+      const providerFilter = q.get("provider");
+      const wantVision = q.get("vision") === "true";
+      const wantTools = q.get("tools") === "true";
+      const wantFree = q.get("free") === "true";
+      const wantLocal = q.get("local") === "true";
+
+      const models = listCatalogModels().filter((m) => {
+        if (providerFilter && m.provider !== providerFilter) return false;
+        if (wantVision && !m.vision) return false;
+        if (wantTools && !m.tools) return false;
+        if (wantFree && !m.free) return false;
+        if (wantLocal && !m.local) return false;
+        return true;
+      });
+
       return json(request, {
         object: "list",
-        data: listProviders().map((provider) => ({
-          id: provider.id,
-          object: "model",
-          owned_by: provider.name,
-        })),
+        data: models.map(toModelEntry),
       });
+    }
+
+    // Pricing transparency endpoint. Honest: only models with a KNOWN list price
+    // are returned (unknown prices are omitted, never invented). USD per 1M tokens.
+    if (url.pathname === "/v1/pricing" && request.method === "GET") {
+      const data = listCatalogModels()
+        .filter((m) => m.inputPer1M !== null && m.outputPer1M !== null)
+        .map((m) => ({
+          id: m.id,
+          provider: m.provider,
+          input_per_1m: m.inputPer1M,
+          output_per_1m: m.outputPer1M,
+          free: m.free,
+        }));
+      return json(request, { object: "list", data });
     }
 
     if (url.pathname === "/v1/traces" && request.method === "GET") {
       const limit = Number(url.searchParams.get("limit")) || 20;
       return json(request, { traces: engine.listTraces(limit) });
+    }
+
+    // OpenRouter-style `/activity`: paginated, persistent usage history. Reads
+    // from the DURABLE activity store first (~/.zintus/activity.db, pruned to a
+    // 30-day window), and falls back to the in-memory trace path when the store
+    // is empty/unavailable — keeping the exact Phase-5 entry shape either way.
+    // `?limit=` defaults to 50, capped at 200; `?provider=`/`?model=` narrow the
+    // page; `?since=` (unix seconds) bounds the date window. Honest: only real
+    // recorded usage is surfaced (empty list when none); cost is never fabricated.
+    if (url.pathname === "/v1/activity" && request.method === "GET") {
+      const rawLimit = Number(url.searchParams.get("limit"));
+      const limit =
+        Number.isFinite(rawLimit) && rawLimit > 0
+          ? Math.min(200, Math.floor(rawLimit))
+          : 50;
+      const providerFilter = url.searchParams.get("provider");
+      const modelFilter = url.searchParams.get("model");
+      const rawSince = Number(url.searchParams.get("since"));
+      const since =
+        Number.isFinite(rawSince) && rawSince > 0 ? Math.floor(rawSince) : undefined;
+
+      // ── Durable path ───────────────────────────────────────────────────────
+      if (activityStore) {
+        try {
+          // Fetch one extra to honestly compute `has_more` without a total.
+          const rows = activityStore.listActivity({
+            limit: limit + 1,
+            since,
+            provider: providerFilter,
+            model: modelFilter,
+          });
+          if (rows.length > 0) {
+            const hasMore = rows.length > limit;
+            const data = rows.slice(0, limit).map(activityRecordToEntry);
+            return json(request, {
+              object: "list",
+              data,
+              has_more: hasMore,
+              retention_days: ACTIVITY_RETENTION_DAYS,
+            });
+          }
+          // Empty store → fall through to the trace-derived path below.
+        } catch (error) {
+          log("warn", "activity.read_failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          // Store unavailable → fall through to the trace-derived path below.
+        }
+      }
+
+      // ── Fallback: in-memory trace ring ──────────────────────────────────────
+      // Fetch one extra to honestly compute `has_more` without inventing a total.
+      const fetched = engine.listTraces(limit + 1);
+      const hasMore = fetched.length > limit;
+      let data = fetched.slice(0, limit).map(toActivityEntry);
+      if (providerFilter) {
+        data = data.filter((entry) => entry.provider === providerFilter);
+      }
+      if (modelFilter) {
+        data = data.filter((entry) => entry.model === modelFilter);
+      }
+      if (since !== undefined) {
+        data = data.filter((entry) => entry.created >= since);
+      }
+      return json(request, { object: "list", data, has_more: hasMore });
     }
 
     if (url.pathname === "/v1/savings" && request.method === "GET") {
@@ -1496,6 +2571,37 @@ export function createGatewayHandler(
       }
     }
 
+    // MCP: connect (cached) + list a server's tools/resources/prompts. Auth-gated
+    // above like every other /v1/* route.
+    if (url.pathname === "/v1/mcp/discover" && request.method === "POST") {
+      try {
+        return await handleMcpDiscover(request, requestId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Request failed";
+        metrics.recordError();
+        onError?.(error, { requestId, path: url.pathname });
+        log("error", "mcp.discover_error", { requestId });
+        return json(request, { error: { message: redactSecrets(message) } }, 400);
+      }
+    }
+
+    // MCP: disconnect + evict a cached server connection. Accept DELETE /v1/mcp
+    // and POST /v1/mcp/disconnect (both carry `{ config }`).
+    if (
+      (url.pathname === "/v1/mcp" && request.method === "DELETE") ||
+      (url.pathname === "/v1/mcp/disconnect" && request.method === "POST")
+    ) {
+      try {
+        return await handleMcpDisconnect(request);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Request failed";
+        metrics.recordError();
+        onError?.(error, { requestId, path: url.pathname });
+        log("error", "mcp.disconnect_error", { requestId });
+        return json(request, { error: { message: redactSecrets(message) } }, 400);
+      }
+    }
+
     if (url.pathname === "/v1/research" && request.method === "POST") {
       const limited = enforceRateLimit(request, requestId, url.pathname);
       if (limited) {
@@ -1526,12 +2632,83 @@ export function createGatewayHandler(
 }
 
 function parseMessages(body: {
-  messages?: Array<{ role: string; content: string | ContentBlock[] }>;
+  messages?: Array<{
+    role: string;
+    content?: string | ContentBlock[] | null;
+    tool_call_id?: string;
+    tool_calls?: Array<{
+      id: string;
+      type: "function";
+      function: { name: string; arguments: string };
+    }>;
+  }>;
   message?: { role?: string; content: string | ContentBlock[] } | string;
   thread_id?: string;
 }): ChatMessage[] {
   if (body.messages?.length) {
     return body.messages.map((message) => {
+      // Normalize an OpenAI-native tool-result message (`{role:"tool",
+      // tool_call_id, content}`) to the internal shape: a user turn carrying a
+      // tool_result block. Without this the multi-turn tool loop is impossible
+      // over HTTP. `content` is the result text; tool_call_id correlates it.
+      if (message.role === "tool") {
+        const resultText =
+          typeof message.content === "string"
+            ? message.content
+            : textOf(message.content ?? []);
+        return {
+          role: "user" as const,
+          content: [
+            {
+              type: "tool_result" as const,
+              toolCallId: message.tool_call_id ?? "",
+              content: resultText,
+            },
+          ],
+        };
+      }
+      // Normalize an OpenAI-native assistant turn carrying top-level `tool_calls`
+      // (the shape the gateway itself emits) into internal `tool_call` content
+      // blocks. Without this a stock OpenAI client that echoes the assistant turn
+      // back loses the call (the field is otherwise stripped and `content:null`
+      // is rejected). `function.arguments` is a JSON STRING upstream; parse it,
+      // guarding malformed/non-object payloads to `{}`. Any assistant text is
+      // preserved as a leading text block.
+      if (message.role === "assistant" && message.tool_calls?.length) {
+        const toolCallBlocks: ContentBlock[] = message.tool_calls.map((call) => {
+          let args: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(call.function.arguments) as unknown;
+            if (
+              parsed != null &&
+              typeof parsed === "object" &&
+              !Array.isArray(parsed)
+            ) {
+              args = parsed as Record<string, unknown>;
+            }
+          } catch {
+            args = {};
+          }
+          return {
+            type: "tool_call" as const,
+            id: call.id,
+            name: call.function.name,
+            arguments: args,
+          };
+        });
+        const textBlocks: ContentBlock[] =
+          typeof message.content === "string"
+            ? message.content.length > 0
+              ? [{ type: "text" as const, text: message.content }]
+              : []
+            : Array.isArray(message.content)
+              ? message.content.filter((b) => b.type === "text")
+              : [];
+        return {
+          role: "assistant" as const,
+          content: [...textBlocks, ...toolCallBlocks],
+        };
+      }
       if (
         message.role !== "system" &&
         message.role !== "user" &&
@@ -1539,7 +2716,9 @@ function parseMessages(body: {
       ) {
         throw new Error(`Invalid role: ${message.role}`);
       }
-      return { role: message.role, content: message.content };
+      // Non-tool turns always carry content (schema refine guarantees it unless
+      // tool_calls was present, handled above); coerce the now-nullable type.
+      return { role: message.role, content: message.content ?? "" };
     });
   }
   if (body.message && body.thread_id) {

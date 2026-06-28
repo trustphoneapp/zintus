@@ -83,6 +83,16 @@ export const PRICING_CATALOG: readonly ModelPricing[] = [
     freeLimitNotes: "Free tier ~14,400 req/day. 8B failover for the 70B tier.",
     updatedAt: VERIFIED,
   },
+  {
+    // OpenAI gpt-oss-120b on GroqCloud. Source: console.groq.com/docs/model/openai/gpt-oss-120b.
+    provider: "groq",
+    model: "openai/gpt-oss-120b",
+    inputPer1M: 0.15,
+    outputPer1M: 0.6,
+    freeLimitNotes:
+      "Open-weight MoE on GroqCloud. Tool use + JSON Schema mode. Cached input ~$0.075/1M.",
+    updatedAt: VERIFIED,
+  },
 
   // Gemini — AI Studio / Developer API. Source: ai.google.dev/gemini-api/docs/pricing.
   {

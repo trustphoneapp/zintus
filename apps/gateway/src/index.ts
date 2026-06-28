@@ -5,6 +5,7 @@ export {
   type GatewayKeypair,
 } from "./crypto.js";
 export { detectLocalRuntimes, type LocalRuntimes } from "./local-runtimes.js";
+export { MCPRegistry, type MCPRegistryOptions } from "./mcp-registry.js";
 // Re-exported so integration tests (and @zintus/test-utils) can build a handler
 // against a custom engine without reaching into ./handler.js internals.
 export {
@@ -16,10 +17,12 @@ export {
 import { createEngine } from "@zintus/engine";
 import { loadPolicy, watchPolicy, redactSecrets } from "@zintus/router";
 import { DEFAULT_CONFIG } from "@zintus/types";
+import { ActivityStore } from "./activity-store.js";
 import { buildGatewayConfig, type GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type LogFn } from "./handler.js";
 import { createErrorSink } from "./observability.js";
 import { createRateLimiter, type RateLimiter } from "./rate-limit.js";
+import { MCPRegistry } from "./mcp-registry.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -68,6 +71,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     providerPriority: DEFAULT_CONFIG.providerPriority,
     policy,
   });
+
+  // Durable, machine-local usage history (~/.zintus/activity.db, beside the
+  // quota ledger) so GET /v1/activity is a real persistent 30-day feed. Opened
+  // once and pruned on open; local-only, never sent anywhere.
+  const activityStore = new ActivityStore();
+
+  // MCP connection registry — the gateway HOSTS the MCP clients (server-side;
+  // the browser can't spawn stdio). Connections are reused across requests and
+  // drained on shutdown. Local-first / no-custody: MCP traffic never touches the
+  // relay.
+  const mcpRegistry = new MCPRegistry();
 
   const log: LogFn = (level, message, fields = {}) => {
     // Redact any provider/secret token before the structured line is emitted —
@@ -119,6 +133,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       log,
       onError,
       rateLimiter,
+      activityStore,
+      mcpRegistry,
       getDraining: () => draining,
       // Real, in-flight-aware free-tier quota signal for Tokzen's quota-aware
       // compression dial (was always the hardcoded 1.0 default before wiring).
@@ -203,6 +219,15 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       if (probeTimer) {
         clearInterval(probeTimer);
         probeTimer = null;
+      }
+      // Drain hosted MCP connections (stop the idle sweep + disconnect every
+      // cached client, killing any stdio children) so a deploy doesn't leak them.
+      try {
+        await mcpRegistry.disconnectAll();
+      } catch (error) {
+        log("warn", "gateway.mcp_drain_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
       unwatchPolicy();
       // Stop accepting new connections; let in-flight requests/streams finish,

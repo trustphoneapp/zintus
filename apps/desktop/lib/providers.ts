@@ -6,15 +6,15 @@ export interface DesktopProviderInfo {
   id: ProviderId;
   name: string;
   color: string;
-  quotaLimit: number;
+  /** Real quota ceiling from the gateway, or null when it reports none — NEVER a
+   *  fabricated denominator (the UI shows "limit unknown" instead of a fake %). */
+  quotaLimit: number | null;
   quotaUsed: number;
   enabled: boolean;
   hasKey: boolean;
   priority: number;
   inCooldown: boolean;
 }
-
-const DEFAULT_QUOTA_LIMIT = 1_000_000;
 
 const providerMeta = Object.fromEntries(
   listProviders().map((p) => [
@@ -44,7 +44,7 @@ function buildProviderInfos(
         name: meta.name,
         color: meta.color,
         priority: meta.priority,
-        quotaLimit: status?.quotaLimit ?? DEFAULT_QUOTA_LIMIT,
+        quotaLimit: status?.quotaLimit ?? null,
         quotaUsed: status?.quotaUsed ?? 0,
         enabled: status?.available ?? false,
         hasKey: status?.hasKey ?? false,

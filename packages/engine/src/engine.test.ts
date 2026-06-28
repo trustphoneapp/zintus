@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { MemoryStore } from "@zintus/memory";
+import { ResponseCache } from "@zintus/cache";
+import type { ChatMessage } from "@zintus/types";
 import { createEngine, type EngineConfig } from "./engine.js";
 
 // Always inject a key resolver so tests never touch the real OS keychain
@@ -152,5 +154,69 @@ describe("createEngine", () => {
     expect(injected.getThreadState("t-after")?.state).toMatchObject({
       workingSummary: "still open",
     });
+  });
+
+  // Cache guard (blue-tool-calling #4): a CONTINUATION turn replaying tool_result
+  // blocks carries no new `tools` field, so `requiresTools` is false and the
+  // read guard would otherwise serve it from the text cache (and its lastUser is
+  // a pure tool_result whose textOf is "" — an empty-string L2 lookup). The
+  // `hasToolTurns(effectiveMessages)` guard must keep it OUT of the cache.
+  test("a tool_result continuation turn is not served from cache", async () => {
+    const cachePath = join(dir, "cache-guard.db");
+
+    // Control turn: a plain-text turn whose answer we pre-seed into the cache.
+    const plainMessages: ChatMessage[] = [{ role: "user", content: "what is 2+2" }];
+    // Continuation turn: assistant tool_call + user tool_result, NO `tools` field.
+    const continuationMessages: ChatMessage[] = [
+      { role: "user", content: "what is the weather in paris" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_call",
+            id: "call_abc",
+            name: "get_weather",
+            arguments: { city: "paris" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolCallId: "call_abc", content: "sunny, 21C" }],
+      },
+    ];
+
+    // Pre-seed BOTH turns so a (buggy) read would find a matching entry. Keyed the
+    // SAME way the engine reads an unforced request: model/provider "auto".
+    const seed = new ResponseCache(cachePath);
+    await seed.set(plainMessages, "CACHED PLAIN ANSWER", {
+      model: "auto",
+      providerId: "auto",
+    });
+    await seed.set(continuationMessages, "CACHED TOOL ANSWER", {
+      model: "auto",
+      providerId: "auto",
+    });
+
+    const engine = engineForTest({
+      cachePath,
+      persistConversations: false,
+      persistTraces: false,
+    });
+
+    // Control: the plain-text turn IS served from L1 — proves the seed key matches
+    // the engine's read key, so the negative result below is not vacuous.
+    const plain = await engine.routeAndStream({ messages: plainMessages });
+    expect(plain.cacheHit).toBe("L1");
+    let plainText = "";
+    for await (const chunk of plain.stream) plainText += chunk;
+    expect(plainText).toBe("CACHED PLAIN ANSWER");
+
+    // Guard: the tool_result continuation is NOT served from cache — the engine
+    // falls through to routing, which throws (no provider keys in tests). If the
+    // guard were missing it would instead return "CACHED TOOL ANSWER".
+    await expect(
+      engine.routeAndStream({ messages: continuationMessages }),
+    ).rejects.toThrow();
   });
 });

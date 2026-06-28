@@ -1,10 +1,10 @@
 "use client";
 
 const STATS = [
-  { value: "12",    suffix: "",   label: "AI providers" },
-  { value: "1M",    suffix: "+",  label: "Free tokens/day" },
-  { value: "< 5",   suffix: "ms", label: "Routing latency" },
-  { value: "0",     suffix: "%",  label: "Markup on keys" },
+  { value: "50+",   suffix: " providers", label: "Direct + meta-router catalog" },
+  { value: "100+",  suffix: " models",    label: "Curated and growing weekly" },
+  { value: "< 5ms", suffix: " routing",   label: "In-process quota check" },
+  { value: "0%",    suffix: " markup",    label: "On your own API keys" },
 ];
 
 export function Stats() {

@@ -85,6 +85,11 @@ function createTestRouter(
       id === "huggingface",
     // Only gemini is vision-capable in these tests (matches the real default).
     supportsVision: (id: ProviderId, _model?: string) => id === "gemini",
+    // Tool-capable everywhere EXCEPT huggingface/lmstudio (matches the real
+    // registry: those two have tools:false), so the tool gate has a non-tool
+    // provider to filter out.
+    supportsTools: (id: ProviderId, _model?: string) =>
+      id !== "huggingface" && id !== "lmstudio",
   }));
 
   return createRouter({
@@ -300,6 +305,119 @@ describe("createRouter failover", () => {
     // User explicitly forced groq — must NOT be silently re-routed to gemini.
     await expect(
       router.routeAndStream({ messages: imageMessages, provider: "groq" }),
+    ).rejects.toThrow(/unsupported_capability/);
+  });
+
+  test("vision: an explicit openrouter vision model does NOT fail over onto a non-vision free model", async () => {
+    const VISION_MODEL = "meta-llama/llama-3.2-90b-vision-instruct";
+    const dbPath = join(
+      tmpdir(),
+      `zintus-vision-refilter-${Date.now()}-${Math.random()}.db`,
+    );
+    dbPaths.push(dbPath);
+    const attemptedModels: string[] = [];
+    mock.module("@zintus/providers", () => ({
+      listProviders: () => [
+        stubProvider("openrouter", 1, async (_messages, options) => {
+          attemptedModels.push(options.model ?? "default");
+          // The vision model is rate-limited → WITHOUT the vision re-filter the
+          // router would fail over onto the non-vision free models and re-send the
+          // image blocks to a blind model (silent downgrade). With the re-filter,
+          // the free models are dropped and the request fails honestly instead.
+          throw new ProviderHttpError("rate limited", 429);
+        }),
+      ],
+      ProviderHttpError,
+      estimateUsage,
+      trainsOnUserData: () => false,
+      mayTrainOnUserData: () => false,
+      // Model-aware: only the explicit vision model is vision-capable; the
+      // openrouter free fallbacks are text-only.
+      supportsVision: (id: ProviderId, model?: string) =>
+        id === "openrouter" && model === VISION_MODEL,
+      supportsTools: () => true,
+    }));
+    const router = createRouter({ dbPath, getApiKey: async () => "test-key" });
+
+    await expect(
+      router.routeAndStream({ messages: imageMessages, model: VISION_MODEL }),
+    ).rejects.toThrow();
+
+    // ONLY the vision model was attempted — the non-vision free models were never
+    // tried (the image blocks are never re-sent to a blind model).
+    expect(attemptedModels).toEqual([VISION_MODEL]);
+    expect(attemptedModels.some((m) => m.includes(":free"))).toBe(false);
+  });
+
+  const weatherTool = {
+    name: "get_weather",
+    description: "Get the weather for a city",
+    parameters: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    },
+  };
+
+  test("tools: a tools request routes to a tool-capable provider", async () => {
+    const router = createTestRouter([
+      stubProvider("huggingface", 1, async () => ({
+        stream: (async function* () { yield { content: "no tools" }; })(),
+      })),
+      stubProvider("groq", 2, async () => ({
+        stream: (async function* () {
+          yield {
+            toolCall: {
+              type: "tool_call" as const,
+              id: "call_get_weather_0",
+              name: "get_weather",
+              arguments: { city: "Paris" },
+            },
+          };
+          yield { finishReason: "tool_calls" as const };
+        })(),
+      })),
+    ]);
+    // huggingface (priority 1) is filtered out for lacking tools → groq serves it.
+    const result = await router.routeAndStream({
+      messages,
+      tools: [weatherTool],
+    });
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+    expect(result.providerId).toBe("groq");
+    // The parallel tool-call channel is populated after the drain.
+    expect(result.toolCalls?.[0]?.name).toBe("get_weather");
+    expect(result.toolCalls?.[0]?.arguments).toEqual({ city: "Paris" });
+  });
+
+  test("tools: a tools request with NO tool-capable provider throws unsupported_capability", async () => {
+    const router = createTestRouter([
+      stubProvider("huggingface", 1, async () => ({
+        stream: (async function* () { yield { content: "x" }; })(),
+      })),
+    ]);
+    await expect(
+      router.routeAndStream({ messages, tools: [weatherTool] }),
+    ).rejects.toThrow(/unsupported_capability/);
+  });
+
+  test("tools: a forced non-tool provider on a tools request fails (no silent switch)", async () => {
+    const router = createTestRouter([
+      stubProvider("huggingface", 1, async () => ({
+        stream: (async function* () { yield { content: "x" }; })(),
+      })),
+      stubProvider("groq", 2, async () => ({
+        stream: (async function* () { yield { content: "y" }; })(),
+      })),
+    ]);
+    await expect(
+      router.routeAndStream({
+        messages,
+        tools: [weatherTool],
+        provider: "huggingface",
+      }),
     ).rejects.toThrow(/unsupported_capability/);
   });
 

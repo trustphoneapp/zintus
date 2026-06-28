@@ -10,7 +10,14 @@ export function QuotaBar({
   const pct = Math.max(0, Math.min(100, value));
 
   return (
-    <div className={`quota-track${thin ? " thin" : ""}`}>
+    <div
+      className={`quota-track${thin ? " thin" : ""}`}
+      role="progressbar"
+      aria-valuenow={Math.round(pct)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label={`${Math.round(pct)}% quota remaining`}
+    >
       <div
         className="quota-fill"
         style={{

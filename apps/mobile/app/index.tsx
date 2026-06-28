@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Platform,
   Pressable,
   Share,
   StyleSheet,
@@ -11,16 +12,51 @@ import {
 } from "react-native";
 import type { ProviderId } from "@zintus/types";
 import { useFocusEffect, useRouter } from "expo-router";
-import { streamChat, getGatewayUrl } from "@/lib/chat";
+import type { ResponseFormat } from "@zintus/types";
+import {
+  streamChat,
+  getGatewayUrl,
+  type ChatMcpConfig,
+  type McpToolEvent,
+} from "@/lib/chat";
 import { fetchGatewayHealth } from "@/lib/gateway";
-import { loadConfig, loadSelectedProvider } from "@/lib/config";
-import { toChatMessages } from "@/lib/messages";
+import {
+  loadConfig,
+  loadJsonMode,
+  loadMcpServers,
+  loadSelectedProvider,
+  loadToolsMode,
+  saveJsonMode,
+  saveToolsMode,
+} from "@/lib/config";
+import { activeMcpServersForChat } from "@/lib/mcp-config";
+import {
+  BUILTIN_TOOL_DEFINITIONS,
+  MAX_TOOL_ROUNDS,
+  executeBuiltinToolCall,
+} from "@/lib/builtin-tools";
+import { toChatMessages, type ChatMeta } from "@/lib/messages";
 import { migrateLegacyKeys } from "@/lib/secure-keys";
 import { COLORS } from "@/lib/theme";
 
 // "auto" is a UI-only sentinel: it sends NO provider so the gateway routes
 // using the configured strategy.
 type ProviderSelection = ProviderId | "auto";
+
+/** One tool call the model made, rendered transparently in the stream. */
+interface ToolCallView {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/** The locally-executed result for a tool call, shown beneath it. */
+interface ToolResultView {
+  toolCallId: string;
+  name: string;
+  content: string;
+  isError: boolean;
+}
 
 interface Message {
   id: string;
@@ -29,6 +65,74 @@ interface Message {
   streaming?: boolean;
   providerId?: ProviderId;
   model?: string;
+  /** Transparency metadata (route reason, latency) for an assistant turn. */
+  meta?: ChatMeta;
+  /** Built-in tool calls the model made on this turn (Tools toggle on). */
+  toolCalls?: ToolCallView[];
+  /** Locally-executed results for `toolCalls`, paired by id. */
+  toolResults?: ToolResultView[];
+  /** Server-side MCP tool-loop events (call/result) the gateway streamed for
+   *  this turn. Display-only — the gateway already ran them. */
+  mcpEvents?: McpToolEvent[];
+}
+
+/**
+ * Build the chat body's `mcp` block from the user's enabled MCP servers, plus the
+ * active tool count for the header indicator. The gateway runs these tools
+ * SERVER-SIDE; the phone only displays the activity. Returns `undefined` when
+ * nothing is enabled. Mirrors web's `activeMcpForChat`.
+ */
+function activeMcpForChat(): { mcp: ChatMcpConfig | undefined; toolCount: number } {
+  const { servers } = activeMcpServersForChat(loadMcpServers());
+  if (servers.length === 0) {
+    return { mcp: undefined, toolCount: 0 };
+  }
+  const enabledTools = servers.flatMap((s) => s.enabledTools);
+  return {
+    mcp: {
+      servers: servers.map((s) => s.config),
+      // Omit when no concrete tool names are known yet (server enabled but not
+      // tested) so the gateway offers every tool it discovers rather than
+      // suppressing them all with an empty allow-list.
+      ...(enabledTools.length > 0 ? { enabledTools } : {}),
+    },
+    toolCount: enabledTools.length,
+  };
+}
+
+/** Render one MCP tool-loop event as a calm one-line summary (no arg/secret
+ *  values — only parameter names / char counts come through the parser). */
+function mcpEventLine(event: McpToolEvent): string {
+  if (event.kind === "call") {
+    const where = event.server ? `${event.server}/` : "";
+    const args = event.argsSummary ? `(${event.argsSummary})` : "";
+    return `🔧 ${where}${event.tool}${args}`;
+  }
+  return `${event.ok ? "→ " : "error · "}${event.summary}`;
+}
+
+/** Compact one-line render of a tool's arguments object. */
+function formatToolArgs(args: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(args);
+  } catch {
+    return "{…}";
+  }
+}
+
+/** Returns a pretty-printed JSON string iff `content` is a JSON object/array,
+ *  else null. Lets a `response_format: json_object` turn render as formatted
+ *  JSON without ever fabricating structure (mirrors desktop's auto-detect). */
+function asStructuredJson(content: string): string | null {
+  const trimmed = content.trim();
+  if (!trimmed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+    return null;
+  }
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return null;
+  }
 }
 
 export default function ChatScreen() {
@@ -41,9 +145,16 @@ export default function ChatScreen() {
   const [error, setError] = useState<string | null>(null);
   const [gatewayOnline, setGatewayOnline] = useState(true);
   const [gatewayChecked, setGatewayChecked] = useState(false);
+  const [jsonMode, setJsonMode] = useState(false);
+  const [toolsMode, setToolsMode] = useState(false);
+  // Count of MCP tools active across enabled servers — drives the header
+  // indicator. Refreshed on focus (the MCP screen may have changed it).
+  const [mcpToolCount, setMcpToolCount] = useState(0);
 
   useEffect(() => {
     void migrateLegacyKeys();
+    setJsonMode(loadJsonMode());
+    setToolsMode(loadToolsMode());
   }, []);
 
   useEffect(() => {
@@ -65,6 +176,7 @@ export default function ChatScreen() {
   useFocusEffect(
     useCallback(() => {
       setSelectedProvider(loadSelectedProvider());
+      setMcpToolCount(activeMcpForChat().toolCount);
     }, []),
   );
 
@@ -107,46 +219,179 @@ export default function ChatScreen() {
     setSending(true);
     setError(null);
 
+    // When JSON mode is on, ask the gateway for json_object structured output;
+    // it resolves the best level the routed provider can actually serve.
+    const responseFormat: ResponseFormat | undefined = jsonMode
+      ? { type: "json_object" }
+      : undefined;
+
+    // Shared routing params for every turn this send makes (the tool loop reuses
+    // them each round). "auto" -> send no provider so the gateway routes by strategy.
+    const routing = {
+      providerId:
+        selectedProvider === "auto" ? undefined : selectedProvider,
+      strategy:
+        selectedProvider === "auto" ? config.routingStrategy : undefined,
+      mode: config.contextMode,
+      responseFormat,
+    } as const;
+
+    // Built-in tool definitions are sent only when the Tools toggle is on; the
+    // chat then runs the bounded execute→feed-back loop locally (the SAME loop
+    // web/desktop/CLI run — "one Zintus" tools-everywhere parity).
+    const tools = toolsMode ? BUILTIN_TOOL_DEFINITIONS : undefined;
+
+    // Enabled MCP servers for this turn (server-side tool loop). Undefined when
+    // none are enabled, so a normal turn carries no `mcp` field at all.
+    const { mcp } = activeMcpForChat();
+
+    // The bubble the active turn streams into — updated as the tool loop opens a
+    // fresh bubble per round, so a mid-loop error attaches to the right one.
+    let currentAssistantId = assistantId;
+
     try {
-      const result = await streamChat({
-        // "auto" -> send no provider so the gateway routes by strategy.
-        providerId: selectedProvider === "auto" ? undefined : selectedProvider,
-        strategy: selectedProvider === "auto" ? config.routingStrategy : undefined,
-        mode: config.contextMode,
-        messages: toChatMessages([...messages, userMessage]),
-        onChunk: (text) => {
+      // The conversation we feed the gateway. The tool loop appends the model's
+      // assistant tool_call turn and our tool_result turn each round.
+      const convo = toChatMessages([...messages, userMessage]);
+
+      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+        let streamedText = "";
+        const result = await streamChat({
+          ...routing,
+          tools,
+          mcp,
+          messages: convo,
+          onChunk: (text) => {
+            streamedText = text;
+            const id = currentAssistantId;
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === id ? { ...message, content: text } : message,
+              ),
+            );
+          },
+          // Each server-side MCP call/result lands live on the active bubble —
+          // calm transparency without ever executing a tool on the phone.
+          onMcpToolEvent: (event) => {
+            const id = currentAssistantId;
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === id
+                  ? { ...message, mcpEvents: [...(message.mcpEvents ?? []), event] }
+                  : message,
+              ),
+            );
+          },
+        });
+
+        const calls = result.toolCalls ?? [];
+
+        // No tool calls -> this is the final answer; settle the bubble and stop.
+        if (calls.length === 0) {
+          const id = currentAssistantId;
           setMessages((current) =>
             current.map((message) =>
-              message.id === assistantId
-                ? { ...message, content: text }
+              message.id === id
+                ? {
+                    ...message,
+                    streaming: false,
+                    providerId: result.providerId,
+                    model: result.model,
+                    meta: result.meta,
+                    content:
+                      message.content ||
+                      `[${result.providerId}/${result.model}] (empty response)`,
+                  }
                 : message,
             ),
           );
-        },
-      });
+          break;
+        }
 
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === assistantId
-            ? {
-                ...message,
-                streaming: false,
-                providerId: result.providerId,
-                model: result.model,
-                content:
-                  message.content ||
-                  `[${result.providerId}/${result.model}] (empty response)`,
-              }
-            : message,
-        ),
-      );
+        // Execute each built-in tool locally; an unknown tool / failure comes
+        // back as an honest isError result the model can recover from.
+        const toolViews: ToolCallView[] = calls.map((c) => ({
+          id: c.id,
+          name: c.name,
+          arguments: c.arguments,
+        }));
+        const results = calls.map((c) =>
+          executeBuiltinToolCall({
+            id: c.id,
+            name: c.name,
+            arguments: c.arguments,
+          }),
+        );
+        const resultViews: ToolResultView[] = results.map((r) => {
+          const call = calls.find((c) => c.id === r.toolCallId);
+          return {
+            toolCallId: r.toolCallId,
+            name: call?.name ?? "tool",
+            content: r.content,
+            isError: r.isError,
+          };
+        });
+
+        const hitCap = round === MAX_TOOL_ROUNDS;
+        const settledId = currentAssistantId;
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === settledId
+              ? {
+                  ...message,
+                  streaming: false,
+                  providerId: result.providerId,
+                  model: result.model,
+                  meta: result.meta,
+                  toolCalls: toolViews,
+                  toolResults: resultViews,
+                  content: hitCap
+                    ? message.content ||
+                      `Stopped after ${MAX_TOOL_ROUNDS} tool rounds.`
+                    : message.content,
+                }
+              : message,
+          ),
+        );
+
+        // Bounded: a model still calling tools at the cap is surfaced, not looped.
+        if (hitCap) break;
+
+        // Feed the assistant tool_call turn + our tool_result turn back, then
+        // open a fresh bubble for the next round's answer.
+        convo.push({
+          role: "assistant",
+          content: [
+            ...(streamedText.trim()
+              ? [{ type: "text" as const, text: streamedText }]
+              : []),
+            ...calls,
+          ],
+        });
+        convo.push({
+          role: "user",
+          content: results.map((r) => ({
+            type: "tool_result" as const,
+            toolCallId: r.toolCallId,
+            content: r.content,
+            isError: r.isError,
+          })),
+        });
+
+        const nextId = `${Date.now()}-assistant-${round}`;
+        currentAssistantId = nextId;
+        setMessages((current) => [
+          ...current,
+          { id: nextId, role: "assistant", content: "", streaming: true },
+        ]);
+      }
     } catch (sendError) {
       const message =
         sendError instanceof Error ? sendError.message : "Request failed";
       setError(message);
       setMessages((current) =>
         current.map((item) =>
-          item.id === assistantId
+          item.id === currentAssistantId
             ? {
                 ...item,
                 streaming: false,
@@ -184,6 +429,66 @@ export default function ChatScreen() {
               {chipLabel}
             </Text>
           </Pressable>
+          <Pressable
+            style={({ pressed }) => [
+              styles.chip,
+              jsonMode && styles.chipActive,
+              pressed && styles.pressed,
+            ]}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: jsonMode }}
+            onPress={() => {
+              setJsonMode((current) => {
+                const next = !current;
+                saveJsonMode(next);
+                return next;
+              });
+            }}
+          >
+            <Text
+              style={[styles.chipText, jsonMode && styles.chipTextActive]}
+            >
+              {"{} JSON"}
+            </Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [
+              styles.chip,
+              toolsMode && styles.chipActive,
+              pressed && styles.pressed,
+            ]}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: toolsMode }}
+            onPress={() => {
+              setToolsMode((current) => {
+                const next = !current;
+                saveToolsMode(next);
+                return next;
+              });
+            }}
+          >
+            <Text
+              style={[styles.chipText, toolsMode && styles.chipTextActive]}
+            >
+              {"🔧 Tools"}
+            </Text>
+          </Pressable>
+          {mcpToolCount > 0 ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.chip,
+                styles.chipActive,
+                pressed && styles.pressed,
+              ]}
+              onPress={() => {
+                router.push("/mcp");
+              }}
+            >
+              <Text style={[styles.chipText, styles.chipTextActive]}>
+                {`🔧 ${mcpToolCount} tools active`}
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable
             style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
             onPress={() => {
@@ -230,6 +535,13 @@ export default function ChatScreen() {
         }
         renderItem={({ item }) => {
           const isUser = item.role === "user";
+          // The headline "why this provider/model" — the prominent route reason
+          // from the gateway's metadata frame. Mirrors web/desktop's top-line pill.
+          const routeReason = !isUser ? item.meta?.routeReason : undefined;
+          // Render a settled assistant turn that is itself JSON as formatted
+          // monospace (the response_format: json_object path), never faking it.
+          const structuredJson =
+            !isUser && !item.streaming ? asStructuredJson(item.content) : null;
           return (
             <View
               style={[
@@ -237,10 +549,21 @@ export default function ChatScreen() {
                 isUser ? styles.userBubble : styles.assistantBubble,
               ]}
             >
+              {routeReason ? (
+                <Text style={styles.routeReason} numberOfLines={2}>
+                  {routeReason}
+                </Text>
+              ) : null}
+
               {item.streaming && !item.content ? (
                 <View style={styles.typingRow}>
                   <ActivityIndicator size="small" color={COLORS.accentBright} />
                   <Text style={styles.typingText}>Thinking…</Text>
+                </View>
+              ) : structuredJson ? (
+                <View style={styles.jsonBlock}>
+                  <Text style={styles.jsonLabel}>JSON output</Text>
+                  <Text style={styles.jsonText}>{structuredJson}</Text>
                 </View>
               ) : (
                 <Text style={[styles.bubbleText, isUser && styles.userBubbleText]}>
@@ -251,12 +574,65 @@ export default function ChatScreen() {
                 </Text>
               )}
 
+              {item.toolCalls && item.toolCalls.length > 0 ? (
+                <View style={styles.toolBlock}>
+                  {item.toolCalls.map((call) => {
+                    const toolResult = item.toolResults?.find(
+                      (r) => r.toolCallId === call.id,
+                    );
+                    return (
+                      <View key={call.id} style={styles.toolCallRow}>
+                        <Text style={styles.toolCallName} numberOfLines={2}>
+                          {`🔧 ${call.name}(${formatToolArgs(call.arguments)})`}
+                        </Text>
+                        {toolResult ? (
+                          <Text
+                            style={[
+                              styles.toolResult,
+                              toolResult.isError && styles.toolResultError,
+                            ]}
+                            numberOfLines={4}
+                          >
+                            {toolResult.isError ? "error · " : "→ "}
+                            {toolResult.content}
+                          </Text>
+                        ) : null}
+                      </View>
+                    );
+                  })}
+                </View>
+              ) : null}
+
+              {item.mcpEvents && item.mcpEvents.length > 0 ? (
+                <View style={styles.toolBlock}>
+                  {item.mcpEvents.map((event, i) => (
+                    <Text
+                      key={`${event.kind}-${event.id}-${i}`}
+                      style={[
+                        event.kind === "call"
+                          ? styles.toolCallName
+                          : styles.toolResult,
+                        event.kind === "result" &&
+                          !event.ok &&
+                          styles.toolResultError,
+                      ]}
+                      numberOfLines={3}
+                    >
+                      {mcpEventLine(event)}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+
               {!isUser && !item.streaming && item.content ? (
                 <View style={styles.assistantFooter}>
                   {item.providerId ? (
                     <Text style={styles.attribution}>
                       {item.providerId}
                       {item.model ? ` · ${item.model}` : ""}
+                      {item.meta?.latencyMs
+                        ? ` · ${item.meta.latencyMs} ms`
+                        : ""}
                     </Text>
                   ) : (
                     <View />
@@ -396,7 +772,57 @@ const styles = StyleSheet.create({
   assistantBubble: { alignSelf: "flex-start", backgroundColor: COLORS.panel },
   bubbleText: { color: COLORS.ink },
   userBubbleText: { color: COLORS.onAccent },
+  routeReason: {
+    color: COLORS.accentBright,
+    fontSize: 12,
+    fontWeight: "600",
+    marginBottom: 6,
+  },
+  jsonBlock: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 10,
+  },
+  jsonLabel: {
+    color: COLORS.muted,
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  jsonText: {
+    color: COLORS.ink,
+    fontSize: 12,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  },
   cursor: { color: COLORS.accentBright },
+  toolBlock: {
+    marginTop: 8,
+    gap: 6,
+  },
+  toolCallRow: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 8,
+  },
+  toolCallName: {
+    color: COLORS.accentBright,
+    fontSize: 12,
+    fontWeight: "600",
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  },
+  toolResult: {
+    color: COLORS.muted,
+    fontSize: 12,
+    marginTop: 4,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  },
+  toolResultError: { color: COLORS.error },
   typingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   typingText: { color: COLORS.muted, fontSize: 13 },
   assistantFooter: {

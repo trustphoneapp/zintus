@@ -1,5 +1,12 @@
 import chalk from "chalk";
-import { setKey, deleteKey, listKeys, getKey } from "@zintus/keychain";
+import {
+  setKey,
+  setKeys,
+  deleteKey,
+  listKeys,
+  getKey,
+  getKeys,
+} from "@zintus/keychain";
 import { createProvider } from "@zintus/providers";
 import { isProviderId, PROVIDER_IDS } from "@zintus/types";
 
@@ -44,6 +51,7 @@ async function validateKeyRemote(
 export async function validateAndStoreKey(
   provider: ProviderId,
   key: string,
+  options?: { fallback?: boolean },
 ): Promise<{ ok: boolean; error?: string }> {
   if (provider !== "ollama" && provider !== "lmstudio") {
     const result = await validateKeyRemote(provider, key);
@@ -51,13 +59,23 @@ export async function validateAndStoreKey(
       return { ok: false, error: result.error ?? "Key validation failed" };
     }
   }
-  await setKey(provider, key);
+  if (options?.fallback) {
+    // BYOK priority + fallback: APPEND to the ordered key list (primary first).
+    // The router tries the next key on an auth (401/403) failure before
+    // abandoning the provider. `setKey` (no --fallback) still replaces with a
+    // sole primary, so the default behavior is unchanged.
+    const existing = await getKeys(provider);
+    await setKeys(provider, [...existing, key]);
+  } else {
+    await setKey(provider, key);
+  }
   return { ok: true };
 }
 
 export async function runKeysSet(
   provider: string,
   key: string,
+  options?: { fallback?: boolean },
 ): Promise<void> {
   if (!isProviderId(provider)) {
     console.error(
@@ -67,13 +85,21 @@ export async function runKeysSet(
     process.exit(1);
   }
 
-  const result = await validateAndStoreKey(provider, key);
+  const result = await validateAndStoreKey(provider, key, options);
   if (!result.ok) {
     console.error(chalk.red(result.error ?? "Key validation failed"));
     process.exit(1);
   }
 
-  console.log(chalk.green(`✓ Stored key for ${provider}`));
+  if (options?.fallback) {
+    const total = (await getKeys(provider)).length;
+    console.log(
+      chalk.green(`✓ Added fallback key for ${provider}`),
+      chalk.dim(`(${total} key${total === 1 ? "" : "s"} in priority order)`),
+    );
+  } else {
+    console.log(chalk.green(`✓ Stored key for ${provider}`));
+  }
 }
 
 export async function runKeysList(options?: { json?: boolean }): Promise<void> {
@@ -92,7 +118,14 @@ export async function runKeysList(options?: { json?: boolean }): Promise<void> {
 
   console.log(chalk.bold("Stored API keys:\n"));
   for (const { provider, masked } of keys) {
-    console.log(`  ${chalk.cyan(provider.padEnd(12))} ${masked}`);
+    // Show the fallback count so the priority list (primary + fallbacks) is
+    // visible. A provider with a single key prints exactly as before.
+    const count = isProviderId(provider)
+      ? (await getKeys(provider)).length
+      : 1;
+    const suffix =
+      count > 1 ? chalk.dim(` (+${count - 1} fallback)`) : "";
+    console.log(`  ${chalk.cyan(provider.padEnd(12))} ${masked}${suffix}`);
   }
 }
 

@@ -3,7 +3,17 @@ import type {
   ContextMode,
   ProviderId,
   RoutingStrategy,
+  ToolCallContentBlock,
+  ToolChoice,
+  ToolDefinition,
+  ResponseFormat,
 } from "@zintus/types";
+import type {
+  MCPPrompt,
+  MCPResource,
+  MCPServerConfig,
+  MCPTool,
+} from "@zintus/mcp";
 
 export const GATEWAY_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";
@@ -326,6 +336,214 @@ export async function fetchGatewayModels(): Promise<string[] | null> {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Rich models catalog — the OpenRouter-grade `/v1/models` + `/v1/pricing`.
+//
+// These mirror the gateway's enriched catalog entries (apps/gateway/src/handler.ts
+// `toModelEntry`). They are SEPARATE from `fetchGatewayModels` above, which stays
+// a thin `string[]` for the terminal. HONESTY: prices are `null` when unknown
+// (render "price unknown", never $0); an offline/erroring gateway returns `[]`
+// rather than fabricated rows.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 3-state structured-output capability (matches @zintus/providers StructuredLevel). */
+export type CatalogStructuredOutput = "none" | "json_object" | "json_schema";
+
+/** Coarse data-policy tag from the catalog entry. */
+export type CatalogDataPolicyTag =
+  | "no_train"
+  | "may_train"
+  | "unknown"
+  | "zero_retention";
+
+/** Badge class shared with the providers page's `policy-badge` styling. */
+export type CatalogDataPolicyBadge = "no-training" | "trains" | "zdr" | "unknown";
+
+/** One enriched `/v1/models` entry. Field names mirror the gateway response
+ *  verbatim (snake_case) so this DTO maps 1:1 onto the wire format. */
+export interface CatalogModelDto {
+  id: string;
+  object: "model";
+  owned_by: string;
+  display_name: string;
+  context_window: number;
+  capabilities: {
+    vision: boolean;
+    tools: boolean;
+    structured_output: CatalogStructuredOutput;
+  };
+  /** USD per 1M tokens; either side may be `null` when the price is unknown. */
+  pricing: {
+    input_per_1m: number | null;
+    output_per_1m: number | null;
+  };
+  free: boolean;
+  local: boolean;
+  data_policy: {
+    tag: CatalogDataPolicyTag;
+    trains_on_data?: boolean | string;
+    retention?: string;
+    zdr?: boolean;
+    badge: CatalogDataPolicyBadge;
+    policy_url?: string;
+  };
+}
+
+/** One priced `/v1/pricing` entry (only models with a concrete, non-null price). */
+export interface CatalogPricingDto {
+  id: string;
+  provider: string;
+  input_per_1m: number;
+  output_per_1m: number;
+  free: boolean;
+}
+
+/** Server-side filters supported by `GET /v1/models`. Omitted/false flags are
+ *  not sent (so the gateway returns the full list). */
+export interface CatalogModelFilters {
+  provider?: string;
+  vision?: boolean;
+  tools?: boolean;
+  free?: boolean;
+  local?: boolean;
+}
+
+/** Build the `/v1/models` query string from filters. Exported (pure) so the
+ *  filter→querystring mapping is unit-testable without mocking `fetch`. */
+export function catalogModelsQuery(filters?: CatalogModelFilters): string {
+  const params = new URLSearchParams();
+  if (filters?.provider) params.set("provider", filters.provider);
+  if (filters?.vision) params.set("vision", "true");
+  if (filters?.tools) params.set("tools", "true");
+  if (filters?.free) params.set("free", "true");
+  if (filters?.local) params.set("local", "true");
+  return params.toString();
+}
+
+/**
+ * The rich models catalog from `GET /v1/models`. Returns `[]` (not null) when the
+ * gateway is offline or errors — the catalog is FREE core, so the page renders an
+ * honest "gateway offline" empty state rather than fabricated rows.
+ */
+export async function fetchCatalogModels(
+  filters?: CatalogModelFilters,
+): Promise<CatalogModelDto[]> {
+  try {
+    const qs = catalogModelsQuery(filters);
+    const response = await fetch(
+      `${GATEWAY_URL}/v1/models${qs ? `?${qs}` : ""}`,
+      { cache: "no-store", headers: { ...gatewayAuthHeaders() } },
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json()) as { data?: CatalogModelDto[] };
+    return body.data ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Priced models from `GET /v1/pricing`. Returns `[]` on an offline/erroring gateway. */
+export async function fetchCatalogPricing(): Promise<CatalogPricingDto[]> {
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/pricing`, {
+      cache: "no-store",
+      headers: { ...gatewayAuthHeaders() },
+    });
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json()) as { data?: CatalogPricingDto[] };
+    return body.data ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP (Model Context Protocol) — the browser can't HOST MCP, so the settings UI
+// asks the user's local gateway to connect and report a server's capabilities.
+// `discoverMcpServer` drives the "Test connection" button; `disconnectMcpServer`
+// is a best-effort cleanup when a server is removed. Neither throws.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A successful discovery: the server's advertised tools/resources/prompts. */
+export interface McpDiscoverResult {
+  tools: MCPTool[];
+  resources: MCPResource[];
+  prompts: MCPPrompt[];
+  /** Epoch ms the gateway connected to the server. */
+  connectedAt: number;
+}
+
+/**
+ * Connect (via the local gateway) to one MCP server and return its advertised
+ * tools/resources/prompts. NEVER throws: a failed/refused connection or an
+ * offline gateway resolves to `{ error }` with an honest, human-readable message
+ * so the UI can show it inline instead of crashing.
+ */
+export async function discoverMcpServer(
+  config: MCPServerConfig,
+): Promise<McpDiscoverResult | { error: string }> {
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/mcp/discover`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ config }),
+    });
+    const body = (await response.json().catch(() => null)) as
+      | {
+          tools?: MCPTool[];
+          resources?: MCPResource[];
+          prompts?: MCPPrompt[];
+          connectedAt?: number;
+          error?: { message?: string };
+        }
+      | null;
+    if (!response.ok) {
+      return {
+        error:
+          body?.error?.message ??
+          `Couldn't reach the MCP server (gateway error ${response.status}).`,
+      };
+    }
+    return {
+      tools: body?.tools ?? [],
+      resources: body?.resources ?? [],
+      prompts: body?.prompts ?? [],
+      connectedAt: body?.connectedAt ?? Date.now(),
+    };
+  } catch {
+    return {
+      error:
+        "Couldn't reach the gateway. Start it with `zintus serve`, then try again.",
+    };
+  }
+}
+
+/**
+ * Best-effort disconnect of a cached MCP server connection on the gateway.
+ * Fire-and-forget: returns `true` on success, `false` on any failure (an offline
+ * gateway is harmless here — there was nothing to disconnect). Never throws.
+ */
+export async function disconnectMcpServer(
+  config: MCPServerConfig,
+): Promise<boolean> {
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/mcp/disconnect`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ config }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function fetchGatewayThreads(): Promise<
   Array<{ id: string; title: string }> | null
 > {
@@ -399,7 +617,18 @@ interface GatewayChunk {
   provider?: ProviderId;
   model?: string;
   thread_id?: string;
-  choices?: Array<{ delta?: { content?: string } }>;
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        type?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
   error?: { message?: string };
   // metadata-event fields (type === "metadata")
   tokens?: { input?: number; output?: number };
@@ -407,7 +636,14 @@ interface GatewayChunk {
   cost_usd?: number;
   saved_vs_claude_sonnet?: number;
   routing_strategy?: string;
+  route_reason?: string;
   private_mode_honored?: boolean;
+  // server-side MCP tool-loop event fields (type === "mcp_tool_call" |
+  // "mcp_tool_result"). A result frame carries the call id + outcome at the top
+  // level (its `choices` is empty); a call frame reuses the tool-call delta shape.
+  tool_call_id?: string;
+  is_error?: boolean;
+  content?: string;
 }
 
 /** Per-response transparency metadata (parsed from the SSE metadata event). */
@@ -420,6 +656,13 @@ export interface ChatMeta {
   costUsd: number;
   savedUsd: number;
   routingStrategy: string;
+  /**
+   * Human "why this provider/model" line from the gateway's route trace (e.g.
+   * "cheapest healthy provider", "failover after groq rate-limit"). `undefined`
+   * when the trace recorded no reason. Surfaced as the headline at the top of the
+   * assistant turn — the prominent "why this route" signal the audit flagged missing.
+   */
+  routeReason?: string;
   /**
    * Privacy-mode honesty: `undefined` when private mode was off, `true` when
    * honored, `false` when the gateway had to use a may-train/"unknown" provider
@@ -456,6 +699,200 @@ export class UnsupportedCapabilityError extends Error {
   }
 }
 
+/** One streamed tool-call fragment from a chat delta (`choices[].delta.tool_calls[]`).
+ *  The gateway emits the call's `name` once and its `arguments` as a (possibly
+ *  fragmented) JSON string; fragments are keyed/ordered by `index`. */
+export interface ToolCallDelta {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/** Mutable per-`index` accumulator for streamed tool-call fragments. */
+export type ToolCallAccumulator = Map<
+  number,
+  { id: string; name: string; args: string }
+>;
+
+/**
+ * Fold one chunk's `delta.tool_calls` fragments into the index-keyed accumulator.
+ * Concatenates argument fragments in arrival order; a later non-undefined `id`/
+ * `name` wins over an earlier blank (the gateway sends name once, args in pieces).
+ * Pure + exported so the reassembly can be unit-tested without mocking `fetch`.
+ */
+export function accumulateToolCallDeltas(
+  acc: ToolCallAccumulator,
+  deltas: ToolCallDelta[] | undefined,
+): void {
+  for (const tc of deltas ?? []) {
+    const index = tc.index ?? 0;
+    const existing = acc.get(index) ?? { id: "", name: "", args: "" };
+    acc.set(index, {
+      id: tc.id ?? existing.id,
+      name: tc.function?.name ?? existing.name,
+      args: existing.args + (tc.function?.arguments ?? ""),
+    });
+  }
+}
+
+/**
+ * Finalize the accumulator into ordered `ToolCallContentBlock[]`. Sorted by
+ * `index` for deterministic multi-call ordering; malformed/partial argument JSON
+ * degrades to `{}` rather than throwing, so a garbled tool call never crashes the
+ * chat stream. Pure + exported (unit-tested in `gateway.test.ts`).
+ */
+export function finalizeToolCalls(
+  acc: ToolCallAccumulator,
+): ToolCallContentBlock[] {
+  return [...acc.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, call]) => {
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        parsedArgs = call.args
+          ? (JSON.parse(call.args) as Record<string, unknown>)
+          : {};
+      } catch {
+        parsedArgs = {};
+      }
+      return {
+        type: "tool_call" as const,
+        id: call.id || `call_${call.name}_${index}`,
+        name: call.name,
+        arguments: parsedArgs,
+      };
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-side MCP tool loop — the gateway (PR3) runs the MCP tools itself and
+// streams progress as `mcp_tool_call` / `mcp_tool_result` SSE frames ALONGSIDE
+// the normal text stream. The web NEVER executes these tools — it only displays
+// them. These pure helpers parse a frame into a calm, secret-safe UI event and
+// are unit-tested directly (no `fetch` mock needed).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The `mcp` block the chat body carries: the gateway connects each server and
+ *  runs the tool loop server-side. Shape mirrors @zintus/schemas MCPRequest. */
+export interface ChatMcpConfig {
+  servers: MCPServerConfig[];
+  /** Allow-list of tool names (raw or namespaced). Omit to offer every tool the
+   *  servers advertise. */
+  enabledTools?: string[];
+}
+
+/** One ordered MCP tool-loop event surfaced to the UI. A `call` names the tool;
+ *  the matching `result` (same `id`) reports success/char-count or an error. */
+export type McpToolEvent =
+  | {
+      kind: "call";
+      /** tool_call id — pairs a later `result` back to this call. */
+      id: string;
+      /** Server segment of the namespaced name (a stable hash, may be ""). */
+      server: string;
+      /** Server-local tool name (e.g. "read_file"). */
+      tool: string;
+      /** Parameter NAMES only — never values (no secret leakage). "" when none. */
+      argsSummary: string;
+    }
+  | {
+      kind: "result";
+      id: string;
+      ok: boolean;
+      /** "234 chars" on success, or the (truncated) error message. */
+      summary: string;
+    };
+
+const MCP_TOOL_PREFIX = "mcp__";
+
+/**
+ * Split a gateway MCP tool name `mcp__<serverId>__<tool>` into its parts. The
+ * serverId is the hex hash up to the FIRST `__` after the prefix; the rest is the
+ * tool name (which may itself contain `__`). A non-MCP name yields the whole name
+ * as `tool`. Local mirror of apps/gateway/src/mcp-bridge.ts `parseMcpToolName`
+ * (gateway `src/` isn't importable from the web bundle).
+ */
+export function splitMcpToolName(name: string): { server: string; tool: string } {
+  if (!name.startsWith(MCP_TOOL_PREFIX)) {
+    return { server: "", tool: name };
+  }
+  const rest = name.slice(MCP_TOOL_PREFIX.length);
+  const sep = rest.indexOf("__");
+  if (sep <= 0) {
+    return { server: "", tool: rest };
+  }
+  return { server: rest.slice(0, sep), tool: rest.slice(sep + 2) };
+}
+
+/**
+ * A calm, secret-safe summary of tool arguments: the parameter NAMES only, never
+ * their values (which may carry secrets). Returns "" for empty / non-object args.
+ */
+export function summarizeToolArgs(raw: string | undefined): string {
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.keys(parsed as Record<string, unknown>).join(", ");
+    }
+  } catch {
+    // not JSON — show nothing rather than dumping a raw fragment
+  }
+  return "";
+}
+
+/**
+ * A short result summary: the char count on success, or the (truncated) message
+ * on error. Never dumps the full body — honesty without leaking large/secret
+ * tool output into the transcript.
+ */
+export function summarizeToolResult(
+  content: string | undefined,
+  isError: boolean,
+): string {
+  const text = content ?? "";
+  if (isError) {
+    const msg = text.trim() || "the tool reported an error";
+    return msg.length > 120 ? `${msg.slice(0, 117)}…` : msg;
+  }
+  const n = text.length;
+  return `${n} char${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Parse a streamed chunk into an `McpToolEvent`, or null when it isn't an MCP
+ * frame. Matches the gateway frames precisely: `mcp_tool_call` reuses the
+ * tool-call delta shape (`choices[0].delta.tool_calls[0]`); `mcp_tool_result`
+ * carries `tool_call_id` / `is_error` / `content` at the top level. Pure +
+ * exported so the parsing is unit-tested without mocking `fetch`.
+ */
+export function parseMcpToolEvent(chunk: GatewayChunk): McpToolEvent | null {
+  if (chunk.type === "mcp_tool_call") {
+    const tc = chunk.choices?.[0]?.delta?.tool_calls?.[0];
+    if (!tc) return null;
+    const name = tc.function?.name ?? "";
+    const { server, tool } = splitMcpToolName(name);
+    return {
+      kind: "call",
+      id: tc.id ?? "",
+      server,
+      tool: tool || name,
+      argsSummary: summarizeToolArgs(tc.function?.arguments),
+    };
+  }
+  if (chunk.type === "mcp_tool_result") {
+    const isError = chunk.is_error ?? false;
+    return {
+      kind: "result",
+      id: chunk.tool_call_id ?? "",
+      ok: !isError,
+      summary: summarizeToolResult(chunk.content, isError),
+    };
+  }
+  return null;
+}
+
 export async function streamGatewayChat(params: {
   // Content is `string` (text-only) OR an ordered `ContentBlock[]` (multimodal:
   // a text block followed by image blocks). The gateway reads images from these
@@ -466,6 +903,9 @@ export async function streamGatewayChat(params: {
   }>;
   providerId?: ProviderId;
   defaultProvider?: ProviderId;
+  /** Specific model id (e.g. from the catalog's "Use this model"). When set the
+   *  gateway routes to this exact model rather than the provider default. */
+  model?: string;
   strategy?: RoutingStrategy;
   mode?: ContextMode;
   threadId?: string;
@@ -475,8 +915,22 @@ export async function streamGatewayChat(params: {
   allowTraining?: ProviderId[];
   keys?: Partial<Record<ProviderId, string>>;
   temperature?: number;
+  /** Tool/function definitions for this turn. Requires a tool-capable provider —
+   *  the gateway returns a 422 UnsupportedCapabilityError otherwise. */
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
+  /** Structured-output request (e.g. { type: "json_object" }). The gateway
+   *  resolves the best level the chosen provider can serve. */
+  responseFormat?: ResponseFormat;
+  /** Configured MCP servers for this turn. When present the gateway runs a
+   *  SERVER-SIDE tool loop and streams `mcp_tool_call`/`mcp_tool_result` events;
+   *  the web only displays them (it never executes these tools). */
+  mcp?: ChatMcpConfig;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
+  /** Live callback for each server-side MCP tool-loop event (call/result), in
+   *  arrival order — lets the UI render activity as it streams. */
+  onMcpToolEvent?: (event: McpToolEvent) => void;
 }): Promise<{
   providerId: ProviderId;
   model: string;
@@ -485,12 +939,19 @@ export async function streamGatewayChat(params: {
   compileTokens?: number;
   meta?: ChatMeta;
   compression?: CompressionStats;
+  /** Tool calls the model made this turn (empty for a normal text turn). The
+   *  caller runs the tools and sends results back as `tool_result` blocks. */
+  toolCalls?: ToolCallContentBlock[];
+  /** Ordered server-side MCP tool-loop events emitted this turn (empty when no
+   *  MCP servers were configured). Display-only — the gateway already ran them. */
+  toolEvents?: McpToolEvent[];
 }> {
   const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
     body: JSON.stringify({
       messages: params.messages,
+      model: params.model,
       stream: true,
       provider: params.providerId ?? params.defaultProvider,
       strategy: params.strategy,
@@ -503,6 +964,12 @@ export async function streamGatewayChat(params: {
       block_training: params.blockTraining,
       allow_training: params.allowTraining,
       temperature: params.temperature,
+      tools: params.tools,
+      tool_choice: params.toolChoice,
+      response_format: params.responseFormat,
+      // Present ONLY when the user has MCP servers enabled. The gateway connects
+      // them and runs the tool loop server-side (the web never executes them).
+      mcp: params.mcp,
       // BYOK keys are only ever sent to a LOCAL gateway — never across the
       // network (would leak keys in a plaintext body to a remote host).
       keys:
@@ -553,11 +1020,31 @@ export async function streamGatewayChat(params: {
   // Compression savings ride along as response headers (known before streaming).
   const compression = readCompressionStats(response.headers) ?? undefined;
   let output = "";
+  // Accumulate streamed tool-call fragments by their `index`. The gateway emits
+  // each call's name once and its arguments as a (possibly fragmented) JSON
+  // string; we concatenate then parse once the stream ends. Robust to both the
+  // whole-object shape Zintus emits and OpenAI's fragmented shape. The fold +
+  // finalize are pure helpers (accumulateToolCallDeltas / finalizeToolCalls) so
+  // the fragile reassembly is unit-tested directly (see gateway.test.ts).
+  const toolCallsByIndex: ToolCallAccumulator = new Map();
+  // Ordered server-side MCP tool-loop events (call/result). These ride the same
+  // stream as the text but are a SEPARATE channel — display only.
+  const toolEvents: McpToolEvent[] = [];
 
   await readSseData(response, (payload) => {
     const chunk = payload as GatewayChunk;
     if (chunk.error?.message) {
       throw new Error(chunk.error.message);
+    }
+
+    // Server-side MCP frames first: they reuse the tool-call delta shape, so they
+    // MUST be peeled off here, before accumulateToolCallDeltas would fold them
+    // into the (client) tool-call channel.
+    const mcpEvent = parseMcpToolEvent(chunk);
+    if (mcpEvent) {
+      toolEvents.push(mcpEvent);
+      params.onMcpToolEvent?.(mcpEvent);
+      return;
     }
 
     if (chunk.type === "metadata" && chunk.provider) {
@@ -570,6 +1057,7 @@ export async function streamGatewayChat(params: {
         costUsd: chunk.cost_usd ?? 0,
         savedUsd: chunk.saved_vs_claude_sonnet ?? 0,
         routingStrategy: chunk.routing_strategy ?? "auto",
+        routeReason: chunk.route_reason,
         privacyHonored: chunk.private_mode_honored,
       };
       return;
@@ -585,11 +1073,18 @@ export async function streamGatewayChat(params: {
       output += delta;
       params.onChunk(output);
     }
+
+    accumulateToolCallDeltas(
+      toolCallsByIndex,
+      chunk.choices?.[0]?.delta?.tool_calls,
+    );
   });
 
   if (!provider) {
     throw new Error("Gateway stream ended without provider metadata");
   }
+
+  const toolCalls = finalizeToolCalls(toolCallsByIndex);
 
   return {
     providerId: provider,
@@ -599,5 +1094,7 @@ export async function streamGatewayChat(params: {
     compileTokens,
     meta,
     compression,
+    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    toolEvents: toolEvents.length > 0 ? toolEvents : undefined,
   };
 }

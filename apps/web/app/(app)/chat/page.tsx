@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { MessageBubble } from "@/app/_components/MessageBubble";
+import { ArtifactPanel } from "@/app/_components/ArtifactPanel";
+import { extractArtifacts, type Artifact } from "@/lib/artifacts";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { ConsentDialog } from "@/app/_components/ConsentDialog";
@@ -16,11 +18,20 @@ import {
 } from "@/lib/app-store";
 import {
   streamChat,
+  sanitizeSendHistory,
   UnsupportedCapabilityError,
+  type ChatMcpConfig,
   type ChatMessage,
+  type McpToolEvent,
 } from "@/lib/chat-client";
+import { activeMcpServersForChat, loadMcpServers } from "@/lib/mcp-config";
 import { processImage, MediaError } from "@zintus/media";
 import type { ContentBlock, ImageContentBlock } from "@zintus/types";
+import {
+  BUILTIN_TOOL_DEFINITIONS,
+  BUILTIN_WEB_TOOLS,
+  executeWebToolCall,
+} from "@/lib/web-tools";
 import {
   acceptImageFile,
   buildImageMessageContent,
@@ -29,6 +40,7 @@ import {
   isImageMime,
   providerCanSeeImages,
 } from "@/lib/image-attachments";
+import { extractPdfText } from "@/lib/extract-pdf";
 import { memorySystemMessage } from "@/lib/memory";
 import { downloadFile } from "@/lib/download";
 import {
@@ -38,6 +50,10 @@ import {
 import { getActiveProject, setActiveProjectId } from "@/lib/projects";
 import { loadPresets, type Preset } from "@/lib/presets";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
+import {
+  useSpeechRecognition,
+  appendDictation,
+} from "@/lib/use-speech-recognition";
 
 const PROMPT_CARDS = [
   { title: "Explain this code", body: "Walk through a snippet step by step" },
@@ -51,13 +67,17 @@ const TEXT_EXTENSIONS = new Set([
   ".json", ".sh", ".yaml", ".toml", ".rs", ".go", ".css",
 ]);
 
-/** A text file is extracted to a string and folded into the prompt. */
+/** A text or PDF file: its text is extracted client-side and folded into the
+ *  prompt. `pages` is set for PDFs so the chip can show "📄 extracted N pages";
+ *  `truncated` flags a long PDF whose tail we stopped reading. */
 interface TextAttachment {
   id: string;
   kind: "text";
   name: string;
   content: string;
   mimeType: string;
+  pages?: number;
+  truncated?: boolean;
 }
 
 /** An image is processed by @zintus/media into an `ImageContentBlock` that we
@@ -81,6 +101,33 @@ interface ComposerNotice {
 
 function capitalize(s: string): string {
   return s.length > 0 ? s[0]!.toUpperCase() + s.slice(1) : s;
+}
+
+/**
+ * Build the chat body's `mcp` block from the user's enabled MCP servers (PR2's
+ * `loadMcpServers` → `activeMcpServersForChat`), plus the active tool count for
+ * the header indicator. The gateway runs these tools SERVER-SIDE; the web only
+ * displays the resulting activity. Returns `undefined` when nothing is enabled.
+ */
+function activeMcpForChat(): {
+  mcp: ChatMcpConfig | undefined;
+  toolCount: number;
+} {
+  const { servers } = activeMcpServersForChat(loadMcpServers());
+  if (servers.length === 0) {
+    return { mcp: undefined, toolCount: 0 };
+  }
+  const enabledTools = servers.flatMap((s) => s.enabledTools);
+  return {
+    mcp: {
+      servers: servers.map((s) => s.config),
+      // Omit when no concrete tool names are known yet (server enabled but not
+      // tested) so the gateway offers every tool it discovers rather than
+      // suppressing them all with an empty allow-list.
+      ...(enabledTools.length > 0 ? { enabledTools } : {}),
+    },
+    toolCount: enabledTools.length,
+  };
 }
 
 /**
@@ -153,11 +200,20 @@ export default function ChatPage() {
   const [consentOpen, setConsentOpen] = useState(false);
   const [notice, setNotice] = useState<ComposerNotice | null>(null);
   const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
+  // Count of MCP tools active this chat (header indicator). Read from localStorage
+  // on mount + when the window regains focus (e.g. after editing /settings/mcp).
+  const [mcpToolCount, setMcpToolCount] = useState(0);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [activePreset, setActivePreset] = useState<Preset | null>(null);
   // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
   // hydration mismatch (document.cookie is client-only).
   const [localMode, setLocalMode] = useState(false);
+  // Collapsed secondary-controls popover ("⚙ More") and the New-chat affordance
+  // menu (which owns the incognito option). Both close on outside click.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [newChatMenuOpen, setNewChatMenuOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  const newChatRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -184,6 +240,68 @@ export default function ChatPage() {
     return false;
   });
 
+  // Tools toggle (persisted): when on, the built-in browser-safe tools
+  // (calculator, current_datetime, random_number) are offered to the model and
+  // executed locally in a bounded loop. Requires a tool-capable provider.
+  const [toolsEnabled, setToolsEnabled] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:tools") === "true";
+    }
+    return false;
+  });
+
+  // Structured-output (JSON) toggle (persisted): when on, the turn requests
+  // response_format json_object. The gateway resolves the best level the chosen
+  // provider can serve, or returns an honest 422 when it can't. Parity w/ desktop.
+  const [jsonEnabled, setJsonEnabled] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:json") === "true";
+    }
+    return false;
+  });
+  useEffect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("zintus:json", String(jsonEnabled));
+    }
+  }, [jsonEnabled]);
+
+  // ── Artifacts / canvas side panel ─────────────────────────────────────────
+  // The panel lists every artifact-worthy block (substantial code, full HTML,
+  // SVG, long markdown doc) across the conversation. Detection is pure (see
+  // lib/artifacts.ts); ids are namespaced by message so two turns never collide.
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  const { artifactList, artifactsByMessage } = useMemo(() => {
+    const list: Artifact[] = [];
+    const byMessage: Record<string, Artifact[]> = {};
+    for (const m of messages) {
+      if (m.role !== "assistant" || !m.content) continue;
+      const arts = extractArtifacts(m.content).map((a) => ({
+        ...a,
+        id: `${m.id}:${a.id}`,
+      }));
+      if (arts.length > 0) {
+        byMessage[m.id] = arts;
+        list.push(...arts);
+      }
+    }
+    return { artifactList: list, artifactsByMessage: byMessage };
+  }, [messages]);
+
+  const openArtifact = useCallback((id: string) => {
+    setActiveArtifactId(id);
+    setArtifactPanelOpen(true);
+  }, []);
+
+  // Close the panel if the conversation no longer has any artifacts (e.g. after
+  // a regenerate or switching to an empty thread).
+  useEffect(() => {
+    if (artifactList.length === 0) {
+      setArtifactPanelOpen(false);
+      setActiveArtifactId(null);
+    }
+  }, [artifactList.length]);
+
   useEffect(() => {
     hydrate();
     void unlock();
@@ -191,6 +309,16 @@ export default function ChatPage() {
     setPresets(loadPresets());
     setActiveProjectName(getActiveProject()?.name ?? null);
   }, [hydrate, unlock]);
+
+  // Keep the header's "🔧 N tools active" indicator in sync with the user's MCP
+  // settings (localStorage): recompute on mount + whenever the window regains
+  // focus (the user may have just changed servers in /settings/mcp).
+  useEffect(() => {
+    const refresh = () => setMcpToolCount(activeMcpForChat().toolCount);
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, []);
 
   const applyPreset = useCallback(
     (preset: Preset | null) => {
@@ -214,6 +342,22 @@ export default function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Dismiss the More / New-chat popovers on an outside click (mirrors ProviderPicker).
+  useEffect(() => {
+    if (!moreOpen && !newChatMenuOpen) return;
+    function onClick(event: MouseEvent) {
+      const target = event.target as Node;
+      if (moreRef.current && !moreRef.current.contains(target)) {
+        setMoreOpen(false);
+      }
+      if (newChatRef.current && !newChatRef.current.contains(target)) {
+        setNewChatMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [moreOpen, newChatMenuOpen]);
 
   // Abort any in-flight stream when leaving the page (mirrors /compare, /research).
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -295,12 +439,46 @@ export default function ChatPage() {
         continue;
       }
 
-      // ── Text branch — extracted + sent inline (unchanged) ──────────────────
       const ext = "." + (file.name.split(".").pop()?.toLowerCase() ?? "");
+
+      // ── PDF branch — text extracted CLIENT-SIDE, then folded in like text ───
+      // Bytes never leave the browser; a scanned/corrupt/oversize PDF yields an
+      // honest notice (no fabricated text). See lib/extract-pdf.ts for the
+      // CSP-safe (eval-free, no-worker, no-WASM) pdf.js config.
+      if (file.type === "application/pdf" || ext === ".pdf") {
+        const result = await extractPdfText(file);
+        if ("error" in result) {
+          setNotice({ tone: "error", text: `${file.name}: ${result.error}` });
+          continue;
+        }
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            kind: "text",
+            name: file.name,
+            content: result.text,
+            mimeType: "application/pdf",
+            pages: result.pages,
+            truncated: result.truncated,
+          },
+        ]);
+        if (result.truncated) {
+          setNotice({
+            tone: "warn",
+            text: `${file.name}: read the first ${result.pages} pages — the rest wasn't included.`,
+          });
+        } else {
+          setNotice(null);
+        }
+        continue;
+      }
+
+      // ── Text branch — extracted + sent inline (unchanged) ──────────────────
       if (!TEXT_EXTENSIONS.has(ext)) {
         setNotice({
           tone: "error",
-          text: `${file.name} isn't a supported file — attach an image (PNG/JPEG/WebP) or a text file.`,
+          text: `${file.name} isn't a supported file — attach an image (PNG/JPEG/WebP), a PDF, or a text file.`,
         });
         continue;
       }
@@ -342,48 +520,161 @@ export default function ChatPage() {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      // The tools turn runs STATELESS (no threadId) so the bounded execution loop
+      // is deterministic: `send` passes the full conversation as `sendMessages`
+      // when tools are on. A normal turn keeps the threadId-compiled context.
+      const useThread = !toolsEnabled;
+      const convo: ChatMessage[] = [...sendMessages];
+      let currentAssistantId = assistantId;
+      const MAX_TOOL_ROUNDS = 5;
+
+      // The user's enabled MCP servers for this turn (read fresh, like apiKeys).
+      // When present the gateway runs the tools SERVER-SIDE and streams
+      // `mcp_tool_call`/`mcp_tool_result` events; we only display them.
+      const { mcp } = activeMcpForChat();
+
+      // Catalog "Use this model": route to the exact chosen model, but ONLY when it
+      // belongs to the currently-selected provider (avoid a stale model after the
+      // user switches providers in the composer).
+      let catalogModel: string | undefined;
       try {
-        const result = await streamChat({
-          messages: sendMessages,
-          providerId: selectedProvider ?? undefined,
-          mode: settings.contextMode,
-          threadId,
-          // Read fresh: the LocalKeyManager may have just populated the vault and
-          // re-invoked send() before this component re-rendered with new keys.
-          apiKeys: useProviderStatusStore.getState().keys,
-          // Incognito prefers non-training providers regardless of the saved pref.
-          settings: incognito
-            ? { ...settings, blockTrainingProviders: true }
-            : settings,
-          webSearch: webSearchEnabled,
-          temperature: activePreset?.temperature,
-          signal: controller.signal,
-          onChunk: (text) => updateMessage(assistantId, text),
-        });
-
-        setActiveProvider(result.providerId);
-        setThreadId(result.threadId);
-        patchMessage(assistantId, {
-          providerId: result.providerId,
-          model: result.model,
-          compileTokens: result.compileTokens,
-          meta: result.meta,
-          compression: result.compression,
-        });
-
-        pushTerminalLine({
-          text: `→ routed to ${result.providerId} (${result.model}) via ${result.source}`,
-          tone: "success",
-        });
-        // Multimodal: confirm which provider actually read the image(s).
-        if (hadImages) {
-          setNotice({
-            tone: "ok",
-            text: `Image analyzed by ${result.meta?.provider ?? result.providerId}`,
-          });
+        const raw =
+          typeof localStorage !== "undefined"
+            ? localStorage.getItem("zintus:selected-model")
+            : null;
+        if (raw) {
+          const sel = JSON.parse(raw) as { id?: string; provider?: string };
+          if (sel.id && sel.provider && sel.provider === selectedProvider) {
+            catalogModel = sel.id;
+          }
         }
-        if (result.source === "gateway") {
-          await loadLastTrace();
+      } catch {
+        // ignore malformed storage
+      }
+
+      try {
+        for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+          let streamedText = "";
+          // Server-side MCP tool-loop events for THIS round's request, accumulated
+          // and patched onto the active assistant bubble as they stream in.
+          const roundMcpEvents: McpToolEvent[] = [];
+          const result = await streamChat({
+            messages: convo,
+            providerId: selectedProvider ?? undefined,
+            model: catalogModel,
+            mode: settings.contextMode,
+            threadId: useThread ? threadId : undefined,
+            // Read fresh: the LocalKeyManager may have just populated the vault and
+            // re-invoked send() before this component re-rendered with new keys.
+            apiKeys: useProviderStatusStore.getState().keys,
+            // Incognito prefers non-training providers regardless of the saved pref.
+            settings: incognito
+              ? { ...settings, blockTrainingProviders: true }
+              : settings,
+            webSearch: webSearchEnabled,
+            temperature: activePreset?.temperature,
+            tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
+            responseFormat: jsonEnabled ? { type: "json_object" } : undefined,
+            mcp,
+            signal: controller.signal,
+            onChunk: (text) => {
+              streamedText = text;
+              updateMessage(currentAssistantId, text);
+            },
+            onMcpToolEvent: (event) => {
+              roundMcpEvents.push(event);
+              patchMessage(currentAssistantId, {
+                mcpToolEvents: [...roundMcpEvents],
+              });
+            },
+          });
+
+          setActiveProvider(result.providerId);
+          if (useThread) setThreadId(result.threadId);
+          patchMessage(currentAssistantId, {
+            providerId: result.providerId,
+            model: result.model,
+            compileTokens: result.compileTokens,
+            meta: result.meta,
+            compression: result.compression,
+          });
+          pushTerminalLine({
+            text: `→ routed to ${result.providerId} (${result.model}) via ${result.source}`,
+            tone: "success",
+          });
+          // Multimodal: confirm which provider actually read the image(s).
+          if (hadImages && round === 0) {
+            setNotice({
+              tone: "ok",
+              text: `Image analyzed by ${result.meta?.provider ?? result.providerId}`,
+            });
+          }
+          if (result.source === "gateway") {
+            await loadLastTrace();
+          }
+
+          const calls = result.toolCalls ?? [];
+          if (calls.length === 0) break;
+
+          // Render the tool calls on the current assistant bubble.
+          patchMessage(currentAssistantId, {
+            toolCalls: calls.map((c) => ({
+              id: c.id,
+              name: c.name,
+              arguments: c.arguments,
+            })),
+          });
+
+          if (round === MAX_TOOL_ROUNDS) {
+            pushTerminalLine({
+              text: `⚠ tool loop stopped after ${MAX_TOOL_ROUNDS} rounds`,
+              tone: "warning",
+            });
+            if (!streamedText.trim()) {
+              updateMessage(
+                currentAssistantId,
+                `_Stopped after ${MAX_TOOL_ROUNDS} tool rounds._`,
+              );
+            }
+            break;
+          }
+
+          // Execute each call locally (built-in, browser-safe tools) and feed the
+          // results back on the next request as tool_result blocks.
+          const results = calls.map((c) =>
+            executeWebToolCall({ id: c.id, name: c.name, arguments: c.arguments }),
+          );
+          for (const c of calls) {
+            const r = results.find((x) => x.toolCallId === c.id);
+            pushTerminalLine({
+              text: `🔧 ${c.name}(${JSON.stringify(c.arguments)}) → ${r?.isError ? "error" : (r?.content ?? "")}`,
+              tone: r?.isError ? "warning" : "muted",
+            });
+          }
+
+          convo.push({
+            role: "assistant",
+            content: [
+              ...(streamedText.trim()
+                ? [{ type: "text" as const, text: streamedText }]
+                : []),
+              ...calls,
+            ],
+          });
+          convo.push({
+            role: "user",
+            content: results.map((r) => ({
+              type: "tool_result" as const,
+              toolCallId: r.toolCallId,
+              content: r.content,
+              isError: r.isError,
+            })),
+          });
+
+          // A fresh assistant bubble for the next round's answer.
+          const next = createAssistantPlaceholder();
+          appendMessage(next);
+          currentAssistantId = next.id;
         }
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
@@ -395,22 +686,23 @@ export default function ChatPage() {
           const lines = [
             error.message,
             "",
-            "Try a vision-capable provider:",
+            "Try a different provider:",
             ...error.suggestions.map((s) => `- **${s.provider}** — ${s.reason}`),
           ];
-          updateMessage(assistantId, lines.join("\n"));
+          updateMessage(currentAssistantId, lines.join("\n"));
           pushTerminalLine({ text: `✗ ${error.message}`, tone: "warning" });
           return;
         }
         const message =
           error instanceof Error ? error.message : "Request failed";
-        updateMessage(assistantId, `Error: ${message}`);
+        updateMessage(currentAssistantId, `Error: ${message}`);
         pushTerminalLine({ text: `✗ ${message}`, tone: "warning" });
       } finally {
         setLoading(false);
       }
     },
     [
+      appendMessage,
       loadLastTrace,
       patchMessage,
       pushTerminalLine,
@@ -419,6 +711,8 @@ export default function ChatPage() {
       setThreadId,
       settings,
       threadId,
+      toolsEnabled,
+      jsonEnabled,
       updateMessage,
       webSearchEnabled,
       incognito,
@@ -455,8 +749,14 @@ export default function ChatPage() {
     let textPrefix = "";
     for (const att of attachments) {
       if (att.kind !== "text") continue;
-      const ext = att.name.split(".").pop() ?? "txt";
-      textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
+      if (att.pages !== undefined) {
+        // PDF: extracted text, not source — label honestly with the page count.
+        const more = att.truncated ? ` (first ${att.pages}, truncated)` : "";
+        textPrefix += `[PDF: ${att.name} — ${att.pages} page${att.pages === 1 ? "" : "s"}${more}]\n\`\`\`\n${att.content}\n\`\`\`\n\n`;
+      } else {
+        const ext = att.name.split(".").pop() ?? "txt";
+        textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
+      }
     }
     const userText = (textPrefix + prompt).trim();
 
@@ -491,13 +791,17 @@ export default function ChatPage() {
         ? buildImageMessageContent(userText, imageBlocks)
         : userText;
 
-    const history: ChatMessage[] = [
+    // Sanitize the store-derived history before sending: the tools loop can
+    // leave empty-content assistant bubbles and adjacent same-role turns that a
+    // strict role-alternation provider (Gemini) would reject. Subsumes the old
+    // `&& content` intent. The trailing user turn is preserved.
+    const history: ChatMessage[] = sanitizeSendHistory([
       ...messages.map((message) => ({
         role: message.role,
         content: message.content,
       })),
       { role: "user", content: userMessageContent },
-    ];
+    ]);
 
     // The stored user bubble carries image METADATA (never base64) so it honestly
     // shows which image(s) this turn included (the composer thumbnails clear on
@@ -539,7 +843,10 @@ export default function ChatPage() {
       }
     }
     const sendMessages: ChatMessage[] =
-      threadId == null
+      // A tools turn runs stateless, so it needs the FULL conversation here (the
+      // loop in streamAssistant drops threadId). A normal continued turn sends
+      // just the new user message and relies on threadId-compiled context.
+      threadId == null || toolsEnabled
         ? [...leading, ...history]
         : [{ role: "user", content: userMessageContent }];
     await streamAssistant(
@@ -560,6 +867,7 @@ export default function ChatPage() {
     settings,
     streamAssistant,
     threadId,
+    toolsEnabled,
   ]);
 
   const regenerate = useCallback(async () => {
@@ -597,11 +905,14 @@ export default function ChatPage() {
     appendMessage(assistant);
 
     const s = useAppStore.getState();
-    const priorMessages = (
-      s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? []
-    )
-      .filter((message) => message.id !== assistant.id && message.content)
-      .map((message) => ({ role: message.role, content: message.content }));
+    // Sanitize the rebuilt history: drop the empty placeholder + any dangling
+    // empty tool-round assistant bubbles, and merge adjacent same-role turns so
+    // Regenerate never replays a malformed conversation.
+    const priorMessages = sanitizeSendHistory(
+      (s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? [])
+        .filter((message) => message.id !== assistant.id && message.content)
+        .map((message) => ({ role: message.role, content: message.content })),
+    );
 
     const lastUserContent: string | ContentBlock[] =
       reuseImages.length > 0
@@ -628,9 +939,36 @@ export default function ChatPage() {
     setLoading(false);
   }, []);
 
+  // Voice input (dictation): the BROWSER's Web Speech recognizer fills the
+  // composer textarea — no audio touches the gateway/relay, and the user still
+  // presses send. Finalized chunks append to the existing `input` state so they
+  // ride the normal send path. Interim words show as a live preview only.
+  const handleDictation = useCallback((chunk: string) => {
+    setInput((prev) => appendDictation(prev, chunk));
+  }, []);
+  const speech = useSpeechRecognition({ onFinalTranscript: handleDictation });
+  const toggleDictation = useCallback(() => {
+    if (speech.listening) speech.stop();
+    else speech.start();
+  }, [speech]);
+  // Surface a recognition error (denied mic / no speech) as a calm composer
+  // notice, consistent with attachment errors.
+  useEffect(() => {
+    if (speech.error) setNotice({ tone: "warn", text: speech.error });
+  }, [speech.error]);
+
   const lastAssistantId = [...messages]
     .reverse()
     .find((message) => message.role === "assistant")?.id;
+
+  // The provider the next send will (likely) hit — used to surface an honest,
+  // non-interactive "Vision" capability chip next to the attach control so it's
+  // clear up front whether the selected route can actually read an image.
+  const effectiveComposerProvider =
+    selectedProvider ?? settings.defaultProvider ?? null;
+  const visionReady = effectiveComposerProvider
+    ? providerCanSeeImages(effectiveComposerProvider)
+    : false;
 
   const exportThread = useCallback(() => {
     if (messages.length === 0) return;
@@ -644,6 +982,7 @@ export default function ChatPage() {
   }, [messages]);
 
   return (
+    <div className="chat-layout">
     <div className="screen chat-screen">
       {incognito ? (
         <div className="chat-local-banner chat-incognito-banner">
@@ -672,6 +1011,156 @@ export default function ChatPage() {
           void send();
         }}
       />
+      {/* Thread header: title + context chips on the left; New-chat affordance
+          (owns incognito) and Export pinned right. Export moved OUT of the
+          composer per the chat-hierarchy cleanup. */}
+      <div
+        className="chat-header"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          padding: "10px 28px",
+          borderBottom: "0.5px solid var(--c-border)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            minWidth: 0,
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--color-text)",
+          }}
+        >
+          <span>{incognito ? "Incognito chat" : "Chat"}</span>
+          {activeProjectName ? (
+            <span
+              className="chat-privacy-chip"
+              title="Active project — its instructions lead each new chat. Click × to leave."
+            >
+              📁 {activeProjectName}
+              <button
+                type="button"
+                aria-label="Leave project"
+                onClick={() => {
+                  setActiveProjectId(null);
+                  setActiveProjectName(null);
+                }}
+                style={{
+                  marginLeft: 6,
+                  background: "none",
+                  border: "none",
+                  color: "inherit",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            </span>
+          ) : null}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* MCP indicator: shown only when the user has enabled servers with
+              tools. The gateway runs these tools server-side; this links to the
+              settings page to manage them. */}
+          {mcpToolCount > 0 ? (
+            <a
+              href="/settings/mcp"
+              className="chat-tool-toggle"
+              title="MCP tools available to the model this chat — manage in settings"
+              style={{
+                textDecoration: "none",
+                color: "var(--color-purple-light, #7C3AED)",
+              }}
+            >
+              🔧 {mcpToolCount} tool{mcpToolCount === 1 ? "" : "s"} active
+            </a>
+          ) : null}
+          {/* New-chat affordance with an incognito option in its menu. */}
+          <div className="composer-picker" ref={newChatRef}>
+            <button
+              type="button"
+              className="chat-tool-toggle"
+              aria-haspopup="menu"
+              aria-expanded={newChatMenuOpen}
+              onClick={() => setNewChatMenuOpen((v) => !v)}
+              title="Start a new chat"
+            >
+              <Icon name="plus" size={13} />
+              New chat
+              <Icon name="chevron-down" size={11} />
+            </button>
+            {newChatMenuOpen ? (
+              <div
+                className="composer-picker-menu"
+                role="menu"
+                style={{ bottom: "auto", top: "calc(100% + 6px)", left: "auto", right: 0 }}
+              >
+                <button
+                  type="button"
+                  className="composer-picker-option"
+                  onClick={() => {
+                    newChat(false);
+                    setNewChatMenuOpen(false);
+                  }}
+                >
+                  <Icon name="plus" size={13} />
+                  <span>New chat</span>
+                </button>
+                <button
+                  type="button"
+                  className={`composer-picker-option${incognito ? " active" : ""}`}
+                  onClick={() => {
+                    newChat(true);
+                    setNewChatMenuOpen(false);
+                  }}
+                  title="Nothing saved, non-training providers only"
+                >
+                  <span aria-hidden>🕶</span>
+                  <span>New incognito chat</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
+          {artifactList.length > 0 ? (
+            <button
+              type="button"
+              className={`chat-tool-toggle${artifactPanelOpen ? " active" : ""}`}
+              onClick={() => {
+                if (artifactPanelOpen) {
+                  setArtifactPanelOpen(false);
+                } else {
+                  openArtifact(activeArtifactId ?? artifactList[0]!.id);
+                }
+              }}
+              aria-pressed={artifactPanelOpen}
+              aria-label="Toggle the artifacts panel"
+              title="Substantial code, HTML, SVG, and long docs from this chat"
+            >
+              <Icon name="layers" size={13} />
+              Artifacts ({artifactList.length})
+            </button>
+          ) : null}
+          {messages.length > 0 ? (
+            <button
+              type="button"
+              className="chat-tool-toggle"
+              onClick={exportThread}
+              aria-label="Export this chat as Markdown"
+              title="Export this chat as Markdown"
+            >
+              <Icon name="copy" size={13} />
+              Export
+            </button>
+          ) : null}
+        </div>
+      </div>
+
       <div className="chat-messages">
         {messages.length === 0 ? (
           <div className="chat-empty">
@@ -725,7 +1214,11 @@ export default function ChatPage() {
             <MessageBubble
               key={message.id}
               message={message}
+              toolCalls={message.toolCalls}
+              mcpToolEvents={message.mcpToolEvents}
               isStreaming={loading && message.id === lastAssistantId}
+              artifacts={artifactsByMessage[message.id]}
+              onOpenArtifact={openArtifact}
               onRegenerate={
                 message.id === lastAssistantId && !loading
                   ? regenerate
@@ -746,95 +1239,193 @@ export default function ChatPage() {
             void handleFiles(e.dataTransfer.files);
           }}
         >
-          <div className="chat-composer-top">
+          {/* Composer toolbar (calm): the model/route picker stays accessible;
+              every other secondary control collapses into a single "⚙ More"
+              popover. Incognito moved to the header New-chat menu; Export to the
+              header. */}
+          <div
+            className="chat-composer-top"
+            style={{ gap: 8 }}
+          >
             <ProviderPicker />
-            {presets.length > 0 ? (
-              <select
-                className="chat-preset-select"
-                value={activePreset?.id ?? ""}
-                onChange={(event) =>
-                  applyPreset(
-                    presets.find((p) => p.id === event.target.value) ?? null,
-                  )
-                }
-                title="Apply a saved preset"
-              >
-                <option value="">No preset</option>
-                {presets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.name}
-                  </option>
-                ))}
-              </select>
-            ) : null}
-            {settings.blockTrainingProviders ? (
-              <span
-                className="chat-privacy-chip"
-                title="Privacy mode — only routing to providers that don't train on your data"
-              >
-                🛡 Privacy
-              </span>
-            ) : null}
-            {activeProjectName ? (
-              <span
-                className="chat-privacy-chip"
-                title="Active project — its instructions lead each new chat. Click × to leave."
-              >
-                📁 {activeProjectName}
-                <button
-                  type="button"
-                  aria-label="Leave project"
-                  onClick={() => {
-                    setActiveProjectId(null);
-                    setActiveProjectName(null);
-                  }}
-                  style={{ marginLeft: 6, background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0 }}
-                >
-                  ×
-                </button>
-              </span>
-            ) : null}
-            <button
-              type="button"
-              className={`chat-tool-toggle${incognito ? " active" : ""}`}
-              onClick={() => newChat(!incognito)}
-              title={
-                incognito
-                  ? "Leave incognito (start a normal chat)"
-                  : "Start an incognito chat — nothing saved, non-training providers only"
-              }
-            >
-              🕶 Incognito
-            </button>
-            {messages.length > 0 ? (
+
+            <div className="composer-picker" ref={moreRef}>
               <button
                 type="button"
-                className="chat-tool-toggle"
-                onClick={exportThread}
-                title="Export this chat as Markdown"
-                style={{ marginLeft: "auto" }}
+                className={`chat-tool-toggle${
+                  webSearchEnabled ||
+                  toolsEnabled ||
+                  activePreset ||
+                  activeProjectName ||
+                  settings.blockTrainingProviders
+                    ? " active"
+                    : ""
+                }`}
+                aria-haspopup="menu"
+                aria-expanded={moreOpen}
+                aria-label="More chat options"
+                onClick={() => setMoreOpen((v) => !v)}
+                title="Search, tools, presets, project"
               >
-                <Icon name="copy" size={13} />
-                Export
+                <Icon name="settings" size={13} />
+                More
               </button>
-            ) : null}
-            <button
-              type="button"
-              className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
-              onClick={() => {
-                setWebSearchEnabled((v) => {
-                  const next = !v;
-                  if (typeof localStorage !== "undefined") {
-                    localStorage.setItem("zintus:web-search", String(next));
-                  }
-                  return next;
-                });
-              }}
-              title={searchTooltip(selectedProvider)}
-            >
-              <Icon name="globe" size={13} />
-              Search
-            </button>
+
+              {moreOpen ? (
+                <div
+                  className="composer-picker-menu"
+                  role="menu"
+                  style={{ minWidth: 252, padding: 8 }}
+                >
+                  <div className="composer-picker-section">Tools</div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      flexWrap: "wrap",
+                      padding: "0 4px 6px",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
+                      aria-pressed={webSearchEnabled}
+                      aria-label="Toggle web search"
+                      onClick={() => {
+                        setWebSearchEnabled((v) => {
+                          const next = !v;
+                          if (typeof localStorage !== "undefined") {
+                            localStorage.setItem("zintus:web-search", String(next));
+                          }
+                          return next;
+                        });
+                      }}
+                      title={searchTooltip(selectedProvider)}
+                    >
+                      <Icon name="globe" size={13} />
+                      Search
+                    </button>
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${toolsEnabled ? " active" : ""}`}
+                      aria-pressed={toolsEnabled}
+                      aria-label="Toggle tools"
+                      onClick={() => {
+                        setToolsEnabled((v) => {
+                          const next = !v;
+                          if (typeof localStorage !== "undefined") {
+                            localStorage.setItem("zintus:tools", String(next));
+                          }
+                          return next;
+                        });
+                      }}
+                      title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally in your browser; needs a tool-capable provider.`}
+                    >
+                      🔧 Tools
+                    </button>
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${jsonEnabled ? " active" : ""}`}
+                      aria-pressed={jsonEnabled}
+                      aria-label="Toggle JSON output"
+                      onClick={() => setJsonEnabled((v) => !v)}
+                      title="Request structured JSON output. The gateway resolves the best level the chosen provider can serve, or returns an honest error when it can't."
+                    >
+                      {"{}"} JSON
+                    </button>
+                  </div>
+
+                  {presets.length > 0 ? (
+                    <>
+                      <div className="composer-picker-section">Preset</div>
+                      <div style={{ padding: "0 4px 6px" }}>
+                        <select
+                          className="chat-preset-select"
+                          style={{ width: "100%" }}
+                          value={activePreset?.id ?? ""}
+                          onChange={(event) =>
+                            applyPreset(
+                              presets.find((p) => p.id === event.target.value) ??
+                                null,
+                            )
+                          }
+                          aria-label="Apply a saved preset"
+                          title="Apply a saved preset"
+                        >
+                          <option value="">No preset</option>
+                          {presets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </>
+                  ) : null}
+
+                  {activeProjectName ? (
+                    <>
+                      <div className="composer-picker-section">Project</div>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "0 4px 6px",
+                          fontSize: 12,
+                          color: "var(--color-text-sub)",
+                        }}
+                      >
+                        <span>📁 {activeProjectName}</span>
+                        <button
+                          type="button"
+                          className="chat-tool-toggle"
+                          style={{ marginLeft: "auto" }}
+                          onClick={() => {
+                            setActiveProjectId(null);
+                            setActiveProjectName(null);
+                          }}
+                          title="Leave this project"
+                        >
+                          Leave
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+
+                  {visionReady || settings.blockTrainingProviders ? (
+                    <>
+                      <div className="composer-picker-section">This route</div>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: 6,
+                          padding: "0 4px 2px",
+                        }}
+                      >
+                        {visionReady ? (
+                          <span
+                            className="chat-privacy-chip"
+                            title={`${capitalize(effectiveComposerProvider ?? "")} can read attached images`}
+                          >
+                            <Icon name="image" size={12} /> Vision
+                          </span>
+                        ) : null}
+                        {settings.blockTrainingProviders ? (
+                          <span
+                            className="chat-privacy-chip"
+                            title="Privacy mode — only routing to providers that don't train on your data"
+                          >
+                            🛡 Privacy
+                          </span>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
           {notice && (
             <div className={`chat-composer-notice is-${notice.tone}`} role="status">
@@ -879,6 +1470,12 @@ export default function ChatPage() {
                     <>
                       <Icon name="paperclip" size={12} />
                       <span className="chat-attachment-name">{att.name}</span>
+                      {att.pages !== undefined ? (
+                        <span className="chat-attachment-meta">
+                          📄 extracted {att.pages} page{att.pages === 1 ? "" : "s"}
+                          {att.truncated ? " (truncated)" : ""}
+                        </span>
+                      ) : null}
                     </>
                   )}
                   <Tooltip content={`Remove ${att.name}`}>
@@ -899,7 +1496,7 @@ export default function ChatPage() {
             <input
               type="file"
               ref={fileInputRef}
-              accept="image/jpeg,image/png,image/webp,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
+              accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
               multiple
               style={{ display: "none" }}
               onChange={(e) => {
@@ -908,6 +1505,17 @@ export default function ChatPage() {
                 e.target.value = "";
               }}
             />
+            {/* Icons left: attach sits at the leading edge of the input row. */}
+            <Tooltip content="Attach an image (PNG/JPEG/WebP), a PDF, or a text file">
+              <button
+                type="button"
+                className="chat-attach"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach an image, PDF, or text file"
+              >
+                <Icon name="image" size={16} />
+              </button>
+            </Tooltip>
             <textarea
               ref={inputRef}
               rows={1}
@@ -935,16 +1543,41 @@ export default function ChatPage() {
               }}
               placeholder="Ask anything — routed automatically across your free providers"
             />
-            <Tooltip content="Attach an image (PNG/JPEG/WebP) or a text file">
-              <button
-                type="button"
-                className="chat-attach"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach an image or text file"
+            {/* Voice input (dictation). Honest about support: the Web Speech
+                API is Chromium-only in practice, so when unsupported we show a
+                disabled mic with a plain-spoken tooltip rather than hide it. The
+                active tooltip is honest about where the audio goes. */}
+            {speech.supported ? (
+              <Tooltip
+                content={
+                  speech.listening
+                    ? "Stop dictation"
+                    : "Dictate — uses your browser's speech service (Chrome sends audio to Google); no audio reaches Zintus"
+                }
               >
-                <Icon name="image" size={16} />
-              </button>
-            </Tooltip>
+                <button
+                  type="button"
+                  className={`chat-mic${speech.listening ? " is-listening" : ""}`}
+                  onClick={toggleDictation}
+                  aria-label={speech.listening ? "Stop dictation" : "Start dictation"}
+                  aria-pressed={speech.listening}
+                >
+                  <Icon name="mic" size={16} />
+                </button>
+              </Tooltip>
+            ) : (
+              <Tooltip content="Voice input needs a Chromium-based browser (Chrome or Edge)">
+                <button
+                  type="button"
+                  className="chat-mic"
+                  disabled
+                  aria-label="Voice input not available in this browser"
+                >
+                  <Icon name="mic" size={16} />
+                </button>
+              </Tooltip>
+            )}
+            {/* Send / stop pinned to the trailing (right) edge. */}
             {loading ? (
               <Tooltip content="Stop generating (Esc)">
                 <button
@@ -970,6 +1603,14 @@ export default function ChatPage() {
               </Tooltip>
             )}
           </div>
+          {speech.listening ? (
+            <div className="chat-mic-status" role="status" aria-live="polite">
+              <span className="chat-mic-dot" aria-hidden />
+              <span>
+                Listening{speech.transcript ? `: ${speech.transcript}` : "… speak now"}
+              </span>
+            </div>
+          ) : null}
         </div>
         <div className="chat-composer-hint">
           <kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> newline
@@ -981,6 +1622,15 @@ export default function ChatPage() {
           ) : null}
         </div>
       </div>
+    </div>
+    {artifactPanelOpen && artifactList.length > 0 ? (
+      <ArtifactPanel
+        artifacts={artifactList}
+        activeId={activeArtifactId}
+        onSelect={setActiveArtifactId}
+        onClose={() => setArtifactPanelOpen(false)}
+      />
+    ) : null}
     </div>
   );
 }

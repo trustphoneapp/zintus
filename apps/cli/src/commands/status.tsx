@@ -10,9 +10,19 @@ function QuotaBar({
   width = 30,
 }: {
   used: number;
-  limit: number;
+  limit: number | null;
   width?: number;
 }) {
+  // No reported denominator: show real usage with an honest "limit unknown"
+  // rather than drawing a bar against a fabricated ceiling.
+  if (limit == null) {
+    return (
+      <Text dimColor>
+        {used.toLocaleString()} tok used · limit unknown
+      </Text>
+    );
+  }
+
   const pct = limit > 0 ? Math.min(used / limit, 1) : 0;
   const filled = Math.round(pct * width);
   const empty = width - filled;

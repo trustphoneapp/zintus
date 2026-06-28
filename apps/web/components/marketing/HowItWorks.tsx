@@ -5,24 +5,24 @@ import { Reveal } from "./Reveal";
 const STEPS = [
   {
     number: "01",
-    title: "Install the CLI",
-    body: "One command. Works on macOS, Linux, Windows. Keys are stored in your OS keychain — never on our servers.",
-    code: "$ npm install -g zintus\n$ zintus init",
-    codeComment: "# walks you through adding free API keys",
+    title: "Add your keys",
+    body: "Drop in your API keys. They're stored in your OS keychain — never sent to our servers. Add one provider or twelve. Each one multiplies your free daily quota.",
+    code: "$ zintus keys add\n$ zintus keys list",
+    codeComment: "# stored in your OS keychain",
   },
   {
     number: "02",
     title: "The router decides",
-    body: "Checks quota across all providers in real time. Picks the fastest one with tokens remaining.",
-    code: "$ zintus chat \"explain quantum computing\"",
-    codeComment: "# → cerebras/llama-3.3-70b [38ms]",
+    body: "Zintus checks quota across all providers in real time. Short prompt? Routes to the fastest model. Long context? Picks the one with a 2M token window. Code heavy? Goes to the best coder at T0 price.",
+    code: "$ zintus chat \"summarize this contract\"",
+    codeComment: "# → widest-context model · 2M tokens",
   },
   {
     number: "03",
-    title: "Automatic fallback",
-    body: "If one provider hits its limit, Zintus instantly routes to the next. You never see an error.",
-    code: "cerebras → groq → gemini → deepseek → ollama",
-    codeComment: "# priority order, fully configurable",
+    title: "See exactly what it cost",
+    body: "Every response shows the model used, tokens consumed, and dollar cost. Your monthly balance updates in real time. No surprises at the end of the month.",
+    code: "model: fast model · tokens: 1,247\ncost: $0.004 · balance updated",
+    codeComment: "# shown after every response",
   },
 ];
 

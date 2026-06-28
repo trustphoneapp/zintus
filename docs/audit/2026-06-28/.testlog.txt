@@ -1,0 +1,144 @@
+$ export TOKZEN_HOME=${TOKZEN_HOME:-.tokzen-test}; bun run --filter tokzen build && vitest run packages/crypto-e2e/src/e2e.test.ts packages/router/src/priority.test.ts packages/router/src/cooldown.test.ts packages/router/src/groq-reset.test.ts packages/router/src/quota-core.test.ts && bun test packages/providers/src/token-estimate.test.ts packages/providers/src/utils.test.ts packages/providers/src/vcr.test.ts packages/providers/src/providers/gemini.test.ts packages/providers/src/provider-metadata.test.ts packages/providers/src/pricing.test.ts packages/providers/src/pricing-billing-guard.test.ts packages/providers/src/data-policies.test.ts packages/providers/src/capabilities.test.ts packages/schemas/src/index.test.ts packages/types/src/content.test.ts packages/media/src/images.test.ts && bun test packages/router/src/factory.test.ts packages/router/src/factory.cooldown.test.ts packages/router/src/factory.model-groups.test.ts packages/router/src/factory.latency.test.ts packages/router/src/factory.probe.test.ts packages/router/src/factory.half-open.test.ts packages/router/src/policy.test.ts packages/router/src/limits.test.ts packages/router/src/quota-ledger.test.ts packages/router/src/quota-ledger.vk.test.ts packages/router/src/inflight.test.ts packages/router/src/error-streak.test.ts packages/router/src/redact.test.ts packages/router/src/sanitize.test.ts packages/router/src/limiter.test.ts packages/router/src/weighted.test.ts packages/engine/src/engine.test.ts packages/engine/src/otel.test.ts packages/engine/src/conversation-store.test.ts packages/context-compiler/src/compiler.test.ts packages/memory/src/vector.test.ts packages/memory/src/llm-memory.test.ts packages/memory/src/embeddings.test.ts packages/memory/src/memory-consolidation.test.ts packages/memory/src/memory-store.test.ts packages/memory/src/extract.test.ts packages/keychain/src/storage.test.ts packages/cache/src/cache.test.ts apps/gateway/src/auth.test.ts apps/gateway/src/handler.test.ts apps/gateway/src/route-options.test.ts apps/gateway/src/metrics.test.ts apps/gateway/src/rate-limit.test.ts apps/web/lib/chat.test.ts apps/web/lib/crypto.test.ts apps/web/lib/worker.test.ts apps/web/lib/seo.test.ts apps/web/lib/billing.test.ts apps/web/lib/image-attachments.test.ts apps/web/lib/focus-trap.test.ts apps/web/app/_components/gateway-offline.test.ts apps/web/app/_components/markdown.test.ts apps/web/app/account/delete/account-delete.test.ts apps/web/lib/quota-intelligence.test.ts apps/desktop/lib/quota-intelligence.test.ts apps/desktop/lib/tauri.test.ts apps/cli/src/commands/keys.test.ts apps/cli/src/commands/cloud.test.ts apps/cli/src/commands/chat-content.test.ts apps/mobile/lib/gateway-url-resolve.test.ts packages/search/src/search.test.ts && bun test packages/engine/src/engine.integration.test.ts packages/engine/src/engine.failover.integration.test.ts apps/gateway/src/handler.integration.test.ts apps/gateway/src/gateway-flow.integration.test.ts apps/gateway/src/contracts.test.ts apps/gateway/src/openapi-spec.test.ts apps/gateway/src/observability.test.ts packages/search/src/search-router.test.ts && bun test packages/codebase-indexer/src/index.test.ts packages/context-compiler/src/util/diff-context.test.ts packages/context-compiler/src/smart-context.test.ts && bun test packages/tokzen/tests/ workers/relay/tests/ packages/test-utils/src/ && bun test apps/gateway/src/handler.research.test.ts
+tokzen build: CLI Building entry: src/index.ts, src/mcp/server.ts, src/ml/llmlingua.ts
+tokzen build: CLI Using tsconfig: tsconfig.build.json
+tokzen build: CLI tsup v8.5.1
+tokzen build: CLI Using tsup config: /Users/yashwanthsurabhi/Projects/zintus/packages/tokzen/tsup.config.ts
+tokzen build: CLI Target: es2022
+tokzen build: CLI Cleaning output folder
+tokzen build: ESM Build start
+tokzen build: CJS Build start
+tokzen build: ESM dist/mcp/server.js                 4.58 KB
+tokzen build: ESM dist/index.js                      2.69 KB
+tokzen build: ESM dist/ml/llmlingua.js               1.72 KB
+tokzen build: ESM dist/cache-aligner-I4S5I3DH.js     157.00 B
+tokzen build: ESM dist/chunk-TGND4S27.js             42.75 KB
+tokzen build: ESM dist/chunk-5GWTPEA5.js             2.67 KB
+tokzen build: ESM dist/chunk-7KDCI2T6.js             9.01 KB
+tokzen build: ESM dist/chunk-NOGYHKTN.js             1.24 KB
+tokzen build: ESM dist/ml/llmlingua.js.map           4.39 KB
+tokzen build: ESM dist/cache-aligner-I4S5I3DH.js.map 71.00 B
+tokzen build: ESM dist/index.js.map                  4.35 KB
+tokzen build: ESM dist/mcp/server.js.map             9.08 KB
+tokzen build: ESM dist/chunk-7KDCI2T6.js.map         18.16 KB
+tokzen build: ESM dist/chunk-5GWTPEA5.js.map         7.36 KB
+tokzen build: ESM dist/chunk-TGND4S27.js.map         92.47 KB
+tokzen build: ESM dist/chunk-NOGYHKTN.js.map         2.77 KB
+tokzen build: ESM ⚡️ Build success in 66ms
+tokzen build: CJS dist/index.cjs                      3.96 KB
+tokzen build: CJS dist/chunk-523KRH7Z.cjs             46.89 KB
+tokzen build: CJS dist/chunk-5NIUITUK.cjs             10.71 KB
+tokzen build: CJS dist/ml/llmlingua.cjs               1.95 KB
+tokzen build: CJS dist/chunk-TO2NDH3W.cjs             1.89 KB
+tokzen build: CJS dist/chunk-OX7OBC3W.cjs             3.07 KB
+tokzen build: CJS dist/mcp/server.cjs                 5.66 KB
+tokzen build: CJS dist/cache-aligner-ISK5UH33.cjs     269.00 B
+tokzen build: CJS dist/index.cjs.map                  5.55 KB
+tokzen build: CJS dist/chunk-523KRH7Z.cjs.map         75.77 KB
+tokzen build: CJS dist/ml/llmlingua.cjs.map           5.19 KB
+tokzen build: CJS dist/mcp/server.cjs.map             9.67 KB
+tokzen build: CJS dist/chunk-OX7OBC3W.cjs.map         8.59 KB
+tokzen build: CJS dist/cache-aligner-ISK5UH33.cjs.map 293.00 B
+tokzen build: CJS dist/chunk-TO2NDH3W.cjs.map         3.45 KB
+tokzen build: CJS dist/chunk-5NIUITUK.cjs.map         16.49 KB
+tokzen build: CJS ⚡️ Build success in 67ms
+tokzen build: DTS Build start
+tokzen build: DTS ⚡️ Build success in 1142ms
+tokzen build: DTS dist/index.d.ts           10.63 KB
+tokzen build: DTS dist/mcp/server.d.ts      150.00 B
+tokzen build: DTS dist/ml/llmlingua.d.ts    453.00 B
+tokzen build: DTS dist/types-Limaima0.d.ts  1.36 KB
+tokzen build: DTS dist/index.d.cts          10.63 KB
+tokzen build: DTS dist/mcp/server.d.cts     150.00 B
+tokzen build: DTS dist/ml/llmlingua.d.cts   454.00 B
+tokzen build: DTS dist/types-Limaima0.d.cts 1.36 KB
+tokzen build: Exited with code 0
+
+ RUN  v4.1.9 /Users/yashwanthsurabhi/Projects/zintus
+
+
+ Test Files  5 passed (5)
+      Tests  30 passed (30)
+   Start at  03:05:48
+   Duration  182ms (transform 159ms, setup 0ms, import 231ms, tests 56ms, environment 0ms)
+
+bun test v1.3.14 (0d9b296a)
+
+ 116 pass
+ 0 fail
+ 532 expect() calls
+Ran 116 tests across 12 files. [129.00ms]
+bun test v1.3.14 (0d9b296a)
+
+packages/keychain/src/storage.test.ts:
+[keychain] OS keychain unavailable — using an in-memory fallback (keys are not persisted). On a desktop this should not happen; on headless Linux start a Secret Service or set CI_KEYCHAIN=memory.
+
+ 402 pass
+ 0 fail
+ 1371 expect() calls
+Ran 402 tests across 50 files. [3.60s]
+bun test v1.3.14 (0d9b296a)
+
+apps/gateway/src/handler.integration.test.ts:
+[@zintus/memory] OLLAMA_HOST not set or unreachable — memory/cache similarity is using the keyword-hash fallback (token overlap), NOT semantic embeddings. Set OLLAMA_HOST for semantic recall.
+
+ 42 pass
+ 0 fail
+ 462 expect() calls
+Ran 42 tests across 8 files. [409.00ms]
+bun test v1.3.14 (0d9b296a)
+
+ 18 pass
+ 0 fail
+ 46 expect() calls
+Ran 18 tests across 3 files. [82.00ms]
+bun test v1.3.14 (0d9b296a)
+
+workers/relay/tests/account-delete.test.ts:
+account.delete.stripe Error: Stripe cancel error: nope
+
+packages/tokzen/tests/pipeline.test.ts:
+[tokzen] AST mode: javascript
+
+packages/tokzen/tests/code-ast.test.ts:
+[tokzen] AST mode: typescript
+[tokzen] AST mode: python
+
+packages/tokzen/tests/evals.test.ts:
+
+[tokzen eval] Running tier 1 (8 samples per benchmark)
+
+=== Tokzen Eval Results ===
+
+Benchmark                 Samples  Baseline   Compressed   Delta    Ratio    Pass
+-------------------------------------------------------------------------------------
+GSM8K                     8        100.0      100.0        +0.0%    42%      ✓
+TruthfulQA                8        100.0      100.0        +0.0%    100%     ✓
+SQuAD                     8        100.0      100.0        +0.0%    100%     ✓
+BCFL                      8        100.0      100.0        +0.0%    100%     ✓
+CCR Needle Retention      8        100.0      100.0        +0.0%    100%     ✓
+
+
+[tokzen eval] Running tier 1 (8 samples per benchmark)
+
+=== Tokzen Eval Results ===
+
+Benchmark                 Samples  Baseline   Compressed   Delta    Ratio    Pass
+-------------------------------------------------------------------------------------
+GSM8K                     8        100.0      100.0        +0.0%    42%      ✓
+TruthfulQA                8        100.0      100.0        +0.0%    100%     ✓
+SQuAD                     8        100.0      100.0        +0.0%    100%     ✓
+BCFL                      8        100.0      100.0        +0.0%    100%     ✓
+CCR Needle Retention      8        100.0      100.0        +0.0%    100%     ✓
+
+
+ 306 pass
+ 0 fail
+ 1216 expect() calls
+Ran 306 tests across 35 files. [518.00ms]
+bun test v1.3.14 (0d9b296a)
+
+ 5 pass
+ 0 fail
+ 27 expect() calls
+Ran 5 tests across 1 file. [324.00ms]
+EXIT=0

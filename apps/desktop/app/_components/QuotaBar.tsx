@@ -6,10 +6,13 @@ export function QuotaBar({
   label,
 }: {
   used: number;
-  limit: number;
+  /** null when the gateway reports no quota ceiling — render "limit unknown",
+   *  never a fake percentage against a fabricated denominator. */
+  limit: number | null;
   label?: string;
 }) {
-  const pct = limit > 0 ? Math.min(used / limit, 1) : 0;
+  const known = limit != null && limit > 0;
+  const pct = known ? Math.min(used / limit, 1) : 0;
   // Usage framing (pct = fraction used). --color-yellow was undefined on desktop
   // — use the shared design-system thresholds.
   const color =
@@ -33,7 +36,7 @@ export function QuotaBar({
         >
           <span>{label}</span>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
-            {Math.round(pct * 100)}%
+            {known ? `${Math.round(pct * 100)}%` : "limit unknown"}
           </span>
         </div>
       )}
@@ -66,7 +69,7 @@ export function QuotaBar({
               textAlign: "right",
             }}
           >
-            {Math.round(pct * 100)}%
+            {known ? `${Math.round(pct * 100)}%` : "limit unknown"}
           </span>
         )}
       </div>
