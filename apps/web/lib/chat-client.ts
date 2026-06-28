@@ -11,11 +11,14 @@ import type {
 import {
   fetchGatewayHealth,
   streamGatewayChat,
+  type ChatMcpConfig,
   type ChatMeta,
   type CompressionStats,
+  type McpToolEvent,
 } from "./gateway";
 
 export { UnsupportedCapabilityError } from "./gateway";
+export type { ChatMcpConfig, McpToolEvent } from "./gateway";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -71,6 +74,8 @@ export interface StreamChatResult {
   /** Tool calls the model made this turn (empty for a normal text turn). The
    *  caller runs the tools and sends results back as tool_result blocks. */
   toolCalls?: ToolCallContentBlock[];
+  /** Server-side MCP tool-loop events emitted this turn (display only). */
+  toolEvents?: McpToolEvent[];
   source: "gateway";
 }
 
@@ -96,8 +101,13 @@ export async function streamChat(params: {
   toolChoice?: ToolChoice;
   /** Structured-output request (e.g. { type: "json_object" }). */
   responseFormat?: ResponseFormat;
+  /** Configured MCP servers for this turn — the gateway runs them server-side
+   *  and streams tool-loop events; the web only displays them. */
+  mcp?: ChatMcpConfig;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
+  /** Live callback for each server-side MCP tool-loop event (call/result). */
+  onMcpToolEvent?: (event: McpToolEvent) => void;
 }): Promise<StreamChatResult> {
   const gatewayUp = await isGatewayAvailable();
 
@@ -123,8 +133,10 @@ export async function streamChat(params: {
     tools: params.tools,
     toolChoice: params.toolChoice,
     responseFormat: params.responseFormat,
+    mcp: params.mcp,
     signal: params.signal,
     onChunk: params.onChunk,
+    onMcpToolEvent: params.onMcpToolEvent,
   });
 
   return { ...result, source: "gateway" };

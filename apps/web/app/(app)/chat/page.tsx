@@ -20,8 +20,11 @@ import {
   streamChat,
   sanitizeSendHistory,
   UnsupportedCapabilityError,
+  type ChatMcpConfig,
   type ChatMessage,
+  type McpToolEvent,
 } from "@/lib/chat-client";
+import { activeMcpServersForChat, loadMcpServers } from "@/lib/mcp-config";
 import { processImage, MediaError } from "@zintus/media";
 import type { ContentBlock, ImageContentBlock } from "@zintus/types";
 import {
@@ -101,6 +104,33 @@ function capitalize(s: string): string {
 }
 
 /**
+ * Build the chat body's `mcp` block from the user's enabled MCP servers (PR2's
+ * `loadMcpServers` → `activeMcpServersForChat`), plus the active tool count for
+ * the header indicator. The gateway runs these tools SERVER-SIDE; the web only
+ * displays the resulting activity. Returns `undefined` when nothing is enabled.
+ */
+function activeMcpForChat(): {
+  mcp: ChatMcpConfig | undefined;
+  toolCount: number;
+} {
+  const { servers } = activeMcpServersForChat(loadMcpServers());
+  if (servers.length === 0) {
+    return { mcp: undefined, toolCount: 0 };
+  }
+  const enabledTools = servers.flatMap((s) => s.enabledTools);
+  return {
+    mcp: {
+      servers: servers.map((s) => s.config),
+      // Omit when no concrete tool names are known yet (server enabled but not
+      // tested) so the gateway offers every tool it discovers rather than
+      // suppressing them all with an empty allow-list.
+      ...(enabledTools.length > 0 ? { enabledTools } : {}),
+    },
+    toolCount: enabledTools.length,
+  };
+}
+
+/**
  * Which web-search strategy the gateway will use for the selected provider —
  * surfaced as the toggle's tooltip so the cost/path is clear before sending.
  * Mirrors getSearchStrategy() in @zintus/search.
@@ -170,6 +200,9 @@ export default function ChatPage() {
   const [consentOpen, setConsentOpen] = useState(false);
   const [notice, setNotice] = useState<ComposerNotice | null>(null);
   const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
+  // Count of MCP tools active this chat (header indicator). Read from localStorage
+  // on mount + when the window regains focus (e.g. after editing /settings/mcp).
+  const [mcpToolCount, setMcpToolCount] = useState(0);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [activePreset, setActivePreset] = useState<Preset | null>(null);
   // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
@@ -276,6 +309,16 @@ export default function ChatPage() {
     setPresets(loadPresets());
     setActiveProjectName(getActiveProject()?.name ?? null);
   }, [hydrate, unlock]);
+
+  // Keep the header's "🔧 N tools active" indicator in sync with the user's MCP
+  // settings (localStorage): recompute on mount + whenever the window regains
+  // focus (the user may have just changed servers in /settings/mcp).
+  useEffect(() => {
+    const refresh = () => setMcpToolCount(activeMcpForChat().toolCount);
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, []);
 
   const applyPreset = useCallback(
     (preset: Preset | null) => {
@@ -485,6 +528,11 @@ export default function ChatPage() {
       let currentAssistantId = assistantId;
       const MAX_TOOL_ROUNDS = 5;
 
+      // The user's enabled MCP servers for this turn (read fresh, like apiKeys).
+      // When present the gateway runs the tools SERVER-SIDE and streams
+      // `mcp_tool_call`/`mcp_tool_result` events; we only display them.
+      const { mcp } = activeMcpForChat();
+
       // Catalog "Use this model": route to the exact chosen model, but ONLY when it
       // belongs to the currently-selected provider (avoid a stale model after the
       // user switches providers in the composer).
@@ -507,6 +555,9 @@ export default function ChatPage() {
       try {
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
           let streamedText = "";
+          // Server-side MCP tool-loop events for THIS round's request, accumulated
+          // and patched onto the active assistant bubble as they stream in.
+          const roundMcpEvents: McpToolEvent[] = [];
           const result = await streamChat({
             messages: convo,
             providerId: selectedProvider ?? undefined,
@@ -524,10 +575,17 @@ export default function ChatPage() {
             temperature: activePreset?.temperature,
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
             responseFormat: jsonEnabled ? { type: "json_object" } : undefined,
+            mcp,
             signal: controller.signal,
             onChunk: (text) => {
               streamedText = text;
               updateMessage(currentAssistantId, text);
+            },
+            onMcpToolEvent: (event) => {
+              roundMcpEvents.push(event);
+              patchMessage(currentAssistantId, {
+                mcpToolEvents: [...roundMcpEvents],
+              });
             },
           });
 
@@ -1007,6 +1065,22 @@ export default function ChatPage() {
           ) : null}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* MCP indicator: shown only when the user has enabled servers with
+              tools. The gateway runs these tools server-side; this links to the
+              settings page to manage them. */}
+          {mcpToolCount > 0 ? (
+            <a
+              href="/settings/mcp"
+              className="chat-tool-toggle"
+              title="MCP tools available to the model this chat — manage in settings"
+              style={{
+                textDecoration: "none",
+                color: "var(--color-purple-light, #7C3AED)",
+              }}
+            >
+              🔧 {mcpToolCount} tool{mcpToolCount === 1 ? "" : "s"} active
+            </a>
+          ) : null}
           {/* New-chat affordance with an incognito option in its menu. */}
           <div className="composer-picker" ref={newChatRef}>
             <button
@@ -1141,6 +1215,7 @@ export default function ChatPage() {
               key={message.id}
               message={message}
               toolCalls={message.toolCalls}
+              mcpToolEvents={message.mcpToolEvents}
               isStreaming={loading && message.id === lastAssistantId}
               artifacts={artifactsByMessage[message.id]}
               onOpenArtifact={openArtifact}

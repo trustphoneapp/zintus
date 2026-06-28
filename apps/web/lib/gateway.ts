@@ -638,6 +638,12 @@ interface GatewayChunk {
   routing_strategy?: string;
   route_reason?: string;
   private_mode_honored?: boolean;
+  // server-side MCP tool-loop event fields (type === "mcp_tool_call" |
+  // "mcp_tool_result"). A result frame carries the call id + outcome at the top
+  // level (its `choices` is empty); a call frame reuses the tool-call delta shape.
+  tool_call_id?: string;
+  is_error?: boolean;
+  content?: string;
 }
 
 /** Per-response transparency metadata (parsed from the SSE metadata event). */
@@ -759,6 +765,134 @@ export function finalizeToolCalls(
     });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-side MCP tool loop — the gateway (PR3) runs the MCP tools itself and
+// streams progress as `mcp_tool_call` / `mcp_tool_result` SSE frames ALONGSIDE
+// the normal text stream. The web NEVER executes these tools — it only displays
+// them. These pure helpers parse a frame into a calm, secret-safe UI event and
+// are unit-tested directly (no `fetch` mock needed).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The `mcp` block the chat body carries: the gateway connects each server and
+ *  runs the tool loop server-side. Shape mirrors @zintus/schemas MCPRequest. */
+export interface ChatMcpConfig {
+  servers: MCPServerConfig[];
+  /** Allow-list of tool names (raw or namespaced). Omit to offer every tool the
+   *  servers advertise. */
+  enabledTools?: string[];
+}
+
+/** One ordered MCP tool-loop event surfaced to the UI. A `call` names the tool;
+ *  the matching `result` (same `id`) reports success/char-count or an error. */
+export type McpToolEvent =
+  | {
+      kind: "call";
+      /** tool_call id — pairs a later `result` back to this call. */
+      id: string;
+      /** Server segment of the namespaced name (a stable hash, may be ""). */
+      server: string;
+      /** Server-local tool name (e.g. "read_file"). */
+      tool: string;
+      /** Parameter NAMES only — never values (no secret leakage). "" when none. */
+      argsSummary: string;
+    }
+  | {
+      kind: "result";
+      id: string;
+      ok: boolean;
+      /** "234 chars" on success, or the (truncated) error message. */
+      summary: string;
+    };
+
+const MCP_TOOL_PREFIX = "mcp__";
+
+/**
+ * Split a gateway MCP tool name `mcp__<serverId>__<tool>` into its parts. The
+ * serverId is the hex hash up to the FIRST `__` after the prefix; the rest is the
+ * tool name (which may itself contain `__`). A non-MCP name yields the whole name
+ * as `tool`. Local mirror of apps/gateway/src/mcp-bridge.ts `parseMcpToolName`
+ * (gateway `src/` isn't importable from the web bundle).
+ */
+export function splitMcpToolName(name: string): { server: string; tool: string } {
+  if (!name.startsWith(MCP_TOOL_PREFIX)) {
+    return { server: "", tool: name };
+  }
+  const rest = name.slice(MCP_TOOL_PREFIX.length);
+  const sep = rest.indexOf("__");
+  if (sep <= 0) {
+    return { server: "", tool: rest };
+  }
+  return { server: rest.slice(0, sep), tool: rest.slice(sep + 2) };
+}
+
+/**
+ * A calm, secret-safe summary of tool arguments: the parameter NAMES only, never
+ * their values (which may carry secrets). Returns "" for empty / non-object args.
+ */
+export function summarizeToolArgs(raw: string | undefined): string {
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.keys(parsed as Record<string, unknown>).join(", ");
+    }
+  } catch {
+    // not JSON — show nothing rather than dumping a raw fragment
+  }
+  return "";
+}
+
+/**
+ * A short result summary: the char count on success, or the (truncated) message
+ * on error. Never dumps the full body — honesty without leaking large/secret
+ * tool output into the transcript.
+ */
+export function summarizeToolResult(
+  content: string | undefined,
+  isError: boolean,
+): string {
+  const text = content ?? "";
+  if (isError) {
+    const msg = text.trim() || "the tool reported an error";
+    return msg.length > 120 ? `${msg.slice(0, 117)}…` : msg;
+  }
+  const n = text.length;
+  return `${n} char${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Parse a streamed chunk into an `McpToolEvent`, or null when it isn't an MCP
+ * frame. Matches the gateway frames precisely: `mcp_tool_call` reuses the
+ * tool-call delta shape (`choices[0].delta.tool_calls[0]`); `mcp_tool_result`
+ * carries `tool_call_id` / `is_error` / `content` at the top level. Pure +
+ * exported so the parsing is unit-tested without mocking `fetch`.
+ */
+export function parseMcpToolEvent(chunk: GatewayChunk): McpToolEvent | null {
+  if (chunk.type === "mcp_tool_call") {
+    const tc = chunk.choices?.[0]?.delta?.tool_calls?.[0];
+    if (!tc) return null;
+    const name = tc.function?.name ?? "";
+    const { server, tool } = splitMcpToolName(name);
+    return {
+      kind: "call",
+      id: tc.id ?? "",
+      server,
+      tool: tool || name,
+      argsSummary: summarizeToolArgs(tc.function?.arguments),
+    };
+  }
+  if (chunk.type === "mcp_tool_result") {
+    const isError = chunk.is_error ?? false;
+    return {
+      kind: "result",
+      id: chunk.tool_call_id ?? "",
+      ok: !isError,
+      summary: summarizeToolResult(chunk.content, isError),
+    };
+  }
+  return null;
+}
+
 export async function streamGatewayChat(params: {
   // Content is `string` (text-only) OR an ordered `ContentBlock[]` (multimodal:
   // a text block followed by image blocks). The gateway reads images from these
@@ -788,8 +922,15 @@ export async function streamGatewayChat(params: {
   /** Structured-output request (e.g. { type: "json_object" }). The gateway
    *  resolves the best level the chosen provider can serve. */
   responseFormat?: ResponseFormat;
+  /** Configured MCP servers for this turn. When present the gateway runs a
+   *  SERVER-SIDE tool loop and streams `mcp_tool_call`/`mcp_tool_result` events;
+   *  the web only displays them (it never executes these tools). */
+  mcp?: ChatMcpConfig;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
+  /** Live callback for each server-side MCP tool-loop event (call/result), in
+   *  arrival order — lets the UI render activity as it streams. */
+  onMcpToolEvent?: (event: McpToolEvent) => void;
 }): Promise<{
   providerId: ProviderId;
   model: string;
@@ -801,6 +942,9 @@ export async function streamGatewayChat(params: {
   /** Tool calls the model made this turn (empty for a normal text turn). The
    *  caller runs the tools and sends results back as `tool_result` blocks. */
   toolCalls?: ToolCallContentBlock[];
+  /** Ordered server-side MCP tool-loop events emitted this turn (empty when no
+   *  MCP servers were configured). Display-only — the gateway already ran them. */
+  toolEvents?: McpToolEvent[];
 }> {
   const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
     method: "POST",
@@ -823,6 +967,9 @@ export async function streamGatewayChat(params: {
       tools: params.tools,
       tool_choice: params.toolChoice,
       response_format: params.responseFormat,
+      // Present ONLY when the user has MCP servers enabled. The gateway connects
+      // them and runs the tool loop server-side (the web never executes them).
+      mcp: params.mcp,
       // BYOK keys are only ever sent to a LOCAL gateway — never across the
       // network (would leak keys in a plaintext body to a remote host).
       keys:
@@ -880,11 +1027,24 @@ export async function streamGatewayChat(params: {
   // finalize are pure helpers (accumulateToolCallDeltas / finalizeToolCalls) so
   // the fragile reassembly is unit-tested directly (see gateway.test.ts).
   const toolCallsByIndex: ToolCallAccumulator = new Map();
+  // Ordered server-side MCP tool-loop events (call/result). These ride the same
+  // stream as the text but are a SEPARATE channel — display only.
+  const toolEvents: McpToolEvent[] = [];
 
   await readSseData(response, (payload) => {
     const chunk = payload as GatewayChunk;
     if (chunk.error?.message) {
       throw new Error(chunk.error.message);
+    }
+
+    // Server-side MCP frames first: they reuse the tool-call delta shape, so they
+    // MUST be peeled off here, before accumulateToolCallDeltas would fold them
+    // into the (client) tool-call channel.
+    const mcpEvent = parseMcpToolEvent(chunk);
+    if (mcpEvent) {
+      toolEvents.push(mcpEvent);
+      params.onMcpToolEvent?.(mcpEvent);
+      return;
     }
 
     if (chunk.type === "metadata" && chunk.provider) {
@@ -935,5 +1095,6 @@ export async function streamGatewayChat(params: {
     meta,
     compression,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    toolEvents: toolEvents.length > 0 ? toolEvents : undefined,
   };
 }

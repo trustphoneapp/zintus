@@ -6,6 +6,7 @@ import type {
   CompressionStats,
   GatewayProviderStatus,
   GatewaySavings,
+  McpToolEvent,
 } from "./gateway";
 
 /** Image-attachment metadata shown on a sent user bubble. Metadata ONLY — the
@@ -46,6 +47,8 @@ export interface UiMessage {
   images?: UiImageMeta[];
   /** Tool calls the assistant made on this turn (rendered as call cards). */
   toolCalls?: ToolCall[];
+  /** Server-side MCP tool-loop activity for this turn (call/result lines). */
+  mcpToolEvents?: McpToolEvent[];
   time: string;
 }
 
@@ -81,7 +84,7 @@ interface AppState {
   terminalLines: TerminalLine[];
   appendMessage: (message: UiMessage) => void;
   updateMessage: (id: string, content: string) => void;
-  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens" | "meta" | "compression" | "toolCalls">>) => void;
+  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens" | "meta" | "compression" | "toolCalls" | "mcpToolEvents">>) => void;
   setThreadId: (threadId?: string) => void;
   setActiveProvider: (providerId: ProviderId | null) => void;
   setSelectedProvider: (providerId: ProviderId | null) => void;
