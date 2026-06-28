@@ -21,10 +21,11 @@ core stays free; no key custody.
 - **`zintus agent`** — a sandboxed coding agent loop (read/search + gated apply-edit; traversal/symlink-escape blocked, 26 security tests).
 - **Deeper research** — cross-verification passes + structurally-bound citations.
 
-**MCP (Model Context Protocol) — feature-complete end-to-end**
+**MCP (Model Context Protocol) — feature-complete on every surface**
 - `@zintus/mcp` client on the official SDK (stdio + SSE + Streamable HTTP).
 - Gateway **hosts** MCP (registry + cache), `/v1/mcp/discover`, and a **server-side bounded tool loop** (browsers can't spawn stdio; keeps MCP traffic off the relay).
-- Web **settings/mcp** UI (add/test/enable servers) + **chat integration** (tool calls/results stream into chat; "🔧 N tools active").
+- **All four surfaces**: web · desktop · CLI · mobile each configure servers + use them in chat (tool calls/results stream in; "🔧 N tools active"). Type-only `@zintus/mcp` on web/desktop/mobile (no SDK in any webview/RN bundle).
+- **`zintus agent` + MCP**: the sandboxed coding agent hosts MCP directly (Bun) and wields **file tools + any MCP tool** in one loop — Cursor has the agent, Claude Desktop has MCP; this has both, over a router.
 - The unique combination: **MCP tools + the best/cheapest model across 12 providers.**
 
 **Honesty fixes (found by the competitor-debate / audits)**
@@ -38,9 +39,10 @@ Chat **7.5** · Router **7** · Research ~7 · Agentic ~5–6 · **Overall ~7.5/
 Full detail: `docs/audit/2026-06-28/ten-out-of-ten/` (VERDICT, FINAL-SCORECARD, RE-SCORE).
 
 ## Testing
-~1,340 tests pass (0 fail) across 107 files; `bun run typecheck` clean. Every PR was
+~1,400 tests pass (0 fail) across 112 files; `bun run typecheck` clean. Every PR was
 verified green before commit; the agent-loop sandbox + BYOK auth-retry path were
-reviewed by hand.
+reviewed by hand. (Test total is the runner's batch aggregate — CI gives the
+canonical figure.)
 
 ## Not in scope — [HUMAN]/device/business (documented, never faked)
 In-browser CSP verify (PDF + artifact iframe); live MCP/agent/research runs; mobile
