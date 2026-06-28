@@ -2,10 +2,20 @@ import type {
   ChatMessage,
   ContextMode,
   ProviderId,
+  ResponseFormat,
   RoutingStrategy,
 } from "@zintus/types";
 
+import {
+  buildChatRequestBody,
+  parseChatMeta,
+  type ChatMeta,
+  type GatewayChunk,
+} from "./messages";
 import { getGatewayUrl } from "./gateway-url";
+
+export type { ChatMeta } from "./messages";
+export { buildChatRequestBody, parseChatMeta } from "./messages";
 
 // Re-exported so existing importers (`@/lib/chat`) keep working; resolution
 // (user-saved → env → dev host → localhost) lives in lib/gateway-url.
@@ -24,16 +34,12 @@ export interface StreamChatParams {
   mode?: ContextMode;
   messages: ChatMessage[];
   threadId?: string;
+  /** Structured-output request. `{ type: "json_object" }` asks the provider for
+   *  syntactically-valid JSON; the gateway resolves the best level the chosen
+   *  provider can actually serve (never claims more than it returns). */
+  responseFormat?: ResponseFormat;
   onChunk: (text: string) => void;
   signal?: AbortSignal;
-}
-
-interface GatewayChunk {
-  choices?: Array<{ delta?: { content?: string } }>;
-  provider?: ProviderId;
-  model?: string;
-  thread_id?: string;
-  error?: { message?: string };
 }
 
 export async function streamChat({
@@ -42,6 +48,7 @@ export async function streamChat({
   mode,
   messages,
   threadId,
+  responseFormat,
   onChunk,
   signal,
 }: StreamChatParams): Promise<{
@@ -49,18 +56,21 @@ export async function streamChat({
   model: string;
   threadId?: string;
   traceId?: string;
+  meta?: ChatMeta;
 }> {
   const response = await fetch(`${getGatewayUrl()}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
-    body: JSON.stringify({
-      messages,
-      stream: true,
-      provider: providerId,
-      strategy,
-      mode,
-      thread_id: threadId,
-    }),
+    body: JSON.stringify(
+      buildChatRequestBody({
+        messages,
+        providerId,
+        strategy,
+        mode,
+        threadId,
+        responseFormat,
+      }),
+    ),
     signal,
   });
 
@@ -82,6 +92,7 @@ export async function streamChat({
   let model = "unknown";
   let resolvedThreadId = threadId;
   let traceId: string | undefined;
+  let meta: ChatMeta | undefined;
   let output = "";
 
   while (true) {
@@ -108,7 +119,17 @@ export async function streamChat({
         throw new Error(chunk.error.message);
       }
 
-      traceId = (chunk as { id?: string }).id ?? traceId;
+      // Metadata frame (route reason, latency, tokens) — parse and continue;
+      // it carries no content delta and its `model` is the resolved winner.
+      const frameMeta = parseChatMeta(chunk);
+      if (frameMeta) {
+        meta = frameMeta;
+        provider = frameMeta.provider;
+        model = frameMeta.model;
+        continue;
+      }
+
+      traceId = chunk.id ?? traceId;
       provider = chunk.provider ?? provider;
       model = chunk.model ?? model;
       resolvedThreadId = chunk.thread_id ?? resolvedThreadId;
@@ -130,5 +151,6 @@ export async function streamChat({
     model,
     threadId: resolvedThreadId,
     traceId,
+    meta,
   };
 }

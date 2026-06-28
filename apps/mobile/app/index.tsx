@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  Platform,
   Pressable,
   Share,
   StyleSheet,
@@ -11,10 +12,16 @@ import {
 } from "react-native";
 import type { ProviderId } from "@zintus/types";
 import { useFocusEffect, useRouter } from "expo-router";
+import type { ResponseFormat } from "@zintus/types";
 import { streamChat, getGatewayUrl } from "@/lib/chat";
 import { fetchGatewayHealth } from "@/lib/gateway";
-import { loadConfig, loadSelectedProvider } from "@/lib/config";
-import { toChatMessages } from "@/lib/messages";
+import {
+  loadConfig,
+  loadJsonMode,
+  loadSelectedProvider,
+  saveJsonMode,
+} from "@/lib/config";
+import { toChatMessages, type ChatMeta } from "@/lib/messages";
 import { migrateLegacyKeys } from "@/lib/secure-keys";
 import { COLORS } from "@/lib/theme";
 
@@ -29,6 +36,23 @@ interface Message {
   streaming?: boolean;
   providerId?: ProviderId;
   model?: string;
+  /** Transparency metadata (route reason, latency) for an assistant turn. */
+  meta?: ChatMeta;
+}
+
+/** Returns a pretty-printed JSON string iff `content` is a JSON object/array,
+ *  else null. Lets a `response_format: json_object` turn render as formatted
+ *  JSON without ever fabricating structure (mirrors desktop's auto-detect). */
+function asStructuredJson(content: string): string | null {
+  const trimmed = content.trim();
+  if (!trimmed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+    return null;
+  }
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return null;
+  }
 }
 
 export default function ChatScreen() {
@@ -41,9 +65,11 @@ export default function ChatScreen() {
   const [error, setError] = useState<string | null>(null);
   const [gatewayOnline, setGatewayOnline] = useState(true);
   const [gatewayChecked, setGatewayChecked] = useState(false);
+  const [jsonMode, setJsonMode] = useState(false);
 
   useEffect(() => {
     void migrateLegacyKeys();
+    setJsonMode(loadJsonMode());
   }, []);
 
   useEffect(() => {
@@ -107,12 +133,19 @@ export default function ChatScreen() {
     setSending(true);
     setError(null);
 
+    // When JSON mode is on, ask the gateway for json_object structured output;
+    // it resolves the best level the routed provider can actually serve.
+    const responseFormat: ResponseFormat | undefined = jsonMode
+      ? { type: "json_object" }
+      : undefined;
+
     try {
       const result = await streamChat({
         // "auto" -> send no provider so the gateway routes by strategy.
         providerId: selectedProvider === "auto" ? undefined : selectedProvider,
         strategy: selectedProvider === "auto" ? config.routingStrategy : undefined,
         mode: config.contextMode,
+        responseFormat,
         messages: toChatMessages([...messages, userMessage]),
         onChunk: (text) => {
           setMessages((current) =>
@@ -133,6 +166,7 @@ export default function ChatScreen() {
                 streaming: false,
                 providerId: result.providerId,
                 model: result.model,
+                meta: result.meta,
                 content:
                   message.content ||
                   `[${result.providerId}/${result.model}] (empty response)`,
@@ -185,6 +219,28 @@ export default function ChatScreen() {
             </Text>
           </Pressable>
           <Pressable
+            style={({ pressed }) => [
+              styles.chip,
+              jsonMode && styles.chipActive,
+              pressed && styles.pressed,
+            ]}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: jsonMode }}
+            onPress={() => {
+              setJsonMode((current) => {
+                const next = !current;
+                saveJsonMode(next);
+                return next;
+              });
+            }}
+          >
+            <Text
+              style={[styles.chipText, jsonMode && styles.chipTextActive]}
+            >
+              {"{} JSON"}
+            </Text>
+          </Pressable>
+          <Pressable
             style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
             onPress={() => {
               router.push("/providers");
@@ -230,6 +286,13 @@ export default function ChatScreen() {
         }
         renderItem={({ item }) => {
           const isUser = item.role === "user";
+          // The headline "why this provider/model" — the prominent route reason
+          // from the gateway's metadata frame. Mirrors web/desktop's top-line pill.
+          const routeReason = !isUser ? item.meta?.routeReason : undefined;
+          // Render a settled assistant turn that is itself JSON as formatted
+          // monospace (the response_format: json_object path), never faking it.
+          const structuredJson =
+            !isUser && !item.streaming ? asStructuredJson(item.content) : null;
           return (
             <View
               style={[
@@ -237,10 +300,21 @@ export default function ChatScreen() {
                 isUser ? styles.userBubble : styles.assistantBubble,
               ]}
             >
+              {routeReason ? (
+                <Text style={styles.routeReason} numberOfLines={2}>
+                  {routeReason}
+                </Text>
+              ) : null}
+
               {item.streaming && !item.content ? (
                 <View style={styles.typingRow}>
                   <ActivityIndicator size="small" color={COLORS.accentBright} />
                   <Text style={styles.typingText}>Thinking…</Text>
+                </View>
+              ) : structuredJson ? (
+                <View style={styles.jsonBlock}>
+                  <Text style={styles.jsonLabel}>JSON output</Text>
+                  <Text style={styles.jsonText}>{structuredJson}</Text>
                 </View>
               ) : (
                 <Text style={[styles.bubbleText, isUser && styles.userBubbleText]}>
@@ -257,6 +331,9 @@ export default function ChatScreen() {
                     <Text style={styles.attribution}>
                       {item.providerId}
                       {item.model ? ` · ${item.model}` : ""}
+                      {item.meta?.latencyMs
+                        ? ` · ${item.meta.latencyMs} ms`
+                        : ""}
                     </Text>
                   ) : (
                     <View />
@@ -396,6 +473,32 @@ const styles = StyleSheet.create({
   assistantBubble: { alignSelf: "flex-start", backgroundColor: COLORS.panel },
   bubbleText: { color: COLORS.ink },
   userBubbleText: { color: COLORS.onAccent },
+  routeReason: {
+    color: COLORS.accentBright,
+    fontSize: 12,
+    fontWeight: "600",
+    marginBottom: 6,
+  },
+  jsonBlock: {
+    backgroundColor: COLORS.surface,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 10,
+  },
+  jsonLabel: {
+    color: COLORS.muted,
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
+  jsonText: {
+    color: COLORS.ink,
+    fontSize: 12,
+    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  },
   cursor: { color: COLORS.accentBright },
   typingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   typingText: { color: COLORS.muted, fontSize: 13 },

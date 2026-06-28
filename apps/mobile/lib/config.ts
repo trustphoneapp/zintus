@@ -9,6 +9,7 @@ import {
 const storage = createMMKV({ id: "zintus.config" });
 const STORAGE_KEY = "config";
 const SELECTED_PROVIDER_KEY = "selectedProvider";
+const JSON_MODE_KEY = "jsonMode";
 
 export function loadConfig(): AppConfig {
   const raw = storage.getString(STORAGE_KEY);
@@ -39,6 +40,20 @@ export function loadSelectedProvider(): ProviderId {
 
 export function saveSelectedProvider(providerId: ProviderId): void {
   storage.set(SELECTED_PROVIDER_KEY, providerId);
+}
+
+/**
+ * Structured-output (JSON) toggle for the chat composer, persisted across
+ * launches. When on, a turn requests `response_format: { type: "json_object" }`;
+ * the gateway resolves the best level the routed provider can serve. Mirrors
+ * desktop's persisted `zintus:desktop-json` flag.
+ */
+export function loadJsonMode(): boolean {
+  return storage.getBoolean(JSON_MODE_KEY) ?? false;
+}
+
+export function saveJsonMode(enabled: boolean): void {
+  storage.set(JSON_MODE_KEY, enabled);
 }
 
 export const ROUTING_STRATEGIES: Array<{
