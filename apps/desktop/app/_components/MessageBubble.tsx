@@ -88,8 +88,10 @@ function ToolCallCard({ call }: { call: ToolCall }) {
  * expose copy / regenerate actions. An empty assistant message shows a typing
  * indicator while the gateway response is in flight.
  *
- * Tool/function calls and structured (JSON) output are accepted purely as props
- * (the ChatPanel passes them) so the store's message type stays untouched.
+ * Tool/function calls are passed as props. Structured (JSON) output is rendered
+ * either from an explicit `structured` prop OR auto-detected when the assistant's
+ * answer body is itself JSON — which is how a `response_format: json_object` turn
+ * (the composer's JSON toggle) surfaces, with no fake structure ever claimed.
  */
 export function MessageBubble({
   message,
@@ -143,7 +145,38 @@ export function MessageBubble({
   }
 
   if (isUser) {
-    return <div className="chat-bubble-user">{message.content}</div>;
+    const images = message.images ?? [];
+    return (
+      <div className="chat-bubble-user">
+        {images.length > 0 ? (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: message.content ? 6 : 0 }}>
+            {images.map((img, i) => (
+              <span
+                key={`${img.name}-${i}`}
+                title={`${img.name} · ${img.width}×${img.height}${img.exifStripped ? " · EXIF stripped" : ""}`}
+                style={{ display: "inline-flex", alignItems: "center" }}
+              >
+                {img.previewUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={img.previewUrl}
+                    alt={img.name}
+                    width={120}
+                    height={120}
+                    style={{ maxWidth: 120, maxHeight: 120, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(255,255,255,0.18)" }}
+                  />
+                ) : (
+                  // Object URL didn't survive (e.g. after reload): show metadata only,
+                  // never base64 — the bytes are not kept in history.
+                  <span style={{ fontSize: 12, opacity: 0.85 }}>🖼 {img.name}</span>
+                )}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {message.content}
+      </div>
+    );
   }
 
   const hasContent = Boolean(message.content);

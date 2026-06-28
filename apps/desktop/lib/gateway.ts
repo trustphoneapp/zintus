@@ -2,6 +2,7 @@ import type {
   ContentBlock,
   ContextMode,
   ProviderId,
+  ResponseFormat,
   RoutingStrategy,
   ToolCallContentBlock,
   ToolChoice,
@@ -378,6 +379,10 @@ export async function streamGatewayChat(params: {
    *  the gateway returns a 422 UnsupportedCapabilityError otherwise. */
   tools?: ToolDefinition[];
   toolChoice?: ToolChoice;
+  /** Structured-output request. `{ type: "json_object" }` asks the provider for
+   *  syntactically-valid JSON; the gateway resolves the best level the chosen
+   *  provider can actually serve (never claims more than it returns). */
+  responseFormat?: ResponseFormat;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<{
@@ -414,6 +419,7 @@ export async function streamGatewayChat(params: {
       block_training: params.blockTraining,
       tools: params.tools,
       tool_choice: params.toolChoice,
+      response_format: params.responseFormat,
     }),
     signal: params.signal,
   });

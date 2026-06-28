@@ -3,6 +3,7 @@ import type {
   ContentBlock,
   ContextMode,
   ProviderId,
+  ResponseFormat,
   ToolCallContentBlock,
   ToolChoice,
   ToolDefinition,
@@ -93,6 +94,10 @@ export async function streamChat(params: {
    *  the gateway returns a structured 422 otherwise. */
   tools?: ToolDefinition[];
   toolChoice?: ToolChoice;
+  /** Structured-output request (e.g. `{ type: "json_object" }`). The gateway
+   *  resolves the best level the routed provider can serve; we only render what
+   *  it actually returns. */
+  responseFormat?: ResponseFormat;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<StreamChatResult> {
@@ -105,6 +110,7 @@ export async function streamChat(params: {
     blockTraining: params.settings.blockTrainingProviders,
     tools: params.tools,
     toolChoice: params.toolChoice,
+    responseFormat: params.responseFormat,
     signal: params.signal,
     onChunk: params.onChunk,
   });

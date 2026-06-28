@@ -35,6 +35,20 @@ export interface ToolCall {
   arguments?: Record<string, unknown>;
 }
 
+/** Image METADATA shown on a sent user bubble. Never carries base64 — the bytes
+ *  ride only in the gateway request `content`, never in thread history. The
+ *  `previewUrl` is a local object URL of the original picked file (thumbnail only).
+ *  Mirrors web's UiImageMeta. */
+export interface UiImageMeta {
+  name: string;
+  mimeType: string;
+  bytes: number;
+  width?: number;
+  height?: number;
+  exifStripped: boolean;
+  previewUrl?: string;
+}
+
 export interface ChatMessageUi {
   id: string;
   role: "user" | "assistant";
@@ -47,6 +61,8 @@ export interface ChatMessageUi {
   meta?: ResponseMeta;
   /** Tool calls the model made on this assistant turn (when Tools is enabled). */
   toolCalls?: ToolCall[];
+  /** Image metadata for a sent user turn (thumbnails + size only; never base64). */
+  images?: UiImageMeta[];
 }
 
 export interface Thread {
@@ -222,6 +238,12 @@ export const useChatStore = create<ChatState>()(
 export function createChatMessage(
   role: ChatMessageUi["role"],
   content: string,
+  images?: UiImageMeta[],
 ): ChatMessageUi {
-  return { id: createMessageId(), role, content };
+  return {
+    id: createMessageId(),
+    role,
+    content,
+    ...(images && images.length > 0 ? { images } : {}),
+  };
 }
