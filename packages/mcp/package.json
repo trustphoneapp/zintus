@@ -1,0 +1,25 @@
+{
+  "name": "@zintus/mcp",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/client.test.ts"
+  },
+  "dependencies": {
+    "@zintus/types": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "zod": "^3.25.76"
+  }
+}

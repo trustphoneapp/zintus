@@ -12,6 +12,7 @@
     { "path": "./packages/search" },
     { "path": "./packages/memory" },
     { "path": "./packages/codebase-indexer" },
+    { "path": "./packages/mcp" },
     { "path": "./packages/context-compiler" },
     { "path": "./packages/engine" },
     { "path": "./packages/tokzen" },
