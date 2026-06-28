@@ -22,6 +22,43 @@ export interface ChatMessage {
   content: string | ContentBlock[];
 }
 
+function isEmptyContent(content: string | ContentBlock[]): boolean {
+  if (typeof content === "string") return content.trim() === "";
+  return content.length === 0;
+}
+
+/**
+ * Clean a store-derived conversation before it is sent to the gateway. The
+ * tool-execution loop can leave the message store with empty-content assistant
+ * bubbles (a tool round with no preamble text) and/or two adjacent assistant
+ * turns (one per round). Replaying that verbatim produces a malformed multi-turn
+ * conversation (empty assistant content + adjacent same-role turns) that strict
+ * role-alternation providers (e.g. Gemini) reject. This returns a cleaned COPY:
+ *   (a) drops any assistant turn whose content is empty (blank string or empty
+ *       block array);
+ *   (b) merges adjacent same-role turns whose content are both strings (joined
+ *       with a newline); non-string (ContentBlock[]) turns are pushed un-merged.
+ * Order is preserved and the input is never mutated.
+ */
+export function sanitizeSendHistory(messages: ChatMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "assistant" && isEmptyContent(m.content)) continue;
+    const last = out[out.length - 1];
+    if (
+      last &&
+      last.role === m.role &&
+      typeof last.content === "string" &&
+      typeof m.content === "string"
+    ) {
+      last.content = `${last.content}\n${m.content}`;
+    } else {
+      out.push({ role: m.role, content: m.content });
+    }
+  }
+  return out;
+}
+
 export interface StreamChatResult {
   providerId: ProviderId;
   model: string;

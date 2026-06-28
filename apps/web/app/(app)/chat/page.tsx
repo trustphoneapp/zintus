@@ -16,6 +16,7 @@ import {
 } from "@/lib/app-store";
 import {
   streamChat,
+  sanitizeSendHistory,
   UnsupportedCapabilityError,
   type ChatMessage,
 } from "@/lib/chat-client";
@@ -585,13 +586,17 @@ export default function ChatPage() {
         ? buildImageMessageContent(userText, imageBlocks)
         : userText;
 
-    const history: ChatMessage[] = [
+    // Sanitize the store-derived history before sending: the tools loop can
+    // leave empty-content assistant bubbles and adjacent same-role turns that a
+    // strict role-alternation provider (Gemini) would reject. Subsumes the old
+    // `&& content` intent. The trailing user turn is preserved.
+    const history: ChatMessage[] = sanitizeSendHistory([
       ...messages.map((message) => ({
         role: message.role,
         content: message.content,
       })),
       { role: "user", content: userMessageContent },
-    ];
+    ]);
 
     // The stored user bubble carries image METADATA (never base64) so it honestly
     // shows which image(s) this turn included (the composer thumbnails clear on
@@ -695,11 +700,14 @@ export default function ChatPage() {
     appendMessage(assistant);
 
     const s = useAppStore.getState();
-    const priorMessages = (
-      s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? []
-    )
-      .filter((message) => message.id !== assistant.id && message.content)
-      .map((message) => ({ role: message.role, content: message.content }));
+    // Sanitize the rebuilt history: drop the empty placeholder + any dangling
+    // empty tool-round assistant bubbles, and merge adjacent same-role turns so
+    // Regenerate never replays a malformed conversation.
+    const priorMessages = sanitizeSendHistory(
+      (s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? [])
+        .filter((message) => message.id !== assistant.id && message.content)
+        .map((message) => ({ role: message.role, content: message.content })),
+    );
 
     const lastUserContent: string | ContentBlock[] =
       reuseImages.length > 0
