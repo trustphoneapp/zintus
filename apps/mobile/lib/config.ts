@@ -5,6 +5,15 @@ import {
   type ProviderId,
   type RoutingStrategy,
 } from "@zintus/types";
+import {
+  addMcpServer as addMcpServerTo,
+  loadMcpServers as loadMcpServersFrom,
+  removeMcpServer as removeMcpServerFrom,
+  saveMcpServers as saveMcpServersTo,
+  updateMcpServer as updateMcpServerIn,
+  type McpStorage,
+  type StoredMcpServer,
+} from "./mcp-config";
 
 const storage = createMMKV({ id: "zintus.config" });
 const STORAGE_KEY = "config";
@@ -112,6 +121,42 @@ export function loadToolsMode(): boolean {
 
 export function saveToolsMode(enabled: boolean): void {
   storage.set(TOOLS_MODE_KEY, enabled);
+}
+
+/**
+ * MMKV-backed storage for the MCP server list. The pure CRUD lives in
+ * lib/mcp-config.ts (RN-free, unit-tested with an in-memory fake); these thin
+ * wrappers bind it to the same `zintus.config` MMKV instance the rest of this
+ * file uses, mirroring the loadJsonMode/loadToolsMode pattern.
+ */
+const mcpStorage: McpStorage = {
+  getString: (key) => storage.getString(key),
+  set: (key, value) => storage.set(key, value),
+};
+
+export function loadMcpServers(): StoredMcpServer[] {
+  return loadMcpServersFrom(mcpStorage);
+}
+
+export function saveMcpServers(servers: StoredMcpServer[]): void {
+  saveMcpServersTo(mcpStorage, servers);
+}
+
+export function addMcpServer(
+  draft: Omit<StoredMcpServer, "id"> & { id?: string },
+): StoredMcpServer {
+  return addMcpServerTo(mcpStorage, draft);
+}
+
+export function updateMcpServer(
+  id: string,
+  patch: Partial<Omit<StoredMcpServer, "id">>,
+): StoredMcpServer[] {
+  return updateMcpServerIn(mcpStorage, id, patch);
+}
+
+export function removeMcpServer(id: string): StoredMcpServer[] {
+  return removeMcpServerFrom(mcpStorage, id);
 }
 
 export const ROUTING_STRATEGIES: Array<{

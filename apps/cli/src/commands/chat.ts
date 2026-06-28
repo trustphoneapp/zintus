@@ -24,6 +24,14 @@ import {
   loadImages,
   normalizeChatError,
 } from "./chat-content.js";
+import {
+  buildChatMcpConfig,
+  formatMcpToolEvent,
+  gatewayUrl,
+  loadMcpServers,
+  parseMcpToolEvent,
+  type ChatMcpConfig,
+} from "../lib/mcp-config.js";
 
 /** Load + minimally validate a `ToolDefinition[]` from a JSON file. Throws a
  *  clear, user-facing error rather than a raw parse stack. */
@@ -80,6 +88,159 @@ export interface ChatOptions {
    *  random_number) — set by a bare `--tools` (no file). The CLI then runs the
    *  real execute→feed-back loop, mirroring the web chat. */
   builtinTools?: boolean;
+  /** MCP toggle for this turn. `undefined` = auto (on when servers are enabled);
+   *  `false` (`--no-mcp`) forces it off; `true` (`--mcp`) forces it on. When
+   *  active the chat runs through the local gateway, which hosts the servers. */
+  mcp?: boolean;
+}
+
+/** One streamed SSE chunk from the gateway chat endpoint, narrowed to the fields
+ *  the MCP path reads. Structurally a superset of `GatewayMcpChunk`, so it passes
+ *  straight to `parseMcpToolEvent`. */
+interface ChatStreamChunk {
+  type?: string;
+  provider?: string;
+  model?: string;
+  error?: { message?: string };
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      tool_calls?: Array<{
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+  }>;
+  tool_call_id?: string;
+  is_error?: boolean;
+  content?: string;
+}
+
+/**
+ * MCP chat path — runs through the LOCAL gateway (`zintus serve`), the only
+ * component that hosts MCP. Posts the configured servers in the request body;
+ * the gateway connects them, runs the bounded tool loop SERVER-SIDE, and streams
+ * `mcp_tool_call` / `mcp_tool_result` events alongside the answer text. The CLI
+ * only DISPLAYS them — it never executes a tool and no MCP data touches the
+ * relay. Honest, base64-free errors on an offline gateway or a refused server.
+ */
+async function runMcpChat(
+  prompt: string,
+  mcp: ChatMcpConfig,
+  options: ChatOptions | undefined,
+  project: { instructions?: string } | null,
+): Promise<void> {
+  const userText = project?.instructions
+    ? `${project.instructions}\n\n---\n\n${prompt}`
+    : prompt;
+
+  const spinner = ora(
+    `Routing via gateway with ${mcp.servers.length} MCP server${mcp.servers.length === 1 ? "" : "s"}`,
+  ).start();
+
+  let response: Response;
+  try {
+    response = await fetch(`${gatewayUrl()}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: userText }],
+        stream: true,
+        mode: options?.mode,
+        mcp,
+      }),
+    });
+  } catch {
+    spinner.fail("Couldn't reach the gateway");
+    console.error(
+      chalk.red("Start it with `zintus serve` (it hosts your MCP servers), then retry."),
+    );
+    process.exit(1);
+  }
+
+  if (!response.ok || !response.body) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: { message?: string };
+    } | null;
+    spinner.fail("Request failed");
+    console.error(
+      chalk.red(body?.error?.message ?? `Gateway error ${response.status}`),
+    );
+    process.exit(1);
+  }
+
+  spinner.succeed("Streaming (MCP tools run server-side on your gateway)");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let printedAnswer = false;
+  let providerLabel: string | undefined;
+  let model: string | undefined;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r\n|\r|\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let chunk: ChatStreamChunk;
+        try {
+          chunk = JSON.parse(payload) as ChatStreamChunk;
+        } catch {
+          continue;
+        }
+        if (chunk.error?.message) {
+          process.stdout.write("\n");
+          console.error(chalk.red(chunk.error.message));
+          process.exit(1);
+        }
+
+        // MCP tool-loop frames first: they reuse the tool-call delta shape, so
+        // they must be peeled off before we treat the chunk as answer text.
+        const event = parseMcpToolEvent(chunk);
+        if (event) {
+          const text = formatMcpToolEvent(event);
+          const colored =
+            event.kind === "call"
+              ? chalk.cyan(text)
+              : event.ok
+                ? chalk.green(text)
+                : chalk.yellow(text);
+          // Keep tool activity on stderr so piping the answer stays clean.
+          console.error(colored);
+          continue;
+        }
+
+        if (chunk.type === "metadata") {
+          providerLabel = chunk.provider ?? providerLabel;
+          model = chunk.model ?? model;
+          continue;
+        }
+
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          printedAnswer = true;
+          process.stdout.write(delta);
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (printedAnswer) {
+    process.stdout.write("\n");
+  }
+  if (providerLabel) {
+    console.error(
+      chalk.dim(`${providerLabel}${model ? ` · ${model}` : ""}`),
+    );
+  }
 }
 
 export async function runChat(
@@ -100,6 +261,25 @@ export async function runChat(
   const project = await getActiveProject();
   if (project) {
     console.error(chalk.dim(`📁 project: ${project.name}`));
+  }
+
+  // MCP: when servers are enabled (and not `--no-mcp`), or `--mcp` is forced,
+  // the chat MUST run through the local gateway — the in-process engine can't
+  // host MCP. This is a separate, text-only path; the normal (non-MCP) chat
+  // below is unchanged. `--mcp` with nothing enabled is an honest no-op hint.
+  if (options?.mcp !== false) {
+    const mcp = buildChatMcpConfig(await loadMcpServers());
+    if (mcp) {
+      await runMcpChat(prompt, mcp, options, project);
+      return;
+    }
+    if (options?.mcp === true) {
+      console.error(
+        chalk.yellow(
+          "No enabled MCP servers — add one with `zintus mcp add` (running without MCP).",
+        ),
+      );
+    }
   }
   // Only pin the project's provider if it's actually keyed (or a local runtime):
   // forcing a keyless provider disables failover and fails every request.

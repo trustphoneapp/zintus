@@ -3,7 +3,12 @@ import { persist } from "zustand/middleware";
 import { DEFAULT_CONFIG, type AppConfig, type ProviderId } from "@zintus/types";
 import { loadConfig, saveConfig } from "./config";
 import { fetchProviderSnapshot, type DesktopProviderInfo } from "./providers";
-import type { CompressionStats, GatewaySavings, ResponseMeta } from "./gateway";
+import type {
+  CompressionStats,
+  GatewaySavings,
+  McpToolEvent,
+  ResponseMeta,
+} from "./gateway";
 
 interface SettingsState {
   settings: AppConfig;
@@ -61,6 +66,9 @@ export interface ChatMessageUi {
   meta?: ResponseMeta;
   /** Tool calls the model made on this assistant turn (when Tools is enabled). */
   toolCalls?: ToolCall[];
+  /** Server-side MCP tool-loop activity for this assistant turn (display only —
+   *  the gateway ran the tools). Calm violet activity; never the raw args/output. */
+  mcpToolEvents?: McpToolEvent[];
   /** Image metadata for a sent user turn (thumbnails + size only; never base64). */
   images?: UiImageMeta[];
 }

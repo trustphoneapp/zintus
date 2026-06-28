@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Layers } from "lucide-react";
 import type { ChatMessageUi } from "@/lib/store";
+import type { McpToolEvent } from "@/lib/gateway";
 import { summarizeArtifactBody, type Artifact } from "@/lib/artifacts";
 import { CompressionBadge } from "./CompressionBadge";
 import { Markdown, CodeBlock } from "./Markdown";
@@ -85,6 +86,81 @@ function ToolCallCard({ call }: { call: ToolCall }) {
 }
 
 /**
+ * Server-side MCP tool-loop activity, grouped with the assistant turn that
+ * triggered it. Calm + honest: each real `mcp_tool_call` becomes a "Calling
+ * <tool>…" line; the paired `mcp_tool_result` (matched by id) becomes a "✓ result
+ * (N chars)" or "✗ error: <message>" line. Args/results are summaries only (the
+ * gateway never streamed the raw bodies — see lib/gateway.ts summarizers).
+ * Mirrors apps/web/app/_components/MessageBubble.tsx.
+ */
+function McpToolActivity({ events }: { events: McpToolEvent[] }) {
+  // call id → tool label, so a result line can name the tool it belongs to.
+  const labelById = new Map<string, string>();
+  for (const ev of events) {
+    if (ev.kind === "call") {
+      labelById.set(ev.id, ev.tool || ev.server || "tool");
+    }
+  }
+  const lineStyle: React.CSSProperties = {
+    fontFamily: "var(--font-mono, ui-monospace, monospace)",
+    fontSize: 12.5,
+    lineHeight: 1.5,
+    color: "#94a3b8",
+    wordBreak: "break-word",
+    overflowWrap: "anywhere",
+  };
+  return (
+    <div
+      className="mcp-tool-activity"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        marginTop: 8,
+        padding: "6px 10px",
+        borderLeft: "2px solid #7C3AED",
+        borderRadius: 8,
+        background: "rgba(124,58,237,0.06)",
+      }}
+    >
+      {events.map((ev, i) => {
+        if (ev.kind === "call") {
+          const label = ev.tool || ev.server || "tool";
+          return (
+            <div key={`c-${ev.id}-${i}`} style={lineStyle}>
+              <span aria-hidden style={{ fontFamily: "system-ui, sans-serif" }}>
+                🔧
+              </span>{" "}
+              Calling{" "}
+              <span style={{ color: "#7C3AED", fontWeight: 600 }}>{label}</span>
+              {ev.argsSummary ? (
+                <span style={{ color: "#64748b" }}> ({ev.argsSummary})</span>
+              ) : null}
+              …
+            </div>
+          );
+        }
+        const label = labelById.get(ev.id);
+        const prefix = label ? `${label} ` : "";
+        return (
+          <div key={`r-${ev.id}-${i}`} style={lineStyle}>
+            {ev.ok ? (
+              <span style={{ color: "#22c55e" }}>
+                ✓ {prefix}result ({ev.summary})
+              </span>
+            ) : (
+              <span style={{ color: "#f59e0b" }}>
+                ✗ {prefix}error: {ev.summary}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
  * Renders a single chat message. Assistant messages render Markdown (parity with
  * web/mobile), show routed provider/model metadata + the compression badge, and
  * expose copy / regenerate actions. An empty assistant message shows a typing
@@ -100,6 +176,7 @@ export function MessageBubble({
   onRegenerate,
   isStreaming = false,
   toolCalls,
+  mcpToolEvents,
   structured,
   artifacts,
   onOpenArtifact,
@@ -109,6 +186,8 @@ export function MessageBubble({
   isStreaming?: boolean;
   /** Tool/function calls emitted by this assistant turn. */
   toolCalls?: ToolCall[];
+  /** Server-side MCP tool-loop activity for this assistant turn (display only). */
+  mcpToolEvents?: McpToolEvent[];
   /** Structured / JSON output to render in a labeled code block. */
   structured?: unknown;
   /** Artifacts detected in this assistant turn (computed by the chat panel). */
@@ -189,6 +268,7 @@ export function MessageBubble({
 
   const hasContent = Boolean(message.content);
   const hasToolCalls = Array.isArray(toolCalls) && toolCalls.length > 0;
+  const hasMcpEvents = Array.isArray(mcpToolEvents) && mcpToolEvents.length > 0;
   // Explicit structured prop wins; otherwise auto-detect a JSON-only answer
   // (skipped mid-stream, where a partial body would never parse).
   const structuredText =
@@ -251,7 +331,7 @@ export function MessageBubble({
           ) : (
             <Markdown content={bodyContent} />
           )
-        ) : !hasToolCalls && structured === undefined ? (
+        ) : !hasToolCalls && !hasMcpEvents && structured === undefined ? (
           <span className="typing-dots" aria-label="Assistant is typing">
             <span />
             <span />
@@ -285,6 +365,7 @@ export function MessageBubble({
             ))}
           </div>
         ) : null}
+        {hasMcpEvents ? <McpToolActivity events={mcpToolEvents!} /> : null}
         {structured !== undefined && structuredText ? (
           <div style={{ marginTop: hasContent || hasToolCalls ? 8 : 0 }}>
             <CodeBlock lang="json" text={structuredText} label="Structured output" />

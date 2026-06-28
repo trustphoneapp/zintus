@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@zintus/mcp": "workspace:*",
     "@zintus/media": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/router": "workspace:*",

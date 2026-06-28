@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Layers, MessageSquarePlus } from "lucide-react";
+import Link from "next/link";
+import { Layers, MessageSquarePlus, Wrench } from "lucide-react";
 import type {
   ContentBlock,
   ImageContentBlock,
@@ -15,8 +16,11 @@ import {
   streamChat,
   sanitizeSendHistory,
   UnsupportedCapabilityError,
+  type ChatMcpConfig,
   type ChatMessage,
+  type McpToolEvent,
 } from "@/lib/chat-client";
+import { activeMcpServersForChat, loadMcpServers } from "@/lib/mcp-config";
 import {
   acceptImageFile,
   buildImageMessageContent,
@@ -76,6 +80,31 @@ function attachmentBlocks(atts: TextAttachment[]): string {
   return atts
     .map((a) => `[File: ${a.name}]\n\`\`\`\n${a.content}\n\`\`\``)
     .join("\n\n");
+}
+
+/**
+ * Build the chat body's `mcp` block from the user's enabled MCP servers
+ * (mcp-config's `loadMcpServers` → `activeMcpServersForChat`), plus the active
+ * tool count for the header indicator. The gateway runs these tools SERVER-SIDE;
+ * the desktop only displays the resulting activity. Returns `undefined` when
+ * nothing is enabled. Mirrors web's `activeMcpForChat`.
+ */
+function activeMcpForChat(): { mcp: ChatMcpConfig | undefined; toolCount: number } {
+  const { servers } = activeMcpServersForChat(loadMcpServers());
+  if (servers.length === 0) {
+    return { mcp: undefined, toolCount: 0 };
+  }
+  const enabledTools = servers.flatMap((s) => s.enabledTools);
+  return {
+    mcp: {
+      servers: servers.map((s) => s.config),
+      // Omit when no concrete tool names are known yet (server enabled but not
+      // tested) so the gateway offers every tool it discovers rather than
+      // suppressing them all with an empty allow-list.
+      ...(enabledTools.length > 0 ? { enabledTools } : {}),
+    },
+    toolCount: enabledTools.length,
+  };
 }
 
 export function ChatPanel() {
@@ -155,8 +184,20 @@ export function ChatPanel() {
     return false;
   });
 
+  // Count of MCP tools active this chat (header indicator). Recomputed on mount
+  // and whenever the window regains focus (the user may have just edited servers
+  // in the MCP settings screen).
+  const [mcpToolCount, setMcpToolCount] = useState(0);
+
   useEffect(() => {
     setActiveProjectName(getActiveProject()?.name ?? null);
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setMcpToolCount(activeMcpForChat().toolCount);
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, []);
 
   const handleFiles = useCallback(async (files: FileList | null) => {
@@ -251,9 +292,15 @@ export function ChatPanel() {
         ? { type: "json_object" }
         : undefined;
 
+      // The user's enabled MCP servers for this turn. The gateway runs the tool
+      // loop SERVER-SIDE and streams call/result frames; we only display them.
+      const { mcp } = activeMcpForChat();
+
       try {
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
           let streamedText = "";
+          // Server-side MCP activity for THIS round's assistant bubble.
+          const roundMcpEvents: McpToolEvent[] = [];
           const result = await streamChat({
             messages: convo,
             settings,
@@ -261,12 +308,20 @@ export function ChatPanel() {
             mode: settings.contextMode,
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
             responseFormat,
+            mcp,
             signal: controller.signal,
             onChunk: (text) => {
               if (!controller.signal.aborted) {
                 streamedText = text;
                 updateMessage(currentAssistantId, { content: text });
               }
+            },
+            onMcpToolEvent: (event) => {
+              if (controller.signal.aborted) return;
+              roundMcpEvents.push(event);
+              updateMessage(currentAssistantId, {
+                mcpToolEvents: [...roundMcpEvents],
+              });
             },
           });
           updateMessage(currentAssistantId, {
@@ -524,7 +579,11 @@ export function ChatPanel() {
         }
       }
     }
-    updateMessage(lastAssistant.id, { content: "", toolCalls: undefined });
+    updateMessage(lastAssistant.id, {
+      content: "",
+      toolCalls: undefined,
+      mcpToolEvents: undefined,
+    });
     await runTurn(history, lastAssistant.id);
   }, [loading, messages, runTurn, updateMessage]);
 
@@ -618,6 +677,35 @@ export function ChatPanel() {
                 routed → {activeProvider}
               </Badge>
             )}
+            <Link
+              href="/settings/mcp"
+              title={
+                mcpToolCount > 0
+                  ? `${mcpToolCount} MCP tool${mcpToolCount === 1 ? "" : "s"} active — the gateway runs them server-side. Manage in MCP settings.`
+                  : "Connect MCP tool servers (run by your gateway) for this chat."
+              }
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                fontSize: 12,
+                textDecoration: "none",
+                padding: "2px 8px",
+                borderRadius: 999,
+                border: "1px solid",
+                borderColor:
+                  mcpToolCount > 0 ? "#7C3AED" : "var(--color-border)",
+                color:
+                  mcpToolCount > 0 ? "#a78bfa" : "var(--color-text-muted)",
+                background:
+                  mcpToolCount > 0 ? "rgba(124,58,237,0.10)" : "transparent",
+              }}
+            >
+              <Wrench size={12} />
+              {mcpToolCount > 0
+                ? `${mcpToolCount} tool${mcpToolCount === 1 ? "" : "s"} active`
+                : "MCP"}
+            </Link>
             {artifactList.length > 0 && (
               <Button
                 type="button"
@@ -795,6 +883,7 @@ export function ChatPanel() {
                   key={message.id}
                   message={message}
                   toolCalls={message.toolCalls}
+                  mcpToolEvents={message.mcpToolEvents}
                   artifacts={artifactsByMessage[message.id]}
                   onOpenArtifact={openArtifact}
                   onRegenerate={

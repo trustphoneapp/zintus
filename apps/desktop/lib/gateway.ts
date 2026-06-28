@@ -8,6 +8,15 @@ import type {
   ToolChoice,
   ToolDefinition,
 } from "@zintus/types";
+// TYPE-ONLY import: @zintus/mcp is the gateway's server-side SDK surface. The
+// desktop renderer never hosts MCP — it only describes server configs + shows
+// discovery results, so we erase this at build time (never bundle the SDK).
+import type {
+  MCPPrompt,
+  MCPResource,
+  MCPServerConfig,
+  MCPTool,
+} from "@zintus/mcp";
 
 const DEFAULT_GATEWAY_URL = "http://localhost:8788";
 const ENV_GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL?.trim() || null;
@@ -225,6 +234,101 @@ export async function fetchRouteOptions(
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP (Model Context Protocol) — the desktop renderer can't HOST MCP, so the
+// settings UI asks the user's local gateway to connect and report a server's
+// capabilities. `discoverMcpServer` drives the "Test connection" button;
+// `disconnectMcpServer` is a best-effort cleanup when a server is removed.
+// Neither throws. Mirrors apps/web/lib/gateway.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A successful discovery: the server's advertised tools/resources/prompts. */
+export interface McpDiscoverResult {
+  tools: MCPTool[];
+  resources: MCPResource[];
+  prompts: MCPPrompt[];
+  /** Epoch ms the gateway connected to the server. */
+  connectedAt: number;
+}
+
+/**
+ * Connect (via the local gateway) to one MCP server and return its advertised
+ * tools/resources/prompts. NEVER throws: a failed/refused connection or an
+ * offline gateway resolves to `{ error }` with an honest, human-readable message
+ * so the UI can show it inline instead of crashing.
+ */
+export async function discoverMcpServer(
+  config: MCPServerConfig,
+): Promise<McpDiscoverResult | { error: string }> {
+  const gatewayUrl = await resolveGatewayUrl();
+  if (!gatewayUrl) {
+    return {
+      error:
+        "Couldn't reach the gateway. Start it with `zintus serve`, then try again.",
+    };
+  }
+  try {
+    const response = await fetch(`${gatewayUrl}/v1/mcp/discover`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ config }),
+    });
+    const body = (await response.json().catch(() => null)) as
+      | {
+          tools?: MCPTool[];
+          resources?: MCPResource[];
+          prompts?: MCPPrompt[];
+          connectedAt?: number;
+          error?: { message?: string };
+        }
+      | null;
+    if (!response.ok) {
+      return {
+        error:
+          body?.error?.message ??
+          `Couldn't reach the MCP server (gateway error ${response.status}).`,
+      };
+    }
+    return {
+      tools: body?.tools ?? [],
+      resources: body?.resources ?? [],
+      prompts: body?.prompts ?? [],
+      connectedAt: body?.connectedAt ?? Date.now(),
+    };
+  } catch {
+    return {
+      error:
+        "Couldn't reach the gateway. Start it with `zintus serve`, then try again.",
+    };
+  }
+}
+
+/**
+ * Best-effort disconnect of a cached MCP server connection on the gateway.
+ * Fire-and-forget: returns `true` on success, `false` on any failure (an offline
+ * gateway is harmless here — there was nothing to disconnect). Never throws.
+ */
+export async function disconnectMcpServer(
+  config: MCPServerConfig,
+): Promise<boolean> {
+  const gatewayUrl = await resolveGatewayUrl();
+  if (!gatewayUrl) {
+    return false;
+  }
+  try {
+    const response = await fetch(`${gatewayUrl}/v1/mcp/disconnect`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ config }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Per-response transparency signals from the gateway's `metadata` SSE frame
  * (emitted right before [DONE]). Derived integers/ratios only — never keys or
@@ -275,6 +379,12 @@ interface GatewayChunk {
   saved_vs_claude_sonnet?: number;
   routing_strategy?: string;
   route_reason?: string;
+  // server-side MCP tool-loop event fields (type === "mcp_tool_call" |
+  // "mcp_tool_result"). A result frame carries the call id + outcome at the top
+  // level (its `choices` is empty); a call frame reuses the tool-call delta shape.
+  tool_call_id?: string;
+  is_error?: boolean;
+  content?: string;
 }
 
 /** One actionable provider suggestion from the gateway's capability error. */
@@ -371,6 +481,133 @@ export function finalizeToolCalls(
     });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-side MCP tool loop — the gateway runs the MCP tools itself and streams
+// progress as `mcp_tool_call` / `mcp_tool_result` SSE frames ALONGSIDE the normal
+// text stream. The desktop NEVER executes these tools — it only displays them.
+// These pure helpers parse a frame into a calm, secret-safe UI event and are
+// unit-tested directly (no `fetch` mock needed). Mirrors apps/web/lib/gateway.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The `mcp` block the chat body carries: the gateway connects each server and
+ *  runs the tool loop server-side. Shape mirrors @zintus/schemas MCPRequest. */
+export interface ChatMcpConfig {
+  servers: MCPServerConfig[];
+  /** Allow-list of tool names (raw or namespaced). Omit to offer every tool the
+   *  servers advertise. */
+  enabledTools?: string[];
+}
+
+/** One ordered MCP tool-loop event surfaced to the UI. A `call` names the tool;
+ *  the matching `result` (same `id`) reports success/char-count or an error. */
+export type McpToolEvent =
+  | {
+      kind: "call";
+      /** tool_call id — pairs a later `result` back to this call. */
+      id: string;
+      /** Server segment of the namespaced name (a stable hash, may be ""). */
+      server: string;
+      /** Server-local tool name (e.g. "read_file"). */
+      tool: string;
+      /** Parameter NAMES only — never values (no secret leakage). "" when none. */
+      argsSummary: string;
+    }
+  | {
+      kind: "result";
+      id: string;
+      ok: boolean;
+      /** "234 chars" on success, or the (truncated) error message. */
+      summary: string;
+    };
+
+const MCP_TOOL_PREFIX = "mcp__";
+
+/**
+ * Split a gateway MCP tool name `mcp__<serverId>__<tool>` into its parts. The
+ * serverId is the hex hash up to the FIRST `__` after the prefix; the rest is the
+ * tool name (which may itself contain `__`). A non-MCP name yields the whole name
+ * as `tool`. Local mirror of apps/gateway/src/mcp-bridge.ts `parseMcpToolName`.
+ */
+export function splitMcpToolName(name: string): { server: string; tool: string } {
+  if (!name.startsWith(MCP_TOOL_PREFIX)) {
+    return { server: "", tool: name };
+  }
+  const rest = name.slice(MCP_TOOL_PREFIX.length);
+  const sep = rest.indexOf("__");
+  if (sep <= 0) {
+    return { server: "", tool: rest };
+  }
+  return { server: rest.slice(0, sep), tool: rest.slice(sep + 2) };
+}
+
+/**
+ * A calm, secret-safe summary of tool arguments: the parameter NAMES only, never
+ * their values (which may carry secrets). Returns "" for empty / non-object args.
+ */
+export function summarizeToolArgs(raw: string | undefined): string {
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.keys(parsed as Record<string, unknown>).join(", ");
+    }
+  } catch {
+    // not JSON — show nothing rather than dumping a raw fragment
+  }
+  return "";
+}
+
+/**
+ * A short result summary: the char count on success, or the (truncated) message
+ * on error. Never dumps the full body — honesty without leaking large/secret
+ * tool output into the transcript.
+ */
+export function summarizeToolResult(
+  content: string | undefined,
+  isError: boolean,
+): string {
+  const text = content ?? "";
+  if (isError) {
+    const msg = text.trim() || "the tool reported an error";
+    return msg.length > 120 ? `${msg.slice(0, 117)}…` : msg;
+  }
+  const n = text.length;
+  return `${n} char${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Parse a streamed chunk into an `McpToolEvent`, or null when it isn't an MCP
+ * frame. Matches the gateway frames precisely: `mcp_tool_call` reuses the
+ * tool-call delta shape (`choices[0].delta.tool_calls[0]`); `mcp_tool_result`
+ * carries `tool_call_id` / `is_error` / `content` at the top level. Pure +
+ * exported so the parsing is unit-tested without mocking `fetch`.
+ */
+export function parseMcpToolEvent(chunk: GatewayChunk): McpToolEvent | null {
+  if (chunk.type === "mcp_tool_call") {
+    const tc = chunk.choices?.[0]?.delta?.tool_calls?.[0];
+    if (!tc) return null;
+    const name = tc.function?.name ?? "";
+    const { server, tool } = splitMcpToolName(name);
+    return {
+      kind: "call",
+      id: tc.id ?? "",
+      server,
+      tool: tool || name,
+      argsSummary: summarizeToolArgs(tc.function?.arguments),
+    };
+  }
+  if (chunk.type === "mcp_tool_result") {
+    const isError = chunk.is_error ?? false;
+    return {
+      kind: "result",
+      id: chunk.tool_call_id ?? "",
+      ok: !isError,
+      summary: summarizeToolResult(chunk.content, isError),
+    };
+  }
+  return null;
+}
+
 export async function streamGatewayChat(params: {
   messages: Array<{
     role: "user" | "assistant" | "system";
@@ -391,8 +628,15 @@ export async function streamGatewayChat(params: {
    *  syntactically-valid JSON; the gateway resolves the best level the chosen
    *  provider can actually serve (never claims more than it returns). */
   responseFormat?: ResponseFormat;
+  /** Configured MCP servers for this turn. When present the gateway runs a
+   *  SERVER-SIDE tool loop and streams `mcp_tool_call`/`mcp_tool_result` events;
+   *  the desktop only displays them (it never executes these tools). */
+  mcp?: ChatMcpConfig;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
+  /** Live callback for each server-side MCP tool-loop event (call/result), in
+   *  arrival order — lets the UI render activity as it streams. */
+  onMcpToolEvent?: (event: McpToolEvent) => void;
 }): Promise<{
   providerId: ProviderId;
   model: string;
@@ -403,6 +647,9 @@ export async function streamGatewayChat(params: {
   /** Tool calls the model made this turn (empty for a normal text turn). The
    *  caller runs the tools and sends results back as `tool_result` blocks. */
   toolCalls?: ToolCallContentBlock[];
+  /** Ordered server-side MCP tool-loop events emitted this turn (empty when no
+   *  MCP servers were configured). Display-only — the gateway already ran them. */
+  toolEvents?: McpToolEvent[];
 }> {
   const gatewayUrl = await resolveGatewayUrl();
   if (!gatewayUrl) {
@@ -428,6 +675,9 @@ export async function streamGatewayChat(params: {
       tools: params.tools,
       tool_choice: params.toolChoice,
       response_format: params.responseFormat,
+      // Present ONLY when the user has MCP servers enabled. The gateway connects
+      // them and runs the tool loop server-side (the desktop never executes them).
+      mcp: params.mcp,
     }),
     signal: params.signal,
   });
@@ -478,6 +728,9 @@ export async function streamGatewayChat(params: {
   // string; we concatenate then parse once the stream ends. The fold + finalize
   // are pure helpers (accumulateToolCallDeltas / finalizeToolCalls).
   const toolCallsByIndex: ToolCallAccumulator = new Map();
+  // Ordered server-side MCP tool-loop events (call/result). These ride the same
+  // stream as the text but are a SEPARATE channel — display only.
+  const toolEvents: McpToolEvent[] = [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -501,6 +754,16 @@ export async function streamGatewayChat(params: {
       const chunk = JSON.parse(payload) as GatewayChunk;
       if (chunk.error?.message) {
         throw new Error(chunk.error.message);
+      }
+
+      // Server-side MCP frames first: they reuse the tool-call delta shape, so
+      // they MUST be peeled off here, before accumulateToolCallDeltas would fold
+      // them into the (client) tool-call channel.
+      const mcpEvent = parseMcpToolEvent(chunk);
+      if (mcpEvent) {
+        toolEvents.push(mcpEvent);
+        params.onMcpToolEvent?.(mcpEvent);
+        continue;
       }
 
       traceId = chunk.id ?? traceId;
@@ -552,5 +815,6 @@ export async function streamGatewayChat(params: {
     compression,
     meta: Object.keys(meta).length > 0 ? meta : undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    toolEvents: toolEvents.length > 0 ? toolEvents : undefined,
   };
 }

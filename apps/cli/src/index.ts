@@ -31,6 +31,9 @@ interface ChatCliOptions {
   // From `--tools [file]`: `true` when bare (enable the built-in executable
   // tools), or a path string to a JSON file of custom tool/function definitions.
   tools?: string | boolean;
+  // `--mcp` / `--no-mcp`: force MCP on/off for this turn. Undefined = auto (on
+  // when servers are enabled). Commander stores `--no-mcp` as `mcp: false`.
+  mcp?: boolean;
 }
 
 // Commander collector: accumulate each repeated `--image` into one array.
@@ -58,6 +61,7 @@ function toChatOptions(options: ChatCliOptions): ChatOptions {
     // string points at a custom ToolDefinition[] JSON file.
     toolsFile: typeof options.tools === "string" ? options.tools : undefined,
     builtinTools: options.tools === true,
+    mcp: options.mcp,
   };
 }
 
@@ -80,6 +84,14 @@ program
   .option(
     "--tools [file]",
     "Enable built-in executable tools (calculator, current_datetime, random_number) and run the execute→feed-back loop; pass a JSON file path for custom tool definitions",
+  )
+  .option(
+    "--no-mcp",
+    "Skip enabled MCP servers for this turn (default: enabled servers are offered)",
+  )
+  .option(
+    "--mcp",
+    "Force-enable MCP for this turn (routes via your gateway, which hosts the servers)",
   )
   .action(async (prompt: string, options: ChatCliOptions) => {
     await runChat(prompt, toChatOptions(options));
@@ -126,6 +138,14 @@ program
   .option(
     "--tools [file]",
     "Enable built-in executable tools (calculator, current_datetime, random_number) and run the execute→feed-back loop; pass a JSON file path for custom tool definitions",
+  )
+  .option(
+    "--no-mcp",
+    "Skip enabled MCP servers for this turn (default: enabled servers are offered)",
+  )
+  .option(
+    "--mcp",
+    "Force-enable MCP for this turn (routes via your gateway, which hosts the servers)",
   )
   .action(async (prompt: string | undefined, options: ChatCliOptions) => {
     if (!prompt) {
@@ -213,6 +233,95 @@ keys
   .argument("<provider>", "Provider name")
   .action(async (provider: string) => {
     await runKeysRemove(provider);
+  });
+
+const mcp = program
+  .command("mcp")
+  .description(
+    "Manage MCP servers (the tools your chats can call). Your gateway hosts them; stdio servers spawn a LOCAL process",
+  );
+
+mcp
+  .command("add")
+  .description("Add (or update, by name) an MCP server")
+  .argument("<name>", "Local name for this server")
+  .option(
+    "--stdio <command>",
+    'Spawn a local process via the gateway, e.g. --stdio "npx -y @modelcontextprotocol/server-filesystem /tmp"',
+  )
+  .option(
+    "--arg <value>",
+    "Extra argv passed to the --stdio command (repeatable; use for args with spaces)",
+    (value: string, prev: string[]) => [...prev, value],
+    [],
+  )
+  .option(
+    "--env <KEY=VALUE>",
+    "Environment variable for the --stdio process (repeatable)",
+    (value: string, prev: string[]) => [...prev, value],
+    [],
+  )
+  .option("--sse <url>", "Connect to a remote server over the HTTP+SSE transport")
+  .option("--http <url>", "Connect to a remote server over the Streamable HTTP transport")
+  .action(
+    async (
+      name: string,
+      options: {
+        stdio?: string;
+        arg?: string[];
+        env?: string[];
+        sse?: string;
+        http?: string;
+      },
+    ) => {
+      const { runMcpAdd } = await import("./commands/mcp.js");
+      await runMcpAdd(name, options);
+    },
+  );
+
+mcp
+  .command("list")
+  .description("List configured MCP servers (● enabled) with tool counts")
+  .option("--json", "Output as JSON for automation")
+  .action(async (options: { json?: boolean }) => {
+    const { runMcpList } = await import("./commands/mcp.js");
+    await runMcpList(options);
+  });
+
+mcp
+  .command("remove")
+  .description("Remove an MCP server")
+  .argument("<name>", "Server name")
+  .action(async (name: string) => {
+    const { runMcpRemove } = await import("./commands/mcp.js");
+    await runMcpRemove(name);
+  });
+
+mcp
+  .command("test")
+  .description("Connect via the gateway and list the server's tools")
+  .argument("<name>", "Server name")
+  .action(async (name: string) => {
+    const { runMcpTest } = await import("./commands/mcp.js");
+    await runMcpTest(name);
+  });
+
+mcp
+  .command("enable")
+  .description("Enable a server (its tools are offered in `zintus chat`)")
+  .argument("<name>", "Server name")
+  .action(async (name: string) => {
+    const { runMcpEnable } = await import("./commands/mcp.js");
+    await runMcpEnable(name, true);
+  });
+
+mcp
+  .command("disable")
+  .description("Disable a server (kept, but not offered in chat)")
+  .argument("<name>", "Server name")
+  .action(async (name: string) => {
+    const { runMcpEnable } = await import("./commands/mcp.js");
+    await runMcpEnable(name, false);
   });
 
 const projects = program

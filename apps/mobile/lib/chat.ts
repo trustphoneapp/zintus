@@ -9,18 +9,23 @@ import type {
   ToolDefinition,
 } from "@zintus/types";
 
+import type { MCPServerConfig } from "@zintus/mcp";
+
 import {
   accumulateToolCallDeltas,
   buildChatRequestBody,
   finalizeToolCalls,
   parseChatMeta,
+  parseMcpToolEvent,
+  type ChatMcpConfig,
   type ChatMeta,
   type GatewayChunk,
+  type McpToolEvent,
   type ToolCallAccumulator,
 } from "./messages";
 import { getGatewayUrl } from "./gateway-url";
 
-export type { ChatMeta } from "./messages";
+export type { ChatMeta, ChatMcpConfig, McpToolEvent } from "./messages";
 export { buildChatRequestBody, parseChatMeta } from "./messages";
 
 // Re-exported so existing importers (`@/lib/chat`) keep working; resolution
@@ -49,8 +54,67 @@ export interface StreamChatParams {
    *  the returned `toolCalls` locally and feeds `tool_result` blocks back. */
   tools?: ToolDefinition[];
   toolChoice?: ToolChoice;
+  /** Configured MCP servers for this turn. When present the gateway runs a
+   *  SERVER-SIDE tool loop and streams `mcp_tool_call`/`mcp_tool_result` events;
+   *  the phone displays them but never executes MCP tools. */
+  mcp?: ChatMcpConfig;
   onChunk: (text: string) => void;
+  /** Live callback for each server-side MCP tool-loop event (call/result), in
+   *  arrival order. The final ordered list is also returned as `toolEvents`. */
+  onMcpToolEvent?: (event: McpToolEvent) => void;
   signal?: AbortSignal;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP (Model Context Protocol) — the phone can't HOST MCP, so the settings screen
+// asks the user's local gateway to connect and report a server's capabilities.
+// `discoverMcpServer` drives the "Test connection" button. Never throws.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A successful discovery: the server's advertised tool list + connect time. */
+export interface McpDiscoverResult {
+  tools: import("@zintus/mcp").MCPTool[];
+  /** Epoch ms the gateway connected to the server. */
+  connectedAt: number;
+}
+
+/**
+ * Connect (via the local gateway) to one MCP server and return its advertised
+ * tools. NEVER throws: a failed/refused connection or an offline gateway resolves
+ * to `{ error }` with an honest, human-readable message so the UI can show it
+ * inline instead of crashing. Mirrors web's `discoverMcpServer`.
+ */
+export async function discoverMcpServer(
+  config: MCPServerConfig,
+): Promise<McpDiscoverResult | { error: string }> {
+  try {
+    const response = await fetch(`${getGatewayUrl()}/v1/mcp/discover`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ config }),
+    });
+    const body = (await response.json().catch(() => null)) as {
+      tools?: import("@zintus/mcp").MCPTool[];
+      connectedAt?: number;
+      error?: { message?: string };
+    } | null;
+    if (!response.ok) {
+      return {
+        error:
+          body?.error?.message ??
+          `Couldn't reach the MCP server (gateway error ${response.status}).`,
+      };
+    }
+    return {
+      tools: body?.tools ?? [],
+      connectedAt: body?.connectedAt ?? Date.now(),
+    };
+  } catch {
+    return {
+      error:
+        "Couldn't reach the gateway. Start it with `zintus serve` on your computer, then try again.",
+    };
+  }
 }
 
 export async function streamChat({
@@ -62,7 +126,9 @@ export async function streamChat({
   responseFormat,
   tools,
   toolChoice,
+  mcp,
   onChunk,
+  onMcpToolEvent,
   signal,
 }: StreamChatParams): Promise<{
   providerId: ProviderId;
@@ -74,6 +140,9 @@ export async function streamChat({
    *  caller runs the built-in tools and feeds the results back as tool_result
    *  blocks on the next request. */
   toolCalls?: ToolCallContentBlock[];
+  /** Ordered server-side MCP tool-loop events emitted this turn (empty when no
+   *  MCP servers were configured). Display-only — the gateway already ran them. */
+  toolEvents?: McpToolEvent[];
 }> {
   const response = await fetch(`${getGatewayUrl()}/v1/chat/completions`, {
     method: "POST",
@@ -88,6 +157,7 @@ export async function streamChat({
         responseFormat,
         tools,
         toolChoice,
+        mcp,
       }),
     ),
     signal,
@@ -116,6 +186,10 @@ export async function streamChat({
   // Accumulate streamed tool-call fragments by their `index`; the pure
   // fold/finalize helpers live in ./messages and are unit-tested directly.
   const toolCallsByIndex: ToolCallAccumulator = new Map();
+  // Ordered server-side MCP tool-loop events (call/result). These ride the same
+  // stream but are peeled off BEFORE the client tool-call accumulator so an MCP
+  // call frame never pollutes the local built-in tool reassembly.
+  const toolEvents: McpToolEvent[] = [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -139,6 +213,15 @@ export async function streamChat({
       const chunk = JSON.parse(payload) as GatewayChunk;
       if (chunk.error?.message) {
         throw new Error(chunk.error.message);
+      }
+
+      // Server-side MCP frames first: they reuse the tool-call delta shape, so
+      // they must be peeled off BEFORE the client tool-call accumulator below.
+      const mcpEvent = parseMcpToolEvent(chunk);
+      if (mcpEvent) {
+        toolEvents.push(mcpEvent);
+        onMcpToolEvent?.(mcpEvent);
+        continue;
       }
 
       // Metadata frame (route reason, latency, tokens) — parse and continue;
@@ -182,5 +265,6 @@ export async function streamChat({
     traceId,
     meta,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    toolEvents: toolEvents.length > 0 ? toolEvents : undefined,
   };
 }

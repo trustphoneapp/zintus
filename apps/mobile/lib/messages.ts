@@ -8,6 +8,10 @@ import type {
   ToolChoice,
   ToolDefinition,
 } from "@zintus/types";
+// TYPE-ONLY: @zintus/mcp is a server-side package (it pulls in the MCP SDK +
+// node:child_process). We import only the config type so the gateway-bound
+// payload is shaped correctly — the SDK is NEVER bundled into the RN app.
+import type { MCPServerConfig } from "@zintus/mcp";
 
 /**
  * Per-response transparency metadata parsed from the gateway's `metadata` SSE
@@ -102,6 +106,12 @@ export interface GatewayChunk {
   routing_strategy?: string;
   route_reason?: string;
   private_mode_honored?: boolean;
+  // Server-side MCP tool-loop event fields (type === "mcp_tool_call" |
+  // "mcp_tool_result"). A result frame carries the call id + outcome at the top
+  // level (its `choices` is empty); a call frame reuses the tool-call delta shape.
+  tool_call_id?: string;
+  is_error?: boolean;
+  content?: string;
 }
 
 /**
@@ -145,6 +155,10 @@ export function buildChatRequestBody(params: {
    *  provider — the gateway returns a structured 422 otherwise. */
   tools?: ToolDefinition[];
   toolChoice?: ToolChoice;
+  /** Configured MCP servers for this turn. When present the gateway connects each
+   *  server, runs a SERVER-SIDE tool loop, and streams `mcp_tool_call` /
+   *  `mcp_tool_result` SSE frames alongside the text. The phone never hosts MCP. */
+  mcp?: ChatMcpConfig;
 }): Record<string, unknown> {
   return {
     messages: params.messages,
@@ -156,7 +170,137 @@ export function buildChatRequestBody(params: {
     response_format: params.responseFormat,
     tools: params.tools,
     tool_choice: params.toolChoice,
+    // Present ONLY when the user has MCP servers enabled. Omitted otherwise so a
+    // normal turn carries no `mcp` field at all.
+    mcp: params.mcp,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server-side MCP tool loop — the gateway runs the MCP tools itself and streams
+// progress as `mcp_tool_call` / `mcp_tool_result` SSE frames ALONGSIDE the text
+// stream. The phone NEVER executes these tools — it only displays them. These
+// pure helpers parse a frame into a calm, secret-safe UI event and are unit-
+// tested directly. Mirrors apps/web/lib/gateway.ts exactly ("one Zintus").
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The `mcp` block the chat body carries: the gateway connects each server and
+ *  runs the tool loop server-side. Shape mirrors @zintus/schemas MCPRequest. */
+export interface ChatMcpConfig {
+  servers: MCPServerConfig[];
+  /** Allow-list of tool names (raw or namespaced). Omit to offer every tool the
+   *  servers advertise. */
+  enabledTools?: string[];
+}
+
+/** One ordered MCP tool-loop event surfaced to the UI. A `call` names the tool;
+ *  the matching `result` (same `id`) reports success/char-count or an error. */
+export type McpToolEvent =
+  | {
+      kind: "call";
+      /** tool_call id — pairs a later `result` back to this call. */
+      id: string;
+      /** Server segment of the namespaced name (a stable hash, may be ""). */
+      server: string;
+      /** Server-local tool name (e.g. "read_file"). */
+      tool: string;
+      /** Parameter NAMES only — never values (no secret leakage). "" when none. */
+      argsSummary: string;
+    }
+  | {
+      kind: "result";
+      id: string;
+      ok: boolean;
+      /** "234 chars" on success, or the (truncated) error message. */
+      summary: string;
+    };
+
+const MCP_TOOL_PREFIX = "mcp__";
+
+/**
+ * Split a gateway MCP tool name `mcp__<serverId>__<tool>` into its parts. The
+ * serverId is the hash up to the FIRST `__` after the prefix; the rest is the
+ * tool name (which may itself contain `__`). A non-MCP name yields the whole name
+ * as `tool`. Mirror of apps/gateway/src/mcp-bridge.ts `parseMcpToolName`.
+ */
+export function splitMcpToolName(name: string): { server: string; tool: string } {
+  if (!name.startsWith(MCP_TOOL_PREFIX)) {
+    return { server: "", tool: name };
+  }
+  const rest = name.slice(MCP_TOOL_PREFIX.length);
+  const sep = rest.indexOf("__");
+  if (sep <= 0) {
+    return { server: "", tool: rest };
+  }
+  return { server: rest.slice(0, sep), tool: rest.slice(sep + 2) };
+}
+
+/**
+ * A calm, secret-safe summary of tool arguments: the parameter NAMES only, never
+ * their values (which may carry secrets). Returns "" for empty / non-object args.
+ */
+export function summarizeToolArgs(raw: string | undefined): string {
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.keys(parsed as Record<string, unknown>).join(", ");
+    }
+  } catch {
+    // not JSON — show nothing rather than dumping a raw fragment
+  }
+  return "";
+}
+
+/**
+ * A short result summary: the char count on success, or the (truncated) message
+ * on error. Never dumps the full body — honesty without leaking large/secret
+ * tool output into the transcript.
+ */
+export function summarizeToolResult(
+  content: string | undefined,
+  isError: boolean,
+): string {
+  const text = content ?? "";
+  if (isError) {
+    const msg = text.trim() || "the tool reported an error";
+    return msg.length > 120 ? `${msg.slice(0, 117)}…` : msg;
+  }
+  const n = text.length;
+  return `${n} char${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * Parse a streamed chunk into an `McpToolEvent`, or null when it isn't an MCP
+ * frame. Matches the gateway frames precisely: `mcp_tool_call` reuses the
+ * tool-call delta shape (`choices[0].delta.tool_calls[0]`); `mcp_tool_result`
+ * carries `tool_call_id` / `is_error` / `content` at the top level. Pure +
+ * exported so the parsing is unit-tested without mocking `fetch`.
+ */
+export function parseMcpToolEvent(chunk: GatewayChunk): McpToolEvent | null {
+  if (chunk.type === "mcp_tool_call") {
+    const tc = chunk.choices?.[0]?.delta?.tool_calls?.[0];
+    if (!tc) return null;
+    const name = tc.function?.name ?? "";
+    const { server, tool } = splitMcpToolName(name);
+    return {
+      kind: "call",
+      id: tc.id ?? "",
+      server,
+      tool: tool || name,
+      argsSummary: summarizeToolArgs(tc.function?.arguments),
+    };
+  }
+  if (chunk.type === "mcp_tool_result") {
+    const isError = chunk.is_error ?? false;
+    return {
+      kind: "result",
+      id: chunk.tool_call_id ?? "",
+      ok: !isError,
+      summary: summarizeToolResult(chunk.content, isError),
+    };
+  }
+  return null;
 }
 
 /** One streamed tool-call fragment from a chat delta (`choices[].delta.tool_calls[]`).

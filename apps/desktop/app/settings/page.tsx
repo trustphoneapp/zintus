@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
+import { Wrench } from "lucide-react";
 import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
 import { useSettingsStore } from "@/lib/store";
@@ -165,6 +167,37 @@ export default function SettingsPage() {
               </li>
             ))}
           </ol>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>MCP servers</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <p style={{ margin: 0, fontSize: 14, color: "var(--color-text-sub)" }}>
+            Connect Model Context Protocol tool servers so models can use their
+            tools in chat. Your gateway connects and runs the tools — Zintus only
+            shows the activity.
+          </p>
+          <Link
+            href="/settings/mcp"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              alignSelf: "flex-start",
+              fontSize: 13,
+              textDecoration: "none",
+              padding: "6px 12px",
+              borderRadius: 8,
+              border: "1px solid var(--color-border)",
+              background: "var(--color-elevated)",
+              color: "var(--color-text)",
+            }}
+          >
+            <Wrench size={14} /> Manage MCP servers
+          </Link>
         </CardContent>
       </Card>
 

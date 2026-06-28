@@ -13,16 +13,23 @@ import {
 import type { ProviderId } from "@zintus/types";
 import { useFocusEffect, useRouter } from "expo-router";
 import type { ResponseFormat } from "@zintus/types";
-import { streamChat, getGatewayUrl } from "@/lib/chat";
+import {
+  streamChat,
+  getGatewayUrl,
+  type ChatMcpConfig,
+  type McpToolEvent,
+} from "@/lib/chat";
 import { fetchGatewayHealth } from "@/lib/gateway";
 import {
   loadConfig,
   loadJsonMode,
+  loadMcpServers,
   loadSelectedProvider,
   loadToolsMode,
   saveJsonMode,
   saveToolsMode,
 } from "@/lib/config";
+import { activeMcpServersForChat } from "@/lib/mcp-config";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   MAX_TOOL_ROUNDS,
@@ -64,6 +71,44 @@ interface Message {
   toolCalls?: ToolCallView[];
   /** Locally-executed results for `toolCalls`, paired by id. */
   toolResults?: ToolResultView[];
+  /** Server-side MCP tool-loop events (call/result) the gateway streamed for
+   *  this turn. Display-only — the gateway already ran them. */
+  mcpEvents?: McpToolEvent[];
+}
+
+/**
+ * Build the chat body's `mcp` block from the user's enabled MCP servers, plus the
+ * active tool count for the header indicator. The gateway runs these tools
+ * SERVER-SIDE; the phone only displays the activity. Returns `undefined` when
+ * nothing is enabled. Mirrors web's `activeMcpForChat`.
+ */
+function activeMcpForChat(): { mcp: ChatMcpConfig | undefined; toolCount: number } {
+  const { servers } = activeMcpServersForChat(loadMcpServers());
+  if (servers.length === 0) {
+    return { mcp: undefined, toolCount: 0 };
+  }
+  const enabledTools = servers.flatMap((s) => s.enabledTools);
+  return {
+    mcp: {
+      servers: servers.map((s) => s.config),
+      // Omit when no concrete tool names are known yet (server enabled but not
+      // tested) so the gateway offers every tool it discovers rather than
+      // suppressing them all with an empty allow-list.
+      ...(enabledTools.length > 0 ? { enabledTools } : {}),
+    },
+    toolCount: enabledTools.length,
+  };
+}
+
+/** Render one MCP tool-loop event as a calm one-line summary (no arg/secret
+ *  values — only parameter names / char counts come through the parser). */
+function mcpEventLine(event: McpToolEvent): string {
+  if (event.kind === "call") {
+    const where = event.server ? `${event.server}/` : "";
+    const args = event.argsSummary ? `(${event.argsSummary})` : "";
+    return `🔧 ${where}${event.tool}${args}`;
+  }
+  return `${event.ok ? "→ " : "error · "}${event.summary}`;
 }
 
 /** Compact one-line render of a tool's arguments object. */
@@ -102,6 +147,9 @@ export default function ChatScreen() {
   const [gatewayChecked, setGatewayChecked] = useState(false);
   const [jsonMode, setJsonMode] = useState(false);
   const [toolsMode, setToolsMode] = useState(false);
+  // Count of MCP tools active across enabled servers — drives the header
+  // indicator. Refreshed on focus (the MCP screen may have changed it).
+  const [mcpToolCount, setMcpToolCount] = useState(0);
 
   useEffect(() => {
     void migrateLegacyKeys();
@@ -128,6 +176,7 @@ export default function ChatScreen() {
   useFocusEffect(
     useCallback(() => {
       setSelectedProvider(loadSelectedProvider());
+      setMcpToolCount(activeMcpForChat().toolCount);
     }, []),
   );
 
@@ -192,6 +241,10 @@ export default function ChatScreen() {
     // web/desktop/CLI run — "one Zintus" tools-everywhere parity).
     const tools = toolsMode ? BUILTIN_TOOL_DEFINITIONS : undefined;
 
+    // Enabled MCP servers for this turn (server-side tool loop). Undefined when
+    // none are enabled, so a normal turn carries no `mcp` field at all.
+    const { mcp } = activeMcpForChat();
+
     // The bubble the active turn streams into — updated as the tool loop opens a
     // fresh bubble per round, so a mid-loop error attaches to the right one.
     let currentAssistantId = assistantId;
@@ -206,6 +259,7 @@ export default function ChatScreen() {
         const result = await streamChat({
           ...routing,
           tools,
+          mcp,
           messages: convo,
           onChunk: (text) => {
             streamedText = text;
@@ -213,6 +267,18 @@ export default function ChatScreen() {
             setMessages((current) =>
               current.map((message) =>
                 message.id === id ? { ...message, content: text } : message,
+              ),
+            );
+          },
+          // Each server-side MCP call/result lands live on the active bubble —
+          // calm transparency without ever executing a tool on the phone.
+          onMcpToolEvent: (event) => {
+            const id = currentAssistantId;
+            setMessages((current) =>
+              current.map((message) =>
+                message.id === id
+                  ? { ...message, mcpEvents: [...(message.mcpEvents ?? []), event] }
+                  : message,
               ),
             );
           },
@@ -407,6 +473,22 @@ export default function ChatScreen() {
               {"🔧 Tools"}
             </Text>
           </Pressable>
+          {mcpToolCount > 0 ? (
+            <Pressable
+              style={({ pressed }) => [
+                styles.chip,
+                styles.chipActive,
+                pressed && styles.pressed,
+              ]}
+              onPress={() => {
+                router.push("/mcp");
+              }}
+            >
+              <Text style={[styles.chipText, styles.chipTextActive]}>
+                {`🔧 ${mcpToolCount} tools active`}
+              </Text>
+            </Pressable>
+          ) : null}
           <Pressable
             style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
             onPress={() => {
@@ -518,6 +600,27 @@ export default function ChatScreen() {
                       </View>
                     );
                   })}
+                </View>
+              ) : null}
+
+              {item.mcpEvents && item.mcpEvents.length > 0 ? (
+                <View style={styles.toolBlock}>
+                  {item.mcpEvents.map((event, i) => (
+                    <Text
+                      key={`${event.kind}-${event.id}-${i}`}
+                      style={[
+                        event.kind === "call"
+                          ? styles.toolCallName
+                          : styles.toolResult,
+                        event.kind === "result" &&
+                          !event.ok &&
+                          styles.toolResultError,
+                      ]}
+                      numberOfLines={3}
+                    >
+                      {mcpEventLine(event)}
+                    </Text>
+                  ))}
                 </View>
               ) : null}
 

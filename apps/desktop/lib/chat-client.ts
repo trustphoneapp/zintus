@@ -11,11 +11,14 @@ import type {
 import {
   streamGatewayChat,
   resolveGatewayUrl,
+  type ChatMcpConfig,
   type CompressionStats,
+  type McpToolEvent,
   type ResponseMeta,
 } from "./gateway";
 
 export { UnsupportedCapabilityError } from "./gateway";
+export type { ChatMcpConfig, McpToolEvent } from "./gateway";
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
@@ -73,6 +76,9 @@ export interface StreamChatResult {
   /** Tool calls the model made this turn (empty for a normal text turn). The
    *  caller runs the tools and sends results back as tool_result blocks. */
   toolCalls?: ToolCallContentBlock[];
+  /** Ordered server-side MCP tool-loop events this turn (display only — the
+   *  gateway already ran the tools). Empty when no MCP servers were configured. */
+  toolEvents?: McpToolEvent[];
 }
 
 export async function isGatewayAvailable(): Promise<boolean> {
@@ -98,8 +104,13 @@ export async function streamChat(params: {
    *  resolves the best level the routed provider can serve; we only render what
    *  it actually returns. */
   responseFormat?: ResponseFormat;
+  /** Configured MCP servers for this turn. When present the gateway runs the
+   *  tool loop SERVER-SIDE; the desktop only displays the streamed activity. */
+  mcp?: ChatMcpConfig;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
+  /** Live callback for each server-side MCP tool-loop event (call/result). */
+  onMcpToolEvent?: (event: McpToolEvent) => void;
 }): Promise<StreamChatResult> {
   const result = await streamGatewayChat({
     messages: params.messages,
@@ -111,8 +122,10 @@ export async function streamChat(params: {
     tools: params.tools,
     toolChoice: params.toolChoice,
     responseFormat: params.responseFormat,
+    mcp: params.mcp,
     signal: params.signal,
     onChunk: params.onChunk,
+    onMcpToolEvent: params.onMcpToolEvent,
   });
   return {
     providerId: result.providerId,
@@ -121,5 +134,6 @@ export async function streamChat(params: {
     compression: result.compression,
     meta: result.meta,
     toolCalls: result.toolCalls,
+    toolEvents: result.toolEvents,
   };
 }
