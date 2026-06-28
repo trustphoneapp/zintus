@@ -66,9 +66,11 @@ app must make that explicit and give the user control:
       copy (`lib/consent.ts`: "Stored in your OS keyring. Never sent to the
       relay.") establish disclosure. Confirm it states prompts go to the chosen
       third-party provider before first send. 🔑 [HUMAN] product/legal sign-off.
-- [ ] **AI-content report control**: provide a user-facing way to report/flag
-      problematic AI output (per app-store UGC/AI expectations). 🔑 [HUMAN]
-      decide mechanism (in-app report → support address) and wire it.
+- [x] **AI-content report control** — **SHIPPED** (commit `8137fd9`): a user-facing
+      report/flag action on AI output landed on web + desktop (`MessageBubble`), per
+      app-store UGC/AI expectations. The mechanism (in-app report → support address)
+      is decided and wired. 🔑 [HUMAN] final product/legal sign-off on the
+      destination/retention policy still recommended before store submission.
 
 ### 1.4 Encryption export — **counsel-gated, NOT auto-exempt** 🔑 [HUMAN]
 Zintus uses TLS/HTTPS (OS-provided, exempt) **and** **x25519 / NaCl** for the

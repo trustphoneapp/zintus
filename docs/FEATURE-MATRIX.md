@@ -101,9 +101,41 @@ Several rows above were stale/optimistic. Corrected inline; recorded here with c
   single-screen text chat.
 
 Verified green at audit time: `bun run typecheck` exit 0; full `bun run test` exit 0
-(**0 failures**; exact test count not asserted here — capture from CI). Capability gaps
-confirmed absent stack-wide: **tool/function calling, multimodal image input,
-structured/JSON output.**
+(**0 failures**; exact test count not asserted here — capture from CI).
+
+**Capability status — updated post-audit (2026-06-28).** The "absent stack-wide"
+line below was true at audit time but is now stale; the corrected picture:
+
+- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web 🟡 · Desktop ❌ · Mobile ❌**.
+  Provider streaming (`packages/providers/src/utils.ts`), Gemini round-trip, and
+  gateway 422-on-unsupported are tested; the CLI `--tools` loader
+  (`apps/cli/src/commands/chat.ts`) is hardened (rejects null/array `parameters`).
+  **Web is 🟡 = API/plumbing only, no chat-UI yet:** the SSE tool-call reassembly
+  (`apps/web/lib/gateway.ts` `accumulateToolCallDeltas`/`finalizeToolCalls`) is
+  wired and unit-tested (`apps/web/lib/gateway.test.ts`), but the web chat composer
+  never sends a `tools` array and no chat surface renders a tool-call card — a web
+  *user* cannot define a tool or watch one fire. Per the end-to-end rule below, ✅ is
+  reserved for UI → gateway → provider, so the wired-but-unsurfaced library is 🟡,
+  not ✅. **Desktop/mobile have no tool UI (❌)** — the gateway + CLI serve tools, but
+  no desktop/mobile surface exposes them yet.
+- **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web 🟡 · Desktop ❌ · Mobile ❌**.
+  Engine validate→repair + gateway strict-422 tested. Conservative: only Gemini is
+  `json_schema`; others `json_object`/prompt-level. **Web is 🟡 = library/plumbing
+  only:** `streamGatewayChat` can carry structured output but no web chat surface
+  requests `response_format` or renders the parsed JSON; **desktop/mobile have no
+  JSON UI (❌)**.
+- **Multimodal image input** — proven on **web + CLI** (EXIF-stripped image blocks
+  to a vision-capable model, hard-error rather than silent text-only fallback), and
+  now also **maps to OpenRouter vision models**. **Desktop/mobile image UI is still
+  absent (❌).**
+- **CSP nonce** — relanded in `apps/web/proxy.ts` (per-request nonce, dev-only
+  `'unsafe-eval'` now fail-closed on `NODE_ENV === "development"`, Report-Only
+  toggle). **NOT yet browser-verified** — the in-browser check against
+  `next build && next start` is the remaining [HUMAN] step.
+
+*Original (now-stale) audit-time line, retained for provenance:* "Capability gaps
+confirmed absent stack-wide: tool/function calling, multimodal image input,
+structured/JSON output."
 
 ## Cross-surface issues to resolve (ranked)
 
