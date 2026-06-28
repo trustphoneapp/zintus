@@ -136,6 +136,35 @@ program
   });
 
 program
+  .command("agent")
+  .description(
+    "Run a SANDBOXED coding agent: it reads/searches files and (with per-write confirmation) edits them, confined to --root",
+  )
+  .argument("<task>", "What the agent should do")
+  .option(
+    "--root <dir>",
+    "Sandbox root the agent is confined to (default: current dir)",
+  )
+  .option("--yes", "Auto-apply file writes WITHOUT confirmation (dangerous)")
+  .option("--max-rounds <n>", "Cap the tool loop rounds (default 15)")
+  .action(
+    async (
+      task: string,
+      options: { root?: string; yes?: boolean; maxRounds?: string },
+    ) => {
+      const { runAgent } = await import("./commands/agent.js");
+      let maxRounds: number | undefined;
+      if (options.maxRounds != null) {
+        maxRounds = Number(options.maxRounds);
+        if (!Number.isInteger(maxRounds) || maxRounds < 1) {
+          throw new Error("Invalid --max-rounds. Expected a positive integer.");
+        }
+      }
+      await runAgent(task, { root: options.root, yes: options.yes, maxRounds });
+    },
+  );
+
+program
   .command("status")
   .description("Live dashboard of providers and quota usage")
   .action(async () => {
