@@ -59,6 +59,15 @@ transparency** — the two things no competitor has. This is the category Zintus
 
 **[HUMAN]/device (unchanged):** in-browser CSP verify; desktop signed native builds; mobile EAS/device + store; legal/store; live billing.
 
+## Progress since this verdict (committed + code-verified — NOT yet re-benchmarked)
+Closing the path-to-10 gaps, codeable-first (each committed, suite green):
+- **A1** web structured-output toggle → closes the web↔desktop inversion (catalog "JSON" chip now reachable). *Chat-experience structured: 3 → reachable on web.*
+- **A2** route-reason on **CLI + desktop** (was web-only) + **removed the fabricated 1,000,000 quota denominator on BOTH** CLI and desktop ("limit unknown" instead). *Consistency: route-reason now web+desktop+CLI; honesty hardened.*
+- **B3** durable sqlite activity store (30-day, machine-local) → `/v1/activity` is persistent, not in-memory. *Router/marketplace activity: 5 → durable.*
+- **C1** voice input (Web Speech API dictation, honest browser-support + privacy). *Chat-experience voice: 1 → present on web.*
+- Fixed a desktop consent bug (image-only first send dropped) found in fresh review.
+These are real, committed improvements; **a fresh 4-agent re-benchmark is required before claiming new axis scores** (estimated movement: consistency 5→~7, chat-experience 6.5→~7.5 — mobile parity + B1/B2 remain). Remaining: **B1** catalog breadth (per-model capability-verified — honesty-sensitive), **B2** BYOK priority/fallback keys, **C2** files/PDF, **D** agentic/research, and the mobile [HUMAN] track.
+
 ## Bottom line
 Zintus has a **10/10 moat and honesty story** wrapped in a **~6.5/10 product** —
 strong, differentiated, and honest, but not yet best-in-class on breadth,
