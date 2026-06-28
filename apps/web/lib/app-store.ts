@@ -17,6 +17,10 @@ export interface UiImageMeta {
   width?: number;
   height?: number;
   exifStripped: boolean;
+  /** In-memory object URL of the original file, for a bubble thumbnail. NEVER
+   *  base64 and not meaningfully persisted — a `blob:` URL is dead after reload,
+   *  so the bubble falls back to the metadata chip. */
+  previewUrl?: string;
 }
 
 export interface UiMessage {

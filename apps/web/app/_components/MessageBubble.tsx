@@ -105,30 +105,58 @@ export function MessageBubble({
             }}
           >
             {message.images.map((img, idx) => (
-              <span
+              <div
                 key={idx}
-                className="message-image-chip"
-                title={`${img.mimeType}${
-                  img.width && img.height
-                    ? ` · ${img.width}×${img.height}`
-                    : ""
-                }`}
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
+                  display: "flex",
+                  flexDirection: "column",
                   gap: 4,
-                  fontSize: 11,
-                  color: "#94a3b8",
-                  background: "rgba(255,255,255,0.05)",
-                  border: "1px solid #232a36",
-                  borderRadius: 6,
-                  padding: "2px 8px",
+                  maxWidth: 220,
                 }}
               >
-                <Icon name="paperclip" size={11} />
-                {img.name} · {formatImageBytes(img.bytes)}
-                {img.exifStripped ? " · EXIF stripped" : ""}
-              </span>
+                {img.previewUrl ? (
+                  <img
+                    src={img.previewUrl}
+                    alt={img.name}
+                    style={{
+                      maxWidth: 220,
+                      maxHeight: 220,
+                      width: "auto",
+                      borderRadius: 8,
+                      border: "1px solid #232a36",
+                      objectFit: "cover",
+                      display: "block",
+                    }}
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).style.display =
+                        "none";
+                    }}
+                  />
+                ) : null}
+                <span
+                  className="message-image-chip"
+                  title={`${img.mimeType}${
+                    img.width && img.height
+                      ? ` · ${img.width}×${img.height}`
+                      : ""
+                  }`}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    fontSize: 11,
+                    color: "#94a3b8",
+                    background: "rgba(255,255,255,0.05)",
+                    border: "1px solid #232a36",
+                    borderRadius: 6,
+                    padding: "2px 8px",
+                  }}
+                >
+                  <Icon name="image" size={11} />
+                  {img.name} · {formatImageBytes(img.bytes)}
+                  {img.exifStripped ? " · EXIF stripped" : ""}
+                </span>
+              </div>
             ))}
           </div>
         ) : null}

@@ -244,16 +244,6 @@ export default function ChatPage() {
     });
   }, []);
 
-  /** Drop all attachments, revoking every image preview URL. */
-  const clearAttachments = useCallback(() => {
-    setAttachments((prev) => {
-      for (const a of prev) {
-        if (a.kind === "image") URL.revokeObjectURL(a.previewUrl);
-      }
-      return [];
-    });
-  }, []);
-
   const handleFiles = useCallback(async (files: FileList | File[]) => {
     const fileArray = Array.from(files);
     // Live image count from the ref so multi-file drops respect the max-4 cap.
@@ -521,12 +511,16 @@ export default function ChatPage() {
         width: a.block.width,
         height: a.block.height,
         exifStripped: a.block.exifStripped,
+        previewUrl: a.previewUrl,
       }));
     appendMessage(createUserMessage(userText, sentImageMeta));
     const assistant = createAssistantPlaceholder();
     appendMessage(assistant);
     setInput("");
-    clearAttachments();
+    // Transfer the attachments' preview object URLs to the sent bubbles (don't
+    // revoke them) so the thumbnails render; they're freed on page unload.
+    // Explicit removal (removeAttachment) still revokes.
+    setAttachments([]);
 
     // Leading system messages, injected once at the start of a new conversation
     // (full history sent; server owns context afterwards). Incognito skips memory.
@@ -558,7 +552,6 @@ export default function ChatPage() {
     activePreset,
     appendMessage,
     attachments,
-    clearAttachments,
     incognito,
     input,
     loading,
@@ -949,7 +942,7 @@ export default function ChatPage() {
                 onClick={() => fileInputRef.current?.click()}
                 aria-label="Attach an image or text file"
               >
-                <Icon name="paperclip" size={15} />
+                <Icon name="image" size={16} />
               </button>
             </Tooltip>
             {loading ? (
