@@ -121,6 +121,7 @@ function buildUsageMetadata(
   usage: RouteUsage,
   strategy: string | undefined,
   privacyHonored?: boolean,
+  routeReason?: string,
 ): Record<string, unknown> {
   return {
     type: "metadata",
@@ -134,6 +135,8 @@ function buildUsageMetadata(
       usage.outputTokens,
     ),
     routing_strategy: strategy ?? "auto",
+    // Human "why this provider/model" — surfaced on every platform (consistency).
+    ...(routeReason ? { route_reason: routeReason } : {}),
     // Privacy-mode honesty signal — only present when private mode was requested
     // (block_training). false = the request could not avoid a may-train provider.
     ...(privacyHonored !== undefined
@@ -439,7 +442,7 @@ export function createGatewayHandler(
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
       "Access-Control-Expose-Headers":
-        "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, " +
+        "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, X-Zintus-Route-Reason, " +
         "X-Zintus-Original-Tokens, X-Zintus-Compressed-Tokens, " +
         "X-Zintus-Tokens-Saved, X-Zintus-Compression-Ratio, " +
         "X-Zintus-Cost-Saved-Usd, X-Zintus-Private-Honored, " +
@@ -973,6 +976,15 @@ export function createGatewayHandler(
       "X-Cache-Hit": result.cacheHit ?? "miss",
       "X-Failover-Count": String(result.failoverCount ?? 0),
     };
+    // Human route-reason (why this provider/model) — surfaced on every platform.
+    // Header values must be Latin-1; strip any stray non-ASCII defensively (the
+    // full unicode-safe reason still rides in the metadata SSE/JSON frame).
+    if (result.routeReason) {
+      metaHeaders["X-Zintus-Route-Reason"] = result.routeReason.replace(
+        /[^\x20-\x7E]/g,
+        " ",
+      );
+    }
     // Privacy-mode honesty: surface whether private mode was honored so clients
     // can warn "used <provider> — Private Mode not honored" instead of failing
     // silently. Present only when block_training was requested.
@@ -1129,6 +1141,7 @@ export function createGatewayHandler(
                   capturedUsage,
                   body.strategy,
                   result.privacyHonored,
+                  result.routeReason,
                 ),
               }
             : {}),

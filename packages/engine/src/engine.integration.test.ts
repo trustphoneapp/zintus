@@ -89,6 +89,12 @@ describe("engine integration (stubbed provider)", () => {
     expect(text).toBe("Hello world");
     expect(result.providerId).toBe("gemini");
 
+    // A human route-reason is always present (the consistency rule) and names the
+    // winning provider/model.
+    expect(result.routeReason).toBeDefined();
+    expect(result.routeReason).toContain("gemini");
+    expect(result.routeReason).toContain("strategy");
+
     // Persisted both turns on the thread.
     const messages = engine.getThreadMessages(result.threadId!);
     expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);

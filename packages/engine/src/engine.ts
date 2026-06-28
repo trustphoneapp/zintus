@@ -33,7 +33,7 @@ import type {
   ThreadMessage,
   TraceAttempt,
 } from "@zintus/types";
-import { textOf, requiresStructuredOutput, requiresTools, hasToolTurns } from "@zintus/types";
+import { textOf, requiresVision, requiresStructuredOutput, requiresTools, hasToolTurns } from "@zintus/types";
 import { getKey } from "@zintus/keychain";
 import { ConversationStore } from "./conversation-store.js";
 import { exportRequestTrace, nowEpochMs } from "./otel.js";
@@ -80,6 +80,48 @@ function coercionMessage(
   return { role: "system", content };
 }
 
+/** Build the short, human "why this provider/model" line surfaced on every
+ *  platform (the consistency rule). Honest: states the strategy, any capability
+ *  constraint that filtered candidates, failover count, privacy outcome, or a
+ *  cache hit. */
+function buildRouteReason(opts: {
+  providerId: string;
+  model: string;
+  strategy?: string;
+  failoverCount: number;
+  requiresVision: boolean;
+  requiresTools: boolean;
+  requiresStructured: boolean;
+  privacyHonored?: boolean;
+  cacheHit?: "L1" | "L2" | "miss";
+}): string {
+  // ASCII-only punctuation: this string is also set as an HTTP header
+  // (X-Zintus-Route-Reason), and header values must be Latin-1 — a unicode dash/
+  // middot would throw when the Response is built.
+  if (opts.cacheHit && opts.cacheHit !== "miss") {
+    return `Served from ${opts.cacheHit} cache (no provider call).`;
+  }
+  const caps: string[] = [];
+  if (opts.requiresVision) caps.push("vision");
+  if (opts.requiresTools) caps.push("tools");
+  if (opts.requiresStructured) caps.push("structured output");
+  let reason = `Routed to ${opts.providerId} (${opts.model}) via the ${
+    opts.strategy ?? "auto"
+  } strategy`;
+  if (caps.length) reason += ` (${caps.join(", ")}-capable)`;
+  if (opts.failoverCount > 0) {
+    reason += ` after ${opts.failoverCount} failover${
+      opts.failoverCount > 1 ? "s" : ""
+    }`;
+  }
+  if (opts.privacyHonored === false) {
+    reason += "; Private Mode NOT honored (no privacy-safe provider available)";
+  } else if (opts.privacyHonored === true) {
+    reason += "; Private Mode honored";
+  }
+  return reason + ".";
+}
+
 export interface EngineConfig extends RouterConfig {
   conversationsPath?: string;
   persistConversations?: boolean;
@@ -121,6 +163,9 @@ export interface EngineStreamResult extends RouteStreamResult {
   cacheHit?: "L1" | "L2" | "miss";
   /** Number of provider attempts that failed before one succeeded. */
   failoverCount?: number;
+  /** A short, human "why this provider/model" — strategy + failover + capability +
+   *  privacy. Surfaced on every platform (the consistency rule). Always present. */
+  routeReason?: string;
   /**
    * Structured-output verdict, present ONLY when the request asked for non-text
    * structured output (`responseFormat.type !== "text"`). The text `stream` for
@@ -709,6 +754,16 @@ export function createEngine(config: EngineConfig = {}): Engine {
           cacheHit: "miss",
           failoverCount: attempts.filter((a) => a.status === "fail").length,
           privacyHonored: structuredResult.privacyHonored,
+          routeReason: buildRouteReason({
+            providerId: structuredResult.providerId,
+            model: structuredResult.model,
+            strategy: request.strategy,
+            failoverCount: attempts.filter((a) => a.status === "fail").length,
+            requiresVision: requiresVision(effectiveMessages),
+            requiresTools: false,
+            requiresStructured: true,
+            privacyHonored: structuredResult.privacyHonored,
+          }),
           structuredOutput: {
             requested,
             servedLevel,
@@ -820,6 +875,15 @@ export function createEngine(config: EngineConfig = {}): Engine {
             compileTokenEstimate,
             cacheHit,
             failoverCount: 0,
+            routeReason: buildRouteReason({
+              providerId: String(targetProvider),
+              model: targetModel,
+              failoverCount: 0,
+              requiresVision: false,
+              requiresTools: false,
+              requiresStructured: false,
+              cacheHit,
+            }),
           };
         }
       }
@@ -929,6 +993,16 @@ export function createEngine(config: EngineConfig = {}): Engine {
         cacheHit: "miss",
         failoverCount: attempts.filter((a) => a.status === "fail").length,
         privacyHonored: result.privacyHonored,
+        routeReason: buildRouteReason({
+          providerId: result.providerId,
+          model: result.model,
+          strategy: request.strategy,
+          failoverCount: attempts.filter((a) => a.status === "fail").length,
+          requiresVision: requiresVision(effectiveMessages),
+          requiresTools: requiresTools(request),
+          requiresStructured: requiresStructuredOutput(request),
+          privacyHonored: result.privacyHonored,
+        }),
       };
     },
 
