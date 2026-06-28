@@ -35,6 +35,7 @@ import {
   isImageMime,
   providerCanSeeImages,
 } from "@/lib/image-attachments";
+import { extractPdfText } from "@/lib/extract-pdf";
 import { memorySystemMessage } from "@/lib/memory";
 import { downloadFile } from "@/lib/download";
 import {
@@ -61,13 +62,17 @@ const TEXT_EXTENSIONS = new Set([
   ".json", ".sh", ".yaml", ".toml", ".rs", ".go", ".css",
 ]);
 
-/** A text file is extracted to a string and folded into the prompt. */
+/** A text or PDF file: its text is extracted client-side and folded into the
+ *  prompt. `pages` is set for PDFs so the chip can show "📄 extracted N pages";
+ *  `truncated` flags a long PDF whose tail we stopped reading. */
 interface TextAttachment {
   id: string;
   kind: "text";
   name: string;
   content: string;
   mimeType: string;
+  pages?: number;
+  truncated?: boolean;
 }
 
 /** An image is processed by @zintus/media into an `ImageContentBlock` that we
@@ -352,12 +357,46 @@ export default function ChatPage() {
         continue;
       }
 
-      // ── Text branch — extracted + sent inline (unchanged) ──────────────────
       const ext = "." + (file.name.split(".").pop()?.toLowerCase() ?? "");
+
+      // ── PDF branch — text extracted CLIENT-SIDE, then folded in like text ───
+      // Bytes never leave the browser; a scanned/corrupt/oversize PDF yields an
+      // honest notice (no fabricated text). See lib/extract-pdf.ts for the
+      // CSP-safe (eval-free, no-worker, no-WASM) pdf.js config.
+      if (file.type === "application/pdf" || ext === ".pdf") {
+        const result = await extractPdfText(file);
+        if ("error" in result) {
+          setNotice({ tone: "error", text: `${file.name}: ${result.error}` });
+          continue;
+        }
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            kind: "text",
+            name: file.name,
+            content: result.text,
+            mimeType: "application/pdf",
+            pages: result.pages,
+            truncated: result.truncated,
+          },
+        ]);
+        if (result.truncated) {
+          setNotice({
+            tone: "warn",
+            text: `${file.name}: read the first ${result.pages} pages — the rest wasn't included.`,
+          });
+        } else {
+          setNotice(null);
+        }
+        continue;
+      }
+
+      // ── Text branch — extracted + sent inline (unchanged) ──────────────────
       if (!TEXT_EXTENSIONS.has(ext)) {
         setNotice({
           tone: "error",
-          text: `${file.name} isn't a supported file — attach an image (PNG/JPEG/WebP) or a text file.`,
+          text: `${file.name} isn't a supported file — attach an image (PNG/JPEG/WebP), a PDF, or a text file.`,
         });
         continue;
       }
@@ -613,8 +652,14 @@ export default function ChatPage() {
     let textPrefix = "";
     for (const att of attachments) {
       if (att.kind !== "text") continue;
-      const ext = att.name.split(".").pop() ?? "txt";
-      textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
+      if (att.pages !== undefined) {
+        // PDF: extracted text, not source — label honestly with the page count.
+        const more = att.truncated ? ` (first ${att.pages}, truncated)` : "";
+        textPrefix += `[PDF: ${att.name} — ${att.pages} page${att.pages === 1 ? "" : "s"}${more}]\n\`\`\`\n${att.content}\n\`\`\`\n\n`;
+      } else {
+        const ext = att.name.split(".").pop() ?? "txt";
+        textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
+      }
     }
     const userText = (textPrefix + prompt).trim();
 
@@ -1289,6 +1334,12 @@ export default function ChatPage() {
                     <>
                       <Icon name="paperclip" size={12} />
                       <span className="chat-attachment-name">{att.name}</span>
+                      {att.pages !== undefined ? (
+                        <span className="chat-attachment-meta">
+                          📄 extracted {att.pages} page{att.pages === 1 ? "" : "s"}
+                          {att.truncated ? " (truncated)" : ""}
+                        </span>
+                      ) : null}
                     </>
                   )}
                   <Tooltip content={`Remove ${att.name}`}>
@@ -1309,7 +1360,7 @@ export default function ChatPage() {
             <input
               type="file"
               ref={fileInputRef}
-              accept="image/jpeg,image/png,image/webp,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
+              accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
               multiple
               style={{ display: "none" }}
               onChange={(e) => {
@@ -1319,12 +1370,12 @@ export default function ChatPage() {
               }}
             />
             {/* Icons left: attach sits at the leading edge of the input row. */}
-            <Tooltip content="Attach an image (PNG/JPEG/WebP) or a text file">
+            <Tooltip content="Attach an image (PNG/JPEG/WebP), a PDF, or a text file">
               <button
                 type="button"
                 className="chat-attach"
                 onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach an image or text file"
+                aria-label="Attach an image, PDF, or text file"
               >
                 <Icon name="image" size={16} />
               </button>
