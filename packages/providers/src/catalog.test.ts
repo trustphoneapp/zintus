@@ -177,7 +177,30 @@ describe("model catalog", () => {
       expect(models.length).toBeGreaterThan(0);
       for (const m of models) expect(m.provider).toBe(id);
     }
-    expect(catalogModelsForProvider("gemini").length).toBeGreaterThanOrEqual(5);
-    expect(catalogModelsForProvider("groq").length).toBe(2);
+    expect(catalogModelsForProvider("gemini").length).toBeGreaterThanOrEqual(6);
+    expect(catalogModelsForProvider("groq").length).toBe(4);
+  });
+
+  test("prices are number|null with no NaN/placeholder values", () => {
+    for (const m of MODEL_CATALOG) {
+      for (const price of [m.inputPer1M, m.outputPer1M]) {
+        expect(price === null || typeof price === "number").toBe(true);
+        if (typeof price === "number") {
+          expect(Number.isFinite(price)).toBe(true);
+          expect(Number.isNaN(price)).toBe(false);
+        }
+      }
+    }
+  });
+
+  test("contextWindow is a finite positive integer for every entry", () => {
+    for (const m of MODEL_CATALOG) {
+      expect(Number.isInteger(m.contextWindow)).toBe(true);
+      expect(m.contextWindow).toBeGreaterThan(0);
+    }
+  });
+
+  test("catalog has grown well past the original 23-model seed", () => {
+    expect(MODEL_CATALOG.length).toBeGreaterThanOrEqual(37);
   });
 });

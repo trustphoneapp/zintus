@@ -106,6 +106,7 @@ const VISION_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
   gemini: new Set([
     "gemini-2.5-flash",
     "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
@@ -114,6 +115,9 @@ const VISION_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
     "meta-llama/llama-3.2-90b-vision-instruct",
     "meta-llama/llama-3.2-11b-vision-instruct",
   ]),
+  // Mistral's Pixtral Large is a documented multimodal model; the OpenAI-compat
+  // adapter sends image_url data-URL parts, which the Mistral API accepts.
+  mistral: new Set(["pixtral-large-latest"]),
 };
 
 /**
@@ -143,6 +147,7 @@ const TOOL_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
   gemini: new Set([
     "gemini-2.5-flash",
     "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
@@ -150,7 +155,27 @@ const TOOL_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
   groq: new Set([
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
+    // OpenAI's open-weight MoE models on GroqCloud — function calling supported.
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
   ]),
+  // Cohere Command models that document tool use (via the OpenAI-compat surface).
+  cohere: new Set([
+    "command-a-03-2025",
+    "command-a-reasoning-08-2025",
+    "command-r7b-12-2024",
+  ]),
+  // Mistral instruct models expose native function calling on /v1/chat/completions.
+  mistral: new Set([
+    "mistral-medium-latest",
+    "ministral-8b-latest",
+    "ministral-3b-latest",
+    "pixtral-large-latest",
+  ]),
+  // Fireworks serves OpenAI-style function calling for its Llama instruct models.
+  fireworks: new Set(["accounts/fireworks/models/llama-v3p3-70b-instruct"]),
+  // Cerebras serves tool calling for gpt-oss-120b.
+  cerebras: new Set(["gpt-oss-120b"]),
 };
 
 /**
@@ -185,9 +210,15 @@ const JSON_SCHEMA_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
   gemini: new Set([
     "gemini-2.5-flash",
     "gemini-2.5-pro",
+    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-1.5-pro",
     "gemini-1.5-flash",
+  ]),
+  // GroqCloud documents a "JSON Schema Mode" (constrained decode) for gpt-oss.
+  groq: new Set([
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
   ]),
 };
 

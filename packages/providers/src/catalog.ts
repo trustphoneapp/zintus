@@ -140,6 +140,7 @@ const SEEDS: ReadonlyArray<readonly [ProviderId, CatalogSeed]> = [
   // ── Gemini ─ all listed models are verified vision + tools + json_schema. ──
   ["gemini", { id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", contextWindow: 1_000_000, vision: true, tools: true, structuredOutput: "json_schema", free: true }],
   ["gemini", { id: "gemini-2.5-pro", displayName: "Gemini 2.5 Pro", contextWindow: 1_000_000, vision: true, tools: true, structuredOutput: "json_schema", free: true }],
+  ["gemini", { id: "gemini-2.5-flash-lite", displayName: "Gemini 2.5 Flash-Lite", contextWindow: 1_000_000, vision: true, tools: true, structuredOutput: "json_schema", free: true }],
   ["gemini", { id: "gemini-2.0-flash", displayName: "Gemini 2.0 Flash", contextWindow: 1_000_000, vision: true, tools: true, structuredOutput: "json_schema", free: true }],
   ["gemini", { id: "gemini-1.5-pro", displayName: "Gemini 1.5 Pro", contextWindow: 2_000_000, vision: true, tools: true, structuredOutput: "json_schema", free: true }],
   ["gemini", { id: "gemini-1.5-flash", displayName: "Gemini 1.5 Flash", contextWindow: 1_000_000, vision: true, tools: true, structuredOutput: "json_schema", free: true }],
@@ -149,8 +150,9 @@ const SEEDS: ReadonlyArray<readonly [ProviderId, CatalogSeed]> = [
   ["openrouter", { id: "meta-llama/llama-3.2-90b-vision-instruct", displayName: "Llama 3.2 90B Vision Instruct", contextWindow: 128_000, vision: true, tools: false, structuredOutput: "none", free: false }],
   ["openrouter", { id: "meta-llama/llama-3.2-11b-vision-instruct", displayName: "Llama 3.2 11B Vision Instruct", contextWindow: 128_000, vision: true, tools: false, structuredOutput: "none", free: false }],
 
-  // ── Fireworks ──
+  // ── Fireworks (extra: serverless Llama 3.3 70B, function-calling verified) ──
   ["fireworks", { id: "accounts/fireworks/models/llama-v3p1-8b-instruct", displayName: "Llama 3.1 8B Instruct", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "json_object", free: false }],
+  ["fireworks", { id: "accounts/fireworks/models/llama-v3p3-70b-instruct", displayName: "Llama 3.3 70B Instruct", contextWindow: 131_072, vision: false, tools: true, structuredOutput: "none", free: false }],
 
   // ── xAI ──
   ["xai", { id: "grok-2-latest", displayName: "Grok 2", contextWindow: 131_072, vision: false, tools: true, structuredOutput: "json_object", free: false }],
@@ -159,24 +161,36 @@ const SEEDS: ReadonlyArray<readonly [ProviderId, CatalogSeed]> = [
   ["deepseek", { id: "deepseek-chat", displayName: "DeepSeek Chat", contextWindow: 64_000, vision: false, tools: true, structuredOutput: "json_object", free: false }],
   ["deepseek", { id: "deepseek-reasoner", displayName: "DeepSeek Reasoner", contextWindow: 64_000, vision: false, tools: false, structuredOutput: "none", free: false }],
 
-  // ── Mistral (extra: mistral-small-latest, conservative) ──
+  // ── Mistral (large default + verified -latest aliases; pixtral = vision) ──
   ["mistral", { id: "mistral-large-latest", displayName: "Mistral Large", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "json_object", free: true }],
+  ["mistral", { id: "mistral-medium-latest", displayName: "Mistral Medium", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "none", free: true }],
   ["mistral", { id: "mistral-small-latest", displayName: "Mistral Small", contextWindow: 32_000, vision: false, tools: false, structuredOutput: "none", free: true }],
+  ["mistral", { id: "ministral-8b-latest", displayName: "Ministral 8B", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "none", free: true }],
+  ["mistral", { id: "ministral-3b-latest", displayName: "Ministral 3B", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "none", free: true }],
+  ["mistral", { id: "pixtral-large-latest", displayName: "Pixtral Large", contextWindow: 128_000, vision: true, tools: true, structuredOutput: "none", free: true }],
+  ["mistral", { id: "codestral-latest", displayName: "Codestral", contextWindow: 256_000, vision: false, tools: false, structuredOutput: "none", free: true }],
+  ["mistral", { id: "magistral-medium-latest", displayName: "Magistral Medium", contextWindow: 128_000, vision: false, tools: false, structuredOutput: "none", free: true }],
 
   // ── Hugging Face (Inference Router; default has no native tools/json) ──
   ["huggingface", { id: "meta-llama/Llama-3.3-70B-Instruct", displayName: "Llama 3.3 70B Instruct", contextWindow: 128_000, vision: false, tools: false, structuredOutput: "none", free: true }],
 
-  // ── Cohere (extra: command-r-08-2024, conservative) ──
+  // ── Cohere (default R+ + Command A / R7B, tool-calling verified) ──
   ["cohere", { id: "command-r-plus-08-2024", displayName: "Command R+ (08-2024)", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "none", free: true }],
+  ["cohere", { id: "command-a-03-2025", displayName: "Command A (03-2025)", contextWindow: 256_000, vision: false, tools: true, structuredOutput: "none", free: true }],
+  ["cohere", { id: "command-a-reasoning-08-2025", displayName: "Command A Reasoning (08-2025)", contextWindow: 256_000, vision: false, tools: true, structuredOutput: "none", free: true }],
+  ["cohere", { id: "command-r7b-12-2024", displayName: "Command R7B (12-2024)", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "none", free: true }],
   ["cohere", { id: "command-r-08-2024", displayName: "Command R (08-2024)", contextWindow: 128_000, vision: false, tools: false, structuredOutput: "none", free: true }],
 
   // ── Cerebras (extra: llama-3.1-8b, conservative — not in tool/json allowlists) ──
   ["cerebras", { id: "llama-3.3-70b", displayName: "Llama 3.3 70B", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "json_object", free: true }],
   ["cerebras", { id: "llama-3.1-8b", displayName: "Llama 3.1 8B", contextWindow: 128_000, vision: false, tools: false, structuredOutput: "none", free: true }],
+  ["cerebras", { id: "gpt-oss-120b", displayName: "GPT-OSS 120B", contextWindow: 131_072, vision: false, tools: true, structuredOutput: "none", free: true }],
 
-  // ── Groq (default 70B + verified 8B tool model, both priced) ──
+  // ── Groq (default 70B + 8B tool model + gpt-oss MoE with JSON-schema mode) ──
   ["groq", { id: "llama-3.3-70b-versatile", displayName: "Llama 3.3 70B Versatile", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "json_object", free: true }],
   ["groq", { id: "llama-3.1-8b-instant", displayName: "Llama 3.1 8B Instant", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "none", free: true }],
+  ["groq", { id: "openai/gpt-oss-120b", displayName: "GPT-OSS 120B", contextWindow: 131_072, vision: false, tools: true, structuredOutput: "json_schema", free: true }],
+  ["groq", { id: "openai/gpt-oss-20b", displayName: "GPT-OSS 20B", contextWindow: 131_072, vision: false, tools: true, structuredOutput: "json_schema", free: true }],
 
   // ── Local runtimes (no per-token price; flags fail closed for specific ids) ──
   ["lmstudio", { id: "local-model", displayName: "Local Model (LM Studio)", contextWindow: 32_000, vision: false, tools: false, structuredOutput: "none", free: true }],
