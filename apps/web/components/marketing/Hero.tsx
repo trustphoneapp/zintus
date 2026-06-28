@@ -4,7 +4,9 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { ArrowRight, Check, Copy, Zap } from "lucide-react";
 
-const INSTALL_CMD = "npm install -g zintus";
+// The CLI runs on Bun (bun:sqlite), so install with Bun — `npm i -g` would put a
+// shim on PATH that can't run under Node. Keep this honest.
+const INSTALL_CMD = "bun install -g zintus";
 
 const TERMINAL_LINES = [
   { delay: 0,    type: "prompt", text: "zintus chat" },
@@ -94,7 +96,7 @@ export function Hero() {
                 <span className="t-cmd">{INSTALL_CMD}</span>
               </div>
               <div style={{ marginBottom: 8 }}>
-                <span className="t-ok">✓ zintus@2.0.0 installed</span>
+                <span className="t-ok">✓ zintus@0.2.0 installed</span>
               </div>
               {/* Animated lines */}
               {TERMINAL_LINES.slice(0, visibleLines).map((line, i) => (

@@ -456,7 +456,8 @@ export default function PricingPage() {
           </h2>
           <p className="m-subtitle" style={{ maxWidth: "680px", marginBottom: "1.5rem" }}>
             Every paid referral earns you a reward. Growth and Scale referrals pay 20% of their subscription for 12
-            months. Starter referrals pay a flat $15 one-time. Paid out monthly via Stripe.
+            months. Starter referrals pay a flat $15 one-time. <strong>Payouts are coming soon</strong> — referrals
+            are tracked from day one, and disbursement (monthly via Stripe) goes live with paid plans.
           </p>
           <div style={{ overflowX: "auto", marginBottom: "1.5rem" }}>
             <table
