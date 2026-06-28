@@ -22,12 +22,14 @@ const TITLES: Record<string, string> = {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("zintus:sidebar") === "collapsed";
-    }
-    return false;
-  });
+  // Default false on BOTH the server and the first client render so hydration
+  // matches; the persisted value is applied after mount (effect below). Reading
+  // localStorage in the initializer made the first client render disagree with
+  // the server HTML → "hydration failed" recoverable error.
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    setCollapsed(localStorage.getItem("zintus:sidebar") === "collapsed");
+  }, []);
   const [checked, setChecked] = useState(false);
   const { gatewayConnected, setGatewayStatus } = useAppStore();
 
