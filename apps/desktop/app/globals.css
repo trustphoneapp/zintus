@@ -535,3 +535,143 @@ button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
 /* ── Response meta strip (latency / saved-vs-Claude / strategy) ── */
 .response-meta-strip { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; font-size: 10px; color: var(--color-text-muted, #94a3b8); }
 .response-meta-saved { color: var(--color-good, #34d399); font-weight: 700; }
+
+/* ── Artifacts / canvas drawer ──────────────────────────────────────────────
+   A right-side drawer (no iframe preview on desktop). Reuses the chat's calm
+   palette; the inline affordance lives inside a message bubble. */
+.artifact-affordance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-purple-bright, #818cf8);
+  background: var(--color-purple-faint, rgba(99, 102, 241, 0.1));
+  border: 1px solid var(--color-border, #374151);
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.artifact-affordance:hover { border-color: var(--color-purple-bright, #818cf8); }
+
+.artifact-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  justify-content: flex-end;
+  z-index: 45;
+}
+.artifact-panel {
+  width: min(440px, 92vw);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--color-surface, #111827);
+  border-left: 1px solid var(--color-border, #374151);
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.35);
+}
+.artifact-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border, #374151);
+}
+.artifact-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text, #e8eef5);
+}
+.artifact-panel-close {
+  background: none;
+  border: none;
+  color: var(--color-text-muted, #6b7280);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: inline-flex;
+}
+.artifact-panel-close:hover { color: var(--color-text, #e8eef5); background: rgba(148, 163, 184, 0.12); }
+
+.artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--color-border, #374151);
+}
+.artifact-list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 9px;
+  cursor: pointer;
+  color: var(--color-text-sub, #9ca3af);
+}
+.artifact-list-item:hover { background: rgba(148, 163, 184, 0.08); }
+.artifact-list-item.active {
+  background: var(--color-purple-faint, rgba(99, 102, 241, 0.1));
+  border-color: var(--color-border, #374151);
+  color: var(--color-text, #e8eef5);
+}
+.artifact-list-kind {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--color-purple-bright, #818cf8);
+  flex-shrink: 0;
+}
+.artifact-list-name {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.artifact-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border, #374151);
+}
+.artifact-kind-chip {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--color-purple-bright, #818cf8);
+}
+.artifact-actions { display: inline-flex; gap: 4px; }
+.artifact-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--color-text-sub, #9ca3af);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.artifact-action:hover { color: var(--color-text, #e8eef5); background: rgba(148, 163, 184, 0.1); }
+
+.artifact-body { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
+.artifact-doc { font-size: 14px; }
+.artifact-panel-note {
+  font-size: 11.5px;
+  color: var(--color-text-muted, #6b7280);
+  margin: 10px 0 0;
+  line-height: 1.5;
+}

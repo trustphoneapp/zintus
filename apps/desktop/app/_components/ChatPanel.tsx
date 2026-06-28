@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { MessageSquarePlus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Layers, MessageSquarePlus } from "lucide-react";
 import type {
   ContentBlock,
   ImageContentBlock,
@@ -43,11 +43,13 @@ import {
   hasProviderSendConsent,
 } from "@/lib/consent";
 import { getActiveProject, setActiveProjectId } from "@/lib/projects";
+import { extractArtifacts, type Artifact } from "@/lib/artifacts";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { MessageBubble } from "./MessageBubble";
+import { ArtifactPanel } from "./ArtifactPanel";
 
 // Text-like files we extract on-device (parity with web/mobile). Images now ride
 // as real ImageContentBlocks via @zintus/media (see ImageAttachment below).
@@ -552,6 +554,43 @@ export function ChatPanel() {
     .reverse()
     .find((m) => m.role === "assistant")?.id;
 
+  // ── Artifacts / canvas drawer ──────────────────────────────────────────────
+  // Every artifact-worthy block (substantial code, full HTML, SVG, long markdown
+  // doc) across the conversation. Detection is pure + identical to web (see
+  // lib/artifacts.ts); ids are namespaced by message so two turns never collide.
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  const { artifactList, artifactsByMessage } = useMemo(() => {
+    const list: Artifact[] = [];
+    const byMessage: Record<string, Artifact[]> = {};
+    for (const m of messages) {
+      if (m.role !== "assistant" || !m.content) continue;
+      const arts = extractArtifacts(m.content).map((a) => ({
+        ...a,
+        id: `${m.id}:${a.id}`,
+      }));
+      if (arts.length > 0) {
+        byMessage[m.id] = arts;
+        list.push(...arts);
+      }
+    }
+    return { artifactList: list, artifactsByMessage: byMessage };
+  }, [messages]);
+
+  const openArtifact = useCallback((id: string) => {
+    setActiveArtifactId(id);
+    setArtifactPanelOpen(true);
+  }, []);
+
+  // Close the drawer if the conversation no longer has any artifacts (e.g. after
+  // a regenerate or switching to an empty thread).
+  useEffect(() => {
+    if (artifactList.length === 0) {
+      setArtifactPanelOpen(false);
+      setActiveArtifactId(null);
+    }
+  }, [artifactList.length]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col p-4">
       <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-[var(--color-surface)]">
@@ -578,6 +617,24 @@ export function ChatPanel() {
               <Badge style={{ color: "var(--color-purple-bright)" }}>
                 routed → {activeProvider}
               </Badge>
+            )}
+            {artifactList.length > 0 && (
+              <Button
+                type="button"
+                variant="secondary"
+                aria-pressed={artifactPanelOpen}
+                onClick={() => {
+                  if (artifactPanelOpen) {
+                    setArtifactPanelOpen(false);
+                  } else {
+                    openArtifact(activeArtifactId ?? artifactList[0]!.id);
+                  }
+                }}
+                title="Show the substantial code, HTML, SVG and long documents from this chat"
+              >
+                <Layers size={14} style={{ marginRight: 4 }} />
+                Artifacts ({artifactList.length})
+              </Button>
             )}
             {messages.length > 0 && (
               <Button type="button" variant="secondary" onClick={exportThread}>
@@ -738,6 +795,8 @@ export function ChatPanel() {
                   key={message.id}
                   message={message}
                   toolCalls={message.toolCalls}
+                  artifacts={artifactsByMessage[message.id]}
+                  onOpenArtifact={openArtifact}
                   onRegenerate={
                     message.id === lastAssistantId && !loading ? regenerate : undefined
                   }
@@ -863,6 +922,15 @@ export function ChatPanel() {
           </div>
         </CardContent>
       </Card>
+
+      {artifactPanelOpen && artifactList.length > 0 ? (
+        <ArtifactPanel
+          artifacts={artifactList}
+          activeId={activeArtifactId}
+          onSelect={setActiveArtifactId}
+          onClose={() => setArtifactPanelOpen(false)}
+        />
+      ) : null}
 
       {consentOpen && (
         <div className="consent-backdrop" role="dialog" aria-modal="true">

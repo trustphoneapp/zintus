@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { Layers } from "lucide-react";
 import type { ChatMessageUi } from "@/lib/store";
+import { summarizeArtifactBody, type Artifact } from "@/lib/artifacts";
 import { CompressionBadge } from "./CompressionBadge";
 import { Markdown, CodeBlock } from "./Markdown";
 
@@ -99,6 +101,8 @@ export function MessageBubble({
   isStreaming = false,
   toolCalls,
   structured,
+  artifacts,
+  onOpenArtifact,
 }: {
   message: ChatMessageUi;
   onRegenerate?: () => void;
@@ -107,6 +111,10 @@ export function MessageBubble({
   toolCalls?: ToolCall[];
   /** Structured / JSON output to render in a labeled code block. */
   structured?: unknown;
+  /** Artifacts detected in this assistant turn (computed by the chat panel). */
+  artifacts?: Artifact[];
+  /** Open the artifacts drawer to a given artifact. */
+  onOpenArtifact?: (id: string) => void;
 }) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
@@ -192,6 +200,14 @@ export function MessageBubble({
   // When the answer body *itself* is JSON, render it as a code block instead of
   // forcing it through the markdown path (prose paths stay untouched).
   const contentIsJson = structured === undefined && structuredText !== null;
+  // Substantial code/HTML/SVG blocks move to the artifacts drawer; the inline
+  // body keeps a short reference instead of the whole block. (Markdown-document
+  // artifacts stay inline — they ARE the prose.)
+  const hasArtifacts = Array.isArray(artifacts) && artifacts.length > 0;
+  const bodyContent =
+    hasArtifacts && !contentIsJson
+      ? summarizeArtifactBody(message.content, artifacts!)
+      : message.content;
 
   return (
     <div style={{ display: "flex", flexDirection: "column" }}>
@@ -233,7 +249,7 @@ export function MessageBubble({
           contentIsJson && structuredText ? (
             <CodeBlock lang="json" text={structuredText} label="JSON output" />
           ) : (
-            <Markdown content={message.content} />
+            <Markdown content={bodyContent} />
           )
         ) : !hasToolCalls && structured === undefined ? (
           <span className="typing-dots" aria-label="Assistant is typing">
@@ -241,6 +257,18 @@ export function MessageBubble({
             <span />
             <span />
           </span>
+        ) : null}
+        {hasArtifacts && onOpenArtifact ? (
+          <button
+            type="button"
+            className="artifact-affordance"
+            onClick={() => onOpenArtifact(artifacts![0]!.id)}
+            title="Open in the artifacts panel"
+            style={{ marginTop: hasContent ? 8 : 0 }}
+          >
+            <Layers size={13} />
+            {artifacts!.length} artifact{artifacts!.length === 1 ? "" : "s"} · open panel
+          </button>
         ) : null}
         {hasToolCalls ? (
           <div
