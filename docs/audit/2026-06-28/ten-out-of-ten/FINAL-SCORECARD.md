@@ -113,6 +113,11 @@ Built-in tools, structured output, and route-reason now genuinely span
 **Honest OVERALL: ≈ 7.5 / 10** (up from ~6.5). Two genuine 10s (moat, transparency);
 one near-10 (honesty); a solid consistency 8; the rest 6–7.5; agentic the lone 4.
 
+> **Addendum (landed AFTER this scorecard — features code-verified, axis scores pending a live run):**
+> - **D1 `zintus agent`** — a real SANDBOXED read+edit agent loop with apply-diff: sandbox guard (traversal/absolute/symlink-escape rejected) read by hand + 26 security tests; confirmation-gated writes; bounded. Lifts **agentic** past context-injection (est. 4 → ~5–6; CLI-only, no IDE; live model run = [HUMAN]).
+> - **D2 deeper research** — bounded cross-verification passes + structurally-bound citations (claim→source, corroborated/single-source/uncited, never fabricated) + dedup/ranking. Lifts **research** (est. 6 → ~7; answer QUALITY = live keyed [HUMAN] run).
+> Not asserting the new numbers without a live LLM/web run — that's a [HUMAN] gate. What remains is then **device/business only**: mobile image+voice (native), CSP browser-verify, EAS/signed builds, live billing/payouts, store/legal (+ optional artifacts/canvas, IDE agent, catalog breadth).
+
 ### Is Zintus 10/10 yet? **No.** What still blocks it:
 1. **Agentic depth (4/10)** — no apply-diff / multi-file edits / agent loop / IDE. Widest gap.
 2. **Research depth (6/10)** — single-pass, no cross-verify, citations prompt-instructed.
