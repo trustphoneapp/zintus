@@ -5,7 +5,9 @@ import {
   withinReplayWindow,
   createPortalSession,
   createCheckoutSession,
+  constantTimeEqual,
   STRIPE_SIGNATURE_TOLERANCE_SECS,
+  STRIPE_EVENT_DEDUP_TTL_SECS,
 } from "../src/billing.js";
 import type { Env } from "../src/types.js";
 
@@ -272,5 +274,178 @@ describe("createCheckoutSession — placeholder price guard", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+});
+
+// ── Security hardening 1: constant-time signature compare ────────────────────
+// The HMAC hex is compared to the attacker-supplied `v1` with a constant-time
+// equal (not `===`) so a forged signature can't be reconstructed byte-by-byte
+// from response-timing. We can't assert timing in a unit test, but we pin the
+// boolean contract — including the cases (only first byte differs / only last
+// byte differs) where a short-circuiting `===` would behave differently.
+describe("constantTimeEqual", () => {
+  test("true only for byte-identical strings (incl. empty)", () => {
+    expect(constantTimeEqual("", "")).toBe(true);
+    expect(constantTimeEqual("a1b2c3", "a1b2c3")).toBe(true);
+    expect(constantTimeEqual("0".repeat(64), "0".repeat(64))).toBe(true);
+  });
+  test("false for same-length strings differing only in the first byte", () => {
+    expect(constantTimeEqual("1abc", "0abc")).toBe(false);
+  });
+  test("false for same-length strings differing only in the last byte", () => {
+    expect(constantTimeEqual("0".repeat(63) + "0", "0".repeat(63) + "1")).toBe(false);
+  });
+  test("false for different-length strings (either order)", () => {
+    expect(constantTimeEqual("abc", "abcd")).toBe(false);
+    expect(constantTimeEqual("abcd", "abc")).toBe(false);
+    expect(constantTimeEqual("", "x")).toBe(false);
+  });
+});
+
+// ── Security hardening 2: event-id idempotency / replay dedup ────────────────
+// Stripe delivers at-least-once, so the same event id can arrive more than once
+// (a redelivery, or a captured request replayed inside the 300s signature
+// window). The side effects must run AT MOST once per id: the first delivery
+// processes + records the id in KV; a redelivery of that id ACKs 200 and runs
+// nothing. This is distinct from the ±5-min replay WINDOW above — that rejects
+// STALE replays; this dedups FRESH, correctly-signed REDELIVERIES.
+
+/** In-memory KV double: records put options so the TTL can be asserted. */
+function fakeKv() {
+  const store = new Map<string, string>();
+  const puts: Array<{ key: string; opts?: { expirationTtl?: number } }> = [];
+  return {
+    store,
+    puts,
+    get: async (k: string) => store.get(k) ?? null,
+    put: async (k: string, v: string, opts?: { expirationTtl?: number }) => {
+      store.set(k, v);
+      puts.push({ key: k, opts });
+    },
+    delete: async (k: string) => {
+      store.delete(k);
+    },
+  };
+}
+
+describe("handleStripeWebhook — event-id replay dedup", () => {
+  const makeEvent = (id: string) =>
+    JSON.stringify({
+      id,
+      type: "checkout.session.completed",
+      data: { object: { metadata: { user_id: "u1", tier: "growth" }, customer: "cus_1", subscription: "sub_1" } },
+    });
+
+  test("a valid first-time event processes (200) and records its id in KV", async () => {
+    const db = recordingDb();
+    const kv = fakeKv();
+    const env = { DB: db, KV: kv, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    const body = makeEvent("evt_first");
+    const res = await handleStripeWebhook(
+      new Request("https://relay/webhook", { method: "POST", body, headers: { "stripe-signature": await sign(body) } }),
+      env,
+    );
+    expect(res.status).toBe(200);
+    expect(db.calls.some((c) => /INSERT INTO subscriptions/i.test(c.sql))).toBe(true);
+    expect(kv.store.has("stripe_evt:evt_first")).toBe(true);
+  });
+
+  test("records the id with a TTL inside Stripe's retry window (24h–7d)", async () => {
+    const db = recordingDb();
+    const kv = fakeKv();
+    const env = { DB: db, KV: kv, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    const body = makeEvent("evt_ttl");
+    await handleStripeWebhook(
+      new Request("https://relay/webhook", { method: "POST", body, headers: { "stripe-signature": await sign(body) } }),
+      env,
+    );
+    const put = kv.puts.find((p) => p.key === "stripe_evt:evt_ttl");
+    expect(put?.opts?.expirationTtl).toBe(STRIPE_EVENT_DEDUP_TTL_SECS);
+    expect(STRIPE_EVENT_DEDUP_TTL_SECS).toBeGreaterThanOrEqual(60 * 60 * 24); // >= 24h
+    expect(STRIPE_EVENT_DEDUP_TTL_SECS).toBeLessThanOrEqual(60 * 60 * 24 * 7); // <= 7d
+  });
+
+  test("a duplicate event id is processed once, then skipped (no double side effects)", async () => {
+    const db = recordingDb();
+    const kv = fakeKv();
+    const env = { DB: db, KV: kv, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    const body = makeEvent("evt_dup");
+    const headers = { "stripe-signature": await sign(body) };
+
+    const first = await handleStripeWebhook(
+      new Request("https://relay/webhook", { method: "POST", body, headers }),
+      env,
+    );
+    expect(first.status).toBe(200);
+    const writesAfterFirst = db.calls.length;
+    expect(writesAfterFirst).toBeGreaterThan(0);
+
+    // Redeliver the SAME signed event (same id).
+    const second = await handleStripeWebhook(
+      new Request("https://relay/webhook", { method: "POST", body, headers }),
+      env,
+    );
+    expect(second.status).toBe(200);
+    expect(await second.text()).toContain("duplicate");
+    // The duplicate ran NO further DB writes — side effects fired exactly once.
+    expect(db.calls.length).toBe(writesAfterFirst);
+  });
+
+  test("a tampered signature is rejected (400) and never touches KV or DB", async () => {
+    const db = recordingDb();
+    const kv = fakeKv();
+    const env = { DB: db, KV: kv, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    const body = makeEvent("evt_tamper");
+    // Flip the last hex nibble of the (valid) signature so the HMAC no longer matches.
+    const tampered = (await sign(body)).replace(/.$/, (ch) => (ch === "0" ? "1" : "0"));
+    const res = await handleStripeWebhook(
+      new Request("https://relay/webhook", { method: "POST", body, headers: { "stripe-signature": tampered } }),
+      env,
+    );
+    expect(res.status).toBe(400);
+    expect(db.calls.length).toBe(0);
+    // The dedup gate runs only AFTER signature verification, so a forged event
+    // can't write a marker into KV (would otherwise be a DoS / poison vector).
+    expect(kv.store.size).toBe(0);
+  });
+
+  test("on a processing failure the marker is released so Stripe's retry re-runs", async () => {
+    const kv = fakeKv();
+    // D1 whose first run() throws, then succeeds — simulates a transient failure
+    // AFTER the dedup marker was written. The handler must release the marker so
+    // Stripe's retry (same id → would otherwise 500 then be deduped) re-runs.
+    let throwOnce = true;
+    const db = {
+      prepare: () => ({
+        bind: () => ({
+          run: async () => {
+            if (throwOnce) {
+              throwOnce = false;
+              throw new Error("transient D1 error");
+            }
+            return {};
+          },
+          first: async () => null,
+        }),
+      }),
+    };
+    const env = { DB: db, KV: kv, STRIPE_WEBHOOK_SECRET: SECRET } as unknown as Env;
+    const body = makeEvent("evt_fail");
+    const headers = { "stripe-signature": await sign(body) };
+
+    // First delivery throws (index.onError would map this to a 500 → Stripe retries).
+    await expect(
+      handleStripeWebhook(new Request("https://relay/webhook", { method: "POST", body, headers }), env),
+    ).rejects.toThrow(/transient D1 error/);
+    // Marker released: the id is NOT remembered as processed.
+    expect(kv.store.has("stripe_evt:evt_fail")).toBe(false);
+
+    // Stripe's retry of the SAME id now succeeds and processes.
+    const retry = await handleStripeWebhook(
+      new Request("https://relay/webhook", { method: "POST", body, headers }),
+      env,
+    );
+    expect(retry.status).toBe(200);
+    expect(kv.store.has("stripe_evt:evt_fail")).toBe(true);
   });
 });
