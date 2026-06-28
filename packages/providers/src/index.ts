@@ -35,7 +35,10 @@ export {
   modelCapabilities,
   providerCapabilityTier,
   supportsVision,
+  supportsTools,
+  structuredOutputLevel,
   type ModelCapabilities,
+  type StructuredLevel,
 } from "./capabilities.js";
 export {
   PRICING_CATALOG,

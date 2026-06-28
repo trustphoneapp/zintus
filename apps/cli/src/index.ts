@@ -28,6 +28,8 @@ interface ChatCliOptions {
   diff?: boolean;
   // Repeatable `--image <path>`, collected into an array (max enforced in chat).
   image?: string[];
+  // Path to a JSON file of tool/function definitions (ToolDefinition[]).
+  tools?: string;
 }
 
 // Commander collector: accumulate each repeated `--image` into one array.
@@ -46,7 +48,13 @@ function toChatOptions(options: ChatCliOptions): ChatOptions {
   } else if (typeof options.workspace === "string") {
     workspaceDir = options.workspace;
   }
-  return { mode, workspaceDir, diff: options.diff, images: options.image };
+  return {
+    mode,
+    workspaceDir,
+    diff: options.diff,
+    images: options.image,
+    toolsFile: options.tools,
+  };
 }
 
 program
@@ -64,6 +72,10 @@ program
     "Attach an image for a vision-capable model (repeatable, max 4)",
     collectImage,
     [],
+  )
+  .option(
+    "--tools <file>",
+    "Path to a JSON file of tool/function definitions (routes to a tool-capable model)",
   )
   .action(async (prompt: string, options: ChatCliOptions) => {
     await runChat(prompt, toChatOptions(options));
@@ -106,6 +118,10 @@ program
     "Attach an image for a vision-capable model (repeatable, max 4)",
     collectImage,
     [],
+  )
+  .option(
+    "--tools <file>",
+    "Path to a JSON file of tool/function definitions (routes to a tool-capable model)",
   )
   .action(async (prompt: string | undefined, options: ChatCliOptions) => {
     if (!prompt) {

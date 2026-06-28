@@ -1,12 +1,55 @@
+import { readFileSync } from "node:fs";
 import chalk from "chalk";
 import ora from "ora";
 import { tryGitDiff } from "@zintus/context-compiler";
 import { listKeys } from "@zintus/keychain";
-import type { ContextMode, ImageContentBlock } from "@zintus/types";
+import type {
+  ContextMode,
+  ImageContentBlock,
+  ToolDefinition,
+} from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
 import { getActiveProject } from "../lib/projects.js";
 import { buildChatContent, loadImages, normalizeChatError } from "./chat-content.js";
+
+/** Load + minimally validate a `ToolDefinition[]` from a JSON file. Throws a
+ *  clear, user-facing error rather than a raw parse stack. */
+function loadTools(path: string): ToolDefinition[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    throw new Error(`Could not read --tools file: ${path}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`--tools file is not valid JSON: ${path}`);
+  }
+  // `parameters` must be a PLAIN object: a JSON Schema. `typeof x === "object"`
+  // alone is true for `null` and arrays, which would pass a malformed tool
+  // through to the provider — reject both explicitly.
+  const isPlainObject = (v: unknown): boolean =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+  if (
+    !Array.isArray(parsed) ||
+    !parsed.every(
+      (t) =>
+        t &&
+        typeof t === "object" &&
+        typeof (t as { name?: unknown }).name === "string" &&
+        typeof (t as { description?: unknown }).description === "string" &&
+        isPlainObject((t as { parameters?: unknown }).parameters),
+    )
+  ) {
+    throw new Error(
+      "--tools file must be a JSON array of { name, description, parameters } objects",
+    );
+  }
+  return parsed as ToolDefinition[];
+}
 
 export interface ChatOptions {
   mode?: ContextMode;
@@ -18,6 +61,10 @@ export interface ChatOptions {
   /** Image file paths to attach (repeatable `--image`, max 4). Processed
    *  locally into vision content blocks before routing. */
   images?: string[];
+  /** Path to a JSON file holding a `ToolDefinition[]` array. When set, the
+   *  request requires a tool-capable model and any tool calls the model makes
+   *  are printed after the response. */
+  toolsFile?: string;
 }
 
 export async function runChat(
@@ -119,12 +166,14 @@ export async function runChat(
     // Text prompt FIRST, then the image blocks in order. With no images this is
     // just the plain string (unchanged text-only shape).
     const userContent = buildChatContent(userText, imageBlocks);
+    const tools = options?.toolsFile ? loadTools(options.toolsFile) : undefined;
     const result = await engine.routeAndStream({
       messages: [{ role: "user", content: userContent }],
       provider: forcedProvider,
       mode: options?.mode ?? config.contextMode,
       threadId,
       diffText,
+      tools,
     });
 
     const provider = (await engine.getProviderStatus()).find(
@@ -138,6 +187,18 @@ export async function runChat(
       process.stdout.write(chunk);
     }
     process.stdout.write("\n");
+
+    // Tool calls are populated on the live channel once the stream drains. Print
+    // them honestly (the CLI does not auto-execute tools — the user runs them and
+    // can feed results back). Empty for a normal text turn.
+    if (result.toolCalls && result.toolCalls.length > 0) {
+      console.error(chalk.cyan(`\n${result.toolCalls.length} tool call(s):`));
+      for (const call of result.toolCalls) {
+        console.error(
+          `  ${chalk.bold(call.name)}(${JSON.stringify(call.arguments)})  ${chalk.dim(call.id)}`,
+        );
+      }
+    }
 
     if (result.threadId) {
       console.error(chalk.dim(`thread ${result.threadId}`));

@@ -9,6 +9,7 @@ import type {
   RouteRequest,
   RouteStreamResult,
   RoutingStrategy,
+  ToolCallContentBlock,
 } from "@zintus/types";
 import {
   estimateUsage,
@@ -16,8 +17,41 @@ import {
   mayTrainOnUserData,
   ProviderHttpError,
 } from "@zintus/providers";
-import { supportsVision } from "@zintus/providers";
-import { requiresVision } from "@zintus/types";
+import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
+import {
+  requiresVision,
+  requiresTools,
+  requiresGuaranteedSchema,
+} from "@zintus/types";
+import type { ResponseFormat, ResolvedResponseFormat } from "@zintus/types";
+
+/** Resolve the caller's `ResponseFormat` to the strongest level a given
+ *  provider+model can actually serve. Returns undefined for a text/absent request.
+ *  `json_schema` request → json_schema if the model guarantees it, else json_object
+ *  if it has json-mode, else prompt (emulated). `json_object` request → json_object
+ *  unless the model has no native JSON mode (then prompt). The schema rides along
+ *  for json_schema and prompt so the engine can validate/coerce. */
+function resolveResponseFormat(
+  rf: ResponseFormat | undefined,
+  providerId: ProviderId,
+  model: string,
+): ResolvedResponseFormat | undefined {
+  if (!rf || rf.type === "text") return undefined;
+  const providerLevel = structuredOutputLevel(providerId, model);
+  const name = rf.name ?? "response";
+  let level: ResolvedResponseFormat["level"];
+  if (rf.type === "json_schema") {
+    level =
+      providerLevel === "json_schema"
+        ? "json_schema"
+        : providerLevel === "json_object"
+          ? "json_object"
+          : "prompt";
+  } else {
+    level = providerLevel === "none" ? "prompt" : "json_object";
+  }
+  return { level, schema: rf.schema, name };
+}
 import type { TokenUsage } from "@zintus/types";
 import { isInCooldown } from "./cooldown.js";
 import { redactSecrets } from "./redact.js";
@@ -534,6 +568,38 @@ export function createRouter(config: RouterConfig = {}): Router {
         }
       }
 
+      // Tool routing: a request that supplies tool definitions MUST go to a
+      // tool-capable provider+model. Same discipline as vision — filter to
+      // tool-capable candidates and hard-error (`unsupported_capability`) rather
+      // than silently sending tools to a model that drops them. The per-provider
+      // model fan-out below (groq 70B→8B, openrouter free models) is constrained
+      // to tool-capable models in the attempt loop so failover never lands on a
+      // non-tool model when tools were requested.
+      if (requiresTools(request)) {
+        candidates = candidates.filter((candidate) =>
+          supportsTools(candidate.id, request.model),
+        );
+        if (candidates.length === 0) {
+          throw new Error("unsupported_capability");
+        }
+      }
+
+      // Structured-output routing: a STRICT json_schema request must go to a
+      // provider+model that GUARANTEES schema-constrained decoding. Filter to
+      // json_schema-level candidates and hard-error rather than silently serving
+      // best-effort json-mode. A non-strict structured request is NOT filtered —
+      // it is allowed to fall back to json_object/prompt (resolved per-attempt
+      // below) and is labeled guaranteed:false downstream.
+      if (requiresGuaranteedSchema(request)) {
+        candidates = candidates.filter(
+          (candidate) =>
+            structuredOutputLevel(candidate.id, request.model) === "json_schema",
+        );
+        if (candidates.length === 0) {
+          throw new Error("unsupported_capability");
+        }
+      }
+
       if (candidates.length === 0) {
         throw new Error(
           "No providers available. Configure API keys or start Ollama.",
@@ -589,7 +655,7 @@ export function createRouter(config: RouterConfig = {}): Router {
         // the gateway's configured resolveKey — merges the per-request-keys feature
         // with the quota-reservation admission gate above.
         const apiKey = (await keyFor(provider.id, request)) ?? undefined;
-        const modelsToTry =
+        let modelsToTry =
           provider.id === "groq"
             ? [requestedModel ?? GROQ_MODEL_70B, GROQ_MODEL_8B]
             : provider.id === "openrouter"
@@ -600,14 +666,53 @@ export function createRouter(config: RouterConfig = {}): Router {
                   ),
                 ]
             : [requestedModel ?? provider.defaultModel];
+        // When tools are requested, never fail over onto a model that can't do
+        // tools (e.g. groq's 8B fallback) — that would silently drop the tools.
+        if (requiresTools(request)) {
+          modelsToTry = modelsToTry.filter((model) =>
+            supportsTools(provider.id, model),
+          );
+          if (modelsToTry.length === 0) {
+            releaseReservation();
+            continue;
+          }
+        }
+        // Same discipline for vision: never fail over onto a model that can't do
+        // vision (e.g. an openrouter vision model failing over to a text-only free
+        // model) — that would silently re-send the image blocks to a blind model.
+        if (requiresVision(request.messages)) {
+          modelsToTry = modelsToTry.filter((model) =>
+            supportsVision(provider.id, model),
+          );
+          if (modelsToTry.length === 0) {
+            releaseReservation();
+            continue;
+          }
+        }
 
         for (const model of modelsToTry) {
           const attemptStarted = Date.now();
           try {
+            // Resolve the caller's structured-output request to the strongest
+            // level THIS provider+model can actually serve (json_schema ≥
+            // json_object ≥ prompt). The adapter emits only its native field for
+            // that level; anything below json_schema is validated (and labeled
+            // not-guaranteed) by the engine. We capture the resolved level here so
+            // the winning result reports the level ACTUALLY served — the engine
+            // must label `served_level`/`guaranteed` from this, not from the raw
+            // provider capability.
+            const resolvedRf = resolveResponseFormat(
+              request.responseFormat,
+              provider.id,
+              model,
+            );
             const result = await provider.streamChat(request.messages, {
               model,
               apiKey,
               webSearch: request.webSearch,
+              tools: request.tools,
+              toolChoice: request.toolChoice,
+              responseFormat: resolvedRf,
               temperature: request.temperature,
               maxTokens: request.maxTokens,
               cacheHints: request.cachedContentHandle
@@ -642,6 +747,11 @@ export function createRouter(config: RouterConfig = {}): Router {
             // the stream fully drains (below), and a `status: "fail"` if it errors
             // mid-stream, so the recorded outcome reflects reality. Provider
             // selection / cooldown / sticky-session state above are unchanged.
+            // Live tool-call channel (parallel to the text stream): populated as the
+            // stream drains, complete once it's fully consumed. Kept off the text
+            // `stream` so the (string) text path is byte-identical for existing
+            // consumers; the gateway/engine read this AFTER draining the stream.
+            const collectedToolCalls: ToolCallContentBlock[] = [];
             const textStream = async function* (): AsyncGenerator<string> {
               let reportedUsage: TokenUsage | undefined;
               let outputText = "";
@@ -656,6 +766,9 @@ export function createRouter(config: RouterConfig = {}): Router {
                   }
                   if (chunk.usage) {
                     reportedUsage = chunk.usage;
+                  }
+                  if (chunk.toolCall) {
+                    collectedToolCalls.push(chunk.toolCall);
                   }
                   if (chunk.content) {
                     outputText += chunk.content;
@@ -746,6 +859,12 @@ export function createRouter(config: RouterConfig = {}): Router {
               providerId: provider.id,
               model,
               stream: textStream(),
+              // Live tool-call channel — filled as `stream` drains, read after.
+              toolCalls: collectedToolCalls,
+              // The level actually served this turn (json_schema/json_object/prompt
+              // or undefined for text). The engine labels served_level/guaranteed
+              // from THIS, never from the raw provider capability.
+              resolvedStructuredLevel: resolvedRf?.level,
               // Honesty signal: under private mode, true iff the winner is
               // privacy-safe or user-allowed; false when the strand-fallback had
               // to use a may-train/"unknown" provider. undefined when not private.

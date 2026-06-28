@@ -988,3 +988,549 @@ describe("client-facing error redaction (secrets scrubbed from responses, not ju
     expect(body.error.message).toContain("vision-capable provider");
   });
 });
+
+describe("tool / function calling", () => {
+  const weatherTool = {
+    name: "get_weather",
+    description: "Get the weather for a city",
+    parameters: {
+      type: "object",
+      properties: { city: { type: "string" } },
+      required: ["city"],
+    },
+  };
+  const toolCall = {
+    type: "tool_call" as const,
+    id: "call_x",
+    name: "get_weather",
+    arguments: { city: "Paris" },
+  };
+
+  test("(a) streaming: tool calls are emitted as OpenAI delta.tool_calls + finish_reason:'tool_calls' before [DONE]", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-tc",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "Let me check.";
+          })(),
+          toolCalls: [toolCall],
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: true,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    const dataLines = text
+      .split("\n\n")
+      .map((b) => b.replace(/^data: /, "").trim())
+      .filter((l) => l.length > 0 && l !== "[DONE]");
+    const events = dataLines.map((l) => JSON.parse(l) as Record<string, any>);
+
+    // The tool-call chunk carries the OpenAI delta.tool_calls shape.
+    const toolChunk = events.find(
+      (e) => e.choices?.[0]?.delta?.tool_calls,
+    );
+    expect(toolChunk).toBeDefined();
+    const tc = toolChunk!.choices[0].delta.tool_calls[0];
+    expect(tc.index).toBe(0);
+    expect(tc.id).toBe("call_x");
+    expect(tc.type).toBe("function");
+    expect(tc.function.name).toBe("get_weather");
+    expect(JSON.parse(tc.function.arguments)).toEqual({ city: "Paris" });
+
+    // A terminating delta sets finish_reason: "tool_calls".
+    const finish = events.find(
+      (e) => e.choices?.[0]?.finish_reason === "tool_calls",
+    );
+    expect(finish).toBeDefined();
+    expect(finish!.choices[0].delta).toEqual({});
+
+    // …and the stream still terminates with [DONE] after the tool-call frames.
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  test("(b) explicit non-tool provider + tools → 422 UNSUPPORTED_TOOLS_ERROR (never reaches the engine)", async () => {
+    let routed = false;
+    const engine = fakeEngine({
+      async routeAndStream() {
+        routed = true;
+        throw new Error("should not be called");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "huggingface", // tools: false in MODEL_CAPABILITIES
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: { type: string; required: string[]; message: string };
+    };
+    expect(body.error.type).toBe("unsupported_capability");
+    expect(body.error.required).toContain("tools");
+    expect(body.error.message).toContain("Tool/function calling");
+    expect(routed).toBe(false);
+  });
+
+  test("(c) router throws unsupported_capability with tools (no images) → tools error, not vision error", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error("unsupported_capability");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          // No explicit provider → the explicit-provider gate is skipped and the
+          // router (auto-routing) throws unsupported_capability instead.
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: { type: string; required: string[] };
+    };
+    expect(body.error.type).toBe("unsupported_capability");
+    expect(body.error.required).toContain("tools");
+    expect(body.error.required).not.toContain("vision");
+  });
+
+  test("(d) non-streaming returns tool_calls on the assistant message + finish_reason:'tool_calls'", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-tc",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "";
+          })(),
+          toolCalls: [toolCall],
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [{ role: "user", content: "weather in Paris?" }],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      choices: Array<{
+        message: {
+          role: string;
+          content: string | null;
+          tool_calls?: Array<{
+            id: string;
+            type: string;
+            function: { name: string; arguments: string };
+          }>;
+        };
+        finish_reason: string;
+      }>;
+    };
+    const choice = body.choices[0]!;
+    expect(choice.finish_reason).toBe("tool_calls");
+    expect(choice.message.content).toBeNull();
+    const calls = choice.message.tool_calls!;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.id).toBe("call_x");
+    expect(calls[0]!.type).toBe("function");
+    expect(calls[0]!.function.name).toBe("get_weather");
+    expect(JSON.parse(calls[0]!.function.arguments)).toEqual({ city: "Paris" });
+  });
+
+  test("(e) round-trip: an OpenAI-native assistant tool_calls turn normalizes to internal tool_call blocks", async () => {
+    // The gateway EMITS `{role:"assistant", content:null, tool_calls:[...]}`. A
+    // stock OpenAI client echoes that turn back as the next request's history.
+    // parseMessages must convert the top-level tool_calls (with a JSON-STRING
+    // arguments) into internal tool_call content blocks, or the call is lost.
+    let received: Array<{ role: string; content: unknown }> | undefined;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        received = request.messages;
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-rt",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "Paris is sunny.";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [
+            { role: "user", content: "weather in Paris?" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_x",
+                  type: "function",
+                  function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+                },
+              ],
+            },
+            { role: "tool", tool_call_id: "call_x", content: '{"tempC":21}' },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(received).toBeDefined();
+    const assistantTurn = received!.find((m) => m.role === "assistant")!;
+    expect(Array.isArray(assistantTurn.content)).toBe(true);
+    const blocks = assistantTurn.content as Array<Record<string, unknown>>;
+    const tcBlock = blocks.find((b) => b.type === "tool_call")!;
+    expect(tcBlock.id).toBe("call_x");
+    expect(tcBlock.name).toBe("get_weather");
+    expect(tcBlock.arguments).toEqual({ city: "Paris" });
+  });
+
+  test("(f) malformed tool_call arguments JSON normalizes to an empty object, not a 400", async () => {
+    let received: Array<{ role: string; content: unknown }> | undefined;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        received = request.messages;
+        return {
+          providerId: "groq",
+          model: "llama-3.3-70b-versatile",
+          traceId: "trace-rt2",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "ok";
+          })(),
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          tools: [weatherTool],
+          messages: [
+            { role: "user", content: "weather?" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_y",
+                  type: "function",
+                  function: { name: "get_weather", arguments: "{not json" },
+                },
+              ],
+            },
+            { role: "tool", tool_call_id: "call_y", content: "{}" },
+          ],
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const assistantTurn = received!.find((m) => m.role === "assistant")!;
+    const blocks = assistantTurn.content as Array<Record<string, unknown>>;
+    const tcBlock = blocks.find((b) => b.type === "tool_call")!;
+    expect(tcBlock.arguments).toEqual({});
+  });
+});
+
+describe("structured / JSON output", () => {
+  const personSchema = {
+    type: "object",
+    properties: { name: { type: "string" }, age: { type: "number" } },
+    required: ["name", "age"],
+  };
+
+  test("(a) non-streaming structured request surfaces parsed + structured_output", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "gemini",
+          model: "gemini-2.5-flash",
+          traceId: "trace-so",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield '{"name":"Ada","age":36}';
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_schema" as const,
+            guaranteed: true,
+            valid: true,
+            repairAttempts: 0,
+          },
+          parsed: { name: "Ada", age: 36 },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      choices: Array<{ message: { content: string } }>;
+      parsed: unknown;
+      structured_output: {
+        requested: string;
+        served_level: string;
+        guaranteed: boolean;
+        valid: boolean;
+        repair_attempts: number;
+      };
+    };
+    // Raw assistant text is preserved on the message.
+    expect(body.choices[0]?.message.content).toBe('{"name":"Ada","age":36}');
+    // Top-level parsed value + snake_cased metadata.
+    expect(body.parsed).toEqual({ name: "Ada", age: 36 });
+    expect(body.structured_output.requested).toBe("json_schema");
+    expect(body.structured_output.served_level).toBe("json_schema");
+    expect(body.structured_output.guaranteed).toBe(true);
+    expect(body.structured_output.valid).toBe(true);
+    expect(body.structured_output.repair_attempts).toBe(0);
+  });
+
+  test("(b) strict json_schema with an invalid result → 422 structured_output_invalid", async () => {
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "openrouter",
+          model: "best-effort",
+          traceId: "trace-bad",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "sorry, here is some prose not JSON";
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_object" as const,
+            guaranteed: false,
+            valid: false,
+            repairAttempts: 2,
+            issues: [{ path: "/name", message: "expected string" }],
+          },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          // No explicit provider, so the capability gate is skipped and the engine
+          // result (valid:false) drives the 422 instead.
+          stream: false,
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: {
+        type: string;
+        message: string;
+        structured_output: { valid: boolean; repair_attempts: number };
+      };
+    };
+    expect(body.error.type).toBe("structured_output_invalid");
+    expect(body.error.structured_output.valid).toBe(false);
+    expect(body.error.structured_output.repair_attempts).toBe(2);
+  });
+
+  test("(c) explicit non-json_schema provider + strict → 422 unsupported_capability required ['json_schema']", async () => {
+    // groq's strongest structured level is json_object, not json_schema, so a
+    // strict schema-constrained request against it must hard-error at the gate
+    // (the engine is never reached).
+    const engine = fakeEngine({
+      async routeAndStream() {
+        throw new Error("routeAndStream should not be called");
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          stream: false,
+          provider: "groq",
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as {
+      error: { type: string; required: string[]; message: string };
+    };
+    expect(body.error.type).toBe("unsupported_capability");
+    expect(body.error.required).toContain("json_schema");
+    expect(body.error.message).toContain("Gemini");
+  });
+
+  test("(d) streaming (default) strict json_schema with an invalid result → 422, NOT a 200 stream", async () => {
+    // The DEFAULT path is streaming (stream omitted). The engine buffers +
+    // validates the structured document before routeAndStream resolves, so a
+    // strict request whose output did not validate must hard-fail 422 BEFORE the
+    // SSE stream opens — never a 200 text/event-stream carrying a valid:false
+    // frame + non-conformant prose.
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "openrouter",
+          model: "best-effort",
+          traceId: "trace-bad-stream",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "sorry, here is some prose not JSON";
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_object" as const,
+            guaranteed: false,
+            valid: false,
+            repairAttempts: 2,
+            issues: [{ path: "/name", message: "expected string" }],
+          },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          // stream omitted → defaults to streaming.
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(422);
+    expect(res.headers.get("content-type") ?? "").not.toContain(
+      "text/event-stream",
+    );
+    const body = (await res.json()) as {
+      error: {
+        type: string;
+        structured_output: { valid: boolean; repair_attempts: number };
+      };
+    };
+    expect(body.error.type).toBe("structured_output_invalid");
+    expect(body.error.structured_output.valid).toBe(false);
+    expect(body.error.structured_output.repair_attempts).toBe(2);
+  });
+
+  test("(e) streaming strict json_schema with a VALID result still streams 200", async () => {
+    // Guard the negative: a strict streaming request that DID validate must keep
+    // its 200 SSE behavior (the pre-stream gate is valid:false-only).
+    const engine = fakeEngine({
+      async routeAndStream() {
+        return {
+          providerId: "gemini",
+          model: "best",
+          traceId: "trace-good-stream",
+          threadId: "thread-1",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield '{"name":"Ada","age":36}';
+          })(),
+          structuredOutput: {
+            requested: "json_schema" as const,
+            servedLevel: "json_schema" as const,
+            guaranteed: true,
+            valid: true,
+            repairAttempts: 0,
+            issues: [],
+            parsed: { name: "Ada", age: 36 },
+          },
+        };
+      },
+    });
+    const handler = makeHandler({}, engine);
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          messages: [{ role: "user", content: "describe Ada" }],
+          response_format: { type: "json_schema", strict: true, schema: personSchema },
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+  });
+});

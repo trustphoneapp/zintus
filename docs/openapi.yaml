@@ -830,6 +830,99 @@ components:
           description: Optional diff text for code-aware context compilation.
         search:
           $ref: "#/components/schemas/SearchOptions"
+        tools:
+          type: array
+          description: |
+            Tool/function definitions the model may call this turn. Presence
+            requires a tool-capable provider/model — an unsupported provider
+            yields a 422 `unsupported_capability` (required: ["tools"]).
+          items:
+            $ref: "#/components/schemas/ToolDefinition"
+        tool_choice:
+          description: How the model may use `tools` this turn (default auto).
+          oneOf:
+            - type: string
+              enum: [auto, required, none]
+            - type: object
+              required: [type, name]
+              additionalProperties: false
+              properties:
+                type: { type: string, const: tool }
+                name: { type: string }
+        response_format:
+          $ref: "#/components/schemas/ResponseFormat"
+
+    ResponseFormat:
+      type: object
+      description: |
+        Structured / JSON output request. `json_schema` asks for schema-conformant
+        JSON; `json_object` asks only for syntactically-valid JSON; `text` (default)
+        is free-form. A STRICT `json_schema` request (`strict: true`) DEMANDS a
+        provider that guarantees conformance — an unsupported provider yields a 422
+        `unsupported_capability` (required: ["json_schema"]). Structured requests are
+        BUFFERED and validated, not token-streamed: on the streaming path the text
+        arrives then a single terminal frame carries `parsed` + `structured_output`.
+      required: [type]
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum: [text, json_object, json_schema]
+        schema:
+          type: object
+          description: JSON Schema for the output. Required when `type` is `json_schema`.
+        name:
+          type: string
+          description: Human name for the schema (forwarded to providers that want one).
+        strict:
+          type: boolean
+          description: |
+            When true, DEMANDS a provider that GUARANTEES schema conformance; a
+            non-conformant result returns 422 `structured_output_invalid` rather
+            than a 200 with prose.
+        maxRepairAttempts:
+          type: integer
+          minimum: 0
+          maximum: 2
+
+    ToolDefinition:
+      type: object
+      description: A tool the model may call. Mirrors @zintus/types ToolDefinition.
+      required: [name, description, parameters]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          pattern: "^[a-zA-Z0-9_-]{1,64}$"
+        description:
+          type: string
+        parameters:
+          type: object
+          description: JSON Schema for the tool input (passed through to the provider).
+        strict:
+          type: boolean
+
+    ToolCall:
+      type: object
+      description: |
+        A model's request to invoke a tool, OpenAI-shape. On the streaming path
+        these arrive as `choices[].delta.tool_calls[]` (each carrying `index`)
+        followed by a `finish_reason: "tool_calls"` delta; on the non-streaming
+        path they live on the assistant `message.tool_calls`.
+      required: [id, type, function]
+      additionalProperties: false
+      properties:
+        id: { type: string }
+        type: { type: string, const: function }
+        function:
+          type: object
+          required: [name, arguments]
+          additionalProperties: false
+          properties:
+            name: { type: string }
+            arguments:
+              type: string
+              description: JSON-stringified arguments object.
 
     ChatCompletionChoice:
       type: object
@@ -838,9 +931,20 @@ components:
       properties:
         index: { type: integer }
         message:
-          $ref: "#/components/schemas/ChatMessage"
+          allOf:
+            - $ref: "#/components/schemas/ChatMessage"
+            - type: object
+              properties:
+                tool_calls:
+                  type: array
+                  description: |
+                    Present when the assistant turn ended to await tool results
+                    (finish_reason "tool_calls"); `content` may be null.
+                  items:
+                    $ref: "#/components/schemas/ToolCall"
         finish_reason:
           type: string
+          description: '`stop` for a normal answer, `tool_calls` when the turn emitted tool calls.'
           example: stop
 
     ChatCompletion:
@@ -870,6 +974,43 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ChatCompletionChoice"
+        parsed:
+          description: |
+            The validated, parsed structured-output value. Present only for a
+            structured request (`response_format`) whose output validated.
+        structured_output:
+          $ref: "#/components/schemas/StructuredOutputMeta"
+
+    StructuredOutputMeta:
+      type: object
+      description: |
+        Honesty metadata for a structured-output response. `served_level` is what
+        the chosen provider could actually serve (`prompt` = emulated, never
+        guaranteed); `guaranteed` is true ONLY when `served_level` is `json_schema`.
+      required: [requested, served_level, guaranteed, valid, repair_attempts]
+      additionalProperties: false
+      properties:
+        requested:
+          type: string
+          enum: [json_object, json_schema]
+        served_level:
+          type: string
+          enum: [json_schema, json_object, prompt]
+        guaranteed:
+          type: boolean
+        valid:
+          type: boolean
+        repair_attempts:
+          type: integer
+        issues:
+          type: array
+          items:
+            type: object
+            required: [path, message]
+            additionalProperties: false
+            properties:
+              path: { type: string }
+              message: { type: string }
 
     ChatCompletionChunk:
       type: object
@@ -897,6 +1038,30 @@ components:
                 type: object
                 properties:
                   content: { type: string }
+                  tool_calls:
+                    type: array
+                    description: |
+                      Streamed tool calls. After the text deltas drain, each tool
+                      call is emitted as one chunk carrying a single entry (with
+                      `index`), then a final delta sets `finish_reason: "tool_calls"`.
+                    items:
+                      type: object
+                      required: [index, id, type, function]
+                      additionalProperties: false
+                      properties:
+                        index: { type: integer }
+                        id: { type: string }
+                        type: { type: string, const: function }
+                        function:
+                          type: object
+                          required: [name, arguments]
+                          additionalProperties: false
+                          properties:
+                            name: { type: string }
+                            arguments: { type: string }
+              finish_reason:
+                type: [string, "null"]
+                description: '`tool_calls` on the terminating tool-call delta; null/absent otherwise.'
 
     ResearchRequest:
       type: object

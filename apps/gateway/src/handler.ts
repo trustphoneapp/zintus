@@ -4,7 +4,7 @@ import {
   getModelPricing,
   estimateCostUsd,
 } from "@zintus/providers";
-import { supportsVision } from "@zintus/providers";
+import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
 import { redactSecrets } from "@zintus/router";
 import type { Engine } from "@zintus/engine";
 import {
@@ -21,6 +21,7 @@ import {
   textOf,
   imageCount,
   isContentBlockArray,
+  hasToolTurns,
   type ContentBlock,
 } from "@zintus/types";
 import {
@@ -109,6 +110,81 @@ const UNSUPPORTED_VISION_ERROR = {
     ],
   },
 } as const;
+
+// Returned when a tools-bearing request can't reach a tool-capable provider/model.
+// Mirrors UNSUPPORTED_VISION_ERROR: no upsell, just honest BYOK suggestions.
+const UNSUPPORTED_TOOLS_ERROR = {
+  error: {
+    type: "unsupported_capability",
+    message:
+      "Tool/function calling requires a tool-capable provider or model.",
+    required: ["tools"],
+    suggestions: [
+      { provider: "gemini", reason: "Gemini 2.5 supports function calling." },
+      { provider: "groq", reason: "Llama-3.3-70B on Groq supports tool calls." },
+      { provider: "openrouter", reason: "Pick a tool-capable OpenRouter model." },
+    ],
+  },
+} as const;
+
+// Returned when a STRICT schema-constrained request (`response_format.type ===
+// "json_schema"` with `strict: true`) can't reach a provider/model that
+// GUARANTEES conformance. Mirrors UNSUPPORTED_TOOLS_ERROR: no upsell, just
+// honest BYOK suggestions for providers that DO constrain decoding to a schema.
+const UNSUPPORTED_STRUCTURED_ERROR = {
+  error: {
+    type: "unsupported_capability",
+    message:
+      "Strict schema-constrained output requires a provider that guarantees it (e.g. Gemini).",
+    required: ["json_schema"],
+    suggestions: [
+      {
+        provider: "gemini",
+        reason:
+          "Gemini's responseSchema constrains decoding to your JSON Schema (guaranteed).",
+      },
+    ],
+  },
+} as const;
+
+/**
+ * Structured-output metadata the engine attaches to its stream result for a
+ * structured request. Defined locally as a safe structural type so this file
+ * typechecks independently of when the sibling engine change lands; read off the
+ * result via a narrow cast (`asStructured`). `requested` is the caller's
+ * `response_format.type`; `servedLevel` is what the chosen provider could
+ * actually serve (`prompt` = emulated, never guaranteed). `guaranteed` is true
+ * ONLY when `servedLevel === "json_schema"`.
+ */
+type StructuredOutputMeta = {
+  requested: "json_object" | "json_schema";
+  servedLevel: "json_schema" | "json_object" | "prompt";
+  guaranteed: boolean;
+  valid: boolean;
+  repairAttempts: number;
+  issues?: { path: string; message: string }[];
+};
+
+/** Read the engine result's optional structured-output fields without coupling to
+ *  the (sibling-owned) EngineStreamResult declaration. */
+function asStructured(result: unknown): {
+  structuredOutput?: StructuredOutputMeta;
+  parsed?: unknown;
+} {
+  return result as { structuredOutput?: StructuredOutputMeta; parsed?: unknown };
+}
+
+/** Snake-case the structured metadata for the JSON/SSE wire shape (§2.3). */
+function structuredOutputBody(meta: StructuredOutputMeta): Record<string, unknown> {
+  return {
+    requested: meta.requested,
+    served_level: meta.servedLevel,
+    guaranteed: meta.guaranteed,
+    valid: meta.valid,
+    repair_attempts: meta.repairAttempts,
+    ...(meta.issues ? { issues: meta.issues } : {}),
+  };
+}
 
 export type LogFn = (
   level: "info" | "warn" | "error",
@@ -621,10 +697,31 @@ export function createGatewayHandler(
       );
     }
     const hasImages = imageTotal > 0;
+    const wantsTools = (body.tools?.length ?? 0) > 0;
     // Explicit-provider gate: if the user PICKED a provider, never silently send
     // their image elsewhere — fail clearly if that provider/model can't see it.
     if (hasImages && body.provider && !supportsVision(body.provider, body.model)) {
       return json(request, UNSUPPORTED_VISION_ERROR, 422);
+    }
+    // Same explicit-provider gate for tools: a tools-bearing request against a
+    // provider/model that can't call tools hard-errors rather than silently
+    // dropping the tools and returning a text-only answer.
+    if (wantsTools && body.provider && !supportsTools(body.provider, body.model)) {
+      return json(request, UNSUPPORTED_TOOLS_ERROR, 422);
+    }
+    // Same explicit-provider gate for STRICT structured output: a request that
+    // DEMANDS schema-guaranteed JSON (json_schema + strict) against a picked
+    // provider/model whose strongest structured level isn't `json_schema`
+    // hard-errors rather than silently downgrading to best-effort json/prose.
+    const wantsStrictSchema =
+      body.response_format?.type === "json_schema" &&
+      body.response_format.strict === true;
+    if (
+      wantsStrictSchema &&
+      body.provider &&
+      structuredOutputLevel(body.provider, body.model) !== "json_schema"
+    ) {
+      return json(request, UNSUPPORTED_STRUCTURED_ERROR, 422);
     }
     const imageBytes = messages.reduce(
       (sum, m) =>
@@ -693,7 +790,12 @@ export function createGatewayHandler(
     const selectedProvider = body.provider;
     let tokzenResult: Awaited<ReturnType<typeof compress>> | undefined;
     let compressedMessages: ChatMessage[] = [];
-    if (!hasImages) {
+    // Tokzen flattens every message to text (textOf) and REPLACES the array —
+    // which would destroy tool_call/tool_result blocks. Skip it for tool requests
+    // (definitions this turn OR a continuation turn carrying tool blocks), exactly
+    // as it is skipped for image requests. The original messages flow to the router.
+    const hasTools = wantsTools || hasToolTurns(messages);
+    if (!hasImages && !hasTools) {
       const quotaRemaining = selectedProvider ? (getQuotaRemaining?.(selectedProvider) ?? 1.0) : 1.0;
       const tokzenProvider =
         selectedProvider === "groq" ? "groq" as const
@@ -765,6 +867,9 @@ export function createGatewayHandler(
           mode: body.mode,
           threadId: body.thread_id,
           webSearch: nativeWebSearch,
+          tools: body.tools,
+          toolChoice: body.tool_choice,
+          responseFormat: body.response_format,
           stream: body.stream !== false,
           virtualKey: body.virtual_key ?? body.virtualKey,
           providerWeights: body.provider_weights ?? body.providerWeights,
@@ -794,10 +899,20 @@ export function createGatewayHandler(
           408,
         );
       }
-      // The router rejected an image request with no vision-capable candidate
-      // (auto-routing case). Surface the honest capability error, not a 500.
+      // The router rejected the request because no candidate had the required
+      // capability (auto-routing case). The same "unsupported_capability" Error
+      // is thrown for vision, tools, OR strict structured output, so disambiguate
+      // by REQUEST SHAPE: a strict json_schema request with no image/tools maps to
+      // the structured error; a tools-only request (tools present, no images) maps
+      // to the tools error; anything involving an image maps to the vision error.
       if (error instanceof Error && error.message === "unsupported_capability") {
-        return json(request, UNSUPPORTED_VISION_ERROR, 422);
+        const body422 =
+          wantsStrictSchema && !hasImages && !wantsTools
+            ? UNSUPPORTED_STRUCTURED_ERROR
+            : wantsTools && !hasImages
+              ? UNSUPPORTED_TOOLS_ERROR
+              : UNSUPPORTED_VISION_ERROR;
+        return json(request, body422, 422);
       }
       throw error;
     }
@@ -894,6 +1009,47 @@ export function createGatewayHandler(
         }
         throw error;
       }
+      // Tool calls are populated on result.toolCalls as the stream drains — read
+      // them now (AFTER the loop above) when the live channel is complete. When
+      // present, surface them OpenAI-shape on the assistant message with
+      // finish_reason:"tool_calls"; content is null when the turn was tools-only.
+      const toolCalls = result.toolCalls ?? [];
+      const hasToolCalls = toolCalls.length > 0;
+      const message = hasToolCalls
+        ? {
+            role: "assistant" as const,
+            content: content.length > 0 ? content : null,
+            tool_calls: toolCalls.map((call) => ({
+              id: call.id,
+              type: "function" as const,
+              function: {
+                name: call.name,
+                arguments: JSON.stringify(call.arguments),
+              },
+            })),
+          }
+        : { role: "assistant" as const, content };
+      // Structured output (§2.3): the engine buffered+validated the response and
+      // attached `structuredOutput` metadata plus the `parsed` value. Surface both
+      // on the JSON body. A STRICT request whose output did NOT validate (after the
+      // engine exhausted repair) is an honest hard failure — return 422 with the
+      // metadata rather than a 200 carrying non-conformant prose.
+      const { structuredOutput, parsed } = asStructured(result);
+      if (structuredOutput && body.response_format?.strict && !structuredOutput.valid) {
+        return json(
+          request,
+          {
+            error: {
+              type: "structured_output_invalid",
+              message:
+                "The model's output did not conform to the requested schema after repair attempts.",
+              structured_output: structuredOutputBody(structuredOutput),
+            },
+          },
+          422,
+          metaHeaders,
+        );
+      }
       return json(
         request,
         {
@@ -906,10 +1062,16 @@ export function createGatewayHandler(
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content },
-              finish_reason: "stop",
+              message,
+              finish_reason: hasToolCalls ? "tool_calls" : "stop",
             },
           ],
+          ...(structuredOutput
+            ? {
+                parsed,
+                structured_output: structuredOutputBody(structuredOutput),
+              }
+            : {}),
           ...(capturedUsage
             ? {
                 metadata: buildUsageMetadata(
@@ -923,6 +1085,33 @@ export function createGatewayHandler(
         200,
         metaHeaders,
       );
+    }
+
+    // Structured-output honesty on the DEFAULT (streaming) path. The engine
+    // BUFFERS + validates the whole structured document before routeAndStream
+    // resolves, so `structuredOutput.valid` is already known here — BEFORE the
+    // SSE stream opens. A STRICT json_schema request whose output did NOT
+    // validate (after the engine exhausted repair) is an honest hard failure:
+    // return the same 422 the non-streaming branch returns, rather than opening
+    // a 200 stream that emits a `valid:false` frame + non-conformant prose.
+    // Non-strict (json_object / no-strict json_schema) behavior is unchanged.
+    {
+      const { structuredOutput } = asStructured(result);
+      if (wantsStrictSchema && structuredOutput && !structuredOutput.valid) {
+        return json(
+          request,
+          {
+            error: {
+              type: "structured_output_invalid",
+              message:
+                "The model's output did not conform to the requested schema after repair attempts.",
+              structured_output: structuredOutputBody(structuredOutput),
+            },
+          },
+          422,
+          metaHeaders,
+        );
+      }
     }
 
     const stream = new ReadableStream({
@@ -979,6 +1168,58 @@ export function createGatewayHandler(
               encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
             );
           }
+          // Tool calls: result.toolCalls is the LIVE channel — fully populated
+          // only now that the text stream has drained. Emit them OpenAI-shape so
+          // a generic client accumulates `delta.tool_calls` then sees a
+          // finish_reason:"tool_calls" terminating delta — matching how OpenAI
+          // streams tool calls. Each call is its own chunk (index i), then a
+          // final empty delta carries the finish_reason.
+          if (result.toolCalls?.length) {
+            result.toolCalls.forEach((call, i) => {
+              const toolPayload = {
+                id: result.traceId,
+                object: "chat.completion.chunk",
+                model: result.model,
+                provider: result.providerId,
+                thread_id: result.threadId,
+                compile_trace_id: result.compileTraceId,
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: i,
+                          id: call.id,
+                          type: "function",
+                          function: {
+                            name: call.name,
+                            arguments: JSON.stringify(call.arguments),
+                          },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              };
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(toolPayload)}\n\n`),
+              );
+            });
+            const finishPayload = {
+              id: result.traceId,
+              object: "chat.completion.chunk",
+              model: result.model,
+              provider: result.providerId,
+              thread_id: result.threadId,
+              compile_trace_id: result.compileTraceId,
+              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+            };
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(finishPayload)}\n\n`),
+            );
+          }
           // Emit per-response metadata (transparency strip) once the stream
           // completes, when final token counts are known. Wrapped in a valid
           // chat.completion.chunk envelope (object + empty choices) so generic
@@ -1001,6 +1242,30 @@ export function createGatewayHandler(
             controller.enqueue(
               encoder.encode(`data: ${JSON.stringify(usagePayload)}\n\n`),
             );
+          }
+          // Structured output is BUFFERED, not token-streamed (the engine holds
+          // the whole document to validate/repair it, §5.2). The text already
+          // drained above as a single block; now emit ONE terminal frame carrying
+          // the validated `parsed` value + `structured_output` metadata so the
+          // streaming client gets the same honesty signal as the JSON path. Wrapped
+          // in a chat.completion.chunk envelope to keep the SSE contract uniform.
+          {
+            const { structuredOutput, parsed } = asStructured(result);
+            if (structuredOutput) {
+              const structuredPayload = {
+                object: "chat.completion.chunk",
+                model: result.model,
+                provider: result.providerId,
+                thread_id: result.threadId,
+                compile_trace_id: result.compileTraceId,
+                choices: [],
+                parsed,
+                structured_output: structuredOutputBody(structuredOutput),
+              };
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(structuredPayload)}\n\n`),
+              );
+            }
           }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
@@ -1526,12 +1791,83 @@ export function createGatewayHandler(
 }
 
 function parseMessages(body: {
-  messages?: Array<{ role: string; content: string | ContentBlock[] }>;
+  messages?: Array<{
+    role: string;
+    content?: string | ContentBlock[] | null;
+    tool_call_id?: string;
+    tool_calls?: Array<{
+      id: string;
+      type: "function";
+      function: { name: string; arguments: string };
+    }>;
+  }>;
   message?: { role?: string; content: string | ContentBlock[] } | string;
   thread_id?: string;
 }): ChatMessage[] {
   if (body.messages?.length) {
     return body.messages.map((message) => {
+      // Normalize an OpenAI-native tool-result message (`{role:"tool",
+      // tool_call_id, content}`) to the internal shape: a user turn carrying a
+      // tool_result block. Without this the multi-turn tool loop is impossible
+      // over HTTP. `content` is the result text; tool_call_id correlates it.
+      if (message.role === "tool") {
+        const resultText =
+          typeof message.content === "string"
+            ? message.content
+            : textOf(message.content ?? []);
+        return {
+          role: "user" as const,
+          content: [
+            {
+              type: "tool_result" as const,
+              toolCallId: message.tool_call_id ?? "",
+              content: resultText,
+            },
+          ],
+        };
+      }
+      // Normalize an OpenAI-native assistant turn carrying top-level `tool_calls`
+      // (the shape the gateway itself emits) into internal `tool_call` content
+      // blocks. Without this a stock OpenAI client that echoes the assistant turn
+      // back loses the call (the field is otherwise stripped and `content:null`
+      // is rejected). `function.arguments` is a JSON STRING upstream; parse it,
+      // guarding malformed/non-object payloads to `{}`. Any assistant text is
+      // preserved as a leading text block.
+      if (message.role === "assistant" && message.tool_calls?.length) {
+        const toolCallBlocks: ContentBlock[] = message.tool_calls.map((call) => {
+          let args: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(call.function.arguments) as unknown;
+            if (
+              parsed != null &&
+              typeof parsed === "object" &&
+              !Array.isArray(parsed)
+            ) {
+              args = parsed as Record<string, unknown>;
+            }
+          } catch {
+            args = {};
+          }
+          return {
+            type: "tool_call" as const,
+            id: call.id,
+            name: call.function.name,
+            arguments: args,
+          };
+        });
+        const textBlocks: ContentBlock[] =
+          typeof message.content === "string"
+            ? message.content.length > 0
+              ? [{ type: "text" as const, text: message.content }]
+              : []
+            : Array.isArray(message.content)
+              ? message.content.filter((b) => b.type === "text")
+              : [];
+        return {
+          role: "assistant" as const,
+          content: [...textBlocks, ...toolCallBlocks],
+        };
+      }
       if (
         message.role !== "system" &&
         message.role !== "user" &&
@@ -1539,7 +1875,9 @@ function parseMessages(body: {
       ) {
         throw new Error(`Invalid role: ${message.role}`);
       }
-      return { role: message.role, content: message.content };
+      // Non-tool turns always carry content (schema refine guarantees it unless
+      // tool_calls was present, handled above); coerce the now-nullable type.
+      return { role: message.role, content: message.content ?? "" };
     });
   }
   if (body.message && body.thread_id) {

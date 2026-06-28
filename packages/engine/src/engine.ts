@@ -33,13 +33,19 @@ import type {
   ThreadMessage,
   TraceAttempt,
 } from "@zintus/types";
-import { textOf } from "@zintus/types";
+import { textOf, requiresStructuredOutput, requiresTools, hasToolTurns } from "@zintus/types";
 import { getKey } from "@zintus/keychain";
 import { ConversationStore } from "./conversation-store.js";
 import { exportRequestTrace, nowEpochMs } from "./otel.js";
 import { ResponseCache } from "@zintus/cache";
 import { CodeIndex } from "@zintus/codebase-indexer";
-import { listProviders } from "@zintus/providers";
+import { listProviders, structuredOutputLevel } from "@zintus/providers";
+import {
+  validateJson,
+  extractJsonObject,
+  repairInstruction,
+  type ValidationIssue,
+} from "@zintus/schemas";
 
 /** Conservative context windows (tokens) for sizing code/diff/terminal context
  *  to the target model — smaller window ⇒ the compiler auto-shrinks those
@@ -51,6 +57,27 @@ function modelContextWindow(model?: string): number {
     return 128_000;
   if (m.includes("8b") || m.includes("mini") || m.includes("flash-lite")) return 32_000;
   return 64_000;
+}
+
+/** Minimal JSON-coercion instruction injected on the FIRST structured attempt when
+ *  the resolved level is `prompt` (the provider has no native JSON mode). Without
+ *  it the first attempt has zero guidance to emit JSON, so it returns prose and is
+ *  a guaranteed validation failure — a wasted real provider call before the repair
+ *  loop can steer it. Kept terse; the schema (if any) rides along so the model can
+ *  conform on the first try. */
+function coercionMessage(
+  schema: Record<string, unknown> | undefined,
+  name: string | undefined,
+): ChatMessage {
+  const base =
+    "Respond with ONLY a single valid JSON value. Do not include any prose, " +
+    "explanation, markdown, or code fences — output raw JSON only.";
+  const content = schema
+    ? `${base} The JSON MUST conform to this JSON Schema${
+        name ? ` ("${name}")` : ""
+      }:\n${JSON.stringify(schema)}`
+    : base;
+  return { role: "system", content };
 }
 
 export interface EngineConfig extends RouterConfig {
@@ -94,6 +121,34 @@ export interface EngineStreamResult extends RouteStreamResult {
   cacheHit?: "L1" | "L2" | "miss";
   /** Number of provider attempts that failed before one succeeded. */
   failoverCount?: number;
+  /**
+   * Structured-output verdict, present ONLY when the request asked for non-text
+   * structured output (`responseFormat.type !== "text"`). The text `stream` for
+   * a structured turn is BUFFERED (validated/repaired before return) rather than
+   * token-streamed, then replayed as a single chunk so existing stream consumers
+   * are unaffected.
+   */
+  structuredOutput?: {
+    /** What the caller asked for. */
+    requested: "json_object" | "json_schema";
+    /** The strongest level the winning provider/model could actually serve.
+     *  "prompt" = no native structured support (coerced via instruction). */
+    servedLevel: "json_schema" | "json_object" | "prompt";
+    /** True only when the served level GUARANTEES schema conformance AND the
+     *  final output validated. */
+    guaranteed: boolean;
+    /** Did the final (post-repair) output pass validation? For a `json_object`
+     *  request with no schema this is syntactic-JSON validity only. */
+    valid: boolean;
+    /** Number of validate→repair round-trips actually performed (0 = first
+     *  response already valid, no repair). */
+    repairAttempts: number;
+    /** Outstanding validation issues when `valid` is false. */
+    issues?: ValidationIssue[];
+  };
+  /** The parsed, validated JSON value when `structuredOutput.valid` — otherwise
+   *  undefined. */
+  parsed?: unknown;
 }
 
 export interface Engine {
@@ -462,7 +517,227 @@ export function createEngine(config: EngineConfig = {}): Engine {
       const targetProvider = request.provider ?? "auto";
       const targetModel = request.model ?? "auto";
 
-      if (cache && !request.bypassCache) {
+      // The attempt callback is shared by every router dispatch on this turn
+      // (the structured-output path re-dispatches for repairs), so all attempts
+      // accumulate on the SAME trace.
+      const onAttempt = (event: TraceAttempt) => {
+        attempts.push(event);
+        attemptEndsMs.push(nowEpochMs());
+        if (persistTraces) {
+          conversations.recordAttempt(traceId, event);
+        }
+        config.onAttempt?.(event);
+      };
+
+      // ── Structured / JSON output (buffered validate→repair) ───────────────
+      // A non-text `responseFormat` takes a BUFFERED branch: the router already
+      // resolved the best level this provider/model can serve, so we drain the
+      // text fully, extract+validate the JSON, and (when invalid) re-dispatch
+      // the SAME request with a repair instruction appended — up to the capped
+      // number of round-trips. The final text is replayed as a single stream
+      // chunk so existing `.stream` consumers are unaffected. Structured turns
+      // bypass the response cache entirely (reads AND writes) — caching
+      // unvalidated text would replay a non-conforming answer.
+      if (requiresStructuredOutput(request)) {
+        const schema = request.responseFormat?.schema as
+          | Record<string, unknown>
+          | undefined;
+        // 0 = validate once, no repair; capped server-side at 2.
+        const maxRepairAttempts = Math.min(
+          request.responseFormat?.maxRepairAttempts ?? 2,
+          2,
+        );
+
+        const dispatchAndDrain = async (
+          messages: RouteRequest["messages"],
+        ): Promise<{ result: RouteStreamResult; text: string }> => {
+          const dispatched = await router.routeAndStream({
+            ...request,
+            messages,
+            threadId,
+            stickySessionKey: threadId
+              ? `${threadId}:${request.provider ?? "auto"}`
+              : undefined,
+            stickySessionTtlMs: 30 * 60 * 1000,
+            onAttempt,
+          });
+          // Drain fully — preserves the router's trace/usage/persistence
+          // side-effects and yields nothing partial to the caller.
+          let text = "";
+          for await (const chunk of dispatched.stream) {
+            text += chunk;
+          }
+          return { result: dispatched, text };
+        };
+
+        // Predict the level this request will resolve to (same logic the router's
+        // resolveResponseFormat uses) so we can PREPEND a JSON-coercion instruction
+        // on the FIRST attempt for `prompt`-level requests (providers with no native
+        // JSON mode). For native json_object/json_schema providers the adapter sends
+        // the real format field, so no coercion is needed. With explicit
+        // provider+model this is exact; under auto routing the conservative "none →
+        // prompt" prediction coerces harmlessly even if the winner is native-JSON.
+        const providerLevel = structuredOutputLevel(
+          targetProvider as ProviderId,
+          targetModel,
+        );
+        const requestedType = request.responseFormat!.type;
+        const predictedLevel: "json_schema" | "json_object" | "prompt" =
+          requestedType === "json_schema"
+            ? providerLevel === "json_schema"
+              ? "json_schema"
+              : providerLevel === "json_object"
+                ? "json_object"
+                : "prompt"
+            : providerLevel === "none"
+              ? "prompt"
+              : "json_object";
+
+        let convoMessages = effectiveMessages;
+        if (predictedLevel === "prompt") {
+          convoMessages = [
+            coercionMessage(schema, request.responseFormat?.name),
+            ...convoMessages,
+          ];
+        }
+        let { result: structuredResult, text } =
+          await dispatchAndDrain(convoMessages);
+
+        let extracted = extractJsonObject(text);
+        let valid = false;
+        let issues: ValidationIssue[] = [];
+        let repairAttempts = 0;
+
+        const validateOnce = () => {
+          extracted = extractJsonObject(text);
+          if (!extracted.ok) {
+            valid = false;
+            issues = [{ path: "/", message: "response was not valid JSON" }];
+            return;
+          }
+          if (schema) {
+            const verdict = validateJson(schema, extracted.value);
+            valid = verdict.valid;
+            issues = verdict.issues;
+          } else {
+            // json_object request: syntactic JSON validity only.
+            valid = true;
+            issues = [];
+          }
+        };
+
+        validateOnce();
+        while (!valid && repairAttempts < maxRepairAttempts) {
+          // Append the model's prior (invalid) output as an assistant turn FIRST,
+          // then the repair instruction as a user turn. Omitting the assistant turn
+          // creates consecutive user messages, which Gemini (the default json_schema
+          // route) rejects/merges because it requires strict role alternation.
+          convoMessages = [
+            ...convoMessages,
+            { role: "assistant", content: text },
+            { role: "user", content: repairInstruction(text, issues) },
+          ];
+          repairAttempts += 1;
+          ({ result: structuredResult, text } =
+            await dispatchAndDrain(convoMessages));
+          validateOnce();
+        }
+
+        // Label served_level/guaranteed from the level the router ACTUALLY served
+        // (resolvedStructuredLevel), never from the raw provider capability — a
+        // json_object request to a json_schema-capable provider must report
+        // "json_object"/guaranteed:false, not "json_schema". guaranteed is true only
+        // when the provider served json_schema AND validation passed.
+        const servedLevel: "json_schema" | "json_object" | "prompt" =
+          structuredResult.resolvedStructuredLevel ?? "prompt";
+        const guaranteed = servedLevel === "json_schema" && valid;
+        const requested = request.responseFormat!.type as
+          | "json_object"
+          | "json_schema";
+
+        // Persist the FINAL assistant text + trace, mirroring the normal path's
+        // side-effects. Cache writes are intentionally skipped (see above).
+        if (persistConversations && threadId) {
+          conversations.appendMessage(
+            threadId,
+            { role: "assistant", content: text },
+            {
+              providerId: structuredResult.providerId,
+              model: structuredResult.model,
+              traceId,
+            },
+          );
+          updateMemoryAfterTurn(threadId, lastUser, text);
+        }
+
+        const completedAt = new Date();
+        const trace: Omit<RequestTrace, "traceId" | "attempts"> = {
+          startedAt: new Date(traceStartedAt),
+          completedAt,
+          winner: {
+            providerId: structuredResult.providerId,
+            model: structuredResult.model,
+          },
+          totalLatencyMs: completedAt.getTime() - traceStartedAt,
+        };
+        if (persistTraces) {
+          conversations.completeTrace(traceId, trace);
+        }
+        exportRequestTrace({
+          trace: { traceId, attempts: [...attempts], ...trace },
+          cacheHit: "miss",
+          compileTokens: compileTokenEstimate,
+          failoverCount: attempts.filter((a) => a.status === "fail").length,
+          startMs: otelStartMs,
+          endMs: nowEpochMs(),
+          attemptEndsMs: [...attemptEndsMs],
+        });
+
+        const finalText = text;
+        const replayStream = async function* (): AsyncGenerator<string> {
+          yield finalText;
+        };
+
+        return {
+          providerId: structuredResult.providerId,
+          model: structuredResult.model,
+          stream: replayStream(),
+          traceId,
+          threadId,
+          compileTraceId,
+          compileTokenEstimate,
+          cacheHit: "miss",
+          failoverCount: attempts.filter((a) => a.status === "fail").length,
+          privacyHonored: structuredResult.privacyHonored,
+          structuredOutput: {
+            requested,
+            servedLevel,
+            guaranteed,
+            valid,
+            repairAttempts,
+            issues: valid ? undefined : issues,
+          },
+          parsed: valid ? extracted.value : undefined,
+        };
+      }
+
+      // Skip the cache READ for tool and structured requests. The cache only ever
+      // stores plain-text answers (tool/structured turns skip the WRITE), so a
+      // cached text reply could replay and silently DROP the tool calls / structured
+      // output a tools-or-responseFormat request explicitly asked for. (Structured
+      // requests already returned above; the guard is kept for defense in depth.)
+      // `requiresTools` only catches turns that carry a NEW `tools` field; a
+      // CONTINUATION turn replaying tool_call/tool_result blocks (no `tools` field)
+      // would otherwise slip through — its lastUser is a pure tool_result whose
+      // `textOf` is "", driving an empty-string L2 lookup — so also guard on
+      // `hasToolTurns(messages)`.
+      if (
+        cache &&
+        !request.bypassCache &&
+        !requiresTools(request) &&
+        !requiresStructuredOutput(request) &&
+        !hasToolTurns(effectiveMessages)
+      ) {
         // SCOPED-CACHE NOTE (assessed, intentionally NOT scoped here): the L1
         // key (prompt/model/provider/temp/maxTokens) and the L2 semantic lookup
         // (prompt embedding + model + provider) are NOT scoped by user / thread
@@ -589,7 +864,18 @@ export function createEngine(config: EngineConfig = {}): Engine {
             );
             updateMemoryAfterTurn(threadId, lastUser, assistantContent);
           }
-          if (cache) {
+          // Never cache a tool-call turn: its text is empty/partial and the tool
+          // calls (the real payload) aren't cached, so a cache hit would replay an
+          // empty answer for a prompt that actually wanted a tool invocation. The
+          // `result.toolCalls` check only catches a turn whose RESPONSE emitted new
+          // calls; a continuation turn carrying tool_result blocks in its history
+          // (final synthesis, no new calls) is caught by `hasToolTurns` so L2 never
+          // embeds the empty-string body of a pure tool_result turn.
+          if (
+            cache &&
+            !(result.toolCalls && result.toolCalls.length > 0) &&
+            !hasToolTurns(effectiveMessages)
+          ) {
             // Key the write the SAME way as the read (targetModel/targetProvider,
             // "auto" for unforced requests) so an identical prompt actually hits
             // L1 next time. Keying the write by the winner's resolved
@@ -632,6 +918,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
         providerId: result.providerId,
         model: result.model,
         stream: wrappedStream(),
+        // Forward the router's live tool-call channel by REFERENCE so the gateway
+        // reads completed tool calls after draining the (text) stream. Populated as
+        // `result.stream` drains via `wrappedStream`.
+        toolCalls: result.toolCalls,
         traceId,
         threadId,
         compileTraceId,

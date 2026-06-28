@@ -103,6 +103,29 @@ describe("redactSecrets — formats fixed in this change", () => {
   });
 });
 
+describe("redactSecrets — JWT / UUID / named-token drift fix (matches relay)", () => {
+  test("redacts a JWT-shaped token (eyJ... three base64url segments)", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+    const out = redactSecrets(`id_token leaked: ${jwt}`);
+    expect(out).not.toContain(jwt);
+    expect(out).toContain("****REDACTED-JWT****");
+  });
+
+  test("redacts a UUID-shaped token", () => {
+    const uuid = "550e8400-e29b-41d4-a716-446655440000";
+    const out = redactSecrets(`session ${uuid} expired`);
+    expect(out).not.toContain(uuid);
+    expect(out).toContain("****REDACTED-UUID****");
+  });
+
+  test("redacts a named session token by key name", () => {
+    const out = redactSecrets('{"session_token":"abc123def456ghi789"}');
+    expect(out).not.toContain("abc123def456ghi789");
+    expect(out).toContain("****REDACTED****");
+  });
+});
+
 describe("redactSecrets — accepted limitation", () => {
   test("generic-format keys (Cohere/Mistral/Fireworks) still cannot be matched", () => {
     // These providers use GENERIC_KEY (\\S{8,}) with no distinguishing prefix,
