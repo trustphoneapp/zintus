@@ -546,6 +546,7 @@ interface GatewayChunk {
   cost_usd?: number;
   saved_vs_claude_sonnet?: number;
   routing_strategy?: string;
+  route_reason?: string;
   private_mode_honored?: boolean;
 }
 
@@ -559,6 +560,13 @@ export interface ChatMeta {
   costUsd: number;
   savedUsd: number;
   routingStrategy: string;
+  /**
+   * Human "why this provider/model" line from the gateway's route trace (e.g.
+   * "cheapest healthy provider", "failover after groq rate-limit"). `undefined`
+   * when the trace recorded no reason. Surfaced as the headline at the top of the
+   * assistant turn — the prominent "why this route" signal the audit flagged missing.
+   */
+  routeReason?: string;
   /**
    * Privacy-mode honesty: `undefined` when private mode was off, `true` when
    * honored, `false` when the gateway had to use a may-train/"unknown" provider
@@ -795,6 +803,7 @@ export async function streamGatewayChat(params: {
         costUsd: chunk.cost_usd ?? 0,
         savedUsd: chunk.saved_vs_claude_sonnet ?? 0,
         routingStrategy: chunk.routing_strategy ?? "auto",
+        routeReason: chunk.route_reason,
         privacyHonored: chunk.private_mode_honored,
       };
       return;

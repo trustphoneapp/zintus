@@ -164,6 +164,12 @@ export default function ChatPage() {
   // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
   // hydration mismatch (document.cookie is client-only).
   const [localMode, setLocalMode] = useState(false);
+  // Collapsed secondary-controls popover ("⚙ More") and the New-chat affordance
+  // menu (which owns the incognito option). Both close on outside click.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [newChatMenuOpen, setNewChatMenuOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+  const newChatRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -230,6 +236,22 @@ export default function ChatPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Dismiss the More / New-chat popovers on an outside click (mirrors ProviderPicker).
+  useEffect(() => {
+    if (!moreOpen && !newChatMenuOpen) return;
+    function onClick(event: MouseEvent) {
+      const target = event.target as Node;
+      if (moreRef.current && !moreRef.current.contains(target)) {
+        setMoreOpen(false);
+      }
+      if (newChatRef.current && !newChatRef.current.contains(target)) {
+        setNewChatMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [moreOpen, newChatMenuOpen]);
 
   // Abort any in-flight stream when leaving the page (mirrors /compare, /research).
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -807,6 +829,121 @@ export default function ChatPage() {
           void send();
         }}
       />
+      {/* Thread header: title + context chips on the left; New-chat affordance
+          (owns incognito) and Export pinned right. Export moved OUT of the
+          composer per the chat-hierarchy cleanup. */}
+      <div
+        className="chat-header"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          padding: "10px 28px",
+          borderBottom: "0.5px solid var(--c-border)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            minWidth: 0,
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--color-text)",
+          }}
+        >
+          <span>{incognito ? "Incognito chat" : "Chat"}</span>
+          {activeProjectName ? (
+            <span
+              className="chat-privacy-chip"
+              title="Active project — its instructions lead each new chat. Click × to leave."
+            >
+              📁 {activeProjectName}
+              <button
+                type="button"
+                aria-label="Leave project"
+                onClick={() => {
+                  setActiveProjectId(null);
+                  setActiveProjectName(null);
+                }}
+                style={{
+                  marginLeft: 6,
+                  background: "none",
+                  border: "none",
+                  color: "inherit",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            </span>
+          ) : null}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {/* New-chat affordance with an incognito option in its menu. */}
+          <div className="composer-picker" ref={newChatRef}>
+            <button
+              type="button"
+              className="chat-tool-toggle"
+              aria-haspopup="menu"
+              aria-expanded={newChatMenuOpen}
+              onClick={() => setNewChatMenuOpen((v) => !v)}
+              title="Start a new chat"
+            >
+              <Icon name="plus" size={13} />
+              New chat
+              <Icon name="chevron-down" size={11} />
+            </button>
+            {newChatMenuOpen ? (
+              <div
+                className="composer-picker-menu"
+                role="menu"
+                style={{ bottom: "auto", top: "calc(100% + 6px)", left: "auto", right: 0 }}
+              >
+                <button
+                  type="button"
+                  className="composer-picker-option"
+                  onClick={() => {
+                    newChat(false);
+                    setNewChatMenuOpen(false);
+                  }}
+                >
+                  <Icon name="plus" size={13} />
+                  <span>New chat</span>
+                </button>
+                <button
+                  type="button"
+                  className={`composer-picker-option${incognito ? " active" : ""}`}
+                  onClick={() => {
+                    newChat(true);
+                    setNewChatMenuOpen(false);
+                  }}
+                  title="Nothing saved, non-training providers only"
+                >
+                  <span aria-hidden>🕶</span>
+                  <span>New incognito chat</span>
+                </button>
+              </div>
+            ) : null}
+          </div>
+          {messages.length > 0 ? (
+            <button
+              type="button"
+              className="chat-tool-toggle"
+              onClick={exportThread}
+              aria-label="Export this chat as Markdown"
+              title="Export this chat as Markdown"
+            >
+              <Icon name="copy" size={13} />
+              Export
+            </button>
+          ) : null}
+        </div>
+      </div>
+
       <div className="chat-messages">
         {messages.length === 0 ? (
           <div className="chat-empty">
@@ -882,138 +1019,183 @@ export default function ChatPage() {
             void handleFiles(e.dataTransfer.files);
           }}
         >
-          {/* Composer toolbar: model/route picker + preset on the left, tool
-              toggles (search, private), status indicators, then Export pinned
-              right. Mirrors the control bars in ChatGPT/Claude/Gemini. */}
+          {/* Composer toolbar (calm): the model/route picker stays accessible;
+              every other secondary control collapses into a single "⚙ More"
+              popover. Incognito moved to the header New-chat menu; Export to the
+              header. */}
           <div
             className="chat-composer-top"
-            style={{ gap: 8, flexWrap: "wrap" }}
+            style={{ gap: 8 }}
           >
             <ProviderPicker />
-            {presets.length > 0 ? (
-              <select
-                className="chat-preset-select"
-                value={activePreset?.id ?? ""}
-                onChange={(event) =>
-                  applyPreset(
-                    presets.find((p) => p.id === event.target.value) ?? null,
-                  )
-                }
-                aria-label="Apply a saved preset"
-                title="Apply a saved preset"
-              >
-                <option value="">No preset</option>
-                {presets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.name}
-                  </option>
-                ))}
-              </select>
-            ) : null}
 
-            {/* ── Tool toggles ─────────────────────────────────────────────── */}
-            <button
-              type="button"
-              className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
-              aria-pressed={webSearchEnabled}
-              aria-label="Toggle web search"
-              onClick={() => {
-                setWebSearchEnabled((v) => {
-                  const next = !v;
-                  if (typeof localStorage !== "undefined") {
-                    localStorage.setItem("zintus:web-search", String(next));
-                  }
-                  return next;
-                });
-              }}
-              title={searchTooltip(selectedProvider)}
-            >
-              <Icon name="globe" size={13} />
-              Search
-            </button>
-            <button
-              type="button"
-              className={`chat-tool-toggle${toolsEnabled ? " active" : ""}`}
-              aria-pressed={toolsEnabled}
-              aria-label="Toggle tools"
-              onClick={() => {
-                setToolsEnabled((v) => {
-                  const next = !v;
-                  if (typeof localStorage !== "undefined") {
-                    localStorage.setItem("zintus:tools", String(next));
-                  }
-                  return next;
-                });
-              }}
-              title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally in your browser; needs a tool-capable provider.`}
-            >
-              🔧 Tools
-            </button>
-            <button
-              type="button"
-              className={`chat-tool-toggle${incognito ? " active" : ""}`}
-              aria-pressed={incognito}
-              aria-label={incognito ? "Leave private mode" : "Start a private chat"}
-              onClick={() => newChat(!incognito)}
-              title={
-                incognito
-                  ? "Leave incognito (start a normal chat)"
-                  : "Start an incognito chat — nothing saved, non-training providers only"
-              }
-            >
-              🕶 Incognito
-            </button>
-
-            {/* ── Status indicators (non-interactive, except project ×) ─────── */}
-            {visionReady ? (
-              <span
-                className="chat-privacy-chip"
-                title={`${capitalize(effectiveComposerProvider ?? "")} can read attached images`}
-              >
-                <Icon name="image" size={12} /> Vision
-              </span>
-            ) : null}
-            {settings.blockTrainingProviders ? (
-              <span
-                className="chat-privacy-chip"
-                title="Privacy mode — only routing to providers that don't train on your data"
-              >
-                🛡 Privacy
-              </span>
-            ) : null}
-            {activeProjectName ? (
-              <span
-                className="chat-privacy-chip"
-                title="Active project — its instructions lead each new chat. Click × to leave."
-              >
-                📁 {activeProjectName}
-                <button
-                  type="button"
-                  aria-label="Leave project"
-                  onClick={() => {
-                    setActiveProjectId(null);
-                    setActiveProjectName(null);
-                  }}
-                  style={{ marginLeft: 6, background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0 }}
-                >
-                  ×
-                </button>
-              </span>
-            ) : null}
-
-            {messages.length > 0 ? (
+            <div className="composer-picker" ref={moreRef}>
               <button
                 type="button"
-                className="chat-tool-toggle"
-                onClick={exportThread}
-                aria-label="Export this chat as Markdown"
-                title="Export this chat as Markdown"
-                style={{ marginLeft: "auto" }}
+                className={`chat-tool-toggle${
+                  webSearchEnabled ||
+                  toolsEnabled ||
+                  activePreset ||
+                  activeProjectName ||
+                  settings.blockTrainingProviders
+                    ? " active"
+                    : ""
+                }`}
+                aria-haspopup="menu"
+                aria-expanded={moreOpen}
+                aria-label="More chat options"
+                onClick={() => setMoreOpen((v) => !v)}
+                title="Search, tools, presets, project"
               >
-                <Icon name="copy" size={13} />
-                Export
+                <Icon name="settings" size={13} />
+                More
               </button>
-            ) : null}
+
+              {moreOpen ? (
+                <div
+                  className="composer-picker-menu"
+                  role="menu"
+                  style={{ minWidth: 252, padding: 8 }}
+                >
+                  <div className="composer-picker-section">Tools</div>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 6,
+                      flexWrap: "wrap",
+                      padding: "0 4px 6px",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
+                      aria-pressed={webSearchEnabled}
+                      aria-label="Toggle web search"
+                      onClick={() => {
+                        setWebSearchEnabled((v) => {
+                          const next = !v;
+                          if (typeof localStorage !== "undefined") {
+                            localStorage.setItem("zintus:web-search", String(next));
+                          }
+                          return next;
+                        });
+                      }}
+                      title={searchTooltip(selectedProvider)}
+                    >
+                      <Icon name="globe" size={13} />
+                      Search
+                    </button>
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${toolsEnabled ? " active" : ""}`}
+                      aria-pressed={toolsEnabled}
+                      aria-label="Toggle tools"
+                      onClick={() => {
+                        setToolsEnabled((v) => {
+                          const next = !v;
+                          if (typeof localStorage !== "undefined") {
+                            localStorage.setItem("zintus:tools", String(next));
+                          }
+                          return next;
+                        });
+                      }}
+                      title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally in your browser; needs a tool-capable provider.`}
+                    >
+                      🔧 Tools
+                    </button>
+                  </div>
+
+                  {presets.length > 0 ? (
+                    <>
+                      <div className="composer-picker-section">Preset</div>
+                      <div style={{ padding: "0 4px 6px" }}>
+                        <select
+                          className="chat-preset-select"
+                          style={{ width: "100%" }}
+                          value={activePreset?.id ?? ""}
+                          onChange={(event) =>
+                            applyPreset(
+                              presets.find((p) => p.id === event.target.value) ??
+                                null,
+                            )
+                          }
+                          aria-label="Apply a saved preset"
+                          title="Apply a saved preset"
+                        >
+                          <option value="">No preset</option>
+                          {presets.map((preset) => (
+                            <option key={preset.id} value={preset.id}>
+                              {preset.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </>
+                  ) : null}
+
+                  {activeProjectName ? (
+                    <>
+                      <div className="composer-picker-section">Project</div>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "0 4px 6px",
+                          fontSize: 12,
+                          color: "var(--color-text-sub)",
+                        }}
+                      >
+                        <span>📁 {activeProjectName}</span>
+                        <button
+                          type="button"
+                          className="chat-tool-toggle"
+                          style={{ marginLeft: "auto" }}
+                          onClick={() => {
+                            setActiveProjectId(null);
+                            setActiveProjectName(null);
+                          }}
+                          title="Leave this project"
+                        >
+                          Leave
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+
+                  {visionReady || settings.blockTrainingProviders ? (
+                    <>
+                      <div className="composer-picker-section">This route</div>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexWrap: "wrap",
+                          gap: 6,
+                          padding: "0 4px 2px",
+                        }}
+                      >
+                        {visionReady ? (
+                          <span
+                            className="chat-privacy-chip"
+                            title={`${capitalize(effectiveComposerProvider ?? "")} can read attached images`}
+                          >
+                            <Icon name="image" size={12} /> Vision
+                          </span>
+                        ) : null}
+                        {settings.blockTrainingProviders ? (
+                          <span
+                            className="chat-privacy-chip"
+                            title="Privacy mode — only routing to providers that don't train on your data"
+                          >
+                            🛡 Privacy
+                          </span>
+                        ) : null}
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </div>
           {notice && (
             <div className={`chat-composer-notice is-${notice.tone}`} role="status">

@@ -12,6 +12,11 @@ import { Markdown, CodeBlock } from "./Markdown";
 
 export type { ToolCall };
 
+/** Strip a provider/owner suffix for a compact model label in the top line. */
+function shortModel(model: string): string {
+  return model.replace(/\s*\(.*\)\s*$/, "").trim();
+}
+
 /** Pretty, single-line args for the compact call card; multi-line for the pre. */
 function formatArgs(args: unknown, pretty: boolean): string {
   let value: unknown = args;
@@ -148,18 +153,59 @@ export function MessageBubble({
 
   return (
     <div className={`message-row${isUser ? " user" : ""}`}>
-      {!isUser && provider ? (
-        <div className="message-meta">
-          <span
-            className="message-provider-dot"
-            style={{ background: provider.color }}
-          />
+      {!isUser && (provider || message.meta) ? (
+        <div className="message-meta" style={{ flexWrap: "wrap", rowGap: 4 }}>
+          {provider ? (
+            <span
+              className="message-provider-dot"
+              style={{ background: provider.color }}
+            />
+          ) : null}
           <span>
-            {provider.name.toUpperCase()} · {message.model ?? provider.name}
+            {(provider?.name ?? message.providerId ?? "Assistant").toUpperCase()}
+            {message.model ? ` · ${shortModel(message.model)}` : ""}
             {typeof message.compileTokens === "number"
               ? ` · compile ~${message.compileTokens.toLocaleString()} tok`
               : ""}
           </span>
+          {message.meta?.routeReason ? (
+            // The headline "why this provider/model" — the prominent route reason
+            // (full strip with the rest of the trace stays expandable below).
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "1px 7px",
+                borderRadius: 999,
+                fontWeight: 600,
+                color: "var(--color-purple-light, #7C3AED)",
+                background:
+                  "color-mix(in oklch, var(--color-purple-light, #7C3AED) 12%, transparent)",
+              }}
+              title="Why the router chose this provider and model for this turn"
+            >
+              {message.meta.routeReason}
+            </span>
+          ) : null}
+          {message.meta ? (
+            <span style={{ opacity: 0.85 }}>· {message.meta.latencyMs}ms</span>
+          ) : null}
+          {message.meta?.privacyHonored === true ? (
+            <span
+              style={{ color: "var(--color-green, #22c55e)", fontWeight: 600 }}
+              title="Private mode was on and served by a no-training provider."
+            >
+              · ✓ private
+            </span>
+          ) : message.meta?.privacyHonored === false ? (
+            <span
+              style={{ color: "var(--color-yellow, #f59e0b)", fontWeight: 600 }}
+              title="Private mode was on, but no no-training provider was available."
+            >
+              · ⚠ private not honored
+            </span>
+          ) : null}
         </div>
       ) : null}
       <div className={`message-bubble${isUser ? " user" : ""}`}>
