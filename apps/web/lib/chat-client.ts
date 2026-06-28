@@ -81,6 +81,8 @@ export async function isGatewayAvailable(): Promise<boolean> {
 export async function streamChat(params: {
   messages: ChatMessage[];
   providerId?: ProviderId;
+  /** Specific model id (catalog "Use this model"); else the provider default. */
+  model?: string;
   mode?: ContextMode;
   threadId?: string;
   apiKeys?: Partial<Record<ProviderId, string>>;
@@ -105,6 +107,7 @@ export async function streamChat(params: {
   const result = await streamGatewayChat({
     messages: params.messages,
     providerId: params.providerId,
+    model: params.model,
     defaultProvider: params.settings?.defaultProvider,
     strategy: params.settings?.routingStrategy,
     mode: params.mode ?? params.settings?.contextMode,

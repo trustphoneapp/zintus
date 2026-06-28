@@ -13,7 +13,7 @@ const SECTIONS: Array<{
   label: string;
   items: Array<{
     href: string;
-    icon: "chat" | "compare" | "globe" | "layers" | "zap" | "activity" | "terminal" | "settings";
+    icon: "chat" | "compare" | "globe" | "layers" | "grid" | "zap" | "activity" | "terminal" | "settings";
     label: string;
   }>;
 }> = [
@@ -21,6 +21,7 @@ const SECTIONS: Array<{
     label: "Workspace",
     items: [
       { href: "/chat", icon: "chat", label: "Chat" },
+      { href: "/models", icon: "grid", label: "Models" },
       { href: "/compare", icon: "compare", label: "Compare" },
       { href: "/research", icon: "globe", label: "Research" },
       { href: "/projects", icon: "layers", label: "Projects" },

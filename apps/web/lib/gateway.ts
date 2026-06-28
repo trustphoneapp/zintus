@@ -329,6 +329,131 @@ export async function fetchGatewayModels(): Promise<string[] | null> {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Rich models catalog — the OpenRouter-grade `/v1/models` + `/v1/pricing`.
+//
+// These mirror the gateway's enriched catalog entries (apps/gateway/src/handler.ts
+// `toModelEntry`). They are SEPARATE from `fetchGatewayModels` above, which stays
+// a thin `string[]` for the terminal. HONESTY: prices are `null` when unknown
+// (render "price unknown", never $0); an offline/erroring gateway returns `[]`
+// rather than fabricated rows.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 3-state structured-output capability (matches @zintus/providers StructuredLevel). */
+export type CatalogStructuredOutput = "none" | "json_object" | "json_schema";
+
+/** Coarse data-policy tag from the catalog entry. */
+export type CatalogDataPolicyTag =
+  | "no_train"
+  | "may_train"
+  | "unknown"
+  | "zero_retention";
+
+/** Badge class shared with the providers page's `policy-badge` styling. */
+export type CatalogDataPolicyBadge = "no-training" | "trains" | "zdr" | "unknown";
+
+/** One enriched `/v1/models` entry. Field names mirror the gateway response
+ *  verbatim (snake_case) so this DTO maps 1:1 onto the wire format. */
+export interface CatalogModelDto {
+  id: string;
+  object: "model";
+  owned_by: string;
+  display_name: string;
+  context_window: number;
+  capabilities: {
+    vision: boolean;
+    tools: boolean;
+    structured_output: CatalogStructuredOutput;
+  };
+  /** USD per 1M tokens; either side may be `null` when the price is unknown. */
+  pricing: {
+    input_per_1m: number | null;
+    output_per_1m: number | null;
+  };
+  free: boolean;
+  local: boolean;
+  data_policy: {
+    tag: CatalogDataPolicyTag;
+    trains_on_data?: boolean | string;
+    retention?: string;
+    zdr?: boolean;
+    badge: CatalogDataPolicyBadge;
+    policy_url?: string;
+  };
+}
+
+/** One priced `/v1/pricing` entry (only models with a concrete, non-null price). */
+export interface CatalogPricingDto {
+  id: string;
+  provider: string;
+  input_per_1m: number;
+  output_per_1m: number;
+  free: boolean;
+}
+
+/** Server-side filters supported by `GET /v1/models`. Omitted/false flags are
+ *  not sent (so the gateway returns the full list). */
+export interface CatalogModelFilters {
+  provider?: string;
+  vision?: boolean;
+  tools?: boolean;
+  free?: boolean;
+  local?: boolean;
+}
+
+/** Build the `/v1/models` query string from filters. Exported (pure) so the
+ *  filter→querystring mapping is unit-testable without mocking `fetch`. */
+export function catalogModelsQuery(filters?: CatalogModelFilters): string {
+  const params = new URLSearchParams();
+  if (filters?.provider) params.set("provider", filters.provider);
+  if (filters?.vision) params.set("vision", "true");
+  if (filters?.tools) params.set("tools", "true");
+  if (filters?.free) params.set("free", "true");
+  if (filters?.local) params.set("local", "true");
+  return params.toString();
+}
+
+/**
+ * The rich models catalog from `GET /v1/models`. Returns `[]` (not null) when the
+ * gateway is offline or errors — the catalog is FREE core, so the page renders an
+ * honest "gateway offline" empty state rather than fabricated rows.
+ */
+export async function fetchCatalogModels(
+  filters?: CatalogModelFilters,
+): Promise<CatalogModelDto[]> {
+  try {
+    const qs = catalogModelsQuery(filters);
+    const response = await fetch(
+      `${GATEWAY_URL}/v1/models${qs ? `?${qs}` : ""}`,
+      { cache: "no-store", headers: { ...gatewayAuthHeaders() } },
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json()) as { data?: CatalogModelDto[] };
+    return body.data ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Priced models from `GET /v1/pricing`. Returns `[]` on an offline/erroring gateway. */
+export async function fetchCatalogPricing(): Promise<CatalogPricingDto[]> {
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/pricing`, {
+      cache: "no-store",
+      headers: { ...gatewayAuthHeaders() },
+    });
+    if (!response.ok) {
+      return [];
+    }
+    const body = (await response.json()) as { data?: CatalogPricingDto[] };
+    return body.data ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchGatewayThreads(): Promise<
   Array<{ id: string; title: string }> | null
 > {
@@ -546,6 +671,9 @@ export async function streamGatewayChat(params: {
   }>;
   providerId?: ProviderId;
   defaultProvider?: ProviderId;
+  /** Specific model id (e.g. from the catalog's "Use this model"). When set the
+   *  gateway routes to this exact model rather than the provider default. */
+  model?: string;
   strategy?: RoutingStrategy;
   mode?: ContextMode;
   threadId?: string;
@@ -578,6 +706,7 @@ export async function streamGatewayChat(params: {
     headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
     body: JSON.stringify({
       messages: params.messages,
+      model: params.model,
       stream: true,
       provider: params.providerId ?? params.defaultProvider,
       strategy: params.strategy,

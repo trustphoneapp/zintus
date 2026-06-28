@@ -366,12 +366,32 @@ export default function ChatPage() {
       let currentAssistantId = assistantId;
       const MAX_TOOL_ROUNDS = 5;
 
+      // Catalog "Use this model": route to the exact chosen model, but ONLY when it
+      // belongs to the currently-selected provider (avoid a stale model after the
+      // user switches providers in the composer).
+      let catalogModel: string | undefined;
+      try {
+        const raw =
+          typeof localStorage !== "undefined"
+            ? localStorage.getItem("zintus:selected-model")
+            : null;
+        if (raw) {
+          const sel = JSON.parse(raw) as { id?: string; provider?: string };
+          if (sel.id && sel.provider && sel.provider === selectedProvider) {
+            catalogModel = sel.id;
+          }
+        }
+      } catch {
+        // ignore malformed storage
+      }
+
       try {
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
           let streamedText = "";
           const result = await streamChat({
             messages: convo,
             providerId: selectedProvider ?? undefined,
+            model: catalogModel,
             mode: settings.contextMode,
             threadId: useThread ? threadId : undefined,
             // Read fresh: the LocalKeyManager may have just populated the vault and
