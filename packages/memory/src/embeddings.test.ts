@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
+  __resetKeywordHashWarningForTest,
   embedBatch,
   embedBatchWithMetadata,
   embeddingMode,
@@ -24,9 +25,12 @@ afterEach(() => {
 });
 
 describe("embeddingMode honesty", () => {
-  // First fallback use in this module so the one-time warning is observable here.
   test("keyword-hash fallback warns once and never logs user content", async () => {
     delete process.env.OLLAMA_HOST;
+    // Reset the process-wide warn latch: another test file in the same bun batch
+    // (memory-store, vector, …) may have already tripped the fallback in CI, so
+    // without this the warning wouldn't fire here and the count would be 0.
+    __resetKeywordHashWarningForTest();
     const secret = "supersecretuserphrase";
 
     const calls: string[] = [];
