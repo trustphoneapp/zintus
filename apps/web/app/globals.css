@@ -4227,6 +4227,76 @@ body:has(.dashboard-container) {
   border-color: var(--color-purple-light);
   color: var(--color-purple-light);
 }
+
+/* ── Voice input (dictation) ─────────────────────────────────────────────── */
+.chat-mic {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 0.5px solid var(--c-border);
+  background: var(--color-surface);
+  color: var(--color-text-sub);
+  cursor: pointer;
+  border-radius: 9px;
+  transition:
+    background 120ms cubic-bezier(0.4, 0, 0.2, 1),
+    color 120ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-mic:hover:not(:disabled) {
+  background: var(--color-purple-faint);
+  border-color: var(--color-purple-light);
+  color: var(--color-purple-light);
+}
+.chat-mic:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* Active dictation: violet fill + a calm pulse so it's clear we're listening. */
+.chat-mic.is-listening {
+  background: #7c3aed;
+  border-color: #7c3aed;
+  color: #fff;
+  animation: chat-mic-pulse 1.6s ease-in-out infinite;
+}
+@keyframes chat-mic-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(124, 58, 237, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-mic.is-listening {
+    animation: none;
+  }
+}
+.chat-mic-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 2px 0;
+  font-size: 12px;
+  color: var(--color-text-sub);
+}
+.chat-mic-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #7c3aed;
+  flex-shrink: 0;
+  animation: chat-mic-pulse 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-mic-dot {
+    animation: none;
+  }
+}
 .chat-attachments {
   display: flex;
   flex-wrap: wrap;

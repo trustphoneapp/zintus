@@ -44,6 +44,10 @@ import {
 import { getActiveProject, setActiveProjectId } from "@/lib/projects";
 import { loadPresets, type Preset } from "@/lib/presets";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
+import {
+  useSpeechRecognition,
+  appendDictation,
+} from "@/lib/use-speech-recognition";
 
 const PROMPT_CARDS = [
   { title: "Explain this code", body: "Walk through a snippet step by step" },
@@ -793,6 +797,24 @@ export default function ChatPage() {
     setLoading(false);
   }, []);
 
+  // Voice input (dictation): the BROWSER's Web Speech recognizer fills the
+  // composer textarea — no audio touches the gateway/relay, and the user still
+  // presses send. Finalized chunks append to the existing `input` state so they
+  // ride the normal send path. Interim words show as a live preview only.
+  const handleDictation = useCallback((chunk: string) => {
+    setInput((prev) => appendDictation(prev, chunk));
+  }, []);
+  const speech = useSpeechRecognition({ onFinalTranscript: handleDictation });
+  const toggleDictation = useCallback(() => {
+    if (speech.listening) speech.stop();
+    else speech.start();
+  }, [speech]);
+  // Surface a recognition error (denied mic / no speech) as a calm composer
+  // notice, consistent with attachment errors.
+  useEffect(() => {
+    if (speech.error) setNotice({ tone: "warn", text: speech.error });
+  }, [speech.error]);
+
   const lastAssistantId = [...messages]
     .reverse()
     .find((message) => message.role === "assistant")?.id;
@@ -1334,6 +1356,40 @@ export default function ChatPage() {
               }}
               placeholder="Ask anything — routed automatically across your free providers"
             />
+            {/* Voice input (dictation). Honest about support: the Web Speech
+                API is Chromium-only in practice, so when unsupported we show a
+                disabled mic with a plain-spoken tooltip rather than hide it. The
+                active tooltip is honest about where the audio goes. */}
+            {speech.supported ? (
+              <Tooltip
+                content={
+                  speech.listening
+                    ? "Stop dictation"
+                    : "Dictate — uses your browser's speech service (Chrome sends audio to Google); no audio reaches Zintus"
+                }
+              >
+                <button
+                  type="button"
+                  className={`chat-mic${speech.listening ? " is-listening" : ""}`}
+                  onClick={toggleDictation}
+                  aria-label={speech.listening ? "Stop dictation" : "Start dictation"}
+                  aria-pressed={speech.listening}
+                >
+                  <Icon name="mic" size={16} />
+                </button>
+              </Tooltip>
+            ) : (
+              <Tooltip content="Voice input needs a Chromium-based browser (Chrome or Edge)">
+                <button
+                  type="button"
+                  className="chat-mic"
+                  disabled
+                  aria-label="Voice input not available in this browser"
+                >
+                  <Icon name="mic" size={16} />
+                </button>
+              </Tooltip>
+            )}
             {/* Send / stop pinned to the trailing (right) edge. */}
             {loading ? (
               <Tooltip content="Stop generating (Esc)">
@@ -1360,6 +1416,14 @@ export default function ChatPage() {
               </Tooltip>
             )}
           </div>
+          {speech.listening ? (
+            <div className="chat-mic-status" role="status" aria-live="polite">
+              <span className="chat-mic-dot" aria-hidden />
+              <span>
+                Listening{speech.transcript ? `: ${speech.transcript}` : "… speak now"}
+              </span>
+            </div>
+          ) : null}
         </div>
         <div className="chat-composer-hint">
           <kbd>⏎</kbd> send · <kbd>⇧⏎</kbd> newline
