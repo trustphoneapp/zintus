@@ -1,21 +1,27 @@
 "use client";
 
 const PROVIDERS_ROW1 = [
-  { name: "Cerebras", badge: "1M tok/day", color: "#f59e0b" },
-  { name: "Groq 70B", badge: "1K req/day", color: "#8b5cf6" },
-  { name: "Groq 8B", badge: "14.4K req/day", color: "#a78bfa" },
-  { name: "Gemini Flash", badge: "1.5K req/day", color: "#3b82f6" },
-  { name: "DeepSeek", badge: "MIT free", color: "#22c55e" },
-  { name: "OpenRouter", badge: "50 req/day", color: "#ec4899" },
+  { name: "Ultra-fast inference", badge: "1M tok/day", color: "#f59e0b" },
+  { name: "70B · low latency", badge: "1K req/day", color: "#8b5cf6" },
+  { name: "8B · high volume", badge: "14.4K req/day", color: "#a78bfa" },
+  { name: "Fast multimodal", badge: "1.5K req/day", color: "#3b82f6" },
+  { name: "Open reasoning", badge: "MIT free", color: "#22c55e" },
+  { name: "Model aggregator", badge: "300+ models", color: "#ec4899" },
 ];
 
 const PROVIDERS_ROW2 = [
-  { name: "Cohere", badge: "1K/month", color: "#14b8a6" },
-  { name: "Mistral", badge: "~1B tok/mo", color: "#f97316" },
-  { name: "Fireworks", badge: "$1 free", color: "#eab308" },
-  { name: "xAI Grok", badge: "trial", color: "#94a3b8" },
-  { name: "Ollama", badge: "unlimited local", color: "#34d399" },
-  { name: "LM Studio", badge: "unlimited local", color: "#60a5fa" },
+  { name: "Enterprise NLP", badge: "1K/month", color: "#14b8a6" },
+  { name: "Open weights", badge: "~1B tok/mo", color: "#f97316" },
+  { name: "Serverless inference", badge: "$1 free", color: "#eab308" },
+  { name: "Frontier trial", badge: "trial", color: "#94a3b8" },
+  { name: "Local runtime", badge: "unlimited local", color: "#34d399" },
+  { name: "Local desktop", badge: "unlimited local", color: "#60a5fa" },
+];
+
+const TIERS = [
+  { label: "Tier 0 — Default", sub: "94–99% margin · < $0.30/M", color: "#22c55e" },
+  { label: "Tier 1 — Capable", sub: "70–85% margin · $1–3/M", color: "#3b82f6" },
+  { label: "Tier 2 — Ceiling", sub: "Top-tier reasoning model · hard cap", color: "#7C3AED" },
 ];
 
 function ProviderChip({
@@ -95,10 +101,11 @@ export function ProviderGrid() {
       <div className="m-shell">
         <div style={{ textAlign: "center", marginBottom: "2.5rem" }}>
           <p className="m-eyebrow">Supported providers</p>
-          <h2 className="m-title">12 providers. All free tiers.</h2>
+          <h2 className="m-title">20+ providers. 100+ models. Smarter every month.</h2>
           <p className="m-subtitle">
-            Economy routing picks the cheapest provider with quota left — automatically.
-            When one runs out, the next takes over in under 5ms.
+            Free tier routes across 12+ providers with real-time quota tracking. Add a
+            model-aggregator key to reach 300+ models instantly. Managed tiers use
+            Zintus-provided keys across our curated routing roster.
           </p>
         </div>
       </div>
@@ -106,10 +113,51 @@ export function ProviderGrid() {
       <MarqueeRow providers={PROVIDERS_ROW1} />
       <MarqueeRow providers={PROVIDERS_ROW2} reverse />
       <div className="m-shell" style={{ marginTop: "2rem" }}>
-        <p style={{ textAlign: "center", fontSize: 12, color: "#4a3070" }}>
-          Priority: Cerebras → Groq 70B → Groq 8B → Gemini → DeepSeek → OpenRouter → Cohere →
-          Mistral → Ollama
-        </p>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "center",
+            gap: 12,
+          }}
+        >
+          {TIERS.map((tier) => (
+            <div
+              key={tier.label}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "10px 16px",
+                borderRadius: 10,
+                background: "rgba(13,8,32,0.8)",
+                border: `1px solid ${tier.color}40`,
+              }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: tier.color,
+                  flexShrink: 0,
+                }}
+              />
+              <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>
+                {tier.label}
+              </span>
+              <span style={{ fontSize: 11, color: "#94a3b8" }}>{tier.sub}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ textAlign: "center", marginTop: "1.75rem" }}>
+          <a
+            href="/catalog"
+            style={{ color: "#7C3AED", fontSize: 14, fontWeight: 600 }}
+          >
+            Browse the full catalog — every provider and model →
+          </a>
+        </div>
       </div>
     </section>
   );

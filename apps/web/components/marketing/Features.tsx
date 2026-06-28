@@ -3,9 +3,6 @@
 import {
   Zap,
   Key,
-  Wrench,
-  Braces,
-  Image as ImageIcon,
   Coins,
   Shuffle,
   BarChart2,
@@ -15,58 +12,40 @@ import { Reveal } from "./Reveal";
 
 const FEATURES = [
   {
-    icon: Zap,
-    color: "#f59e0b",
-    title: "Sub-5ms routing",
-    body: "An in-process quota check picks the fastest provider with tokens left — no extra network hop, no proxy in the middle.",
-  },
-  {
-    icon: Shuffle,
-    color: "#3b82f6",
-    title: "Automatic failover",
-    body: "When a provider hits its limit, the next in your priority order takes over. Exhaust the cloud and Ollama or LM Studio answers locally.",
-  },
-  {
-    icon: Key,
-    color: "#7c3aed",
-    title: "Your keys. Your device.",
-    body: "Keys live in your OS keychain or browser secure storage — never in our custody. Requests go straight from your machine to each provider.",
-  },
-  {
-    icon: Wrench,
-    color: "#34d399",
-    title: "Tool calling (API & CLI)",
-    body: "Define tools once; Zintus maps them to each provider's native format and routes only to models that support function calling. Available today via the gateway API and the CLI (--tools) — the web chat tool UI is on the way.",
-  },
-  {
-    icon: Braces,
-    color: "#ec4899",
-    title: "Structured output (API & CLI)",
-    body: "Ask for JSON via the gateway API or CLI: schema-constrained decoding where the provider guarantees it (Gemini), best-effort JSON mode elsewhere. Not yet exposed in the web chat UI.",
-  },
-  {
-    icon: ImageIcon,
-    color: "#22c55e",
-    title: "Image input",
-    body: "Send images to vision-capable models. EXIF and GPS metadata are stripped on-device before anything is sent.",
-  },
-  {
     icon: Coins,
     color: "#eab308",
-    title: "Savings ledger",
-    body: "Every free-tier token is valued against what a metered API would have billed, so you can see your estimated savings add up.",
+    title: "Exact token balance",
+    body: "Your monthly token budget is a fixed number, shown before you subscribe and visible after every message. It doesn't shrink at peak hours or change based on which model you use.",
   },
   {
     icon: BarChart2,
     color: "#60a5fa",
-    title: "Live quota tracking",
-    body: "Real-time RPM and TPM windows per provider mean Zintus switches before you hit a wall — not after a failed request.",
+    title: "No silent downgrades",
+    body: "Some AI products swap your model when you hit a limit and don't tell you. Zintus shows which model handled every request. If your budget runs low, we warn you — we never quietly change what you're getting.",
+  },
+  {
+    icon: Shuffle,
+    color: "#3b82f6",
+    title: "Smart routing, real savings",
+    body: "Zintus classifies each request and routes to the best-value provider automatically. Short queries go to the fastest model. Long contexts go to the widest window. Reasoning tasks go to the strongest reasoner.",
+  },
+  {
+    icon: Key,
+    color: "#7c3aed",
+    title: "Your keys stay on your device",
+    body: "BYOK keys are stored in your OS keychain or browser's encrypted storage. They go directly from your device to the provider — Zintus never sees them. Managed tier keys are Zintus-provided and stay server-side.",
   },
   {
     icon: Terminal,
     color: "#c4b5fd",
-    title: "CLI + Web + Desktop",
-    body: "A terminal-first CLI, a browser chat, and a native Tauri desktop app (beta) — all driven by one BYOK config.",
+    title: "50+ providers, one interface",
+    body: "Route across 20+ direct integrations and 70+ more via a model-aggregator key. One config, one dashboard, one token balance — regardless of which provider handles the request.",
+  },
+  {
+    icon: Zap,
+    color: "#f59e0b",
+    title: "BYOK frontier on any plan",
+    body: "Add your own key for any frontier model on any paid tier. Route to the most powerful models available at direct provider rates — zero markup, zero restrictions, deducted from your own credits not your Zintus quota.",
   },
 ];
 
@@ -76,11 +55,10 @@ export function Features() {
       <div className="m-shell">
         <Reveal>
           <p className="m-eyebrow">Features</p>
-          <h2 className="m-title">A real router, not just a key vault.</h2>
+          <h2 className="m-title">A router built around what you actually bought.</h2>
           <p className="m-subtitle" style={{ marginBottom: "2.5rem" }}>
-            Multi-provider routing and failover with image input in chat, plus tool calling and
-            structured output via the API &amp; CLI — all running against your own keys, on your own
-            machine.
+            Routing, billing, and key handling are built around one idea: you always
+            know which model answered, what it cost, and how much budget is left.
           </p>
         </Reveal>
         <div
