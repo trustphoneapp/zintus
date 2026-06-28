@@ -6,6 +6,7 @@ import type {
   ToolCallContentBlock,
   ToolChoice,
   ToolDefinition,
+  ResponseFormat,
 } from "@zintus/types";
 import {
   fetchGatewayHealth,
@@ -93,6 +94,8 @@ export async function streamChat(params: {
    *  the gateway returns a structured 422 otherwise. */
   tools?: ToolDefinition[];
   toolChoice?: ToolChoice;
+  /** Structured-output request (e.g. { type: "json_object" }). */
+  responseFormat?: ResponseFormat;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<StreamChatResult> {
@@ -119,6 +122,7 @@ export async function streamChat(params: {
     temperature: params.temperature,
     tools: params.tools,
     toolChoice: params.toolChoice,
+    responseFormat: params.responseFormat,
     signal: params.signal,
     onChunk: params.onChunk,
   });

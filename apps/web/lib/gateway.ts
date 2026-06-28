@@ -6,6 +6,7 @@ import type {
   ToolCallContentBlock,
   ToolChoice,
   ToolDefinition,
+  ResponseFormat,
 } from "@zintus/types";
 
 export const GATEWAY_URL =
@@ -695,6 +696,9 @@ export async function streamGatewayChat(params: {
    *  the gateway returns a 422 UnsupportedCapabilityError otherwise. */
   tools?: ToolDefinition[];
   toolChoice?: ToolChoice;
+  /** Structured-output request (e.g. { type: "json_object" }). The gateway
+   *  resolves the best level the chosen provider can serve. */
+  responseFormat?: ResponseFormat;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<{
@@ -729,6 +733,7 @@ export async function streamGatewayChat(params: {
       temperature: params.temperature,
       tools: params.tools,
       tool_choice: params.toolChoice,
+      response_format: params.responseFormat,
       // BYOK keys are only ever sent to a LOCAL gateway — never across the
       // network (would leak keys in a plaintext body to a remote host).
       keys:

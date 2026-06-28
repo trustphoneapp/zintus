@@ -206,6 +206,21 @@ export default function ChatPage() {
     return false;
   });
 
+  // Structured-output (JSON) toggle (persisted): when on, the turn requests
+  // response_format json_object. The gateway resolves the best level the chosen
+  // provider can serve, or returns an honest 422 when it can't. Parity w/ desktop.
+  const [jsonEnabled, setJsonEnabled] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:json") === "true";
+    }
+    return false;
+  });
+  useEffect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("zintus:json", String(jsonEnabled));
+    }
+  }, [jsonEnabled]);
+
   useEffect(() => {
     hydrate();
     void unlock();
@@ -426,6 +441,7 @@ export default function ChatPage() {
             webSearch: webSearchEnabled,
             temperature: activePreset?.temperature,
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
+            responseFormat: jsonEnabled ? { type: "json_object" } : undefined,
             signal: controller.signal,
             onChunk: (text) => {
               streamedText = text;
@@ -556,6 +572,7 @@ export default function ChatPage() {
       settings,
       threadId,
       toolsEnabled,
+      jsonEnabled,
       updateMessage,
       webSearchEnabled,
       incognito,
@@ -1102,6 +1119,16 @@ export default function ChatPage() {
                       title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally in your browser; needs a tool-capable provider.`}
                     >
                       🔧 Tools
+                    </button>
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${jsonEnabled ? " active" : ""}`}
+                      aria-pressed={jsonEnabled}
+                      aria-label="Toggle JSON output"
+                      onClick={() => setJsonEnabled((v) => !v)}
+                      title="Request structured JSON output. The gateway resolves the best level the chosen provider can serve, or returns an honest error when it can't."
+                    >
+                      {"{}"} JSON
                     </button>
                   </div>
 
