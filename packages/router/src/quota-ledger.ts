@@ -361,22 +361,22 @@ export class QuotaLedger {
     const row = this.maybeResetDailyCounters(id, now);
     const tokensIn = input.tokensIn ?? 0;
     const tokensOut = input.tokensOut ?? 0;
-    // Zero-cost failed requests (Phase 2.4): only successful runs debit the
-    // daily token budget. Failed/rate-limited attempts are still logged (for
-    // observability and RPM windows) but do not consume token quota.
+    // Zero-cost-on-error (Phase 2.4): a successful run debits the daily budget —
+    // BOTH its request count and its token cost (applyUsage). A failed or
+    // rate-limited attempt never returned a usable response, so it debits
+    // NEITHER: its token cost is genuinely zero, and it must not consume the
+    // daily request budget either. The attempt is still written to usage_log
+    // below, so it continues to feed the rolling 60s RPM/TPM window
+    // (countRecentUsage — a failed call DID hit the provider's rate limiter) and
+    // the health-aware error streak (recentErrorCount). The live concurrency and
+    // health guards are unchanged; only the persisted DAILY request counter is no
+    // longer charged for a failure.
     const billable = input.status === "success";
 
     if (billable) {
       this.db
         .update(providers)
         .set(applyUsage(row, tokensIn, tokensOut))
-        .where(eq(providers.id, id))
-        .run();
-    } else {
-      // Count the request against daily request budget without charging tokens.
-      this.db
-        .update(providers)
-        .set({ requestsToday: row.requestsToday + 1 })
         .where(eq(providers.id, id))
         .run();
     }

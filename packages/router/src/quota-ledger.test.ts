@@ -23,11 +23,73 @@ describe("QuotaLedger", () => {
     const now = Date.UTC(2026, 5, 15, 12, 0, 0);
     expect(ledger.isQuotaAvailable("gemini", now)).toBe(true);
 
+    // 1500 successful requests exhaust gemini's requestsPerDay (1500). Only a
+    // success debits the daily request budget (see the zero-cost-on-error tests
+    // below), so this must use status "success" to drive requestsToday to the cap.
     for (let i = 0; i < 1_500; i++) {
-      ledger.recordUsage("gemini", { status: "ok" }, now);
+      ledger.recordUsage("gemini", { status: "success" }, now);
     }
 
+    expect(ledger.getProvider("gemini")!.requestsToday).toBe(1_500);
     expect(ledger.isQuotaAvailable("gemini", now)).toBe(false);
+  });
+
+  it("a failed request does not debit the daily request budget (zero-cost-on-error)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
+    dbPath = join(dir, "quota.db");
+    ledger = new QuotaLedger(dbPath);
+
+    const now = Date.UTC(2026, 5, 15, 12, 0, 0);
+    ledger.ensureProvider("gemini");
+    expect(ledger.getProvider("gemini")!.requestsToday).toBe(0);
+
+    // A provider error / rate-limit returns no usable response and bills zero
+    // tokens — it must consume NEITHER the daily token budget NOR the daily
+    // request count.
+    ledger.recordUsage("gemini", { status: "error", errorCode: 500 }, now);
+    ledger.recordUsage("gemini", { status: "rate_limited", errorCode: 429 }, now);
+
+    const row = ledger.getProvider("gemini")!;
+    expect(row.requestsToday).toBe(0);
+    expect(row.tokensToday).toBe(0);
+  });
+
+  it("a successful request debits the daily request budget by exactly one", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
+    dbPath = join(dir, "quota.db");
+    ledger = new QuotaLedger(dbPath);
+
+    const now = Date.UTC(2026, 5, 15, 12, 0, 0);
+    ledger.recordUsage("gemini", { status: "success", tokensIn: 10, tokensOut: 5 }, now);
+
+    let row = ledger.getProvider("gemini")!;
+    expect(row.requestsToday).toBe(1);
+    expect(row.tokensToday).toBe(15);
+
+    // A failure in between leaves the request count untouched; the next success
+    // advances it by one again — failures never inflate the daily request count.
+    ledger.recordUsage("gemini", { status: "error", errorCode: 500 }, now);
+    ledger.recordUsage("gemini", { status: "success" }, now);
+
+    row = ledger.getProvider("gemini")!;
+    expect(row.requestsToday).toBe(2);
+  });
+
+  it("a failed request is still logged for the rolling window and error streak", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
+    dbPath = join(dir, "quota.db");
+    ledger = new QuotaLedger(dbPath);
+
+    const now = Date.UTC(2026, 5, 15, 12, 0, 0);
+    ledger.recordUsage("groq", { status: "error", errorCode: 500 }, now);
+
+    // Not charged to the persisted DAILY request budget...
+    expect(ledger.getProvider("groq")!.requestsToday).toBe(0);
+    // ...but still recorded in usage_log so the rolling 60s RPM window (a failed
+    // call DID hit the provider's rate limiter) and the health-aware error streak
+    // both continue to see it — the live concurrency/health guards are intact.
+    expect(ledger.countRecentUsage("groq", 60_000, now).requests).toBe(1);
+    expect(ledger.recentErrorCount("groq", 60_000, now)).toBe(1);
   });
 
   it("values savings per-model, not just per-provider", () => {
