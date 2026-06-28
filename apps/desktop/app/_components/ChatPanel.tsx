@@ -473,7 +473,10 @@ export function ChatPanel() {
     setConsentOpen(false);
     const p = pendingPrompt;
     setPendingPrompt(null);
-    if (p) void doSend(p);
+    // Send whenever a send is PENDING (p is a string — possibly "" for an
+    // image-only turn). Guarding on truthiness dropped image-only first sends
+    // after consent; `send()` already validated there is content (text or image).
+    if (p !== null) void doSend(p);
   }
 
   const regenerate = useCallback(async () => {
