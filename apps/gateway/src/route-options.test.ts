@@ -324,3 +324,72 @@ describe("GET /v1/route/options", () => {
     expect(body.best).toBe("compress_harder");
   });
 });
+
+/**
+ * Private-Network-Access (PNA) preflight: Chrome blocks a public/HTTPS site from
+ * reaching the user's loopback gateway unless the OPTIONS preflight is answered
+ * with `Access-Control-Allow-Private-Network: true`. The gateway must emit that
+ * header ONLY on the OPTIONS preflight that asks for it AND only for an origin
+ * already in the CORS allow-list — never for an arbitrary site, never on a
+ * normal (non-preflight) response. Tested against the tokenless "loopback"
+ * policy so allow-listed (localhost / zintus.ai) vs not (evil.com) is explicit.
+ */
+describe("OPTIONS preflight — Private-Network-Access header", () => {
+  const REQ_PNA = "Access-Control-Request-Private-Network";
+  const ALLOW_PNA = "Access-Control-Allow-Private-Network";
+  const CHAT = "http://x/v1/chat/completions";
+
+  test("allow-listed origin asking for PNA gets Allow-Private-Network: true (204 unchanged)", async () => {
+    const handler = makeHandler({ corsOrigins: "loopback" });
+    for (const origin of ["http://localhost:3000", "https://www.zintus.ai"]) {
+      const res = await handler(
+        new Request(CHAT, {
+          method: "OPTIONS",
+          headers: { origin, [REQ_PNA]: "true" },
+        }),
+      );
+      expect(res.status).toBe(204);
+      expect(res.headers.get(ALLOW_PNA)).toBe("true");
+      // CORS allow-list still reflects the specific origin (unchanged behavior).
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe(origin);
+    }
+  });
+
+  test("non-allow-listed origin never gets the PNA header (status still 204)", async () => {
+    const handler = makeHandler({ corsOrigins: "loopback" });
+    const res = await handler(
+      new Request(CHAT, {
+        method: "OPTIONS",
+        headers: { origin: "https://evil.com", [REQ_PNA]: "true" },
+      }),
+    );
+    expect(res.status).toBe(204);
+    expect(res.headers.get(ALLOW_PNA)).toBeNull();
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  test("preflight WITHOUT the PNA request header does not advertise PNA", async () => {
+    const handler = makeHandler({ corsOrigins: "loopback" });
+    const res = await handler(
+      new Request(CHAT, {
+        method: "OPTIONS",
+        headers: { origin: "http://localhost:3000" },
+      }),
+    );
+    expect(res.status).toBe(204);
+    expect(res.headers.get(ALLOW_PNA)).toBeNull();
+  });
+
+  test("a normal (non-preflight) request never gets the PNA header", async () => {
+    const handler = makeHandler({ corsOrigins: "loopback" });
+    // Even if a non-OPTIONS request carries the PNA request header, the response
+    // must not advertise PNA — it is a preflight-only signal.
+    const res = await handler(
+      new Request(`${URLBASE}?provider=gemini`, {
+        headers: { origin: "http://localhost:3000", [REQ_PNA]: "true" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get(ALLOW_PNA)).toBeNull();
+  });
+});

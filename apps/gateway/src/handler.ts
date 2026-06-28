@@ -321,6 +321,19 @@ export function createGatewayHandler(
     };
     if (origin) {
       headers["Access-Control-Allow-Origin"] = origin;
+      // Private-Network-Access (Chrome): a public/HTTPS site (e.g. www.zintus.ai)
+      // preflighting a request to the user's loopback gateway is blocked unless we
+      // answer with Allow-Private-Network: true. Emit it ONLY on the OPTIONS
+      // preflight that explicitly asks (Access-Control-Request-Private-Network:
+      // true), and ONLY when `origin` already passed the CORS allow-list above
+      // (resolveCorsOrigin returned non-null). Never for a non-allow-listed site,
+      // and never on a normal (non-preflight) response.
+      if (
+        request.method === "OPTIONS" &&
+        request.headers.get("Access-Control-Request-Private-Network") === "true"
+      ) {
+        headers["Access-Control-Allow-Private-Network"] = "true";
+      }
     }
     return headers;
   }
