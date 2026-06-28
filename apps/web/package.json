@@ -12,6 +12,7 @@
   "dependencies": {
     "@radix-ui/react-tooltip": "^1.2.10",
     "@zintus/crypto-e2e": "workspace:*",
+    "@zintus/mcp": "workspace:*",
     "@zintus/media": "workspace:*",
     "@zintus/providers": "workspace:*",
     "@zintus/types": "workspace:*",

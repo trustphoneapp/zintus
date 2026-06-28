@@ -13,7 +13,7 @@ const SECTIONS: Array<{
   label: string;
   items: Array<{
     href: string;
-    icon: "chat" | "compare" | "globe" | "layers" | "grid" | "zap" | "activity" | "terminal" | "settings";
+    icon: "chat" | "compare" | "globe" | "layers" | "grid" | "zap" | "activity" | "terminal" | "settings" | "plug";
     label: string;
   }>;
 }> = [
@@ -31,6 +31,7 @@ const SECTIONS: Array<{
     label: "Manage",
     items: [
       { href: "/providers", icon: "zap", label: "Providers" },
+      { href: "/settings/mcp", icon: "plug", label: "MCP servers" },
       { href: "/usage", icon: "activity", label: "Usage" },
     ],
   },
@@ -216,6 +217,15 @@ export function Sidebar({
     .filter((t) => t.messages.length > 0 && !t.incognito)
     .sort((a, b) => b.updatedAt - a.updatedAt);
 
+  // Active nav = the LONGEST href that matches the path, so /settings/mcp lights
+  // up "MCP servers" rather than also lighting up its /settings prefix.
+  const activeHref = SECTIONS.flatMap((s) => s.items)
+    .map((item) => item.href)
+    .filter(
+      (href) => pathname === href || pathname.startsWith(`${href}/`),
+    )
+    .sort((a, b) => b.length - a.length)[0];
+
   const query = search.trim().toLowerCase();
   const visibleThreads = query
     ? sortedThreads.filter(
@@ -264,8 +274,7 @@ export function Sidebar({
               <span className="sidebar-section-label">{section.label}</span>
             ) : null}
             {section.items.map((item) => {
-              const active =
-                pathname === item.href || pathname.startsWith(`${item.href}/`);
+              const active = item.href === activeHref;
               return (
                 <Link
                   key={item.href}

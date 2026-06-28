@@ -24,7 +24,8 @@ type IconName =
   | "compare"
   | "grid"
   | "mic"
-  | "image";
+  | "image"
+  | "plug";
 
 const paths: Record<IconName, ReactNode> = {
   send: (
@@ -148,6 +149,14 @@ const paths: Record<IconName, ReactNode> = {
       <rect x="14" y="3" width="7" height="7" rx="1" />
       <rect x="3" y="14" width="7" height="7" rx="1" />
       <rect x="14" y="14" width="7" height="7" rx="1" />
+    </>
+  ),
+  plug: (
+    <>
+      <path d="M12 22v-5" />
+      <path d="M9 8V2" />
+      <path d="M15 8V2" />
+      <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z" />
     </>
   ),
 };

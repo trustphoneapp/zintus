@@ -18,6 +18,7 @@ const TITLES: Record<string, string> = {
   "/providers": "Providers",
   "/usage": "Usage",
   "/settings": "Settings",
+  "/settings/mcp": "MCP servers",
 };
 
 export function AppShell({ children }: { children: React.ReactNode }) {

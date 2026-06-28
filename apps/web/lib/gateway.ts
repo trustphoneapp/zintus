@@ -8,6 +8,12 @@ import type {
   ToolDefinition,
   ResponseFormat,
 } from "@zintus/types";
+import type {
+  MCPPrompt,
+  MCPResource,
+  MCPServerConfig,
+  MCPTool,
+} from "@zintus/mcp";
 
 export const GATEWAY_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";
@@ -452,6 +458,89 @@ export async function fetchCatalogPricing(): Promise<CatalogPricingDto[]> {
     return body.data ?? [];
   } catch {
     return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP (Model Context Protocol) — the browser can't HOST MCP, so the settings UI
+// asks the user's local gateway to connect and report a server's capabilities.
+// `discoverMcpServer` drives the "Test connection" button; `disconnectMcpServer`
+// is a best-effort cleanup when a server is removed. Neither throws.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A successful discovery: the server's advertised tools/resources/prompts. */
+export interface McpDiscoverResult {
+  tools: MCPTool[];
+  resources: MCPResource[];
+  prompts: MCPPrompt[];
+  /** Epoch ms the gateway connected to the server. */
+  connectedAt: number;
+}
+
+/**
+ * Connect (via the local gateway) to one MCP server and return its advertised
+ * tools/resources/prompts. NEVER throws: a failed/refused connection or an
+ * offline gateway resolves to `{ error }` with an honest, human-readable message
+ * so the UI can show it inline instead of crashing.
+ */
+export async function discoverMcpServer(
+  config: MCPServerConfig,
+): Promise<McpDiscoverResult | { error: string }> {
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/mcp/discover`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ config }),
+    });
+    const body = (await response.json().catch(() => null)) as
+      | {
+          tools?: MCPTool[];
+          resources?: MCPResource[];
+          prompts?: MCPPrompt[];
+          connectedAt?: number;
+          error?: { message?: string };
+        }
+      | null;
+    if (!response.ok) {
+      return {
+        error:
+          body?.error?.message ??
+          `Couldn't reach the MCP server (gateway error ${response.status}).`,
+      };
+    }
+    return {
+      tools: body?.tools ?? [],
+      resources: body?.resources ?? [],
+      prompts: body?.prompts ?? [],
+      connectedAt: body?.connectedAt ?? Date.now(),
+    };
+  } catch {
+    return {
+      error:
+        "Couldn't reach the gateway. Start it with `zintus serve`, then try again.",
+    };
+  }
+}
+
+/**
+ * Best-effort disconnect of a cached MCP server connection on the gateway.
+ * Fire-and-forget: returns `true` on success, `false` on any failure (an offline
+ * gateway is harmless here — there was nothing to disconnect). Never throws.
+ */
+export async function disconnectMcpServer(
+  config: MCPServerConfig,
+): Promise<boolean> {
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/mcp/disconnect`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ config }),
+    });
+    return response.ok;
+  } catch {
+    return false;
   }
 }
 
