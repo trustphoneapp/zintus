@@ -3,6 +3,9 @@ import type {
   ContextMode,
   ProviderId,
   RoutingStrategy,
+  ToolCallContentBlock,
+  ToolChoice,
+  ToolDefinition,
 } from "@zintus/types";
 
 export const GATEWAY_URL =
@@ -399,7 +402,18 @@ interface GatewayChunk {
   provider?: ProviderId;
   model?: string;
   thread_id?: string;
-  choices?: Array<{ delta?: { content?: string } }>;
+  choices?: Array<{
+    delta?: {
+      content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        type?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason?: string | null;
+  }>;
   error?: { message?: string };
   // metadata-event fields (type === "metadata")
   tokens?: { input?: number; output?: number };
@@ -456,6 +470,72 @@ export class UnsupportedCapabilityError extends Error {
   }
 }
 
+/** One streamed tool-call fragment from a chat delta (`choices[].delta.tool_calls[]`).
+ *  The gateway emits the call's `name` once and its `arguments` as a (possibly
+ *  fragmented) JSON string; fragments are keyed/ordered by `index`. */
+export interface ToolCallDelta {
+  index?: number;
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+/** Mutable per-`index` accumulator for streamed tool-call fragments. */
+export type ToolCallAccumulator = Map<
+  number,
+  { id: string; name: string; args: string }
+>;
+
+/**
+ * Fold one chunk's `delta.tool_calls` fragments into the index-keyed accumulator.
+ * Concatenates argument fragments in arrival order; a later non-undefined `id`/
+ * `name` wins over an earlier blank (the gateway sends name once, args in pieces).
+ * Pure + exported so the reassembly can be unit-tested without mocking `fetch`.
+ */
+export function accumulateToolCallDeltas(
+  acc: ToolCallAccumulator,
+  deltas: ToolCallDelta[] | undefined,
+): void {
+  for (const tc of deltas ?? []) {
+    const index = tc.index ?? 0;
+    const existing = acc.get(index) ?? { id: "", name: "", args: "" };
+    acc.set(index, {
+      id: tc.id ?? existing.id,
+      name: tc.function?.name ?? existing.name,
+      args: existing.args + (tc.function?.arguments ?? ""),
+    });
+  }
+}
+
+/**
+ * Finalize the accumulator into ordered `ToolCallContentBlock[]`. Sorted by
+ * `index` for deterministic multi-call ordering; malformed/partial argument JSON
+ * degrades to `{}` rather than throwing, so a garbled tool call never crashes the
+ * chat stream. Pure + exported (unit-tested in `gateway.test.ts`).
+ */
+export function finalizeToolCalls(
+  acc: ToolCallAccumulator,
+): ToolCallContentBlock[] {
+  return [...acc.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, call]) => {
+      let parsedArgs: Record<string, unknown> = {};
+      try {
+        parsedArgs = call.args
+          ? (JSON.parse(call.args) as Record<string, unknown>)
+          : {};
+      } catch {
+        parsedArgs = {};
+      }
+      return {
+        type: "tool_call" as const,
+        id: call.id || `call_${call.name}_${index}`,
+        name: call.name,
+        arguments: parsedArgs,
+      };
+    });
+}
+
 export async function streamGatewayChat(params: {
   // Content is `string` (text-only) OR an ordered `ContentBlock[]` (multimodal:
   // a text block followed by image blocks). The gateway reads images from these
@@ -475,6 +555,10 @@ export async function streamGatewayChat(params: {
   allowTraining?: ProviderId[];
   keys?: Partial<Record<ProviderId, string>>;
   temperature?: number;
+  /** Tool/function definitions for this turn. Requires a tool-capable provider —
+   *  the gateway returns a 422 UnsupportedCapabilityError otherwise. */
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<{
@@ -485,6 +569,9 @@ export async function streamGatewayChat(params: {
   compileTokens?: number;
   meta?: ChatMeta;
   compression?: CompressionStats;
+  /** Tool calls the model made this turn (empty for a normal text turn). The
+   *  caller runs the tools and sends results back as `tool_result` blocks. */
+  toolCalls?: ToolCallContentBlock[];
 }> {
   const response = await fetch(`${GATEWAY_URL}/v1/chat/completions`, {
     method: "POST",
@@ -503,6 +590,8 @@ export async function streamGatewayChat(params: {
       block_training: params.blockTraining,
       allow_training: params.allowTraining,
       temperature: params.temperature,
+      tools: params.tools,
+      tool_choice: params.toolChoice,
       // BYOK keys are only ever sent to a LOCAL gateway — never across the
       // network (would leak keys in a plaintext body to a remote host).
       keys:
@@ -553,6 +642,13 @@ export async function streamGatewayChat(params: {
   // Compression savings ride along as response headers (known before streaming).
   const compression = readCompressionStats(response.headers) ?? undefined;
   let output = "";
+  // Accumulate streamed tool-call fragments by their `index`. The gateway emits
+  // each call's name once and its arguments as a (possibly fragmented) JSON
+  // string; we concatenate then parse once the stream ends. Robust to both the
+  // whole-object shape Zintus emits and OpenAI's fragmented shape. The fold +
+  // finalize are pure helpers (accumulateToolCallDeltas / finalizeToolCalls) so
+  // the fragile reassembly is unit-tested directly (see gateway.test.ts).
+  const toolCallsByIndex: ToolCallAccumulator = new Map();
 
   await readSseData(response, (payload) => {
     const chunk = payload as GatewayChunk;
@@ -585,11 +681,18 @@ export async function streamGatewayChat(params: {
       output += delta;
       params.onChunk(output);
     }
+
+    accumulateToolCallDeltas(
+      toolCallsByIndex,
+      chunk.choices?.[0]?.delta?.tool_calls,
+    );
   });
 
   if (!provider) {
     throw new Error("Gateway stream ended without provider metadata");
   }
+
+  const toolCalls = finalizeToolCalls(toolCallsByIndex);
 
   return {
     providerId: provider,
@@ -599,5 +702,6 @@ export async function streamGatewayChat(params: {
     compileTokens,
     meta,
     compression,
+    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
   };
 }

@@ -138,8 +138,10 @@ export default function DownloadPage() {
         </h1>
         <p style={{ fontSize: 15, color: "#94a3b8", marginBottom: "3rem", maxWidth: 720, lineHeight: 1.7 }}>
           Zintus is local-first and BYOK — your keys live on your machine, not on a hosted
-          control plane. Pick the surface that fits: self-host the gateway with Docker, install the
-          CLI, or run the desktop app. One config works across all of them.
+          control plane. The same gateway powers multi-provider routing and failover, tool
+          calling, structured JSON output, and image input everywhere it runs. Pick the surface
+          that fits: self-host with Docker, install the CLI, or run the desktop app (beta). One
+          config works across all of them.
         </p>
 
         <div style={{ maxWidth: 760 }}>

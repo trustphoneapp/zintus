@@ -20,9 +20,11 @@ const MANAGED_KEYS_AVAILABLE = false;
 const FREE_FEATURES = [
   "12 providers via your own keys",
   "Keys stored in OS keychain",
-  "Smart quota routing",
-  "Ollama offline fallback",
-  "CLI + Desktop + Web",
+  "Smart quota routing + failover",
+  "Image input in chat (Web + CLI)",
+  "Tool calling & JSON (API + CLI)",
+  "Ollama / LM Studio offline fallback",
+  "CLI + Web + Desktop chat",
   "No credit card required",
 ];
 

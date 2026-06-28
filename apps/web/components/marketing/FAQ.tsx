@@ -44,6 +44,14 @@ const faqs = [
     q: "Does it work offline?",
     a: "Yes. When all cloud providers are exhausted, Zintus automatically falls back to Ollama or LM Studio running on your own machine. You always get a response.",
   },
+  {
+    q: "Does it support tool calling, JSON output, and images?",
+    a: "Yes. Define tools once and Zintus maps them to each provider's native function-calling format, routing only to models that support it. Ask for structured output and you get JSON — schema-constrained where the provider guarantees it (Gemini), best-effort JSON mode elsewhere. You can also send images to vision-capable models; EXIF and GPS metadata are stripped on your device first.",
+  },
+  {
+    q: "How do I know how much I'm saving?",
+    a: "Zintus keeps a usage ledger and values every free-tier token against what a metered API would have charged for the same model. The dashboard shows the running estimate — it's an approximation for display, not a bill, but it's based on your real usage.",
+  },
 ];
 
 export function FAQ() {

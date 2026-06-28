@@ -1,10 +1,10 @@
-import { Zap, KeyRound, ShieldCheck, Package, Star } from "lucide-react";
+import { Zap, KeyRound, ShieldCheck, Wrench, Star } from "lucide-react";
 
 const ITEMS = [
   { icon: Zap, label: "< 5ms routing latency" },
   { icon: KeyRound, label: "12 free AI providers" },
   { icon: ShieldCheck, label: "Keys never leave your device" },
-  { icon: Package, label: "1M+ free tokens per day" },
+  { icon: Wrench, label: "Tools · JSON · image input" },
   { icon: Star, label: "BUSL-1.1 source-available" },
 ];
 

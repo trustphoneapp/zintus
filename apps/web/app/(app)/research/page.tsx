@@ -32,6 +32,15 @@ const DEPTHS: Array<{ value: ResearchDepth; label: string; hint: string }> = [
   { value: "deep", label: "Deep", hint: "5 searches · ~60s" },
 ];
 
+/** Bare domain for a source URL, used as a trust signal in citations. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
 export default function ResearchPage() {
   const router = useRouter();
   const { gatewayConnected, newChat, appendMessage, updateMessage } =
@@ -148,6 +157,11 @@ export default function ResearchPage() {
   }
 
   const started = queries.length > 0 || running || Boolean(answer) || Boolean(error);
+  const searchesDone = searches.filter((s) => s.status === "done").length;
+  // Stage flags drive the live stepper's "active vs. done" markers.
+  const planDone = searches.length > 0 || synthSources != null || Boolean(answer);
+  const searchDone = synthSources != null || Boolean(answer);
+  const synthDone = Boolean(answer);
 
   return (
     <div className="screen research-screen">
@@ -161,43 +175,97 @@ export default function ResearchPage() {
           rows={3}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="What would you like to research?"
+          onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              void run();
+            }
+          }}
+          placeholder="Ask a research question — e.g. “Compare the leading open-source vector databases.”"
         />
-        <div className="research-depths">
-          {DEPTHS.map((option) => (
-            <label key={option.value} className="research-depth">
-              <input
-                type="radio"
-                name="depth"
-                checked={depth === option.value}
-                onChange={() => setDepth(option.value)}
+
+        <div className="research-depths" role="radiogroup" aria-label="Research depth">
+          {DEPTHS.map((option) => {
+            const active = depth === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                role="radio"
+                aria-checked={active}
                 disabled={running}
-              />
-              <span>
-                <strong>{option.label}</strong>
-                <small>{option.hint} · free</small>
-              </span>
-            </label>
-          ))}
+                onClick={() => setDepth(option.value)}
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 2,
+                  minWidth: 124,
+                  padding: "8px 12px",
+                  textAlign: "left",
+                  cursor: running ? "not-allowed" : "pointer",
+                  border: "0.5px solid",
+                  borderColor: active ? "var(--c-accent)" : "var(--c-border)",
+                  borderRadius: "var(--radius-md)",
+                  background: active ? "var(--c-accent-light)" : "transparent",
+                  color: "var(--color-text)",
+                  opacity: running && !active ? 0.5 : 1,
+                  transition: "border-color var(--t-fast), background var(--t-fast)",
+                }}
+              >
+                <strong style={{ fontSize: 13 }}>{option.label}</strong>
+                <small style={{ fontSize: 11, color: "var(--color-text-muted)" }}>
+                  {option.hint} · free
+                </small>
+              </button>
+            );
+          })}
         </div>
-        <button
-          type="button"
-          className="research-run"
-          onClick={() => void run()}
-          disabled={!query.trim() || running}
+
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 12,
+            alignItems: "center",
+            justifyContent: "space-between",
+          }}
         >
-          {running ? "Researching…" : "Start research →"}
-        </button>
-        {running ? (
-          <button
-            type="button"
-            className="research-run"
-            onClick={stop}
-            style={{ marginLeft: 8 }}
-          >
-            ■ Stop
-          </button>
-        ) : null}
+          <small style={{ fontSize: 11, color: "var(--color-text-muted)" }}>
+            Press ⌘↵ to run · every claim is linked to a source
+          </small>
+          <div style={{ display: "flex", gap: 8 }}>
+            {running ? (
+              <button
+                type="button"
+                className="research-run"
+                onClick={stop}
+                style={{
+                  background: "transparent",
+                  color: "var(--color-text)",
+                  borderColor: "var(--c-border-strong)",
+                  boxShadow: "none",
+                }}
+              >
+                ■ Stop
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="research-run"
+              onClick={() => void run()}
+              disabled={!query.trim() || running}
+            >
+              {running ? (
+                <>
+                  <span className="btn-spinner" />
+                  Researching…
+                </>
+              ) : (
+                "Start research →"
+              )}
+            </button>
+          </div>
+        </div>
       </div>
 
       {!gatewayConnected ? (
@@ -213,25 +281,69 @@ export default function ResearchPage() {
 
       {started ? (
         <div className="research-progress">
-          {queries.length > 0 ? (
-            <div className="research-step">
-              <strong>Research angles</strong>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              paddingBottom: 10,
+              borderBottom:
+                "1px solid color-mix(in oklch, var(--color-text-muted) 14%, transparent)",
+            }}
+          >
+            {running ? (
+              <span className="thinking-dot" />
+            ) : (
+              <span style={{ color: "var(--color-green)" }}>✓</span>
+            )}
+            <strong style={{ fontSize: 13 }}>
+              {running ? "Researching…" : "Research complete"}
+            </strong>
+            <small
+              style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}
+            >
+              {DEPTHS.find((d) => d.value === depth)?.label} mode
+            </small>
+          </div>
+
+          <div className="research-step">
+            <strong>
+              {planDone ? "✓ " : "● "}Planned {queries.length || ""} research{" "}
+              {queries.length === 1 ? "angle" : "angles"}
+            </strong>
+            {queries.length > 0 ? (
               <ul>
                 {queries.map((q) => (
                   <li key={q}>{q}</li>
                 ))}
               </ul>
-            </div>
-          ) : null}
+            ) : null}
+          </div>
 
           {searches.length > 0 ? (
             <div className="research-step">
-              <strong>Searching</strong>
-              <ul>
+              <strong>
+                {searchDone ? "✓ " : "● "}Searched {searchesDone}/{searches.length} sources
+              </strong>
+              <ul style={{ listStyle: "none", paddingLeft: 2 }}>
                 {searches.map((s) => (
-                  <li key={s.index}>
-                    {s.status === "done" ? "✓" : "⟳"} {s.query}
-                    {s.count != null ? ` → ${s.count} results` : "…"}
+                  <li key={s.index} style={{ display: "flex", gap: 6 }}>
+                    <span
+                      style={{
+                        color:
+                          s.status === "done"
+                            ? "var(--color-green)"
+                            : "var(--color-text-muted)",
+                      }}
+                    >
+                      {s.status === "done" ? "✓" : "⟳"}
+                    </span>
+                    <span style={{ flex: 1 }}>{s.query}</span>
+                    {s.count != null ? (
+                      <span style={{ color: "var(--color-text-muted)" }}>
+                        {s.count} results
+                      </span>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -240,7 +352,10 @@ export default function ResearchPage() {
 
           {synthSources != null ? (
             <div className="research-step">
-              <strong>Synthesizing {synthSources} sources…</strong>
+              <strong>
+                {synthDone ? "✓ " : "● "}Synthesizing {synthSources} sources
+                {synthDone ? "" : "…"}
+              </strong>
             </div>
           ) : null}
         </div>
@@ -248,17 +363,102 @@ export default function ResearchPage() {
 
       {answer ? (
         <div className="research-result">
-          <div className="research-answer">{answer}</div>
+          {sources.length > 0 ? (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {sources.map((s, i) => (
+                <a
+                  key={`chip-${s.url}-${i}`}
+                  href={s.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={s.title || s.url}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "4px 10px 4px 4px",
+                    borderRadius: "var(--radius-sm)",
+                    border: "0.5px solid var(--c-border)",
+                    background: "var(--c-inset)",
+                    fontSize: 11,
+                    color: "var(--color-text-sub)",
+                    textDecoration: "none",
+                    maxWidth: 220,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 16,
+                      height: 16,
+                      borderRadius: "50%",
+                      background: "var(--c-accent-light)",
+                      color: "var(--c-accent)",
+                      fontWeight: 600,
+                      fontSize: 10,
+                    }}
+                  >
+                    {i + 1}
+                  </span>
+                  <span
+                    style={{
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {hostOf(s.url)}
+                  </span>
+                </a>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="research-answer">
+            {answer}
+            {running ? <span className="stream-caret" /> : null}
+          </div>
 
           {sources.length > 0 ? (
             <details className="research-sources" open>
-              <summary>{sources.length} sources</summary>
-              <ol>
+              <summary>
+                {sources.length} {sources.length === 1 ? "source" : "sources"} cited
+              </summary>
+              <ol style={{ listStyle: "none", padding: 0, display: "grid", gap: 8 }}>
                 {sources.map((s, i) => (
-                  <li key={`${s.url}-${i}`}>
-                    <a href={s.url} target="_blank" rel="noopener noreferrer">
-                      {s.title || s.url}
-                    </a>
+                  <li
+                    key={`${s.url}-${i}`}
+                    style={{ display: "flex", gap: 10, alignItems: "baseline" }}
+                  >
+                    <span
+                      style={{
+                        flex: "0 0 auto",
+                        minWidth: 18,
+                        textAlign: "right",
+                        color: "var(--c-accent)",
+                        fontWeight: 600,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {i + 1}.
+                    </span>
+                    <span
+                      style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}
+                    >
+                      <a
+                        href={s.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ color: "var(--color-text)", fontWeight: 500 }}
+                      >
+                        {s.title || s.url}
+                      </a>
+                      <small style={{ color: "var(--color-text-muted)", fontSize: 11 }}>
+                        {hostOf(s.url)}
+                      </small>
+                    </span>
                   </li>
                 ))}
               </ol>

@@ -137,7 +137,31 @@ export function CommandPalette() {
     return null;
   }
 
+  const kbdStyle: React.CSSProperties = {
+    minWidth: "18px",
+    padding: "1px 5px",
+    borderRadius: "var(--radius-sm)",
+    border: "0.5px solid var(--c-border)",
+    background: "var(--c-bg)",
+    fontFamily: "var(--font-mono)",
+    fontSize: "10px",
+    textAlign: "center",
+    color: "var(--color-text-muted)",
+  };
+
   const clampedActive = Math.min(active, Math.max(0, filtered.length - 1));
+
+  // Group the flat (keyboard-navigable) list into ordered sections for render,
+  // preserving first-seen group order. Keyboard nav still runs over `filtered`.
+  const groups: Array<{ name: string; items: Command[] }> = [];
+  for (const command of filtered) {
+    const last = groups[groups.length - 1];
+    if (last && last.name === command.group) {
+      last.items.push(command);
+    } else {
+      groups.push({ name: command.group, items: [command] });
+    }
+  }
 
   return (
     <div className="cmdk-overlay" onClick={() => setOpen(false)}>
@@ -173,19 +197,58 @@ export function CommandPalette() {
           {filtered.length === 0 ? (
             <div className="cmdk-empty">No matches</div>
           ) : (
-            filtered.map((command, index) => (
-              <button
-                key={command.id}
-                type="button"
-                className={`cmdk-item${index === clampedActive ? " active" : ""}`}
-                onMouseEnter={() => setActive(index)}
-                onClick={() => command.run()}
-              >
-                <span>{command.label}</span>
-                <span className="cmdk-group">{command.group}</span>
-              </button>
+            groups.map((group) => (
+              <div key={group.name} role="group" aria-label={group.name}>
+                <div
+                  className="cmdk-group"
+                  style={{ padding: "10px 10px 4px", display: "block" }}
+                >
+                  {group.name}
+                </div>
+                {group.items.map((command) => {
+                  const index = filtered.indexOf(command);
+                  const isActive = index === clampedActive;
+                  return (
+                    <button
+                      key={command.id}
+                      type="button"
+                      className={`cmdk-item${isActive ? " active" : ""}`}
+                      onMouseEnter={() => setActive(index)}
+                      onClick={() => command.run()}
+                    >
+                      <span>{command.label}</span>
+                      {isActive ? <kbd>↵</kbd> : null}
+                    </button>
+                  );
+                })}
+              </div>
             ))
           )}
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "14px",
+            padding: "9px 14px",
+            borderTop: "0.5px solid var(--c-border)",
+            fontSize: "11px",
+            color: "var(--color-text-muted)",
+          }}
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}>
+            <kbd style={kbdStyle}>↑</kbd>
+            <kbd style={kbdStyle}>↓</kbd>
+            navigate
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}>
+            <kbd style={kbdStyle}>↵</kbd>
+            select
+          </span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: "5px" }}>
+            <kbd style={kbdStyle}>esc</kbd>
+            close
+          </span>
         </div>
       </div>
     </div>

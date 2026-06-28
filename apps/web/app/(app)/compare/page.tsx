@@ -140,6 +140,13 @@ export default function ComparePage() {
     setRunning(false);
   }, []);
 
+  // Stop a single column without touching the others; the AbortError handler in
+  // streamColumn keeps whatever streamed so far and marks the column done.
+  const stopColumn = useCallback((id: string) => {
+    controllers.current.get(id)?.abort();
+    controllers.current.delete(id);
+  }, []);
+
   const regenerateColumn = useCallback(
     async (column: CompareColumn) => {
       if (!lastPrompt || running) {
@@ -227,7 +234,7 @@ export default function ComparePage() {
 
   return (
     <div className="screen compare-screen">
-      <div className="compare-composer">
+      <div className="compare-composer" style={{ position: "sticky", top: 0, zIndex: 2 }}>
         <textarea
           rows={2}
           value={prompt}
@@ -255,28 +262,35 @@ export default function ComparePage() {
             className="compare-add"
             onClick={addColumn}
             disabled={columns.length >= MAX_COLUMNS}
+            title={`Up to ${MAX_COLUMNS} providers side-by-side`}
           >
             <Icon name="plus" size={13} />
             Add column
           </button>
+          <span
+            style={{
+              fontSize: 12,
+              color: "var(--color-text-muted)",
+              marginRight: "auto",
+            }}
+          >
+            {columns.length} providers
+          </span>
+          {running ? (
+            <button type="button" className="compare-add" onClick={stopAll}>
+              <Icon name="x" size={13} />
+              Stop all
+            </button>
+          ) : null}
           <button
             type="button"
             className="compare-run"
             onClick={() => void runCompare()}
             disabled={!prompt.trim() || running}
+            style={{ marginLeft: 0 }}
           >
             {running ? "Comparing…" : "Compare"}
           </button>
-          {running ? (
-            <button
-              type="button"
-              className="compare-run"
-              onClick={stopAll}
-              style={{ marginLeft: 8 }}
-            >
-              ■ Stop
-            </button>
-          ) : null}
         </div>
       </div>
 
@@ -310,7 +324,10 @@ export default function ComparePage() {
 
       <div
         className="compare-columns"
-        style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))` }}
+        style={{
+          gridTemplateColumns: `repeat(${columns.length}, minmax(260px, 1fr))`,
+          overflowX: "auto",
+        }}
       >
         {columns.map((column) => {
           const result = results[column.id] ?? EMPTY_RESULT;
@@ -333,6 +350,7 @@ export default function ComparePage() {
                   }
                   disabled={running}
                   className="compare-provider-select"
+                  style={{ flex: "0 1 auto" }}
                 >
                   {PROVIDERS.map((p) => (
                     <option key={p.id} value={p.id}>
@@ -340,7 +358,41 @@ export default function ComparePage() {
                     </option>
                   ))}
                 </select>
-                {columns.length > MIN_COLUMNS ? (
+                {result.meta?.model ? (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      color: "var(--color-text-muted)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      minWidth: 0,
+                    }}
+                    title={result.meta.model}
+                  >
+                    {result.meta.model}
+                  </span>
+                ) : null}
+                <span style={{ flex: 1 }} />
+                {result.status === "streaming" ? (
+                  <button
+                    type="button"
+                    className="compare-column-remove"
+                    onClick={() => stopColumn(column.id)}
+                    aria-label="Stop this column"
+                    title="Stop streaming"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      fontSize: 11,
+                      color: "var(--color-text-sub)",
+                    }}
+                  >
+                    <Icon name="x" size={12} />
+                    Stop
+                  </button>
+                ) : columns.length > MIN_COLUMNS ? (
                   <button
                     type="button"
                     className="compare-column-remove"

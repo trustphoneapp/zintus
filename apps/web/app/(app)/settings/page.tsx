@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { useTheme } from "next-themes";
 import { loadMemory, saveMemory } from "@/lib/memory";
 import { loadPresets, savePresets, type Preset } from "@/lib/presets";
 import { useSettingsStore } from "@/lib/store";
 import { ROUTING_STRATEGIES } from "@/lib/settings";
 import { PROVIDER_BY_ID, PROVIDERS } from "@/lib/providers";
-import { signOut } from "@/lib/cloud";
+import { getMe, signOut } from "@/lib/cloud";
 import { DATA_POLICIES } from "@zintus/providers";
 import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
 
@@ -31,6 +31,50 @@ const THEMES: Array<{ value: string; label: string }> = [
   { value: "dark", label: "Dark" },
 ];
 
+const pageStyle: CSSProperties = { maxWidth: 720, width: "100%" };
+
+const sectionStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 12,
+};
+
+const sectionHeadStyle: CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  padding: "0 2px",
+  marginTop: 8,
+};
+
+const sectionTitleStyle: CSSProperties = {
+  fontSize: 11,
+  fontWeight: 600,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--color-text-muted)",
+};
+
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section style={sectionStyle}>
+      <div style={sectionHeadStyle}>
+        <span style={sectionTitleStyle}>{title}</span>
+        {description ? <span className="muted">{description}</span> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
 export default function SettingsPage() {
   const { settings, hydrated, saved, hydrate, update, clearSaved } = useSettingsStore();
   const { theme, setTheme } = useTheme();
@@ -43,11 +87,15 @@ export default function SettingsPage() {
   const [pStrategy, setPStrategy] = useState<RoutingStrategy | "">("");
   const [pSystem, setPSystem] = useState("");
   const [pTemp, setPTemp] = useState("");
+  const [accountEmail, setAccountEmail] = useState<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
     setMemory(loadMemory());
     setPresets(loadPresets());
+    void getMe().then((me) => {
+      if (me.authenticated && me.email) setAccountEmail(me.email);
+    });
   }, []);
 
   function addPreset() {
@@ -121,285 +169,331 @@ export default function SettingsPage() {
 
   return (
     <div className="screen settings-screen">
-      <div className="settings-card">
-        <h2>Privacy &amp; data</h2>
-        <label className="strategy-option" style={{ cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={Boolean(settings.blockTrainingProviders)}
-            onChange={(event) =>
-              update({ blockTrainingProviders: event.target.checked })
-            }
-          />
-          <span>
-            <strong>Block providers that may train on my data</strong>
-            <small>
-              Routes only to providers that don&apos;t train on your prompts.
-              {settings.blockTrainingProviders
-                ? ` Filtering ${blockedCount} of ${PROVIDERS.length} providers.`
-                : ""}
-            </small>
-          </span>
-        </label>
-        {settings.blockTrainingProviders && TRAINING_PROVIDERS.length > 0 ? (
-          <div className="privacy-overrides">
-            <span className="muted">Allow anyway:</span>
-            {TRAINING_PROVIDERS.map((provider) => (
-              <label key={provider.id} className="privacy-override">
-                <input
-                  type="checkbox"
-                  checked={allowed.includes(provider.id)}
-                  onChange={() => toggleAllow(provider.id)}
-                />
-                {provider.name}
-              </label>
-            ))}
+      <div style={{ ...pageStyle, display: "flex", flexDirection: "column", gap: 24 }}>
+        <Section
+          title="Appearance"
+          description="Choose how the interface looks on this device."
+        >
+          <div className="settings-card">
+            <div className="strategy-list">
+              {THEMES.map((option) => (
+                <label key={option.value} className="strategy-option">
+                  <input
+                    type="radio"
+                    name="theme"
+                    checked={mounted && theme === option.value}
+                    onChange={() => setTheme(option.value)}
+                  />
+                  <span>
+                    <strong>{option.label}</strong>
+                  </span>
+                </label>
+              ))}
+            </div>
           </div>
-        ) : null}
-      </div>
+        </Section>
 
-      <div className="settings-card">
-        <h2>Routing strategy</h2>
-        <div className="strategy-list">
-          {ROUTING_STRATEGIES.map((strategy) => (
-            <label key={strategy.value} className="strategy-option">
+        <Section
+          title="Routing defaults"
+          description="How Zintus picks a provider for each request, and the fallback order."
+        >
+          <div className="settings-card">
+            <h2>Routing strategy</h2>
+            <div className="strategy-list">
+              {ROUTING_STRATEGIES.map((strategy) => (
+                <label key={strategy.value} className="strategy-option">
+                  <input
+                    type="radio"
+                    name="strategy"
+                    checked={settings.routingStrategy === strategy.value}
+                    onChange={() =>
+                      update({ routingStrategy: strategy.value as RoutingStrategy })
+                    }
+                  />
+                  <span>
+                    <strong>{strategy.label}</strong>
+                    <small>{strategy.description}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="settings-card">
+            <h2>Default provider</h2>
+            <label>
+              Preferred provider
+              <select
+                value={settings.defaultProvider ?? ""}
+                onChange={(event) =>
+                  update({
+                    defaultProvider: event.target.value
+                      ? (event.target.value as ProviderId)
+                      : undefined,
+                  })
+                }
+              >
+                <option value="">Auto (priority queue)</option>
+                {PROVIDERS.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="settings-card">
+            <h2>Priority order</h2>
+            <p className="muted">
+              Fallback sequence when Auto routing is used.
+            </p>
+            <ol className="priority-list">
+              {settings.providerPriority.map((providerId) => (
+                <li
+                  key={providerId}
+                  style={{ color: PROVIDER_BY_ID[providerId].color }}
+                >
+                  {PROVIDER_BY_ID[providerId].name}
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="settings-card">
+            <h2>Presets</h2>
+            <p className="muted">
+              Saved bundles of provider, routing, system prompt, and temperature.
+              Apply one from the chat composer. Stored locally.
+            </p>
+            {presets.length > 0 ? (
+              <ul className="memory-list">
+                {presets.map((preset) => (
+                  <li key={preset.id}>
+                    <span>
+                      <strong>{preset.name}</strong>
+                      {preset.provider ? ` · ${preset.provider}` : ""}
+                      {preset.strategy ? ` · ${preset.strategy}` : ""}
+                      {preset.temperature != null
+                        ? ` · t=${preset.temperature}`
+                        : ""}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Delete preset"
+                      onClick={() => removePreset(preset.id)}
+                    >
+                      ✕
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="preset-form">
               <input
-                type="radio"
-                name="strategy"
-                checked={settings.routingStrategy === strategy.value}
-                onChange={() =>
-                  update({ routingStrategy: strategy.value as RoutingStrategy })
+                value={pName}
+                onChange={(e) => setPName(e.target.value)}
+                placeholder="Preset name (e.g. Coding)"
+              />
+              <div className="preset-form-row">
+                <select
+                  value={pProvider}
+                  onChange={(e) => setPProvider(e.target.value as ProviderId | "")}
+                >
+                  <option value="">Any provider</option>
+                  {PROVIDERS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={pStrategy}
+                  onChange={(e) =>
+                    setPStrategy(e.target.value as RoutingStrategy | "")
+                  }
+                >
+                  <option value="">Default routing</option>
+                  {ROUTING_STRATEGIES.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="2"
+                  value={pTemp}
+                  onChange={(e) => setPTemp(e.target.value)}
+                  placeholder="temp"
+                  style={{ maxWidth: 90 }}
+                />
+              </div>
+              <textarea
+                value={pSystem}
+                onChange={(e) => setPSystem(e.target.value)}
+                placeholder="System prompt (optional)"
+                rows={2}
+              />
+              <button
+                type="button"
+                className="memory-add-btn"
+                onClick={addPreset}
+                disabled={!pName.trim()}
+              >
+                Add preset
+              </button>
+            </div>
+          </div>
+        </Section>
+
+        <Section
+          title="Context"
+          description="How much background Zintus assembles, and what it remembers."
+        >
+          <div className="settings-card">
+            <h2>Context mode</h2>
+            <div className="strategy-list">
+              {CONTEXT_MODES.map((mode) => (
+                <label key={mode.value} className="strategy-option">
+                  <input
+                    type="radio"
+                    name="context-mode"
+                    checked={settings.contextMode === mode.value}
+                    onChange={() => update({ contextMode: mode.value })}
+                  />
+                  <span>
+                    <strong>{mode.label}</strong>
+                    <small>{mode.description}</small>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="settings-card">
+            <h2>Memory</h2>
+            <p className="muted">
+              Stored only in this browser. Injected as background context at the
+              start of new chats.
+            </p>
+            <div className="memory-add">
+              <input
+                value={memDraft}
+                onChange={(event) => setMemDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    addMemory();
+                  }
+                }}
+                placeholder="e.g. I prefer concise answers in TypeScript"
+              />
+              <button
+                type="button"
+                onClick={addMemory}
+                disabled={!memDraft.trim()}
+              >
+                Add
+              </button>
+            </div>
+            {memory.length > 0 ? (
+              <ul className="memory-list">
+                {memory.map((entry, index) => (
+                  <li key={`${entry}-${index}`}>
+                    <span>{entry}</span>
+                    <button
+                      type="button"
+                      aria-label="Delete memory"
+                      onClick={() => removeMemory(index)}
+                    >
+                      ✕
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        </Section>
+
+        <Section
+          title="Privacy"
+          description="Control whether prompts may reach providers that train on your data."
+        >
+          <div className="settings-card">
+            <label className="strategy-option" style={{ cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={Boolean(settings.blockTrainingProviders)}
+                onChange={(event) =>
+                  update({ blockTrainingProviders: event.target.checked })
                 }
               />
               <span>
-                <strong>{strategy.label}</strong>
-                <small>{strategy.description}</small>
+                <strong>Block providers that may train on my data</strong>
+                <small>
+                  Routes only to providers that don&apos;t train on your prompts.
+                  {settings.blockTrainingProviders
+                    ? ` Filtering ${blockedCount} of ${PROVIDERS.length} providers.`
+                    : ""}
+                </small>
               </span>
             </label>
-          ))}
-        </div>
-      </div>
-
-      <div className="settings-card">
-        <h2>Default provider</h2>
-        <label>
-          Preferred provider
-          <select
-            value={settings.defaultProvider ?? ""}
-            onChange={(event) =>
-              update({
-                defaultProvider: event.target.value
-                  ? (event.target.value as ProviderId)
-                  : undefined,
-              })
-            }
-          >
-            <option value="">Auto (priority queue)</option>
-            {PROVIDERS.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.name}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <div className="settings-card">
-        <h2>Context mode</h2>
-        <div className="strategy-list">
-          {CONTEXT_MODES.map((mode) => (
-            <label key={mode.value} className="strategy-option">
-              <input
-                type="radio"
-                name="context-mode"
-                checked={settings.contextMode === mode.value}
-                onChange={() => update({ contextMode: mode.value })}
-              />
-              <span>
-                <strong>{mode.label}</strong>
-                <small>{mode.description}</small>
-              </span>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      <div className="settings-card">
-        <h2>Priority order</h2>
-        <ol className="priority-list">
-          {settings.providerPriority.map((providerId) => (
-            <li key={providerId} style={{ color: PROVIDER_BY_ID[providerId].color }}>
-              {PROVIDER_BY_ID[providerId].name}
-            </li>
-          ))}
-        </ol>
-      </div>
-
-      <div className="settings-card">
-        <h2>Memory</h2>
-        <p className="muted">
-          Stored only in this browser. Injected as background context at the
-          start of new chats.
-        </p>
-        <div className="memory-add">
-          <input
-            value={memDraft}
-            onChange={(event) => setMemDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                addMemory();
-              }
-            }}
-            placeholder="e.g. I prefer concise answers in TypeScript"
-          />
-          <button type="button" onClick={addMemory} disabled={!memDraft.trim()}>
-            Add
-          </button>
-        </div>
-        {memory.length > 0 ? (
-          <ul className="memory-list">
-            {memory.map((entry, index) => (
-              <li key={`${entry}-${index}`}>
-                <span>{entry}</span>
-                <button
-                  type="button"
-                  aria-label="Delete memory"
-                  onClick={() => removeMemory(index)}
-                >
-                  ✕
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </div>
-
-      <div className="settings-card">
-        <h2>Appearance</h2>
-        <div className="strategy-list">
-          {THEMES.map((option) => (
-            <label key={option.value} className="strategy-option">
-              <input
-                type="radio"
-                name="theme"
-                checked={mounted && theme === option.value}
-                onChange={() => setTheme(option.value)}
-              />
-              <span>
-                <strong>{option.label}</strong>
-              </span>
-            </label>
-          ))}
-        </div>
-      </div>
-
-      <div className="settings-card">
-        <h2>Presets</h2>
-        <p className="muted">
-          Saved bundles of provider, routing, system prompt, and temperature.
-          Apply one from the chat composer. Stored locally.
-        </p>
-        {presets.length > 0 ? (
-          <ul className="memory-list">
-            {presets.map((preset) => (
-              <li key={preset.id}>
-                <span>
-                  <strong>{preset.name}</strong>
-                  {preset.provider ? ` · ${preset.provider}` : ""}
-                  {preset.strategy ? ` · ${preset.strategy}` : ""}
-                  {preset.temperature != null ? ` · t=${preset.temperature}` : ""}
-                </span>
-                <button
-                  type="button"
-                  aria-label="Delete preset"
-                  onClick={() => removePreset(preset.id)}
-                >
-                  ✕
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        <div className="preset-form">
-          <input
-            value={pName}
-            onChange={(e) => setPName(e.target.value)}
-            placeholder="Preset name (e.g. Coding)"
-          />
-          <div className="preset-form-row">
-            <select
-              value={pProvider}
-              onChange={(e) => setPProvider(e.target.value as ProviderId | "")}
-            >
-              <option value="">Any provider</option>
-              {PROVIDERS.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <select
-              value={pStrategy}
-              onChange={(e) => setPStrategy(e.target.value as RoutingStrategy | "")}
-            >
-              <option value="">Default routing</option>
-              {ROUTING_STRATEGIES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              max="2"
-              value={pTemp}
-              onChange={(e) => setPTemp(e.target.value)}
-              placeholder="temp"
-              style={{ maxWidth: 90 }}
-            />
+            {settings.blockTrainingProviders && TRAINING_PROVIDERS.length > 0 ? (
+              <div className="privacy-overrides">
+                <span className="muted">Allow anyway:</span>
+                {TRAINING_PROVIDERS.map((provider) => (
+                  <label key={provider.id} className="privacy-override">
+                    <input
+                      type="checkbox"
+                      checked={allowed.includes(provider.id)}
+                      onChange={() => toggleAllow(provider.id)}
+                    />
+                    {provider.name}
+                  </label>
+                ))}
+              </div>
+            ) : null}
           </div>
-          <textarea
-            value={pSystem}
-            onChange={(e) => setPSystem(e.target.value)}
-            placeholder="System prompt (optional)"
-            rows={2}
-          />
-          <button
-            type="button"
-            className="memory-add-btn"
-            onClick={addPreset}
-            disabled={!pName.trim()}
-          >
-            Add preset
-          </button>
-        </div>
-      </div>
+        </Section>
 
-      <div className="settings-card about-card">
-        <h2>About</h2>
-        <p>Zintus v0.1.0</p>
-        <p className="muted">Client-side free-tier orchestrator</p>
-        <p className="muted">Run gateway: <code>zintus serve</code></p>
-      </div>
-
-      <div className="settings-card">
-        <h2>Account</h2>
-        <button
-          className="auth-submit-btn"
-          style={{ background: "var(--color-red)" }}
-          onClick={async () => {
-            await signOut();
-            window.location.href = "/login";
-          }}
+        <Section
+          title="Data & account"
+          description="App information and session controls."
         >
-          Sign out
-        </button>
-      </div>
+          <div className="settings-card about-card">
+            <h2>About</h2>
+            <p>Zintus v0.1.0</p>
+            <p className="muted">Client-side free-tier orchestrator</p>
+            <p className="muted">
+              Run gateway: <code>zintus serve</code>
+            </p>
+          </div>
 
-      {saved ? <p className="status-banner">Settings saved.</p> : null}
+          <div className="settings-card">
+            <h2>Account</h2>
+            <p className="muted">
+              {accountEmail
+                ? `Signed in as ${accountEmail}.`
+                : "Ends your session on this device."}
+            </p>
+            <button
+              className="auth-submit-btn"
+              style={{ background: "var(--color-red)" }}
+              onClick={async () => {
+                await signOut();
+                window.location.href = "/login";
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </Section>
+
+        {saved ? <p className="status-banner">Settings saved.</p> : null}
+      </div>
     </div>
   );
 }

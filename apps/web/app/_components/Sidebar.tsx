@@ -11,21 +11,30 @@ import { Icon } from "./Icons";
 
 const SECTIONS: Array<{
   label: string;
-  items: Array<{ href: string; icon: "chat" | "compare" | "globe" | "layers" | "activity" | "terminal" | "settings"; label: string }>;
+  items: Array<{
+    href: string;
+    icon: "chat" | "compare" | "globe" | "layers" | "zap" | "activity" | "terminal" | "settings";
+    label: string;
+  }>;
 }> = [
   {
-    label: "Main",
+    label: "Workspace",
     items: [
       { href: "/chat", icon: "chat", label: "Chat" },
       { href: "/compare", icon: "compare", label: "Compare" },
       { href: "/research", icon: "globe", label: "Research" },
       { href: "/projects", icon: "layers", label: "Projects" },
-      { href: "/providers", icon: "layers", label: "Providers" },
+    ],
+  },
+  {
+    label: "Manage",
+    items: [
+      { href: "/providers", icon: "zap", label: "Providers" },
       { href: "/usage", icon: "activity", label: "Usage" },
     ],
   },
   {
-    label: "Dev",
+    label: "System",
     items: [
       { href: "/terminal", icon: "terminal", label: "Terminal" },
       { href: "/settings", icon: "settings", label: "Settings" },
@@ -254,7 +263,8 @@ export function Sidebar({
               <span className="sidebar-section-label">{section.label}</span>
             ) : null}
             {section.items.map((item) => {
-              const active = pathname === item.href;
+              const active =
+                pathname === item.href || pathname.startsWith(`${item.href}/`);
               return (
                 <Link
                   key={item.href}

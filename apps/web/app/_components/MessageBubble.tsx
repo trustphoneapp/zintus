@@ -8,16 +8,96 @@ import { formatImageBytes } from "@/lib/image-attachments";
 import { Icon } from "./Icons";
 import { TransparencyStrip } from "./TransparencyStrip";
 import { CompressionBadge } from "./CompressionBadge";
-import { Markdown } from "./Markdown";
+import { Markdown, CodeBlock } from "./Markdown";
+
+/** A single tool/function call surfaced by the assistant turn. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  /** Raw args — a JSON string or an already-parsed object. */
+  arguments?: unknown;
+}
+
+/** Pretty, single-line args for the compact call card; multi-line for the pre. */
+function formatArgs(args: unknown, pretty: boolean): string {
+  let value: unknown = args;
+  if (typeof args === "string") {
+    const trimmed = args.trim();
+    if (!trimmed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+      return args;
+    }
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      return args;
+    }
+  }
+  if (value === undefined) return "";
+  try {
+    return JSON.stringify(value, null, pretty ? 2 : undefined) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** Returns a pretty-printed JSON string iff `content` is a JSON object/array. */
+function asStructuredJson(content: string): string | null {
+  const trimmed = content.trim();
+  if (!trimmed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) return null;
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return null;
+  }
+}
+
+function ToolCallCard({ call }: { call: ToolCall }) {
+  const args = formatArgs(call.arguments, false);
+  return (
+    <div
+      className="tool-call-card"
+      style={{
+        display: "flex",
+        alignItems: "baseline",
+        gap: 6,
+        fontFamily: "var(--font-mono, ui-monospace, monospace)",
+        fontSize: 12.5,
+        lineHeight: 1.5,
+        color: "#cbd5e1",
+        background: "rgba(148,163,184,0.06)",
+        border: "1px solid #232a36",
+        borderLeft: "2px solid #6366f1",
+        borderRadius: 8,
+        padding: "6px 10px",
+      }}
+    >
+      <span aria-hidden style={{ fontFamily: "system-ui, sans-serif" }}>
+        🔧
+      </span>
+      <span style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
+        <span style={{ color: "#a5b4fc", fontWeight: 600 }}>{call.name}</span>
+        <span style={{ color: "#64748b" }}>(</span>
+        {args}
+        <span style={{ color: "#64748b" }}>)</span>
+      </span>
+    </div>
+  );
+}
 
 export function MessageBubble({
   message,
   onRegenerate,
   isStreaming = false,
+  toolCalls,
+  structured,
 }: {
   message: UiMessage;
   onRegenerate?: () => void;
   isStreaming?: boolean;
+  /** Tool/function calls emitted by this assistant turn. */
+  toolCalls?: ToolCall[];
+  /** Structured / JSON output to render in a labeled code block. */
+  structured?: unknown;
 }) {
   const isUser = message.role === "user";
   const provider = message.providerId
@@ -25,6 +105,18 @@ export function MessageBubble({
     : null;
   const [copied, setCopied] = useState(false);
   const hasContent = Boolean(message.content);
+  const hasToolCalls = !isUser && Array.isArray(toolCalls) && toolCalls.length > 0;
+  // Explicit structured prop wins; otherwise auto-detect a JSON-only answer
+  // (skipped mid-stream, where a partial body would never parse).
+  const structuredText =
+    structured !== undefined
+      ? JSON.stringify(structured, null, 2)
+      : !isUser && !isStreaming && message.content
+        ? asStructuredJson(message.content)
+        : null;
+  // When the answer body *itself* is JSON, render it as a code block instead of
+  // forcing it through the markdown path (prose paths stay untouched).
+  const contentIsJson = structured === undefined && structuredText !== null;
 
   async function copy() {
     try {
@@ -83,6 +175,8 @@ export function MessageBubble({
               <p className="message-paragraph" style={{ whiteSpace: "pre-wrap" }}>
                 {message.content}
               </p>
+            ) : contentIsJson && structuredText ? (
+              <CodeBlock lang="json" text={structuredText} label="JSON output" />
             ) : (
               <Markdown content={message.content} />
             )}
@@ -93,6 +187,26 @@ export function MessageBubble({
             <span className="thinking-dot" aria-hidden />
             Thinking…
           </span>
+        ) : null}
+        {hasToolCalls ? (
+          <div
+            className="tool-call-list"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              marginTop: message.content ? 8 : 0,
+            }}
+          >
+            {toolCalls!.map((call) => (
+              <ToolCallCard key={call.id} call={call} />
+            ))}
+          </div>
+        ) : null}
+        {structured !== undefined && structuredText ? (
+          <div style={{ marginTop: hasContent || hasToolCalls ? 8 : 0 }}>
+            <CodeBlock lang="json" text={structuredText} label="Structured output" />
+          </div>
         ) : null}
         {message.images && message.images.length > 0 ? (
           <div

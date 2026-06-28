@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { QuotaBar } from "@/app/_components/QuotaBar";
 import { RouteOptionsPanel } from "@/app/_components/RouteOptionsPanel";
 import { useAppStore } from "@/lib/app-store";
@@ -10,7 +10,11 @@ import { getRemainingQuotaPercent } from "@/lib/quota";
 import { useProviderStatusStore } from "@/lib/store";
 import { fetchGatewayTraces } from "@/lib/gateway";
 import type { ProviderId } from "@zintus/types";
-import { DATA_POLICIES, type TrainingBadge } from "@zintus/providers";
+import {
+  DATA_POLICIES,
+  MODEL_CAPABILITIES,
+  type TrainingBadge,
+} from "@zintus/providers";
 
 const BADGE_LABEL: Record<TrainingBadge, string> = {
   "no-training": "🟢 No training",
@@ -18,6 +22,74 @@ const BADGE_LABEL: Record<TrainingBadge, string> = {
   zdr: "🔵 Zero retention",
   unknown: "⚪ Policy unknown",
 };
+
+/** Compact context-window label, e.g. 1_000_000 → "1M", 128_000 → "128K". */
+function formatContext(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+  return String(tokens);
+}
+
+const CAP_ON: CSSProperties = {
+  color: "var(--color-green)",
+  border: "1px solid color-mix(in oklch, var(--color-green) 35%, transparent)",
+  background: "color-mix(in oklch, var(--color-green) 12%, transparent)",
+};
+const CAP_OFF: CSSProperties = {
+  color: "var(--color-text-muted)",
+  border: "1px solid var(--c-border)",
+  background: "transparent",
+  opacity: 0.6,
+};
+const CAP_CTX: CSSProperties = {
+  color: "var(--color-text-sub)",
+  border: "1px solid var(--c-border)",
+  background: "transparent",
+};
+
+/** OpenRouter-style capability chips for a provider's default model. */
+function CapabilityBadges({ providerId }: { providerId: ProviderId }) {
+  const caps = MODEL_CAPABILITIES[providerId];
+  if (!caps) return null;
+  const jsonTitle =
+    caps.structuredOutput === "json_schema"
+      ? "Structured output: schema-constrained (guaranteed)"
+      : caps.structuredOutput === "json_object"
+        ? "Structured output: JSON mode"
+        : "No native structured output";
+  const items: Array<{ label: string; on: boolean; title: string }> = [
+    { label: "Vision", on: caps.vision, title: "Accepts image input" },
+    { label: "Tools", on: caps.tools, title: "Supports tool / function calling" },
+    { label: "JSON", on: caps.json, title: jsonTitle },
+  ];
+  return (
+    <div
+      className="provider-card-caps"
+      style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
+    >
+      {items.map((item) => (
+        <span
+          key={item.label}
+          className="provider-chip"
+          style={item.on ? CAP_ON : CAP_OFF}
+          title={item.title}
+        >
+          {item.label}
+        </span>
+      ))}
+      <span
+        className="provider-chip"
+        style={CAP_CTX}
+        title={`${caps.contextWindow.toLocaleString()} token context window · ${caps.model}`}
+      >
+        {formatContext(caps.contextWindow)} ctx
+      </span>
+    </div>
+  );
+}
 
 /** Where to get a free API key, per provider (used on unconfigured cards). */
 const FREE_KEY_URLS: Partial<Record<ProviderId, string>> = {
@@ -233,6 +305,7 @@ export default function ProvidersPage() {
                       </span>
                     );
                   })()}
+                  <CapabilityBadges providerId={provider.id} />
                   {provider.hasKey ? (
                     <>
                       <div className="provider-card-quota-label">
@@ -292,7 +365,30 @@ export default function ProvidersPage() {
       </div>
 
       <div className="vault-card">
-        <h2>{PROVIDER_BY_ID[selected].name}</h2>
+        <div className="provider-card-top">
+          <div>
+            <div className="provider-card-title">
+              <span
+                className="provider-swatch"
+                style={{ background: PROVIDER_BY_ID[selected].color }}
+              />
+              <span>{PROVIDER_BY_ID[selected].name}</span>
+            </div>
+            <span className="provider-card-model">
+              {MODEL_CAPABILITIES[selected]?.model ?? "API key"}
+            </span>
+          </div>
+          <span
+            className={`provider-badge${
+              rows.find((row) => row.id === selected)?.hasKey ? " ok" : ""
+            }`}
+          >
+            {rows.find((row) => row.id === selected)?.hasKey
+              ? "configured"
+              : "needs key"}
+          </span>
+        </div>
+        <CapabilityBadges providerId={selected} />
         <label>
           API key
           <input

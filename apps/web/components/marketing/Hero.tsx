@@ -51,8 +51,9 @@ export function Hero() {
 
           {/* Subheadline */}
           <p className="hero-v2-sub">
-            12 free AI providers in one chat. Zintus picks the fastest one with quota
-            left — and switches automatically when one runs out. Your keys stay on
+            12 free AI providers in one chat, with image input built in. Zintus picks
+            the fastest one with quota left and switches automatically when it runs out —
+            plus tool calling and structured JSON via the API &amp; CLI. Your keys stay on
             your device. We never see them.
           </p>
 

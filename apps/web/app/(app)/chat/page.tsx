@@ -632,6 +632,15 @@ export default function ChatPage() {
     .reverse()
     .find((message) => message.role === "assistant")?.id;
 
+  // The provider the next send will (likely) hit — used to surface an honest,
+  // non-interactive "Vision" capability chip next to the attach control so it's
+  // clear up front whether the selected route can actually read an image.
+  const effectiveComposerProvider =
+    selectedProvider ?? settings.defaultProvider ?? null;
+  const visionReady = effectiveComposerProvider
+    ? providerCanSeeImages(effectiveComposerProvider)
+    : false;
+
   const exportThread = useCallback(() => {
     if (messages.length === 0) return;
     const md = messages
@@ -746,7 +755,13 @@ export default function ChatPage() {
             void handleFiles(e.dataTransfer.files);
           }}
         >
-          <div className="chat-composer-top">
+          {/* Composer toolbar: model/route picker + preset on the left, tool
+              toggles (search, private), status indicators, then Export pinned
+              right. Mirrors the control bars in ChatGPT/Claude/Gemini. */}
+          <div
+            className="chat-composer-top"
+            style={{ gap: 8, flexWrap: "wrap" }}
+          >
             <ProviderPicker />
             {presets.length > 0 ? (
               <select
@@ -757,6 +772,7 @@ export default function ChatPage() {
                     presets.find((p) => p.id === event.target.value) ?? null,
                   )
                 }
+                aria-label="Apply a saved preset"
                 title="Apply a saved preset"
               >
                 <option value="">No preset</option>
@@ -766,6 +782,51 @@ export default function ChatPage() {
                   </option>
                 ))}
               </select>
+            ) : null}
+
+            {/* ── Tool toggles ─────────────────────────────────────────────── */}
+            <button
+              type="button"
+              className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
+              aria-pressed={webSearchEnabled}
+              aria-label="Toggle web search"
+              onClick={() => {
+                setWebSearchEnabled((v) => {
+                  const next = !v;
+                  if (typeof localStorage !== "undefined") {
+                    localStorage.setItem("zintus:web-search", String(next));
+                  }
+                  return next;
+                });
+              }}
+              title={searchTooltip(selectedProvider)}
+            >
+              <Icon name="globe" size={13} />
+              Search
+            </button>
+            <button
+              type="button"
+              className={`chat-tool-toggle${incognito ? " active" : ""}`}
+              aria-pressed={incognito}
+              aria-label={incognito ? "Leave private mode" : "Start a private chat"}
+              onClick={() => newChat(!incognito)}
+              title={
+                incognito
+                  ? "Leave incognito (start a normal chat)"
+                  : "Start an incognito chat — nothing saved, non-training providers only"
+              }
+            >
+              🕶 Incognito
+            </button>
+
+            {/* ── Status indicators (non-interactive, except project ×) ─────── */}
+            {visionReady ? (
+              <span
+                className="chat-privacy-chip"
+                title={`${capitalize(effectiveComposerProvider ?? "")} can read attached images`}
+              >
+                <Icon name="image" size={12} /> Vision
+              </span>
             ) : null}
             {settings.blockTrainingProviders ? (
               <span
@@ -794,23 +855,13 @@ export default function ChatPage() {
                 </button>
               </span>
             ) : null}
-            <button
-              type="button"
-              className={`chat-tool-toggle${incognito ? " active" : ""}`}
-              onClick={() => newChat(!incognito)}
-              title={
-                incognito
-                  ? "Leave incognito (start a normal chat)"
-                  : "Start an incognito chat — nothing saved, non-training providers only"
-              }
-            >
-              🕶 Incognito
-            </button>
+
             {messages.length > 0 ? (
               <button
                 type="button"
                 className="chat-tool-toggle"
                 onClick={exportThread}
+                aria-label="Export this chat as Markdown"
                 title="Export this chat as Markdown"
                 style={{ marginLeft: "auto" }}
               >
@@ -818,23 +869,6 @@ export default function ChatPage() {
                 Export
               </button>
             ) : null}
-            <button
-              type="button"
-              className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
-              onClick={() => {
-                setWebSearchEnabled((v) => {
-                  const next = !v;
-                  if (typeof localStorage !== "undefined") {
-                    localStorage.setItem("zintus:web-search", String(next));
-                  }
-                  return next;
-                });
-              }}
-              title={searchTooltip(selectedProvider)}
-            >
-              <Icon name="globe" size={13} />
-              Search
-            </button>
           </div>
           {notice && (
             <div className={`chat-composer-notice is-${notice.tone}`} role="status">
@@ -908,6 +942,17 @@ export default function ChatPage() {
                 e.target.value = "";
               }}
             />
+            {/* Icons left: attach sits at the leading edge of the input row. */}
+            <Tooltip content="Attach an image (PNG/JPEG/WebP) or a text file">
+              <button
+                type="button"
+                className="chat-attach"
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach an image or text file"
+              >
+                <Icon name="image" size={16} />
+              </button>
+            </Tooltip>
             <textarea
               ref={inputRef}
               rows={1}
@@ -935,16 +980,7 @@ export default function ChatPage() {
               }}
               placeholder="Ask anything — routed automatically across your free providers"
             />
-            <Tooltip content="Attach an image (PNG/JPEG/WebP) or a text file">
-              <button
-                type="button"
-                className="chat-attach"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach an image or text file"
-              >
-                <Icon name="image" size={16} />
-              </button>
-            </Tooltip>
+            {/* Send / stop pinned to the trailing (right) edge. */}
             {loading ? (
               <Tooltip content="Stop generating (Esc)">
                 <button

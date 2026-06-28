@@ -115,7 +115,21 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
   return out;
 }
 
-function CodeBlock({ lang, text }: { lang: string; text: string }) {
+/**
+ * Fenced code / preformatted block with a header (language label + copy button).
+ * Exported so non-markdown surfaces (e.g. structured-output / JSON cards in
+ * MessageBubble) can reuse the exact same chrome. `label` overrides the header
+ * caption when you want something more descriptive than the bare language.
+ */
+export function CodeBlock({
+  lang,
+  text,
+  label,
+}: {
+  lang: string;
+  text: string;
+  label?: string;
+}) {
   const [copied, setCopied] = useState(false);
   async function copy() {
     try {
@@ -129,7 +143,7 @@ function CodeBlock({ lang, text }: { lang: string; text: string }) {
   return (
     <div className="md-code-block">
       <div className="md-code-head">
-        <span className="md-code-lang">{lang || "code"}</span>
+        <span className="md-code-lang">{label ?? (lang || "code")}</span>
         <button type="button" className="md-code-copy" onClick={() => void copy()}>
           {copied ? "Copied" : "Copy"}
         </button>

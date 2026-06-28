@@ -6,9 +6,20 @@ import { PROVIDERS } from "@/lib/providers";
 import { useAppStore } from "@/lib/app-store";
 import { getRemainingQuotaPercent } from "@/lib/quota";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
+import { MODEL_CAPABILITIES } from "@zintus/providers";
 import { Icon } from "./Icons";
 
 type ProviderStatus = "active" | "idle" | "disconnected" | "local";
+
+/** Compact context-window label, e.g. 1_000_000 → "1M", 128_000 → "128K". */
+function formatContext(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const m = tokens / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
+  return String(tokens);
+}
 
 /**
  * Auto-routing modes, surfaced first in the picker. Each maps to a real router
@@ -197,6 +208,9 @@ export function ProviderPicker() {
               />
               <span className={row.hasKey ? "" : "muted"}>{row.name}</span>
               <span className="composer-picker-quota">
+                {MODEL_CAPABILITIES[row.id]
+                  ? `${formatContext(MODEL_CAPABILITIES[row.id].contextWindow)} · `
+                  : ""}
                 {row.hasKey
                   ? row.quota == null
                     ? "ready"
