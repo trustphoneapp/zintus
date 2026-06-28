@@ -19,6 +19,22 @@ export interface OtelRequestInfo {
   failoverCount?: number;
   inputTokens?: number;
   outputTokens?: number;
+  /**
+   * REAL measured span timing (monotonic epoch ms, captured via {@link nowEpochMs}),
+   * so exported spans reflect actual durations instead of synthetic offsets.
+   *
+   * - `startMs` / `endMs` bound the parent `chat.request` span.
+   * - `attemptEndsMs[i]` is the real instant the engine observed
+   *   `trace.attempts[i]` complete; that attempt's span start is derived as
+   *   `attemptEndsMs[i] − attempt.latencyMs` (its real measured latency), which
+   *   preserves true gaps between attempts.
+   *
+   * All optional: when omitted, timing falls back to the trace's wall-clock
+   * `startedAt` / `completedAt` (still real, never fabricated forward offsets).
+   */
+  startMs?: number;
+  endMs?: number;
+  attemptEndsMs?: number[];
 }
 
 const SERVICE_NAME = process.env.OTEL_SERVICE_NAME ?? "zintus-gateway";
@@ -53,22 +69,60 @@ function attrs(list: Array<Attr | null>): Attr[] {
   return list.filter((a): a is Attr => a !== null);
 }
 
+/**
+ * Whether a monotonic high-resolution clock is available. `performance.now()`
+ * is monotonic and sub-millisecond, and `performance.timeOrigin` pins it to the
+ * Unix epoch, so the two together give absolute timestamps whose intervals
+ * reflect REAL elapsed time and never jump backward with NTP/DST corrections.
+ */
+const SUPPORTS_MONOTONIC =
+  typeof performance !== "undefined" &&
+  typeof performance.now === "function" &&
+  typeof performance.timeOrigin === "number";
+
+/**
+ * Absolute Unix-epoch milliseconds (fractional) read from the monotonic clock
+ * where supported, falling back to `Date.now()`. This is the single timing
+ * source for OTel spans: capture it when a span opens and again when it closes,
+ * so start/end/duration are measured, not synthesized.
+ */
+export function nowEpochMs(): number {
+  return SUPPORTS_MONOTONIC
+    ? performance.timeOrigin + performance.now()
+    : Date.now();
+}
+
+/**
+ * Convert (possibly fractional) epoch milliseconds to a Unix-nanosecond string.
+ * Keeps the integer-ms part exact via BigInt (the product overflows a double's
+ * 53-bit mantissa) while still carrying sub-millisecond precision.
+ */
+function msToUnixNano(ms: number): string {
+  const whole = Math.floor(ms);
+  const fracNanos = Math.round((ms - whole) * 1_000_000);
+  return String(BigInt(whole) * 1_000_000n + BigInt(fracNanos));
+}
+
 /** Build the OTLP/HTTP JSON ResourceSpans payload for a completed request. Pure. */
 export function buildOtlpPayload(info: OtelRequestInfo): Record<string, unknown> {
     const { trace } = info;
     const otTraceId = randomHex(16);
     const parentSpanId = randomHex(8);
-    const startNano = String(BigInt(trace.startedAt.getTime()) * 1_000_000n);
-    const endMs = trace.completedAt?.getTime() ?? Date.now();
-    const endNano = String(BigInt(endMs) * 1_000_000n);
+
+    // Parent `chat.request` span: REAL measured start/end. Prefer the monotonic
+    // samples the engine captured around the request; fall back to the trace's
+    // wall-clock timestamps. Either way these are observed, not synthetic.
+    const parentStartMs = info.startMs ?? trace.startedAt.getTime();
+    const parentEndMs =
+      info.endMs ?? trace.completedAt?.getTime() ?? nowEpochMs();
 
     const parentSpan = {
       traceId: otTraceId,
       spanId: parentSpanId,
       name: "chat.request",
       kind: 2, // SERVER
-      startTimeUnixNano: startNano,
-      endTimeUnixNano: endNano,
+      startTimeUnixNano: msToUnixNano(parentStartMs),
+      endTimeUnixNano: msToUnixNano(parentEndMs),
       attributes: attrs([
         str("gen_ai.system", "zintus"),
         str("gen_ai.request.model", trace.winner?.model),
@@ -83,19 +137,37 @@ export function buildOtlpPayload(info: OtelRequestInfo): Record<string, unknown>
       status: { code: 1 }, // OK
     };
 
-    let cursorMs = trace.startedAt.getTime();
-    const childSpans = trace.attempts.map((attempt) => {
-      const aStart = String(BigInt(cursorMs) * 1_000_000n);
-      cursorMs += Math.max(0, attempt.latencyMs);
-      const aEnd = String(BigInt(cursorMs) * 1_000_000n);
+    // Child `provider.attempt` spans anchored to the REAL instant the engine
+    // observed each attempt complete (`attemptEndsMs[i]`); the start is that
+    // real end minus the attempt's real measured `latencyMs`. This preserves
+    // true gaps/overlap between attempts — unlike the previous synthetic cursor,
+    // which packed attempts back-to-back from the request start and so neither
+    // matched real completion instants nor reflected waits between attempts.
+    //
+    // When ends are not supplied we reconstruct backward from the real parent
+    // end (so the chain terminates at the true completion instant rather than
+    // drifting forward from the start); a partially-filled array is honored
+    // per-index and the gaps are filled from the nearest known real end.
+    const attemptEnds = new Array<number>(trace.attempts.length);
+    let cursorMs = parentEndMs;
+    for (let i = trace.attempts.length - 1; i >= 0; i--) {
+      const latency = Math.max(0, trace.attempts[i]?.latencyMs ?? 0);
+      const endMs = info.attemptEndsMs?.[i] ?? cursorMs;
+      attemptEnds[i] = endMs;
+      cursorMs = endMs - latency;
+    }
+
+    const childSpans = trace.attempts.map((attempt, i) => {
+      const aEndMs = attemptEnds[i] ?? parentEndMs;
+      const aStartMs = aEndMs - Math.max(0, attempt.latencyMs);
       return {
         traceId: otTraceId,
         spanId: randomHex(8),
         parentSpanId,
         name: "provider.attempt",
         kind: 3, // CLIENT
-        startTimeUnixNano: aStart,
-        endTimeUnixNano: aEnd,
+        startTimeUnixNano: msToUnixNano(aStartMs),
+        endTimeUnixNano: msToUnixNano(aEndMs),
         attributes: attrs([
           str("gen_ai.system", attempt.providerId),
           str("gen_ai.request.model", attempt.model),

@@ -36,7 +36,7 @@ import type {
 import { textOf } from "@zintus/types";
 import { getKey } from "@zintus/keychain";
 import { ConversationStore } from "./conversation-store.js";
-import { exportRequestTrace } from "./otel.js";
+import { exportRequestTrace, nowEpochMs } from "./otel.js";
 import { ResponseCache } from "@zintus/cache";
 import { CodeIndex } from "@zintus/codebase-indexer";
 import { listProviders } from "@zintus/providers";
@@ -436,6 +436,12 @@ export function createEngine(config: EngineConfig = {}): Engine {
       const traceId = randomUUID();
       const attempts: TraceAttempt[] = [];
       const traceStartedAt = Date.now();
+      // Real OTel span timing: a monotonic clock sample at request open, plus
+      // the real instant each attempt is observed to complete (captured in
+      // onAttempt below, parallel to `attempts`). These feed the OTLP exporter
+      // so span start/end/duration are measured, not synthetic offsets.
+      const otelStartMs = nowEpochMs();
+      const attemptEndsMs: number[] = [];
 
       if (persistTraces) {
         conversations.startTrace(traceId);
@@ -525,6 +531,8 @@ export function createEngine(config: EngineConfig = {}): Engine {
             cacheHit,
             compileTokens: compileTokenEstimate,
             failoverCount: 0,
+            startMs: otelStartMs,
+            endMs: nowEpochMs(),
           });
 
           return {
@@ -551,6 +559,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
         stickySessionTtlMs: 30 * 60 * 1000,
         onAttempt: (event) => {
           attempts.push(event);
+          // Stamp the real instant this attempt finished (the engine only
+          // observes attempts on completion). Kept parallel to `attempts` so
+          // the exporter can place each attempt span on the real timeline.
+          attemptEndsMs.push(nowEpochMs());
           if (persistTraces) {
             conversations.recordAttempt(traceId, event);
           }
@@ -609,6 +621,9 @@ export function createEngine(config: EngineConfig = {}): Engine {
             cacheHit: "miss",
             compileTokens: compileTokenEstimate,
             failoverCount: attempts.filter((a) => a.status === "fail").length,
+            startMs: otelStartMs,
+            endMs: nowEpochMs(),
+            attemptEndsMs: [...attemptEndsMs],
           });
         }
       };
