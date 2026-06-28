@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono, Lora, Plus_Jakarta_Sans, Syne } from "next/font/google";
+import { headers } from "next/headers";
 import "@zintus/ui/globals.css";
 import "./globals.css";
 import { ThemeProvider } from "@/components/marketing/ThemeProvider";
@@ -65,11 +66,17 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  // The per-request CSP nonce set by proxy.ts. Forwarded to next-themes so its
+  // anti-FOUC inline <script> carries the nonce and isn't blocked by the
+  // 'strict-dynamic' script-src (which would otherwise log a CSP violation and
+  // flash the wrong theme on first paint).
+  const nonce = (await headers()).get("x-nonce") ?? undefined;
+
   return (
     <html
       lang="en"
@@ -78,7 +85,7 @@ export default function RootLayout({
     >
       <body className={plusJakartaSans.className}>
         <GalaxyBackground />
-        <ThemeProvider>{children}</ThemeProvider>
+        <ThemeProvider nonce={nonce}>{children}</ThemeProvider>
       </body>
     </html>
   );
