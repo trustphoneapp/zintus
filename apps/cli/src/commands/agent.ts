@@ -17,6 +17,13 @@ import {
   isMutatingTool,
   runAgentToolLoop,
 } from "../lib/agent-tools.js";
+import {
+  type AgentMcpToolset,
+  connectAgentMcp,
+  isMcpAgentTool,
+  selectAgentMcpServers,
+} from "../lib/agent-mcp.js";
+import { loadMcpServers } from "../lib/mcp-config.js";
 import { normalizeChatError } from "./chat-content.js";
 
 export interface AgentOptions {
@@ -26,22 +33,37 @@ export interface AgentOptions {
   yes?: boolean;
   /** Round cap for the route→execute→feed-back loop. */
   maxRounds?: number;
+  /** Use only these configured MCP servers (by name). Empty/undefined => the
+   *  enabled servers. Ignored when `noMcp` is set. */
+  mcp?: string[];
+  /** Disable MCP entirely — the prior file-tool-only behaviour. */
+  noMcp?: boolean;
 }
 
 /** The instruction that frames the task and the sandbox rules for the model. */
-function buildSystemPreamble(root: string): string {
-  return [
+function buildSystemPreamble(root: string, mcpToolCount: number): string {
+  const lines = [
     "You are a coding agent operating inside a SANDBOX.",
     `All file operations are confined to this root: ${root}`,
     "You have these tools: read_file, list_directory, search_code (read-only) and",
     "write_file, apply_edit (mutating, each gated by user confirmation).",
+  ];
+  if (mcpToolCount > 0) {
+    lines.push(
+      `You ALSO have ${mcpToolCount} connected MCP tool(s) named mcp__<server>__<tool>`,
+      "(e.g. GitHub/Postgres/filesystem). Use them when the task needs capabilities",
+      "the file tools don't cover; they run against the user's own connected servers.",
+    );
+  }
+  lines.push(
     "Rules:",
     "- Use paths RELATIVE to the sandbox root. Paths that escape the root are rejected.",
     "- Investigate with read_file/list_directory/search_code before editing.",
     "- Prefer apply_edit for surgical changes; old_string must be an exact, unique match.",
     "- There is no shell. Do not claim to run commands.",
     "- When the task is complete, stop calling tools and give a short summary of what you changed.",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 /** An interactive y/N confirm gate over stdin/stdout. Replaced by an auto-yes
@@ -109,6 +131,39 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     console.error(chalk.yellow("⚠ --yes: write confirmation gate is DISABLED for this run."));
   }
 
+  // Connect the configured MCP servers IN-PROCESS (the CLI is Bun, it hosts the
+  // MCP SDK directly). Failures are surfaced honestly and that server is
+  // skipped; every connected client is disconnected in the finally below.
+  let mcp: AgentMcpToolset | null = null;
+  if (!options?.noMcp) {
+    const { servers, missing } = selectAgentMcpServers(await loadMcpServers(), {
+      only: options?.mcp,
+    });
+    for (const name of missing) {
+      console.error(chalk.yellow(`⚠ no configured MCP server named "${name}" — skipping`));
+    }
+    if (servers.length > 0) {
+      console.error(
+        chalk.yellow(
+          "⚠ MCP servers run the USER'S OWN local processes from your config (same posture as file writes).",
+        ),
+      );
+      mcp = await connectAgentMcp(servers, {
+        onConnect: ({ server, toolCount }) =>
+          console.error(
+            chalk.cyan(`🔌 MCP connected: ${chalk.bold(server)} (${toolCount} tool(s))`),
+          ),
+        onConnectError: ({ server, message }) =>
+          console.error(
+            chalk.yellow(`⚠ MCP server "${server}" failed to connect — skipped: ${message}`),
+          ),
+      });
+    }
+  }
+
+  const mcpToolCount = mcp?.size ?? 0;
+  const toolDefinitions = [...AGENT_TOOL_DEFINITIONS, ...(mcp?.definitions ?? [])];
+
   const spinner = ora("Routing request").start();
   const config = await loadConfig();
   const engine = createAppEngine(config);
@@ -117,7 +172,7 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     const initialMessages: ChatMessage[] = [
       {
         role: "user",
-        content: `${buildSystemPreamble(sandbox.root)}\n\n---\n\nTask:\n${task}`,
+        content: `${buildSystemPreamble(sandbox.root, mcpToolCount)}\n\n---\n\nTask:\n${task}`,
       },
     ];
 
@@ -129,14 +184,22 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
         return engine.routeAndStream({
           messages,
           mode: config.contextMode,
-          tools: AGENT_TOOL_DEFINITIONS,
+          tools: toolDefinitions,
         });
       },
+      // Route MCP calls to the in-process MCP clients; everything else to the
+      // sandboxed file executor. Both feed back into the SAME bounded loop.
       execute: (call) =>
-        executeAgentToolCall(
-          { id: call.id, name: call.name, arguments: call.arguments },
-          ctx,
-        ),
+        mcp && isMcpAgentTool(call.name)
+          ? mcp.execute({
+              id: call.id,
+              name: call.name,
+              arguments: call.arguments,
+            })
+          : executeAgentToolCall(
+              { id: call.id, name: call.name, arguments: call.arguments },
+              ctx,
+            ),
       onRouted: async (turn) => {
         const provider = (await engine.getProviderStatus()).find(
           (p) => p.id === turn.providerId,
@@ -151,6 +214,12 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
       onToolCalls: (calls) => {
         console.error(chalk.cyan(`\n${calls.length} tool call(s):`));
         for (const call of calls) {
+          if (isMcpAgentTool(call.name)) {
+            // Secret-safe: show the parameter NAMES only, never their values.
+            const argNames = Object.keys(call.arguments ?? {}).join(", ");
+            console.error(`  ${chalk.blue("[mcp]")} ${chalk.bold(call.name)}(${argNames})`);
+            continue;
+          }
           const tag = isMutatingTool(call.name) ? chalk.magenta("[write]") : chalk.dim("[read]");
           console.error(
             `  ${tag} ${chalk.bold(call.name)}(${JSON.stringify(call.arguments)})`,
@@ -159,7 +228,14 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
       },
       onToolResult: (r, call) => {
         const label = r.isError ? chalk.yellow("error") : chalk.green("ok");
-        console.error(`  🔧 ${chalk.bold(call.name)} → ${label} ${chalk.dim(r.content.slice(0, 400))}`);
+        // For MCP results show only a size/error summary — the body may carry
+        // secrets. File-tool results (structured JSON) print as before.
+        const summary = isMcpAgentTool(call.name)
+          ? r.isError
+            ? r.content.slice(0, 200)
+            : `${r.content.length} char(s)`
+          : r.content.slice(0, 400);
+        console.error(`  🔧 ${chalk.bold(call.name)} → ${label} ${chalk.dim(summary)}`);
       },
       onStopped: (max) =>
         console.error(chalk.yellow(`⚠ agent loop stopped after ${max} rounds (bounded)`)),
@@ -173,6 +249,11 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
   } catch (error) {
     spinner.fail("Agent run failed");
     console.error(chalk.red(normalizeChatError(error)));
+    // Disconnect MCP before exiting so no spawned child process leaks.
+    await mcp?.disconnect();
     process.exit(1);
+  } finally {
+    // Lifecycle: tear down every connected MCP server on every exit path.
+    await mcp?.disconnect();
   }
 }

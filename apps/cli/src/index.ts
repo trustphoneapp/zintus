@@ -167,10 +167,21 @@ program
   )
   .option("--yes", "Auto-apply file writes WITHOUT confirmation (dangerous)")
   .option("--max-rounds <n>", "Cap the tool loop rounds (default 15)")
+  .option(
+    "--mcp <name...>",
+    "Use only these configured MCP servers (by name); default: all enabled",
+  )
+  .option("--no-mcp", "Disable MCP tools (sandboxed file tools only)")
   .action(
     async (
       task: string,
-      options: { root?: string; yes?: boolean; maxRounds?: string },
+      options: {
+        root?: string;
+        yes?: boolean;
+        maxRounds?: string;
+        mcp?: string[] | boolean;
+        // Commander sets `mcp: false` for `--no-mcp`.
+      },
     ) => {
       const { runAgent } = await import("./commands/agent.js");
       let maxRounds: number | undefined;
@@ -180,7 +191,17 @@ program
           throw new Error("Invalid --max-rounds. Expected a positive integer.");
         }
       }
-      await runAgent(task, { root: options.root, yes: options.yes, maxRounds });
+      // Commander: `--no-mcp` => options.mcp === false; `--mcp a b` => string[];
+      // absent => undefined (default: all enabled servers).
+      const noMcp = options.mcp === false;
+      const mcpNames = Array.isArray(options.mcp) ? options.mcp : undefined;
+      await runAgent(task, {
+        root: options.root,
+        yes: options.yes,
+        maxRounds,
+        mcp: mcpNames,
+        noMcp,
+      });
     },
   );
 
