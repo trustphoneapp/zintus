@@ -9,6 +9,7 @@ import {
 const storage = createMMKV({ id: "zintus.config" });
 const STORAGE_KEY = "config";
 const SELECTED_PROVIDER_KEY = "selectedProvider";
+const SELECTED_MODEL_KEY = "zintus:selected-model";
 const JSON_MODE_KEY = "jsonMode";
 const TOOLS_MODE_KEY = "toolsMode";
 
@@ -41,6 +42,47 @@ export function loadSelectedProvider(): ProviderId {
 
 export function saveSelectedProvider(providerId: ProviderId): void {
   storage.set(SELECTED_PROVIDER_KEY, providerId);
+}
+
+/**
+ * The catalog model the user picked via "Use this model" on the catalog screen.
+ * Mirrors the web's persisted `zintus:selected-model` ({ id, provider,
+ * displayName }). Mobile routes chat by PROVIDER (the gateway picks the concrete
+ * model), so saving a selection also calls {@link saveSelectedProvider}; this
+ * record is what the catalog/chat surfaces read to show the ACTIVE selection.
+ */
+export interface SelectedModel {
+  id: string;
+  provider: ProviderId;
+  displayName: string;
+}
+
+export function loadSelectedModel(): SelectedModel | null {
+  const raw = storage.getString(SELECTED_MODEL_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<SelectedModel>;
+    if (
+      typeof parsed.id === "string" &&
+      typeof parsed.provider === "string" &&
+      typeof parsed.displayName === "string"
+    ) {
+      return parsed as SelectedModel;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the picked model AND switch the active provider so chat routes to it. */
+export function saveSelectedModel(model: SelectedModel): void {
+  storage.set(SELECTED_MODEL_KEY, JSON.stringify(model));
+  saveSelectedProvider(model.provider);
+}
+
+export function clearSelectedModel(): void {
+  storage.remove(SELECTED_MODEL_KEY);
 }
 
 /**
