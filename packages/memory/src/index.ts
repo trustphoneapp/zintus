@@ -5,7 +5,14 @@ export { MemoryStore } from "./memory-store.js";
 export { extractFacts } from "./extract.js";
 export { extractFactsWithLlm, summarizeWithLlm, consolidateFactsWithLlm } from "./llm-memory.js";
 export { summarizeTurns } from "./summarize.js";
-export { chunkText, embedBatch, embedText } from "./embeddings.js";
+export {
+  chunkText,
+  embedBatch,
+  embedBatchWithMetadata,
+  embeddingMode,
+  embedText,
+} from "./embeddings.js";
+export type { EmbeddingMetadata } from "./embeddings.js";
 export type {
   CompileTraceRow,
   MemoryChunkRow,

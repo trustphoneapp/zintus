@@ -98,6 +98,9 @@ export default function ComparePage() {
         setResult(column.id, { status: "done", meta: result.meta });
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
+          // Stopped — keep whatever streamed so far; mark done so the column
+          // doesn't sit stuck in "streaming".
+          setResult(column.id, { status: "done" });
           return;
         }
         setResult(column.id, {
@@ -128,6 +131,14 @@ export default function ComparePage() {
     );
     setRunning(false);
   }, [columns, prompt, running, streamColumn]);
+
+  const stopAll = useCallback(() => {
+    for (const controller of controllers.current.values()) {
+      controller.abort();
+    }
+    controllers.current.clear();
+    setRunning(false);
+  }, []);
 
   const regenerateColumn = useCallback(
     async (column: CompareColumn) => {
@@ -256,6 +267,16 @@ export default function ComparePage() {
           >
             {running ? "Comparing…" : "Compare"}
           </button>
+          {running ? (
+            <button
+              type="button"
+              className="compare-run"
+              onClick={stopAll}
+              style={{ marginLeft: 8 }}
+            >
+              ■ Stop
+            </button>
+          ) : null}
         </div>
       </div>
 

@@ -158,54 +158,104 @@ export async function runCloudLogin(options?: {
 
 // ── zintus cloud status ───────────────────────────────────────────────────
 
-export async function runCloudStatus(): Promise<void> {
+export interface CloudStatusResult {
+  logged_in: boolean;
+  session_id?: string;
+  relay?: string;
+  // "online"/"offline" only when the relay actually answered; "unknown" when the
+  // state could NOT be verified (relay unreachable / credentials rejected / an
+  // unexpected response) — never a confident-but-wrong "offline".
+  status?: "online" | "offline" | "unknown";
+  online?: boolean | null;
+  last_seen?: number | null;
+  reason?: string;
+}
+
+export async function runCloudStatus(options?: { json?: boolean }): Promise<void> {
+  const json = options?.json ?? false;
   const config = await loadCloudConfig();
   if (!config) {
-    console.error(
-      chalk.yellow(
-        "Not logged in to Zintus Cloud. Run: zintus cloud login",
-      ),
-    );
+    if (json) {
+      console.log(JSON.stringify({ logged_in: false } satisfies CloudStatusResult));
+    } else {
+      console.error(
+        chalk.yellow("Not logged in to Zintus Cloud. Run: zintus cloud login"),
+      );
+    }
     return;
   }
 
   const relayUrl = config.relay_url ?? DEFAULT_RELAY_URL;
-  // KNOWN RELAY GAP: the relay's GET /api/sessions/:id/status route is
-  // cookie-authenticated (requireSession → parseSessionCookie, see
-  // workers/relay/src/index.ts:750 + auth.ts:141). It IGNORES this Authorization
-  // header, so an authed-only relay returns 401 here. gateway_secret is verified
-  // ONLY in the WebSocket register handshake (GatewaySession.ts:293), never on an
-  // HTTP route — the CLI holds no session cookie, so it currently cannot read
-  // real online status. We still send the secret as a Bearer token so that this
-  // works the moment the relay grows gateway_secret auth on this route (handed
-  // back to the relay agent); until then a 401 falls through to the offline path.
+  // The relay's GET /api/sessions/:id/status accepts EITHER an owner cookie or
+  // THIS session's own gateway_secret as a Bearer token (session-scoped — see
+  // authorizeSessionScoped in workers/relay/src/index.ts, locked in by
+  // workers/relay/tests/cloud-auth-bearer.test.ts). The CLI holds no browser
+  // cookie, so it authenticates with the secret it stored at login.
   const res = await fetch(
     `${relayUrl}/api/sessions/${config.session_id}/status`,
-    {
-      headers: {
-        Authorization: `Bearer ${config.gateway_secret}`,
-      },
-    },
+    { headers: { Authorization: `Bearer ${config.gateway_secret}` } },
   ).catch(() => null);
 
-  if (!res?.ok) {
-    console.error(chalk.dim("Session ID:"), config.session_id);
-    console.error(chalk.dim("Relay:"), relayUrl);
-    console.error(chalk.yellow("Gateway status: offline (could not reach relay)"));
+  // Be honest about WHY the state couldn't be read instead of mislabelling every
+  // failure "offline": a 401 (bad/expired secret) or an unreachable relay does
+  // NOT mean the gateway is down — the real state is genuinely UNKNOWN. Say so
+  // (and exit non-zero) rather than printing a confident-but-wrong "offline".
+  if (!res || !res.ok) {
+    const reason = !res
+      ? "could not reach relay"
+      : res.status === 401 || res.status === 403
+        ? "relay rejected the saved credentials — run: zintus cloud login"
+        : `relay returned HTTP ${res.status}`;
+    process.exitCode = 1;
+    if (json) {
+      console.log(
+        JSON.stringify({
+          logged_in: true,
+          session_id: config.session_id,
+          relay: relayUrl,
+          status: "unknown",
+          online: null,
+          last_seen: null,
+          reason,
+        } satisfies CloudStatusResult),
+      );
+    } else {
+      console.error(chalk.dim("Session ID:"), config.session_id);
+      console.error(chalk.dim("Relay:"), relayUrl);
+      console.error(
+        chalk.dim("Status:"),
+        chalk.yellow(`unknown (cannot verify — ${reason})`),
+      );
+    }
     return;
   }
 
-  const data = (await res.json()) as {
+  const data = (await res.json().catch(() => ({}))) as {
     online?: boolean;
     name?: string;
     last_seen?: number;
   };
+  const online = data.online === true;
+
+  if (json) {
+    console.log(
+      JSON.stringify({
+        logged_in: true,
+        session_id: config.session_id,
+        relay: relayUrl,
+        status: online ? "online" : "offline",
+        online,
+        last_seen: data.last_seen ?? null,
+      } satisfies CloudStatusResult),
+    );
+    return;
+  }
 
   console.error(chalk.dim("Session ID:"), config.session_id);
   console.error(chalk.dim("Relay:"), relayUrl);
   console.error(
     chalk.dim("Status:"),
-    data.online ? chalk.green("● online") : chalk.gray("○ offline"),
+    online ? chalk.green("● online") : chalk.gray("○ offline"),
   );
   if (data.last_seen) {
     console.error(
@@ -217,25 +267,82 @@ export async function runCloudStatus(): Promise<void> {
 
 // ── zintus cloud logout ───────────────────────────────────────────────────
 
-export async function runCloudLogout(): Promise<void> {
+export interface CloudLogoutResult {
+  // True once the local credentials have been removed (always, on any logout).
+  logged_out: boolean;
+  // True only when the relay confirmed the server-side session was deleted.
+  revoked: boolean;
+  session_id?: string;
+  relay?: string;
+  reason?: string;
+}
+
+export async function runCloudLogout(options?: { json?: boolean }): Promise<void> {
+  const json = options?.json ?? false;
   const config = await loadCloudConfig();
   if (!config) {
-    console.error(chalk.yellow("Not logged in."));
+    if (json) {
+      console.log(
+        JSON.stringify({
+          logged_out: false,
+          revoked: false,
+          reason: "not_logged_in",
+        } satisfies CloudLogoutResult),
+      );
+    } else {
+      console.error(chalk.yellow("Not logged in."));
+    }
     return;
   }
 
   const relayUrl = config.relay_url ?? DEFAULT_RELAY_URL;
-  // Best-effort server-side revoke. KNOWN RELAY GAP (same as status): the relay's
-  // DELETE /api/sessions/:id route is cookie-authenticated (index.ts:665), so
-  // this Bearer header is ignored and the call 401s — the gateway_session row is
-  // NOT deleted server-side and is orphaned in D1. Handed back to the relay agent
-  // (add gateway_secret auth, or have cli-complete also issue a CLI session
-  // token). The LOCAL logout below always succeeds regardless.
-  await fetch(`${relayUrl}/api/sessions/${config.session_id}`, {
+  // Revoke the server-side session FIRST, then clear local state. The relay's
+  // DELETE /api/sessions/:id accepts THIS session's gateway_secret as a Bearer
+  // (session-scoped — authorizeSessionScoped in workers/relay/src/index.ts,
+  // covered by workers/relay/tests/cloud-auth-bearer.test.ts), so the CLI can
+  // delete the row it created without a browser cookie. A 200 means the
+  // gateway_sessions row is gone server-side; anything else (401 / 5xx /
+  // unreachable) means the server session may be ORPHANED — we still clear the
+  // local credentials but report it and exit non-zero.
+  const res = await fetch(`${relayUrl}/api/sessions/${config.session_id}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${config.gateway_secret}` },
-  }).catch(() => {});
+  }).catch(() => null);
 
+  const revoked = res?.ok ?? false;
+  const reason = revoked
+    ? undefined
+    : !res
+      ? "could not reach relay"
+      : `relay returned HTTP ${res.status}`;
+
+  // Local credentials are ALWAYS removed, regardless of the revoke outcome.
   await clearCloudConfig();
-  console.error(chalk.green("✓ Logged out from Zintus Cloud."));
+
+  if (!revoked) process.exitCode = 1;
+
+  if (json) {
+    const result: CloudLogoutResult = {
+      logged_out: true,
+      revoked,
+      session_id: config.session_id,
+      relay: relayUrl,
+    };
+    if (reason) result.reason = reason;
+    console.log(JSON.stringify(result));
+    return;
+  }
+
+  if (revoked) {
+    console.error(
+      chalk.green("✓ Logged out from Zintus Cloud (server session revoked)."),
+    );
+  } else {
+    console.error(chalk.green("✓ Cleared local credentials."));
+    console.error(
+      chalk.yellow(
+        `⚠ Could not revoke the server session (${reason}). It may remain until it expires; sign in again to manage it.`,
+      ),
+    );
+  }
 }

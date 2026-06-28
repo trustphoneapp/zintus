@@ -49,9 +49,21 @@ let calls: RecordedCall[] = [];
 let route: (url: string, init?: RequestInit) => Response;
 const realFetch = globalThis.fetch;
 
+// Capture EVERYTHING the commands print (stdout via console.log for --json,
+// stderr via console.error for human output) so tests can assert on it AND
+// guarantee the gateway_secret is never leaked to any stream.
+let output: string[] = [];
+const realLog = console.log;
+const realError = console.error;
+const SECRET = "secret-abc"; // the gateway_secret used across these tests
+
 beforeEach(() => {
   calls = [];
   openedUrls.length = 0;
+  output = [];
+  process.exitCode = 0;
+  console.log = (...args: unknown[]) => void output.push(args.map(String).join(" "));
+  console.error = (...args: unknown[]) => void output.push(args.map(String).join(" "));
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     const headers: Record<string, string> = {};
@@ -70,7 +82,17 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  console.log = realLog;
+  console.error = realError;
+  // A test that exercised a failure path leaves exitCode=1; don't let that leak
+  // into the runner's own exit status.
+  process.exitCode = 0;
 });
+
+/** The combined stdout+stderr the command printed during a test. */
+function printed(): string {
+  return output.join("\n");
+}
 
 afterAll(() => {
   mock.restore();
@@ -135,62 +157,236 @@ describe("runCloudLogin — relay cli-login/cli-status contract", () => {
   }, 15000);
 });
 
-describe("runCloudStatus — sessions status request shape", () => {
-  it("queries /api/sessions/:id/status with the gateway_secret as a Bearer token", async () => {
+describe("runCloudStatus — honest state from the relay's real response", () => {
+  async function withConfig() {
     await cloud.saveCloudConfig({
       session_id: "sess-123",
-      gateway_secret: "secret-abc",
+      gateway_secret: SECRET,
       relay_url: RELAY,
     });
+  }
+  const STATUS_URL = `${RELAY}/api/sessions/sess-123/status`;
 
-    route = (url) => {
-      if (url === `${RELAY}/api/sessions/sess-123/status`) {
-        return new Response(
-          JSON.stringify({ online: true, last_seen: Date.now() }),
-          { status: 200 },
-        );
-      }
-      throw new Error(`unexpected fetch: ${url}`);
+  it("sends GET with the gateway_secret as a Bearer token (the credential the relay validates)", async () => {
+    await withConfig();
+    route = (url) =>
+      url === STATUS_URL
+        ? new Response(JSON.stringify({ online: true }), { status: 200 })
+        : (() => {
+            throw new Error(`unexpected fetch: ${url}`);
+          })();
+
+    await cloud.runCloudStatus();
+
+    const req = calls.find((c) => c.url === STATUS_URL);
+    expect(req).toBeDefined();
+    expect(req!.method).toBe("GET");
+    // The relay accepts THIS exact header on the status route (session-scoped
+    // gateway_secret Bearer — workers/relay/tests/cloud-auth-bearer.test.ts).
+    expect(req!.headers["Authorization"]).toBe(`Bearer ${SECRET}`);
+  });
+
+  it("200 online:true → reports online, exit 0, never prints the secret", async () => {
+    await withConfig();
+    route = () =>
+      new Response(JSON.stringify({ online: true, last_seen: 1 }), { status: 200 });
+
+    await cloud.runCloudStatus();
+
+    expect(printed().toLowerCase()).toContain("online");
+    expect(process.exitCode).toBe(0);
+    expect(printed()).not.toContain(SECRET);
+  });
+
+  it("200 online:false → reports offline, exit 0", async () => {
+    await withConfig();
+    route = () => new Response(JSON.stringify({ online: false }), { status: 200 });
+
+    await cloud.runCloudStatus();
+
+    expect(printed().toLowerCase()).toContain("offline");
+    expect(printed().toLowerCase()).not.toContain("cannot verify");
+    expect(process.exitCode).toBe(0);
+  });
+
+  it("401 → honest 'unknown (cannot verify)', NOT a false 'offline', exit 1", async () => {
+    await withConfig();
+    route = () => new Response("Unauthorized", { status: 401 });
+
+    await cloud.runCloudStatus();
+
+    expect(printed().toLowerCase()).toContain("unknown");
+    expect(printed().toLowerCase()).toContain("cannot verify");
+    expect(printed().toLowerCase()).not.toContain("offline");
+    expect(process.exitCode).toBe(1);
+    expect(printed()).not.toContain(SECRET);
+  });
+
+  it("relay unreachable (fetch throws) → 'unknown (cannot verify — could not reach relay)', exit 1", async () => {
+    await withConfig();
+    route = () => {
+      throw new Error("ECONNREFUSED");
     };
 
     await cloud.runCloudStatus();
 
-    const req = calls.find(
-      (c) => c.url === `${RELAY}/api/sessions/sess-123/status`,
-    );
-    expect(req).toBeDefined();
-    expect(req!.method).toBe("GET");
-    // The CLI presents the gateway_secret as a Bearer token. NOTE: the relay
-    // route is currently COOKIE-authenticated and ignores this header (known
-    // relay-side gap — see cloud.ts). This test pins the request the CLI emits so
-    // the contract is detectable if either side changes.
-    expect(req!.headers["Authorization"]).toBe("Bearer secret-abc");
+    expect(printed().toLowerCase()).toContain("could not reach relay");
+    expect(printed().toLowerCase()).not.toContain("offline");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("--json 200 → machine-readable {status:'online'} on stdout, no secret", async () => {
+    await withConfig();
+    route = () =>
+      new Response(JSON.stringify({ online: true, last_seen: 42 }), { status: 200 });
+
+    await cloud.runCloudStatus({ json: true });
+
+    const parsed = JSON.parse(printed()) as Record<string, unknown>;
+    expect(parsed).toMatchObject({
+      logged_in: true,
+      session_id: "sess-123",
+      relay: RELAY,
+      status: "online",
+      online: true,
+      last_seen: 42,
+    });
+    expect(process.exitCode).toBe(0);
+    expect(printed()).not.toContain(SECRET);
+  });
+
+  it("--json 401 → {status:'unknown', online:null, reason}, exit 1", async () => {
+    await withConfig();
+    route = () => new Response("Unauthorized", { status: 401 });
+
+    await cloud.runCloudStatus({ json: true });
+
+    const parsed = JSON.parse(printed()) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ status: "unknown", online: null });
+    expect(typeof parsed.reason).toBe("string");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("not logged in → reports it (json {logged_in:false}), exit 0, no relay call", async () => {
+    await cloud.clearCloudConfig();
+    route = () => {
+      throw new Error("should not fetch when logged out");
+    };
+
+    await cloud.runCloudStatus({ json: true });
+
+    expect(JSON.parse(printed())).toEqual({ logged_in: false });
+    expect(calls).toHaveLength(0);
+    expect(process.exitCode).toBe(0);
   });
 });
 
-describe("runCloudLogout — session delete request + local clear", () => {
-  it("sends DELETE /api/sessions/:id with the Bearer token and removes the local config", async () => {
+describe("runCloudLogout — revoke the server session AND clear local state", () => {
+  async function withConfig() {
     await cloud.saveCloudConfig({
       session_id: "sess-123",
-      gateway_secret: "secret-abc",
+      gateway_secret: SECRET,
       relay_url: RELAY,
     });
+  }
+  const DELETE_URL = `${RELAY}/api/sessions/sess-123`;
 
-    route = (url) => {
-      if (url === `${RELAY}/api/sessions/sess-123`) {
-        return new Response(JSON.stringify({ ok: true }), { status: 200 });
-      }
-      throw new Error(`unexpected fetch: ${url}`);
+  it("200 → calls DELETE with the Bearer, reports revoked, clears local, exit 0, no secret", async () => {
+    await withConfig();
+    route = (url) =>
+      url === DELETE_URL
+        ? new Response(JSON.stringify({ ok: true }), { status: 200 })
+        : (() => {
+            throw new Error(`unexpected fetch: ${url}`);
+          })();
+
+    await cloud.runCloudLogout();
+
+    const req = calls.find((c) => c.url === DELETE_URL);
+    expect(req).toBeDefined();
+    expect(req!.method).toBe("DELETE");
+    expect(req!.headers["Authorization"]).toBe(`Bearer ${SECRET}`);
+    expect(printed().toLowerCase()).toContain("revoked");
+    expect(await cloud.loadCloudConfig()).toBeNull();
+    expect(process.exitCode).toBe(0);
+    expect(printed()).not.toContain(SECRET);
+  });
+
+  it("401 → STILL clears local but reports the revoke failure, exit 1", async () => {
+    await withConfig();
+    route = () => new Response("Unauthorized", { status: 401 });
+
+    await cloud.runCloudLogout();
+
+    // The DELETE was attempted with the Bearer the relay validates.
+    const req = calls.find((c) => c.url === DELETE_URL);
+    expect(req!.method).toBe("DELETE");
+    expect(req!.headers["Authorization"]).toBe(`Bearer ${SECRET}`);
+    // Local state cleared regardless...
+    expect(await cloud.loadCloudConfig()).toBeNull();
+    // ...but the failure is reported, not hidden behind a green checkmark.
+    expect(printed().toLowerCase()).toContain("could not revoke");
+    expect(process.exitCode).toBe(1);
+    expect(printed()).not.toContain(SECRET);
+  });
+
+  it("relay unreachable (fetch throws) → clears local, reports failure, exit 1", async () => {
+    await withConfig();
+    route = () => {
+      throw new Error("ECONNREFUSED");
     };
 
     await cloud.runCloudLogout();
 
-    const req = calls.find((c) => c.url === `${RELAY}/api/sessions/sess-123`);
-    expect(req).toBeDefined();
-    expect(req!.method).toBe("DELETE");
-    expect(req!.headers["Authorization"]).toBe("Bearer secret-abc");
-
-    // Local credentials are always cleared, regardless of the server response.
     expect(await cloud.loadCloudConfig()).toBeNull();
+    expect(printed().toLowerCase()).toContain("could not reach relay");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("--json 200 → {logged_out:true, revoked:true}, exit 0", async () => {
+    await withConfig();
+    route = () => new Response(JSON.stringify({ ok: true }), { status: 200 });
+
+    await cloud.runCloudLogout({ json: true });
+
+    const parsed = JSON.parse(printed()) as Record<string, unknown>;
+    expect(parsed).toMatchObject({
+      logged_out: true,
+      revoked: true,
+      session_id: "sess-123",
+      relay: RELAY,
+    });
+    expect(parsed.reason).toBeUndefined();
+    expect(process.exitCode).toBe(0);
+    expect(printed()).not.toContain(SECRET);
+  });
+
+  it("--json 401 → {logged_out:true, revoked:false, reason}, exit 1", async () => {
+    await withConfig();
+    route = () => new Response("Unauthorized", { status: 401 });
+
+    await cloud.runCloudLogout({ json: true });
+
+    const parsed = JSON.parse(printed()) as Record<string, unknown>;
+    expect(parsed).toMatchObject({ logged_out: true, revoked: false });
+    expect(typeof parsed.reason).toBe("string");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("not logged in → no relay call, json {logged_out:false, reason:'not_logged_in'}, exit 0", async () => {
+    await cloud.clearCloudConfig();
+    route = () => {
+      throw new Error("should not fetch when logged out");
+    };
+
+    await cloud.runCloudLogout({ json: true });
+
+    expect(calls).toHaveLength(0);
+    expect(JSON.parse(printed())).toMatchObject({
+      logged_out: false,
+      revoked: false,
+      reason: "not_logged_in",
+    });
+    expect(process.exitCode).toBe(0);
   });
 });

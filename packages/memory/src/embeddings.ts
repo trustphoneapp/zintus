@@ -1,6 +1,52 @@
 const DEFAULT_OLLAMA_MODEL = "nomic-embed-text";
-const FALLBACK_VECTOR_SIZE = 256;
-const FALLBACK_MODEL = "fallback-hash-v1";
+
+// --- Keyword-hash fallback (NON-SEMANTIC) -----------------------------------
+// When no real embedder is configured (OLLAMA_HOST unset, the default) we hash
+// tokens into a fixed set of buckets. The resulting vectors make cosine
+// similarity measure keyword/token OVERLAP between two texts, NOT their meaning.
+// This keeps memory and the L2 cache working with zero setup, but it must never
+// be presented as "semantic"/"vector recall". Set OLLAMA_HOST for real semantic
+// embeddings. `embeddingMode()` exposes which mode is active.
+const KEYWORD_HASH_VECTOR_SIZE = 256;
+// Public model label persisted alongside chunks and asserted by tests. Keep the
+// string stable; the "fallback" name is intentional so stored metadata records
+// that the vector is the degraded keyword-hash, not a semantic embedding.
+const KEYWORD_HASH_MODEL = "fallback-hash-v1";
+
+/**
+ * The embedding mode in effect for this process, derived from configuration
+ * (not from any single request's outcome):
+ *   - "ollama"        OLLAMA_HOST is set → real semantic embeddings.
+ *   - "keyword-hash"  default → deterministic FNV token-hash fallback whose
+ *                     similarity is keyword/token overlap, NOT semantic meaning.
+ *
+ * Even in "ollama" mode a single request can transparently degrade to
+ * keyword-hash if the Ollama call fails; `embedBatchWithMetadata` reports the
+ * provider actually used per call.
+ */
+export function embeddingMode(): "ollama" | "keyword-hash" {
+  return isOllamaConfigured() ? "ollama" : "keyword-hash";
+}
+
+function isOllamaConfigured(): boolean {
+  return Boolean(process.env.OLLAMA_HOST?.trim());
+}
+
+let warnedKeywordHashFallback = false;
+
+// Fires at most once per process, on the first actual use of the keyword-hash
+// fallback. Never includes user/text content — only the configuration hint.
+function warnKeywordHashFallbackOnce(): void {
+  if (warnedKeywordHashFallback) {
+    return;
+  }
+  warnedKeywordHashFallback = true;
+  console.warn(
+    "[@zintus/memory] OLLAMA_HOST not set or unreachable — memory/cache similarity " +
+      "is using the keyword-hash fallback (token overlap), NOT semantic embeddings. " +
+      "Set OLLAMA_HOST for semantic recall.",
+  );
+}
 
 function normalizeOllamaHost(host: string): string {
   return host.endsWith("/") ? host.slice(0, -1) : host;
@@ -23,11 +69,14 @@ function hashToken(token: string): number {
   return hash >>> 0;
 }
 
-function fallbackEmbedding(text: string): number[] {
-  const vector = new Array<number>(FALLBACK_VECTOR_SIZE).fill(0);
+// NON-SEMANTIC fallback: hashes tokens into buckets so cosine similarity reflects
+// keyword overlap, not meaning. See the block comment above. Do not call this a
+// semantic embedding.
+function keywordHashVector(text: string): number[] {
+  const vector = new Array<number>(KEYWORD_HASH_VECTOR_SIZE).fill(0);
   for (const token of tokenize(text)) {
     const hash = hashToken(token);
-    const slot = hash % FALLBACK_VECTOR_SIZE;
+    const slot = hash % KEYWORD_HASH_VECTOR_SIZE;
     const direction = (hash & 1) === 0 ? 1 : -1;
     vector[slot] = (vector[slot] ?? 0) + direction;
   }
@@ -36,6 +85,16 @@ function fallbackEmbedding(text: string): number[] {
     return vector;
   }
   return vector.map((value) => value / magnitude);
+}
+
+// Builds the keyword-hash result and emits the one-time degradation warning.
+function keywordHashBatch(texts: string[]): EmbedBatchResult {
+  warnKeywordHashFallbackOnce();
+  return {
+    embeddings: texts.map((text) => keywordHashVector(text)),
+    provider: "fallback",
+    model: KEYWORD_HASH_MODEL,
+  };
 }
 
 function toEmbeddingArray(value: unknown): number[] | null {
@@ -78,20 +137,17 @@ export type EmbeddingMetadata = {
 
 async function embedBatchInternal(texts: string[]): Promise<EmbedBatchResult> {
   if (!texts.length) {
+    // No vectors produced, so this is not a "use" of the fallback — no warning.
     return {
       embeddings: [],
       provider: "fallback",
-      model: FALLBACK_MODEL,
+      model: KEYWORD_HASH_MODEL,
     };
   }
 
   const host = process.env.OLLAMA_HOST?.trim();
   if (!host) {
-    return {
-      embeddings: texts.map((text) => fallbackEmbedding(text)),
-      provider: "fallback",
-      model: FALLBACK_MODEL,
-    };
+    return keywordHashBatch(texts);
   }
 
   try {
@@ -141,11 +197,7 @@ async function embedBatchInternal(texts: string[]): Promise<EmbedBatchResult> {
 
     throw new Error("Missing embedding payload from Ollama.");
   } catch {
-    return {
-      embeddings: texts.map((text) => fallbackEmbedding(text)),
-      provider: "fallback",
-      model: FALLBACK_MODEL,
-    };
+    return keywordHashBatch(texts);
   }
 }
 
@@ -171,7 +223,7 @@ export async function embedBatchWithMetadata(
 
 export async function embedText(text: string): Promise<number[]> {
   const [embedding] = await embedBatch([text]);
-  return embedding ?? fallbackEmbedding(text);
+  return embedding ?? keywordHashVector(text);
 }
 
 export function chunkText(text: string, size = 256, overlap = 32): string[] {

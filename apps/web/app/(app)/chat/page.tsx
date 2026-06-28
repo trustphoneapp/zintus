@@ -5,6 +5,7 @@ import { useShallow } from "zustand/react/shallow";
 import { MessageBubble } from "@/app/_components/MessageBubble";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
+import { ConsentDialog } from "@/app/_components/ConsentDialog";
 import { Icon } from "@/app/_components/Icons";
 import { Tooltip } from "@/components/ui/Tooltip";
 import {
@@ -31,7 +32,6 @@ import {
 import { memorySystemMessage } from "@/lib/memory";
 import { downloadFile } from "@/lib/download";
 import {
-  DATA_FLOW,
   grantProviderSendConsent,
   hasProviderSendConsent,
 } from "@/lib/consent";
@@ -670,51 +670,15 @@ export default function ChatPage() {
           void send();
         }}
       />
-      {consentOpen ? (
-        <div
-          className="consent-backdrop"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setConsentOpen(false)}
-        >
-          <div className="consent-card" onClick={(e) => e.stopPropagation()}>
-            <h2 className="consent-title">Before your first send</h2>
-            <p className="consent-body">
-              Your message goes to the AI provider you choose, routed through your
-              own gateway. Here&apos;s exactly where data travels:
-            </p>
-            <div className="consent-flow">
-              {DATA_FLOW.map((item) => (
-                <div key={item.data} className="consent-flow-item">
-                  <span className="consent-flow-dest">{item.dest}</span>
-                  <span className="consent-flow-data">{item.data}</span>
-                  <span className="consent-flow-detail">{item.detail}</span>
-                </div>
-              ))}
-            </div>
-            <div className="consent-actions">
-              <button
-                type="button"
-                className="chat-tool-toggle"
-                onClick={() => setConsentOpen(false)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="chat-tool-toggle"
-                onClick={() => {
-                  grantProviderSendConsent();
-                  setConsentOpen(false);
-                  void send();
-                }}
-              >
-                Got it — send
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <ConsentDialog
+        open={consentOpen}
+        onCancel={() => setConsentOpen(false)}
+        onGrant={() => {
+          grantProviderSendConsent();
+          setConsentOpen(false);
+          void send();
+        }}
+      />
       <div className="chat-messages">
         {messages.length === 0 ? (
           <div className="chat-empty">

@@ -126,6 +126,11 @@ export default function ResearchPage() {
     }
   }, [depth, query, running]);
 
+  const stop = useCallback(() => {
+    // AbortError is swallowed by run()'s catch, so this ends the stream cleanly.
+    controllerRef.current?.abort();
+  }, []);
+
   const continueInChat = useCallback(() => {
     newChat();
     appendMessage(createUserMessage(lastQuery));
@@ -183,6 +188,16 @@ export default function ResearchPage() {
         >
           {running ? "Researching…" : "Start research →"}
         </button>
+        {running ? (
+          <button
+            type="button"
+            className="research-run"
+            onClick={stop}
+            style={{ marginLeft: 8 }}
+          >
+            ■ Stop
+          </button>
+        ) : null}
       </div>
 
       {!gatewayConnected ? (

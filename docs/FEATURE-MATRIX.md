@@ -47,7 +47,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 24 | image input | ❌ | 🟡 | ❌ | 🟡 | **shipped** (`feat/multimodal-image-input`): web picker/drag-drop/paste + CLI `--image` send real **EXIF-stripped** image blocks to a **vision-capable** model (Gemini). Router hard-errors (`unsupported_capability` + provider suggestions) when none is available — **never** a silent text-only fallback or `[Image:]` fake. Image bytes never touch the relay and are never logged. **🟡 = code + tests + web build green, but the keyed end-to-end run (browser canvas → Gemini) is the [HUMAN] smoke gate** (§ final gate). Mobile/desktop image UI deferred. See `docs/multimodal-image-input.md` |
 | 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile = unavailable fallback only |
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
-| 27 | report AI response | ✅ | ❌ | ✅ | ❌ | desktop has the Gen-AI flag control; **web has none** (no report UI in `MessageBubble.tsx`); CLI n/a |
+| 27 | report AI response | ✅ | ✅ | ✅ | ❌ | web + desktop have the Gen-AI flag control (web `MessageBubble` "Report" → on-device `zintus:reported-responses.v1`, parity with desktop); CLI n/a |
 | 28 | account / session / cloud remote | ✅ | ✅ | 🟡 | ✅ | web login/session; CLI `cloud`+`remote` |
 | 29 | export / share | ✅ | ✅ | 🟡 | ❌ | web works; desktop uses Blob+`a.download` — **unverified in the Tauri webview** (may need an fs/dialog plugin), test on a packaged build; CLI none |
 
@@ -71,7 +71,9 @@ Several rows above were stale/optimistic. Corrected inline; recorded here with c
   while the gateway reads `zintus` (`packages/keychain/src/storage.ts:6`), so desktop
   keys aren't visible to the chat path even once stored. (#19 desktop ✅→⚠️.)
 - **Web report-AI (#27) is absent**, not partial — no report control in
-  `MessageBubble.tsx`. (#27 web 🟡→❌.)
+  `MessageBubble.tsx`. (#27 web 🟡→❌.) **RESOLVED 2026-06-27** — web `MessageBubble`
+  now has a "Report" control (on-device `zintus:reported-responses.v1`, parity with
+  desktop); #27 web → ✅.
 - **Desktop icons:** the prior "real multi-res icons" wording (here) and the
   "299 B/321 B stubs" note (`RELEASE-CHECKLIST.md §1`) were *both* stale. Current truth:
   icons were regenerated to **multi-resolution** (`icon.ico` = 6 sizes incl. 16/32 px,
@@ -88,7 +90,9 @@ Several rows above were stale/optimistic. Corrected inline; recorded here with c
 - **Project `strategy`:** the apply-path works *if* a strategy is set, but the **web
   project form exposes no strategy control** (`apps/web/app/projects/page.tsx`), so
   web-created projects are always `strategy: null`. The "made strategy actually applied"
-  note (web fixes, below) was overstated for web.
+  note (web fixes, below) was overstated for web. **RESOLVED 2026-06-27** — the projects
+  form now has a Strategy select (Default/Fastest/Economy/Quality/Capability/Balanced);
+  web-created projects persist + apply it.
 - **Private Mode** is best-effort and **not fully honest**: `"unknown"`-training
   providers aren't filtered (`packages/providers/src/data-policies.ts:131`) and there's
   no per-response "not honored" signal — tracked as a P0 honesty fix (separate PR).
@@ -197,8 +201,11 @@ leaks no raw key — but caught a P1 + P2, both fixed:
   ledger/transfer code exists** (referral `commission_cents` is tracked but nothing
   moves money, and no referral row can be created while checkout is gated).
   web/desktop/cli POST prompts straight to the gateway; BYOK keys go only to a
-  loopback gateway (`isLoopbackGateway` guard) or E2E-encrypted; relay logs are
-  redacted. Single execution plane (`@zintus/engine`).
+  loopback gateway (`isLoopbackGateway` guard) or E2E-encrypted — **with one
+  documented exception: the hosted-web "test key" path transits a plaintext key
+  to the validate-key worker (SECURITY.md §key-validation); validate locally on
+  the gateway to avoid it**; relay logs are redacted. Single execution plane
+  (`@zintus/engine`).
 - **Security baseline strong** (redacted logs, OS keychain, web vault AES-GCM +
   PBKDF2-600k, Stripe HMAC + replay window, scoped account deletion).
 - **✅ FIXED — open tokenless gateway (was P1; two layers).** A brutal cross-check

@@ -300,6 +300,15 @@ LLM-assisted summarization/extraction is **opt-in** via `MEMORY_LLM=1` because i
 makes extra provider calls (cost + quota). The default path is fully offline and
 deterministic.
 
+Memory chunk recall (and the L2 response cache below) match text via embeddings.
+By default — no `OLLAMA_HOST` configured — those embeddings are a deterministic
+**keyword-hash** fallback, so similarity is token overlap, **not** semantic
+meaning. It is honest local degradation, not vector recall. Set `OLLAMA_HOST`
+(a local `nomic-embed-text`) for real semantic embeddings. `embeddingMode()` from
+`@zintus/memory` reports the active mode (`"keyword-hash"` by default, `"ollama"`
+when configured), and the package logs a one-time warning the first time it falls
+back to keyword-hash.
+
 The router keeps sticky provider affinity per `threadId + provider` (TTL 30 min)
 so a thread tends to stay on one provider.
 
@@ -311,11 +320,13 @@ before calling any provider (`packages/engine/src/engine.ts`):
 - **L1 — exact match.** SHA-256 over the message history + model/provider/
   temperature/max-tokens. O(1) lookup, sub-millisecond. A hit replays the stored
   answer verbatim.
-- **L2 — semantic (opt-in path).** When L1 misses, the last user message is
-  embedded and matched against stored prompts via `sqlite-vec` cosine distance
-  under a strict threshold (≤ 0.12). Embeddings come from a local model
-  (`nomic-embed-text` via Ollama) with a deterministic hashing fallback, so no
-  network call is required.
+- **L2 — embedding match (opt-in path).** When L1 misses, the last user message
+  is embedded and matched against stored prompts via `sqlite-vec` cosine distance
+  under a strict threshold (≤ 0.12). Embeddings are **semantic only when
+  `OLLAMA_HOST` is set** (`nomic-embed-text` via Ollama); with no embedder
+  configured (the default) they fall back to a deterministic **keyword-hash**
+  (token overlap, not meaning), so L2 degrades to near-exact token-set matching
+  rather than true semantic recall. No network call is required either way.
 
 Because a cached answer is **returned instead of calling the provider**, it can
 differ from what the live model would produce right now. The gateway surfaces

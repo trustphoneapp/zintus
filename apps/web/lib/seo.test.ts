@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import sitemap from "../app/sitemap";
 import robots from "../app/robots";
+import manifest from "../app/manifest";
 import { PUBLIC_ROUTES } from "./site";
 
 const APP_DIR = join(import.meta.dir, "..", "app");
@@ -53,6 +54,28 @@ describe("robots", () => {
     // Private app-shell routes under app/(app) must never be indexed.
     expect(disallow).toContain("/compare");
     expect(disallow).toContain("/research");
+  });
+});
+
+describe("pwa manifest", () => {
+  const m = manifest();
+
+  it("is an installable standalone app named Zintus starting at /", () => {
+    expect(m.name).toBe("Zintus");
+    expect(m.short_name).toBe("Zintus");
+    expect(m.display).toBe("standalone");
+    expect(m.start_url).toBe("/");
+  });
+
+  it("declares brand theme/background colors", () => {
+    expect(m.theme_color).toMatch(/^#[0-9a-fA-F]{6}$/);
+    expect(m.background_color).toMatch(/^#[0-9a-fA-F]{6}$/);
+  });
+
+  it("references the svg favicon and the apple-touch icon", () => {
+    const sources = (m.icons ?? []).map((i) => i.src);
+    expect(sources).toContain("/icon.svg");
+    expect(sources).toContain("/apple-icon");
   });
 });
 

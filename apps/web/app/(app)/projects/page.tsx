@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { PROVIDER_IDS, type ProviderId } from "@zintus/types";
+import { PROVIDER_IDS, type ProviderId, type RoutingStrategy } from "@zintus/types";
 import { useAppStore } from "@/lib/app-store";
 import { useSettingsStore } from "@/lib/store";
 import {
@@ -19,6 +19,7 @@ interface FormState {
   name: string;
   instructions: string;
   defaultProvider: ProviderId | "auto";
+  strategy: RoutingStrategy | "default";
   privateDefault: boolean;
 }
 
@@ -27,6 +28,7 @@ const EMPTY: FormState = {
   name: "",
   instructions: "",
   defaultProvider: "auto",
+  strategy: "default",
   privateDefault: false,
 };
 
@@ -48,6 +50,7 @@ export default function ProjectsPage() {
       name: form.name,
       instructions: form.instructions,
       defaultProvider: form.defaultProvider === "auto" ? null : form.defaultProvider,
+      strategy: form.strategy === "default" ? null : form.strategy,
       privateDefault: form.privateDefault,
     };
     if (form.id) updateProject(form.id, input);
@@ -112,6 +115,7 @@ export default function ProjectsPage() {
                       name: p.name,
                       instructions: p.instructions,
                       defaultProvider: p.defaultProvider ?? "auto",
+                      strategy: p.strategy ?? "default",
                       privateDefault: p.privateDefault,
                     })
                   }
@@ -166,6 +170,19 @@ export default function ProjectsPage() {
                 {PROVIDER_IDS.map((id) => (
                   <option key={id} value={id}>{id}</option>
                 ))}
+              </select>
+              <label style={{ fontSize: 12, color: "#94a3b8" }}>Strategy</label>
+              <select
+                value={form.strategy}
+                onChange={(e) => setForm({ ...form, strategy: e.target.value as RoutingStrategy | "default" })}
+                style={{ height: 34, borderRadius: 8, background: "#0b0f17", border: "1px solid #232a36", color: "#e8eef5", padding: "0 8px" }}
+              >
+                <option value="default">Default</option>
+                <option value="fastest">Fastest</option>
+                <option value="economy">Economy</option>
+                <option value="quality">Quality</option>
+                <option value="capability">Capability</option>
+                <option value="balanced">Balanced</option>
               </select>
               <label style={{ fontSize: 12, color: "#94a3b8", marginLeft: "auto" }}>
                 <input

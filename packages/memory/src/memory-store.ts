@@ -538,14 +538,21 @@ export class MemoryStore {
     }
     try {
       const rows = this.db.select().from(schema.memoryChunks).all();
+      // vec0 does not honor INSERT OR REPLACE on the rowid PK (it raises a UNIQUE
+      // constraint on some builds, e.g. Linux CI). DELETE-then-INSERT is the
+      // supported upsert idiom for a vec0 row by rowid.
+      const del = this.sqlite.query(
+        "DELETE FROM memory_chunk_vectors WHERE rowid = ?",
+      );
       const statement = this.sqlite.query(
-        "INSERT OR REPLACE INTO memory_chunk_vectors(rowid, embedding) VALUES (?, ?)",
+        "INSERT INTO memory_chunk_vectors(rowid, embedding) VALUES (?, ?)",
       );
       for (const row of rows) {
         const embedding = decodeEmbedding(row.embedding);
         if (!embedding || embedding.length !== dimensions) {
           continue;
         }
+        del.run(row.id);
         statement.run(row.id, JSON.stringify(embedding));
       }
     } catch {
@@ -559,8 +566,14 @@ export class MemoryStore {
       return;
     }
     try {
+      // vec0 does not honor INSERT OR REPLACE on the rowid PK (UNIQUE constraint
+      // on some builds, e.g. Linux CI) — DELETE-then-INSERT is the supported
+      // upsert idiom for a vec0 row by rowid.
       this.sqlite
-        .query("INSERT OR REPLACE INTO memory_chunk_vectors(rowid, embedding) VALUES (?, ?)")
+        .query("DELETE FROM memory_chunk_vectors WHERE rowid = ?")
+        .run(chunkId);
+      this.sqlite
+        .query("INSERT INTO memory_chunk_vectors(rowid, embedding) VALUES (?, ?)")
         .run(chunkId, JSON.stringify(embedding));
     } catch {
       this.sqliteVecAvailable = false;
