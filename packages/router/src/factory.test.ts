@@ -4,9 +4,39 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ChatMessage, Provider, ProviderId } from "@zintus/types";
 import { ProviderHttpError, estimateUsage } from "@zintus/providers";
-import { createRouter, type RouteAttemptEvent } from "./factory.js";
+import {
+  createRouter,
+  reservedOutputTokens,
+  DEFAULT_OUTPUT_RESERVE_TOKENS,
+  type RouteAttemptEvent,
+  type RouterConfig,
+} from "./factory.js";
 
 const dbPaths: string[] = [];
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+/** Yield to the event loop until `cond` holds (or fail loudly on timeout). */
+async function until(cond: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("until(): condition not met before timeout");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
 
 function stubProvider(
   id: ProviderId,
@@ -27,7 +57,10 @@ function stubProvider(
   };
 }
 
-function createTestRouter(providers: Provider[]) {
+function createTestRouter(
+  providers: Provider[],
+  extraConfig: Partial<RouterConfig> = {},
+) {
   const dbPath = join(
     tmpdir(),
     `zintus-router-test-${Date.now()}-${Math.random()}.db`,
@@ -57,6 +90,7 @@ function createTestRouter(providers: Provider[]) {
   return createRouter({
     dbPath,
     getApiKey: async () => "test-key",
+    ...extraConfig,
   });
 }
 
@@ -479,5 +513,144 @@ describe("createRouter token accounting", () => {
     const gemini = status.find((entry) => entry.id === "gemini");
     expect(gemini?.tokensToday).toBe(expected.totalTokens);
     expect(gemini?.tokensToday).toBeGreaterThan(0);
+  });
+});
+
+// The pre-dispatch reservation gate must estimate a request's OUTPUT before the
+// model produces a token. The old fixed 1024 under-counted any substantive
+// completion, so a concurrent burst of unbounded requests could overshoot a
+// provider's tokensPerMinute cap by (actual − 1024) × concurrency before
+// recordUsage reconciled it. These cover the realistic-reserve fix + the
+// invariant that an explicit maxTokens is still honored EXACTLY.
+describe("reservedOutputTokens (pre-dispatch output budget)", () => {
+  test("no maxTokens → reserves the higher default, not the old fixed 1024", () => {
+    expect(reservedOutputTokens(undefined)).toBe(DEFAULT_OUTPUT_RESERVE_TOKENS);
+    expect(reservedOutputTokens(undefined)).toBeGreaterThan(1024);
+  });
+
+  test("non-positive maxTokens counts as 'no cap given' → default", () => {
+    expect(reservedOutputTokens(0)).toBe(DEFAULT_OUTPUT_RESERVE_TOKENS);
+    expect(reservedOutputTokens(-1)).toBe(DEFAULT_OUTPUT_RESERVE_TOKENS);
+  });
+
+  test("an explicit maxTokens is honored EXACTLY (never inflated to the default)", () => {
+    expect(reservedOutputTokens(256)).toBe(256);
+    expect(reservedOutputTokens(8192)).toBe(8192);
+    // Even a tiny explicit budget below the default is respected to the token.
+    expect(reservedOutputTokens(100)).toBe(100);
+  });
+
+  test("the default is overridable per-router (configurable, not hard-coded)", () => {
+    expect(reservedOutputTokens(undefined, 2048)).toBe(2048);
+    // An explicit cap still wins over a custom default.
+    expect(reservedOutputTokens(512, 2048)).toBe(512);
+  });
+});
+
+describe("createRouter output reservation under a concurrent burst (TPM overshoot guard)", () => {
+  const messages: ChatMessage[] = [{ role: "user", content: "hi" }];
+  // Same heuristic the router uses internally (estimateUsage is passed through
+  // the @zintus/providers mock unchanged), so the expected per-request reserve
+  // is input + outputBudget.
+  const inputTokens = estimateUsage(messages, "").inputTokens;
+
+  // Drives N concurrent requests at a single tokensPerMinute-capped provider
+  // whose streamChat BLOCKS in flight (holding its reservation), then waits until
+  // every request has cleared the gate (admitted ones blocked inside streamChat,
+  // the rest rejected). Returns how many were admitted — exactly floor(TPM / R).
+  async function admittedUnderBurst(opts: {
+    tpm: number;
+    perRequestMaxTokens?: number;
+    burst: number;
+  }): Promise<number> {
+    let entered = 0;
+    let rejected = 0;
+    const block = deferred();
+    const router = createTestRouter(
+      [
+        stubProvider("cerebras", 1, async () => {
+          entered += 1;
+          await block.promise; // hold the reservation live for the whole burst
+          return {
+            stream: (async function* () {
+              yield { content: "ok" };
+            })(),
+          };
+        }),
+      ],
+      { limits: { cerebras: { tokensPerMinute: opts.tpm } } },
+    );
+
+    const inflight = Array.from({ length: opts.burst }, () =>
+      router
+        .routeAndStream({ messages, maxTokens: opts.perRequestMaxTokens })
+        .catch(() => {
+          // A request the gate rejected throws "All providers exhausted".
+          rejected += 1;
+          return null;
+        }),
+    );
+
+    await until(() => entered + rejected === opts.burst);
+    const admitted = entered;
+
+    // Release everything and drain so reservations are reclaimed cleanly.
+    block.resolve();
+    const settled = await Promise.allSettled(inflight);
+    await Promise.all(
+      settled.map(async (s) => {
+        if (s.status === "fulfilled" && s.value) {
+          for await (const _chunk of s.value.stream) {
+            // drain → triggers the reservation release
+          }
+        }
+      }),
+    );
+    return admitted;
+  }
+
+  test("no maxTokens: a burst reserves the realistic 4096 budget, capping admissions far below the old 1024 reserve", async () => {
+    const TPM = 20_000;
+    const reserveNew = inputTokens + DEFAULT_OUTPUT_RESERVE_TOKENS;
+    const expectedAdmitted = Math.floor(TPM / reserveNew);
+    // The old fixed-1024 reserve would have let this many through — the overshoot.
+    const wouldAdmitAtOld1024 = Math.floor(TPM / (inputTokens + 1024));
+
+    const admitted = await admittedUnderBurst({
+      tpm: TPM,
+      burst: wouldAdmitAtOld1024 + 2, // enough to saturate even the old reserve
+    });
+
+    // Admitted exactly floor(TPM / (input + 4096)) — proof the gate now reserves
+    // the realistic 4096 output budget, not 1024.
+    expect(admitted).toBe(expectedAdmitted);
+    // Strictly fewer than the old 1024 reserve would have admitted → the burst
+    // can no longer overshoot the TPM cap the way it used to.
+    expect(admitted).toBeLessThan(wouldAdmitAtOld1024);
+    // ...but not over-reserved into starvation.
+    expect(admitted).toBeGreaterThan(0);
+    // The cap held: total reserved output never exceeded the per-minute budget.
+    expect(admitted * reserveNew).toBeLessThanOrEqual(TPM);
+  });
+
+  test("explicit maxTokens is reserved EXACTLY at the gate (not inflated to the 4096 default)", async () => {
+    const TPM = 12_000;
+    const MAX = 2_000; // caller's own output cap; > 1024 and < the 4096 default
+    const reserveExact = inputTokens + MAX;
+    const expectedAdmitted = Math.floor(TPM / reserveExact);
+
+    const admitted = await admittedUnderBurst({
+      tpm: TPM,
+      perRequestMaxTokens: MAX,
+      burst: expectedAdmitted + 3,
+    });
+
+    // Reserved input + 2000 per request (the explicit cap), NOT input + 4096.
+    expect(admitted).toBe(expectedAdmitted);
+    // Honoring 2000 (< 4096) admits strictly more than the default would have —
+    // the caller's smaller budget is respected to the token, not over-reserved.
+    expect(admitted).toBeGreaterThan(
+      Math.floor(TPM / (inputTokens + DEFAULT_OUTPUT_RESERVE_TOKENS)),
+    );
   });
 });

@@ -59,6 +59,12 @@ export interface RouterConfig {
   fallbacks?: PolicyConfig["fallbacks"];
   /** Per-provider quota limit overrides (forwarded to the ledger). */
   limits?: Partial<Record<ProviderId, PolicyLimits>>;
+  /**
+   * Output-token budget reserved up-front for a request that sets NO explicit
+   * `maxTokens`. Defaults to {@link DEFAULT_OUTPUT_RESERVE_TOKENS}. A caller's
+   * explicit `maxTokens` is always honored EXACTLY and is unaffected by this.
+   */
+  outputReserveTokens?: number;
 }
 
 /** A provider with a recent error streak this large is treated as unhealthy. */
@@ -97,6 +103,39 @@ const OPENROUTER_FREE_MODELS = [
   "google/gemma-2-9b-it:free",
   "mistralai/mistral-7b-instruct:free",
 ] as const;
+
+/**
+ * Default output-token budget reserved up-front for a request with NO explicit
+ * `maxTokens`. The pre-dispatch reservation gate (inflight.ts) has to estimate a
+ * request's output BEFORE the model has produced a single token. The old fixed
+ * 1024 UNDER-counted any substantive completion, so a concurrent burst of
+ * unbounded requests could overshoot a provider's `tokensPerMinute` cap by
+ * `(actual − 1024) × concurrency` before `recordUsage` reconciled it — real for
+ * TPM-bound providers (Cerebras / Mistral / DeepSeek).
+ *
+ * 4096 covers the bulk of real completions for the free-tier chat models Zintus
+ * routes to, while staying a small fraction of any realistic per-minute token cap
+ * so it does not needlessly reject admissions (throttle throughput). It is NOT
+ * the model's context window — that (64k–1M, see capabilities.ts `contextWindow`)
+ * is input+output capacity, not an output cap, and reserving it would over-count
+ * by orders of magnitude and starve the gate. `recordUsage` still reconciles the
+ * reservation against real usage on completion (briefly double-counting, the safe
+ * direction), so this only has to SHRINK the under-reserve window, not erase it.
+ */
+export const DEFAULT_OUTPUT_RESERVE_TOKENS = 4096;
+
+/**
+ * Output tokens to reserve for one request before dispatch. A positive explicit
+ * `maxTokens` is honored EXACTLY (the caller capped their own output); a
+ * non-positive or unset `maxTokens` counts as "no cap given" and falls back to
+ * `defaultReserve`.
+ */
+export function reservedOutputTokens(
+  maxTokens: number | undefined,
+  defaultReserve: number = DEFAULT_OUTPUT_RESERVE_TOKENS,
+): number {
+  return maxTokens && maxTokens > 0 ? maxTokens : defaultReserve;
+}
 
 export function createRouter(config: RouterConfig = {}): Router {
   const strategy = config.strategy ?? "fastest";
@@ -148,16 +187,21 @@ export function createRouter(config: RouterConfig = {}): Router {
   // requests would otherwise all pass the pre-dispatch check before any of them
   // debits the counters. See inflight.ts.
   const reservations = new InFlightReservations();
-  const OUTPUT_RESERVE_TOKENS = 1024;
+  // Output budget reserved up-front when the caller sets no maxTokens. Higher
+  // than the old fixed 1024 so a concurrent burst of unbounded requests can't
+  // overshoot a provider's tokensPerMinute cap before recordUsage reconciles it
+  // (see DEFAULT_OUTPUT_RESERVE_TOKENS). Overridable per-router via config.
+  const outputReserveDefault =
+    config.outputReserveTokens && config.outputReserveTokens > 0
+      ? config.outputReserveTokens
+      : DEFAULT_OUTPUT_RESERVE_TOKENS;
 
   /** Estimated tokens a request will consume (input estimate + output budget). */
   function estimateReserveTokens(request: RouteRequest): number {
     const { inputTokens } = estimateUsage(request.messages, "");
-    const output =
-      request.maxTokens && request.maxTokens > 0
-        ? request.maxTokens
-        : OUTPUT_RESERVE_TOKENS;
-    return inputTokens + output;
+    return (
+      inputTokens + reservedOutputTokens(request.maxTokens, outputReserveDefault)
+    );
   }
 
   /**
