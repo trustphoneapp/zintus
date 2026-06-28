@@ -50,7 +50,9 @@ export default function ProvidersScreen() {
       <div>
         <h1 style={{ fontSize: 20, fontWeight: 700 }}>Providers</h1>
         <p style={{ fontSize: 14, color: "var(--color-text-sub)" }}>
-          API keys stored in the OS keyring via tauri-plugin-keyring.
+          API keys are stored in your OS keyring (Keychain, Credential Manager,
+          or Secret Service) under the same `zintus` service the local gateway
+          reads.
           {!isTauri() && " Run `bun tauri dev` for keyring access."}
         </p>
       </div>

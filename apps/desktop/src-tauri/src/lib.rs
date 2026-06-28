@@ -2,7 +2,14 @@
 
 use keyring::Entry;
 
-const SERVICE: &str = "com.zintus.desktop";
+// OS-keychain service name. Must match the gateway/CLI keychain service
+// (`packages/keychain/src/storage.ts`, `const SERVICE = "zintus"`) so a key the
+// user enters in the desktop app lands in the SAME OS-keychain entry the local
+// gateway reads for the chat path. Entries are keyed by provider id (the
+// `provider_id` account below), mirroring the gateway's `Entry(SERVICE, id)`
+// layout. Previously this was "com.zintus.desktop", which made desktop-entered
+// keys invisible to the gateway even once the invoke path was fixed.
+const SERVICE: &str = "zintus";
 
 fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
   Entry::new(SERVICE, provider_id).map_err(|error| error.to_string())
