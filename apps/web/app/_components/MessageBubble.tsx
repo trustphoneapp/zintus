@@ -5,6 +5,7 @@ import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
 import type { UiMessage, ToolCall } from "@/lib/app-store";
 import { formatImageBytes } from "@/lib/image-attachments";
+import { summarizeArtifactBody, type Artifact } from "@/lib/artifacts";
 import { Icon } from "./Icons";
 import { TransparencyStrip } from "./TransparencyStrip";
 import { CompressionBadge } from "./CompressionBadge";
@@ -89,6 +90,8 @@ export function MessageBubble({
   isStreaming = false,
   toolCalls,
   structured,
+  artifacts,
+  onOpenArtifact,
 }: {
   message: UiMessage;
   onRegenerate?: () => void;
@@ -97,6 +100,10 @@ export function MessageBubble({
   toolCalls?: ToolCall[];
   /** Structured / JSON output to render in a labeled code block. */
   structured?: unknown;
+  /** Artifacts detected in this assistant turn (computed by the chat page). */
+  artifacts?: Artifact[];
+  /** Open the side panel to a given artifact. */
+  onOpenArtifact?: (id: string) => void;
 }) {
   const isUser = message.role === "user";
   const provider = message.providerId
@@ -116,6 +123,14 @@ export function MessageBubble({
   // When the answer body *itself* is JSON, render it as a code block instead of
   // forcing it through the markdown path (prose paths stay untouched).
   const contentIsJson = structured === undefined && structuredText !== null;
+  // Substantial code/HTML/SVG blocks move to the side panel; the inline body
+  // keeps a short reference instead of the whole block. (Markdown-document
+  // artifacts stay inline — they ARE the prose.)
+  const hasArtifacts = Array.isArray(artifacts) && artifacts.length > 0;
+  const bodyContent =
+    hasArtifacts && !contentIsJson
+      ? summarizeArtifactBody(message.content, artifacts!)
+      : message.content;
 
   async function copy() {
     try {
@@ -218,7 +233,7 @@ export function MessageBubble({
             ) : contentIsJson && structuredText ? (
               <CodeBlock lang="json" text={structuredText} label="JSON output" />
             ) : (
-              <Markdown content={message.content} />
+              <Markdown content={bodyContent} />
             )}
             {isStreaming ? <span className="stream-caret" aria-hidden /> : null}
           </>
@@ -227,6 +242,18 @@ export function MessageBubble({
             <span className="thinking-dot" aria-hidden />
             Thinking…
           </span>
+        ) : null}
+        {hasArtifacts && onOpenArtifact ? (
+          <button
+            type="button"
+            className="artifact-affordance"
+            onClick={() => onOpenArtifact(artifacts![0]!.id)}
+            title="Open in the artifacts panel"
+            style={{ marginTop: message.content ? 8 : 0 }}
+          >
+            <Icon name="layers" size={13} />
+            {artifacts!.length} artifact{artifacts!.length === 1 ? "" : "s"} · open panel
+          </button>
         ) : null}
         {hasToolCalls ? (
           <div

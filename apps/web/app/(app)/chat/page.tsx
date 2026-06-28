@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { MessageBubble } from "@/app/_components/MessageBubble";
+import { ArtifactPanel } from "@/app/_components/ArtifactPanel";
+import { extractArtifacts, type Artifact } from "@/lib/artifacts";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { ConsentDialog } from "@/app/_components/ConsentDialog";
@@ -229,6 +231,43 @@ export default function ChatPage() {
       localStorage.setItem("zintus:json", String(jsonEnabled));
     }
   }, [jsonEnabled]);
+
+  // ── Artifacts / canvas side panel ─────────────────────────────────────────
+  // The panel lists every artifact-worthy block (substantial code, full HTML,
+  // SVG, long markdown doc) across the conversation. Detection is pure (see
+  // lib/artifacts.ts); ids are namespaced by message so two turns never collide.
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
+  const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  const { artifactList, artifactsByMessage } = useMemo(() => {
+    const list: Artifact[] = [];
+    const byMessage: Record<string, Artifact[]> = {};
+    for (const m of messages) {
+      if (m.role !== "assistant" || !m.content) continue;
+      const arts = extractArtifacts(m.content).map((a) => ({
+        ...a,
+        id: `${m.id}:${a.id}`,
+      }));
+      if (arts.length > 0) {
+        byMessage[m.id] = arts;
+        list.push(...arts);
+      }
+    }
+    return { artifactList: list, artifactsByMessage: byMessage };
+  }, [messages]);
+
+  const openArtifact = useCallback((id: string) => {
+    setActiveArtifactId(id);
+    setArtifactPanelOpen(true);
+  }, []);
+
+  // Close the panel if the conversation no longer has any artifacts (e.g. after
+  // a regenerate or switching to an empty thread).
+  useEffect(() => {
+    if (artifactList.length === 0) {
+      setArtifactPanelOpen(false);
+      setActiveArtifactId(null);
+    }
+  }, [artifactList.length]);
 
   useEffect(() => {
     hydrate();
@@ -885,6 +924,7 @@ export default function ChatPage() {
   }, [messages]);
 
   return (
+    <div className="chat-layout">
     <div className="screen chat-screen">
       {incognito ? (
         <div className="chat-local-banner chat-incognito-banner">
@@ -1013,6 +1053,25 @@ export default function ChatPage() {
               </div>
             ) : null}
           </div>
+          {artifactList.length > 0 ? (
+            <button
+              type="button"
+              className={`chat-tool-toggle${artifactPanelOpen ? " active" : ""}`}
+              onClick={() => {
+                if (artifactPanelOpen) {
+                  setArtifactPanelOpen(false);
+                } else {
+                  openArtifact(activeArtifactId ?? artifactList[0]!.id);
+                }
+              }}
+              aria-pressed={artifactPanelOpen}
+              aria-label="Toggle the artifacts panel"
+              title="Substantial code, HTML, SVG, and long docs from this chat"
+            >
+              <Icon name="layers" size={13} />
+              Artifacts ({artifactList.length})
+            </button>
+          ) : null}
           {messages.length > 0 ? (
             <button
               type="button"
@@ -1083,6 +1142,8 @@ export default function ChatPage() {
               message={message}
               toolCalls={message.toolCalls}
               isStreaming={loading && message.id === lastAssistantId}
+              artifacts={artifactsByMessage[message.id]}
+              onOpenArtifact={openArtifact}
               onRegenerate={
                 message.id === lastAssistantId && !loading
                   ? regenerate
@@ -1486,6 +1547,15 @@ export default function ChatPage() {
           ) : null}
         </div>
       </div>
+    </div>
+    {artifactPanelOpen && artifactList.length > 0 ? (
+      <ArtifactPanel
+        artifacts={artifactList}
+        activeId={activeArtifactId}
+        onSelect={setActiveArtifactId}
+        onClose={() => setArtifactPanelOpen(false)}
+      />
+    ) : null}
     </div>
   );
 }
