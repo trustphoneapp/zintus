@@ -241,6 +241,13 @@ export interface ResponseMeta {
   savedVsBaselineUsd?: number;
   /** Routing strategy the gateway actually used (e.g. "fastest"). */
   routingStrategy?: string;
+  /**
+   * Human "why this provider/model" line from the gateway's route trace (e.g.
+   * "cheapest healthy provider", "failover after groq rate-limit"). `undefined`
+   * when the trace recorded no reason. Surfaced as the headline at the top of the
+   * assistant turn — the prominent "why this route" signal the audit flagged missing.
+   */
+  routeReason?: string;
 }
 
 interface GatewayChunk {
@@ -267,6 +274,7 @@ interface GatewayChunk {
   cost_usd?: number;
   saved_vs_claude_sonnet?: number;
   routing_strategy?: string;
+  route_reason?: string;
 }
 
 /** One actionable provider suggestion from the gateway's capability error. */
@@ -510,6 +518,9 @@ export async function streamGatewayChat(params: {
         }
         if (chunk.routing_strategy != null) {
           meta.routingStrategy = chunk.routing_strategy;
+        }
+        if (chunk.route_reason != null) {
+          meta.routeReason = chunk.route_reason;
         }
         continue;
       }

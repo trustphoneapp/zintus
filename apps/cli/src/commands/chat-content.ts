@@ -96,6 +96,84 @@ export async function loadImages(paths: string[]): Promise<ImageContentBlock[]> 
 }
 
 /**
+ * Honest per-turn quota line. `used` is the tokens spent against this provider's
+ * free tier today (the engine's `tokensToday`); `limit` is the provider's daily
+ * cap. The cap is `null`/`undefined` when the engine has no reported denominator
+ * — in that case we say "limit unknown" and NEVER fabricate one (the audit
+ * flagged the old code inventing a 1,000,000 denominator). Returns `null` when
+ * there is no usage figure at all (so the caller omits the line entirely).
+ */
+export function formatQuotaUsage(
+  used: number | undefined,
+  limit: number | null | undefined,
+): string | null {
+  if (used == null) return null;
+  if (limit == null) {
+    return `quota ${used.toLocaleString()} tok used today (limit unknown)`;
+  }
+  return `quota ${used.toLocaleString()}/${limit.toLocaleString()} tok`;
+}
+
+/** Per-turn transparency facts, mirroring the gateway's `metadata` frame. Every
+ *  numeric field is optional: the engine only reports what it actually measured,
+ *  and the renderer omits anything absent rather than inventing a value. */
+export interface TurnFacts {
+  /** Display name for the winning provider (falls back to its id). */
+  providerLabel: string;
+  /** Concrete model the request routed to. */
+  model: string;
+  /** The "why this provider/model" headline from the engine's route trace. */
+  routeReason?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  /** Estimate-only USD this turn would cost on a paid API (0 on free tiers). */
+  costUsd?: number;
+  /** Tokens spent against this provider's free tier today. */
+  quotaUsed?: number;
+  /** Provider's daily token cap — `null`/`undefined` when not reported. */
+  quotaLimit?: number | null;
+}
+
+/**
+ * Render the post-turn transparency summary the CLI prints after a chat reply:
+ * provider · model, the route-reason headline, then the real per-turn facts
+ * (tokens in/out, cost estimate, quota). HONEST BY CONSTRUCTION: each fact is
+ * emitted only when present, costs show "$0 (free tier)" rather than a fake
+ * charge, and the quota denominator is the engine's real value or "unknown" —
+ * never a fabricated 1,000,000. Returns plain text (no ANSI) so it is directly
+ * unit-testable; the caller applies any colouring.
+ */
+export function formatTurnSummary(facts: TurnFacts): string {
+  const lines: string[] = [];
+  lines.push(
+    facts.model
+      ? `${facts.providerLabel} · ${facts.model}`
+      : facts.providerLabel,
+  );
+  const reason = facts.routeReason?.trim();
+  if (reason) {
+    lines.push(`why: ${reason}`);
+  }
+  const parts: string[] = [];
+  if (facts.inputTokens != null && facts.outputTokens != null) {
+    parts.push(
+      `${facts.inputTokens.toLocaleString()} in / ${facts.outputTokens.toLocaleString()} out tok`,
+    );
+  }
+  if (facts.costUsd != null) {
+    parts.push(
+      facts.costUsd > 0 ? `~$${facts.costUsd.toFixed(4)} est` : "$0 (free tier)",
+    );
+  }
+  const quota = formatQuotaUsage(facts.quotaUsed, facts.quotaLimit);
+  if (quota) parts.push(quota);
+  if (parts.length > 0) {
+    lines.push(parts.join(" · "));
+  }
+  return lines.join("\n");
+}
+
+/**
  * Map a routing/engine error to a clear user-facing string. The router throws a
  * bare `unsupported_capability` when an image request can't reach a
  * vision-capable provider/model; we turn that into the honest capability error

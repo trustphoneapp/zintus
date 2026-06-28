@@ -101,7 +101,7 @@ export default function ProvidersScreen() {
         {providers.map((provider) => {
           // Remaining free-tier quota as a percent (gateway owns the ledger).
           const remainingPct =
-            provider.quotaLimit > 0
+            provider.quotaLimit != null && provider.quotaLimit > 0
               ? Math.max(
                   0,
                   Math.min(

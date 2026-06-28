@@ -195,10 +195,37 @@ export function MessageBubble({
 
   return (
     <div style={{ display: "flex", flexDirection: "column" }}>
-      {message.providerId ? (
-        <p className="chat-bubble-meta">
-          {message.providerId.toUpperCase()}
-          {message.model ? ` · ${message.model}` : ""}
+      {message.providerId || message.meta?.routeReason ? (
+        <p
+          className="chat-bubble-meta"
+          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}
+        >
+          {message.providerId ? (
+            <span>
+              {message.providerId.toUpperCase()}
+              {message.model ? ` · ${message.model}` : ""}
+            </span>
+          ) : null}
+          {message.meta?.routeReason ? (
+            // The headline "why this provider/model" — the prominent route reason
+            // (the rest of the transparency strip stays below). Mirrors web's
+            // MessageBubble top-line treatment.
+            <span
+              title="Why the router chose this provider and model for this turn"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "1px 7px",
+                borderRadius: 999,
+                fontWeight: 600,
+                color: "var(--color-accent, #7C3AED)",
+                background:
+                  "color-mix(in oklch, var(--color-accent, #7C3AED) 14%, transparent)",
+              }}
+            >
+              {message.meta.routeReason}
+            </span>
+          ) : null}
         </p>
       ) : null}
       <div className="chat-bubble-assistant">

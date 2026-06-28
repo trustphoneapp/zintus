@@ -3,15 +3,22 @@ import chalk from "chalk";
 import ora from "ora";
 import { tryGitDiff } from "@zintus/context-compiler";
 import { listKeys } from "@zintus/keychain";
+import { estimateCostUsd } from "@zintus/providers";
 import type {
   ContextMode,
   ImageContentBlock,
+  RouteUsage,
   ToolDefinition,
 } from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
 import { getActiveProject } from "../lib/projects.js";
-import { buildChatContent, loadImages, normalizeChatError } from "./chat-content.js";
+import {
+  buildChatContent,
+  formatTurnSummary,
+  loadImages,
+  normalizeChatError,
+} from "./chat-content.js";
 
 /** Load + minimally validate a `ToolDefinition[]` from a JSON file. Throws a
  *  clear, user-facing error rather than a raw parse stack. */
@@ -167,6 +174,10 @@ export async function runChat(
     // just the plain string (unchanged text-only shape).
     const userContent = buildChatContent(userText, imageBlocks);
     const tools = options?.toolsFile ? loadTools(options.toolsFile) : undefined;
+    // Captured when the winning provider's stream completes — the real measured
+    // token counts for this turn (never fabricated). Mirrors the gateway's
+    // `onUsage`-fed metadata frame.
+    let usage: RouteUsage | undefined;
     const result = await engine.routeAndStream({
       messages: [{ role: "user", content: userContent }],
       provider: forcedProvider,
@@ -174,6 +185,9 @@ export async function runChat(
       threadId,
       diffText,
       tools,
+      onUsage: (u) => {
+        usage = u;
+      },
     });
 
     const provider = (await engine.getProviderStatus()).find(
@@ -199,6 +213,33 @@ export async function runChat(
         );
       }
     }
+
+    // Post-turn transparency: provider · model, the route-reason headline, and
+    // the REAL per-turn facts (tokens, cost estimate, quota). Everything here is
+    // measured or reported by the engine — absent fields are omitted, the quota
+    // denominator is the provider's real cap or "unknown" (never a fabricated
+    // 1,000,000), and cost is an estimate ($0 on free tiers).
+    const costUsd = usage
+      ? estimateCostUsd(
+          result.providerId,
+          usage.model ?? result.model,
+          usage.inputTokens,
+          usage.outputTokens,
+        )
+      : undefined;
+    const summary = formatTurnSummary({
+      providerLabel: provider?.name ?? result.providerId,
+      model: result.model,
+      routeReason: result.routeReason,
+      inputTokens: usage?.inputTokens,
+      outputTokens: usage?.outputTokens,
+      costUsd,
+      quotaUsed: provider?.tokensToday,
+      // tokensLimit is undefined when the engine has no reported daily cap — pass
+      // it through as null so the renderer prints "limit unknown", not a guess.
+      quotaLimit: provider?.tokensLimit ?? null,
+    });
+    console.error(chalk.dim(summary));
 
     if (result.threadId) {
       console.error(chalk.dim(`thread ${result.threadId}`));
