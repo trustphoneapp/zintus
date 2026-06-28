@@ -77,7 +77,13 @@ function buildCsp(nonce: string): string {
     scriptSrc,
     "connect-src 'self' http://localhost:* http://127.0.0.1:* https://relay.zintus.ai https://*.zintus.ai",
     "worker-src 'self' blob:",
-    "frame-src 'none'",
+    // 'self' (not 'none') so the artifacts/canvas preview can render: it's a
+    // SANDBOXED srcdoc iframe (sandbox="allow-scripts", NO allow-same-origin, no
+    // network), framing only our own model-output content. Third-party frames
+    // still need an explicit URL allowance, so this stays tight. The live render
+    // under this policy is the in-browser [HUMAN] check; if a browser still
+    // blocks the srcdoc frame, the panel degrades to "preview unavailable".
+    "frame-src 'self'",
     "upgrade-insecure-requests",
   ].join("; ");
 }
