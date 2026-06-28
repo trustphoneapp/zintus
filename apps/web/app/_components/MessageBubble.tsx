@@ -3,20 +3,14 @@
 import { useState } from "react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
-import type { UiMessage } from "@/lib/app-store";
+import type { UiMessage, ToolCall } from "@/lib/app-store";
 import { formatImageBytes } from "@/lib/image-attachments";
 import { Icon } from "./Icons";
 import { TransparencyStrip } from "./TransparencyStrip";
 import { CompressionBadge } from "./CompressionBadge";
 import { Markdown, CodeBlock } from "./Markdown";
 
-/** A single tool/function call surfaced by the assistant turn. */
-export interface ToolCall {
-  id: string;
-  name: string;
-  /** Raw args — a JSON string or an already-parsed object. */
-  arguments?: unknown;
-}
+export type { ToolCall };
 
 /** Pretty, single-line args for the compact call card; multi-line for the pre. */
 function formatArgs(args: unknown, pretty: boolean): string {

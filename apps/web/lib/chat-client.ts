@@ -3,6 +3,9 @@ import type {
   ContentBlock,
   ContextMode,
   ProviderId,
+  ToolCallContentBlock,
+  ToolChoice,
+  ToolDefinition,
 } from "@zintus/types";
 import {
   fetchGatewayHealth,
@@ -27,6 +30,9 @@ export interface StreamChatResult {
   compileTokens?: number;
   meta?: ChatMeta;
   compression?: CompressionStats;
+  /** Tool calls the model made this turn (empty for a normal text turn). The
+   *  caller runs the tools and sends results back as tool_result blocks. */
+  toolCalls?: ToolCallContentBlock[];
   source: "gateway";
 }
 
@@ -44,6 +50,10 @@ export async function streamChat(params: {
   settings?: AppConfig;
   webSearch?: boolean;
   temperature?: number;
+  /** Tool/function definitions for this turn. Requires a tool-capable provider —
+   *  the gateway returns a structured 422 otherwise. */
+  tools?: ToolDefinition[];
+  toolChoice?: ToolChoice;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<StreamChatResult> {
@@ -67,6 +77,8 @@ export async function streamChat(params: {
     allowTraining: params.settings?.allowTrainingProviders,
     keys: params.apiKeys,
     temperature: params.temperature,
+    tools: params.tools,
+    toolChoice: params.toolChoice,
     signal: params.signal,
     onChunk: params.onChunk,
   });

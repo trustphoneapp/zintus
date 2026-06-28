@@ -106,18 +106,20 @@ Verified green at audit time: `bun run typecheck` exit 0; full `bun run test` ex
 **Capability status — updated post-audit (2026-06-28).** The "absent stack-wide"
 line below was true at audit time but is now stale; the corrected picture:
 
-- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web 🟡 · Desktop ❌ · Mobile ❌**.
+- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ❌ · Mobile ❌**.
   Provider streaming (`packages/providers/src/utils.ts`), Gemini round-trip, and
   gateway 422-on-unsupported are tested; the CLI `--tools` loader
   (`apps/cli/src/commands/chat.ts`) is hardened (rejects null/array `parameters`).
-  **Web is 🟡 = API/plumbing only, no chat-UI yet:** the SSE tool-call reassembly
-  (`apps/web/lib/gateway.ts` `accumulateToolCallDeltas`/`finalizeToolCalls`) is
-  wired and unit-tested (`apps/web/lib/gateway.test.ts`), but the web chat composer
-  never sends a `tools` array and no chat surface renders a tool-call card — a web
-  *user* cannot define a tool or watch one fire. Per the end-to-end rule below, ✅ is
-  reserved for UI → gateway → provider, so the wired-but-unsurfaced library is 🟡,
-  not ✅. **Desktop/mobile have no tool UI (❌)** — the gateway + CLI serve tools, but
-  no desktop/mobile surface exposes them yet.
+  **Web now closes the loop end-to-end:** a **Tools** toggle in the chat composer
+  offers a small set of **browser-safe built-in tools** (`apps/web/lib/web-tools.ts`
+  — calculator (eval-free, CSP-safe), `current_datetime`, `random_number`); the
+  model's calls render as tool-call cards (`MessageBubble`), execute locally, and
+  feed `tool_result` blocks back in a bounded loop (max 5 rounds) until the model
+  answers (`streamAssistant` in `chat/page.tsx`). Unit-tested
+  (`apps/web/lib/web-tools.test.ts`). **Caveat:** the web set is BUILT-IN only — a
+  UI for *user-defined* tools (arbitrary schemas/executors) is future work; the
+  gateway API + CLI accept arbitrary tool definitions today. **Desktop/mobile have
+  no tool UI (❌).**
 - **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web 🟡 · Desktop ❌ · Mobile ❌**.
   Engine validate→repair + gateway strict-422 tested. Conservative: only Gemini is
   `json_schema`; others `json_object`/prompt-level. **Web is 🟡 = library/plumbing

@@ -22,6 +22,11 @@ import {
 import { processImage, MediaError } from "@zintus/media";
 import type { ContentBlock, ImageContentBlock } from "@zintus/types";
 import {
+  BUILTIN_TOOL_DEFINITIONS,
+  BUILTIN_WEB_TOOLS,
+  executeWebToolCall,
+} from "@/lib/web-tools";
+import {
   acceptImageFile,
   buildImageMessageContent,
   formatImageBytes,
@@ -184,6 +189,16 @@ export default function ChatPage() {
     return false;
   });
 
+  // Tools toggle (persisted): when on, the built-in browser-safe tools
+  // (calculator, current_datetime, random_number) are offered to the model and
+  // executed locally in a bounded loop. Requires a tool-capable provider.
+  const [toolsEnabled, setToolsEnabled] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:tools") === "true";
+    }
+    return false;
+  });
+
   useEffect(() => {
     hydrate();
     void unlock();
@@ -342,48 +357,125 @@ export default function ChatPage() {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      // The tools turn runs STATELESS (no threadId) so the bounded execution loop
+      // is deterministic: `send` passes the full conversation as `sendMessages`
+      // when tools are on. A normal turn keeps the threadId-compiled context.
+      const useThread = !toolsEnabled;
+      const convo: ChatMessage[] = [...sendMessages];
+      let currentAssistantId = assistantId;
+      const MAX_TOOL_ROUNDS = 5;
+
       try {
-        const result = await streamChat({
-          messages: sendMessages,
-          providerId: selectedProvider ?? undefined,
-          mode: settings.contextMode,
-          threadId,
-          // Read fresh: the LocalKeyManager may have just populated the vault and
-          // re-invoked send() before this component re-rendered with new keys.
-          apiKeys: useProviderStatusStore.getState().keys,
-          // Incognito prefers non-training providers regardless of the saved pref.
-          settings: incognito
-            ? { ...settings, blockTrainingProviders: true }
-            : settings,
-          webSearch: webSearchEnabled,
-          temperature: activePreset?.temperature,
-          signal: controller.signal,
-          onChunk: (text) => updateMessage(assistantId, text),
-        });
-
-        setActiveProvider(result.providerId);
-        setThreadId(result.threadId);
-        patchMessage(assistantId, {
-          providerId: result.providerId,
-          model: result.model,
-          compileTokens: result.compileTokens,
-          meta: result.meta,
-          compression: result.compression,
-        });
-
-        pushTerminalLine({
-          text: `→ routed to ${result.providerId} (${result.model}) via ${result.source}`,
-          tone: "success",
-        });
-        // Multimodal: confirm which provider actually read the image(s).
-        if (hadImages) {
-          setNotice({
-            tone: "ok",
-            text: `Image analyzed by ${result.meta?.provider ?? result.providerId}`,
+        for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+          let streamedText = "";
+          const result = await streamChat({
+            messages: convo,
+            providerId: selectedProvider ?? undefined,
+            mode: settings.contextMode,
+            threadId: useThread ? threadId : undefined,
+            // Read fresh: the LocalKeyManager may have just populated the vault and
+            // re-invoked send() before this component re-rendered with new keys.
+            apiKeys: useProviderStatusStore.getState().keys,
+            // Incognito prefers non-training providers regardless of the saved pref.
+            settings: incognito
+              ? { ...settings, blockTrainingProviders: true }
+              : settings,
+            webSearch: webSearchEnabled,
+            temperature: activePreset?.temperature,
+            tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
+            signal: controller.signal,
+            onChunk: (text) => {
+              streamedText = text;
+              updateMessage(currentAssistantId, text);
+            },
           });
-        }
-        if (result.source === "gateway") {
-          await loadLastTrace();
+
+          setActiveProvider(result.providerId);
+          if (useThread) setThreadId(result.threadId);
+          patchMessage(currentAssistantId, {
+            providerId: result.providerId,
+            model: result.model,
+            compileTokens: result.compileTokens,
+            meta: result.meta,
+            compression: result.compression,
+          });
+          pushTerminalLine({
+            text: `→ routed to ${result.providerId} (${result.model}) via ${result.source}`,
+            tone: "success",
+          });
+          // Multimodal: confirm which provider actually read the image(s).
+          if (hadImages && round === 0) {
+            setNotice({
+              tone: "ok",
+              text: `Image analyzed by ${result.meta?.provider ?? result.providerId}`,
+            });
+          }
+          if (result.source === "gateway") {
+            await loadLastTrace();
+          }
+
+          const calls = result.toolCalls ?? [];
+          if (calls.length === 0) break;
+
+          // Render the tool calls on the current assistant bubble.
+          patchMessage(currentAssistantId, {
+            toolCalls: calls.map((c) => ({
+              id: c.id,
+              name: c.name,
+              arguments: c.arguments,
+            })),
+          });
+
+          if (round === MAX_TOOL_ROUNDS) {
+            pushTerminalLine({
+              text: `⚠ tool loop stopped after ${MAX_TOOL_ROUNDS} rounds`,
+              tone: "warning",
+            });
+            if (!streamedText.trim()) {
+              updateMessage(
+                currentAssistantId,
+                `_Stopped after ${MAX_TOOL_ROUNDS} tool rounds._`,
+              );
+            }
+            break;
+          }
+
+          // Execute each call locally (built-in, browser-safe tools) and feed the
+          // results back on the next request as tool_result blocks.
+          const results = calls.map((c) =>
+            executeWebToolCall({ id: c.id, name: c.name, arguments: c.arguments }),
+          );
+          for (const c of calls) {
+            const r = results.find((x) => x.toolCallId === c.id);
+            pushTerminalLine({
+              text: `🔧 ${c.name}(${JSON.stringify(c.arguments)}) → ${r?.isError ? "error" : (r?.content ?? "")}`,
+              tone: r?.isError ? "warning" : "muted",
+            });
+          }
+
+          convo.push({
+            role: "assistant",
+            content: [
+              ...(streamedText.trim()
+                ? [{ type: "text" as const, text: streamedText }]
+                : []),
+              ...calls,
+            ],
+          });
+          convo.push({
+            role: "user",
+            content: results.map((r) => ({
+              type: "tool_result" as const,
+              toolCallId: r.toolCallId,
+              content: r.content,
+              isError: r.isError,
+            })),
+          });
+
+          // A fresh assistant bubble for the next round's answer.
+          const next = createAssistantPlaceholder();
+          appendMessage(next);
+          currentAssistantId = next.id;
         }
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
@@ -395,22 +487,23 @@ export default function ChatPage() {
           const lines = [
             error.message,
             "",
-            "Try a vision-capable provider:",
+            "Try a different provider:",
             ...error.suggestions.map((s) => `- **${s.provider}** — ${s.reason}`),
           ];
-          updateMessage(assistantId, lines.join("\n"));
+          updateMessage(currentAssistantId, lines.join("\n"));
           pushTerminalLine({ text: `✗ ${error.message}`, tone: "warning" });
           return;
         }
         const message =
           error instanceof Error ? error.message : "Request failed";
-        updateMessage(assistantId, `Error: ${message}`);
+        updateMessage(currentAssistantId, `Error: ${message}`);
         pushTerminalLine({ text: `✗ ${message}`, tone: "warning" });
       } finally {
         setLoading(false);
       }
     },
     [
+      appendMessage,
       loadLastTrace,
       patchMessage,
       pushTerminalLine,
@@ -419,6 +512,7 @@ export default function ChatPage() {
       setThreadId,
       settings,
       threadId,
+      toolsEnabled,
       updateMessage,
       webSearchEnabled,
       incognito,
@@ -539,7 +633,10 @@ export default function ChatPage() {
       }
     }
     const sendMessages: ChatMessage[] =
-      threadId == null
+      // A tools turn runs stateless, so it needs the FULL conversation here (the
+      // loop in streamAssistant drops threadId). A normal continued turn sends
+      // just the new user message and relies on threadId-compiled context.
+      threadId == null || toolsEnabled
         ? [...leading, ...history]
         : [{ role: "user", content: userMessageContent }];
     await streamAssistant(
@@ -560,6 +657,7 @@ export default function ChatPage() {
     settings,
     streamAssistant,
     threadId,
+    toolsEnabled,
   ]);
 
   const regenerate = useCallback(async () => {
@@ -734,6 +832,7 @@ export default function ChatPage() {
             <MessageBubble
               key={message.id}
               message={message}
+              toolCalls={message.toolCalls}
               isStreaming={loading && message.id === lastAssistantId}
               onRegenerate={
                 message.id === lastAssistantId && !loading
@@ -803,6 +902,24 @@ export default function ChatPage() {
             >
               <Icon name="globe" size={13} />
               Search
+            </button>
+            <button
+              type="button"
+              className={`chat-tool-toggle${toolsEnabled ? " active" : ""}`}
+              aria-pressed={toolsEnabled}
+              aria-label="Toggle tools"
+              onClick={() => {
+                setToolsEnabled((v) => {
+                  const next = !v;
+                  if (typeof localStorage !== "undefined") {
+                    localStorage.setItem("zintus:tools", String(next));
+                  }
+                  return next;
+                });
+              }}
+              title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally in your browser; needs a tool-capable provider.`}
+            >
+              🔧 Tools
             </button>
             <button
               type="button"
