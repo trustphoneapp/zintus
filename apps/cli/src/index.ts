@@ -154,8 +154,12 @@ keys
   .description("Store an API key for a provider")
   .argument("<provider>", `Provider (${PROVIDER_IDS.join(", ")})`)
   .argument("<key>", "API key value")
-  .action(async (provider: string, key: string) => {
-    await runKeysSet(provider, key);
+  .option(
+    "--fallback",
+    "Append as a FALLBACK key (kept in priority order; the router tries it on an auth failure) instead of replacing the primary",
+  )
+  .action(async (provider: string, key: string, options: { fallback?: boolean }) => {
+    await runKeysSet(provider, key, options);
   });
 
 keys

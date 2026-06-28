@@ -494,29 +494,25 @@ export default function ProvidersPage() {
             })}
       </div>
 
-      {/* Key priority & fallback — honest "Coming soon" placeholder, NOT a fake
-          control. Today Zintus uses one key per provider; prioritized + fallback
-          BYOK keys (OpenRouter-style) are on the roadmap. */}
-      <div className="vault-card" style={{ opacity: 0.85 }}>
+      {/* Key priority & fallback — now LIVE in the local gateway, not a stub.
+          The router stores an ordered key list per provider in the OS keychain
+          and tries the next key on an auth (401/403) failure before abandoning
+          the provider (OpenRouter-style). This web cockpit manages the PRIMARY
+          key here; add fallback keys to the ordered list with the CLI
+          (`zintus keys`) where the keychain lives. No custody — keys stay local. */}
+      <div className="vault-card">
         <div className="provider-card-top" style={{ marginBottom: 6 }}>
           <div className="provider-card-title">
             <Icon name="layers" size={14} />
             <span>Key priority &amp; fallback</span>
           </div>
-          <span
-            className="provider-chip"
-            style={{
-              color: "var(--color-text-muted)",
-              border: "1px solid var(--c-border)",
-            }}
-          >
-            Coming soon
-          </span>
+          <span className="provider-badge ok">Active</span>
         </div>
         <p className="vault-hint">
-          Today each provider uses a single key. Prioritized + fallback BYOK keys
-          per provider (OpenRouter-style ordering, with per-key quota) are planned —
-          this is a placeholder, not an active control.
+          Add a primary key per provider here. Your local gateway keeps an ordered
+          key list per provider and, on an authentication failure, automatically
+          retries the next key before failing over to another provider — keys are
+          never sent anywhere except your own gateway.
         </p>
       </div>
 

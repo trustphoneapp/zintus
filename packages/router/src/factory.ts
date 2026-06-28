@@ -79,6 +79,13 @@ export interface RouterConfig {
   providerPriority?: ProviderId[];
   defaultProvider?: ProviderId;
   getApiKey?: (providerId: ProviderId) => Promise<string | null>;
+  /**
+   * BYOK fallback keys: the ORDERED key list (primary first) for a provider. When
+   * supplied, the router tries the next key on a pre-stream AUTH failure (401/403)
+   * before abandoning the provider. Defaults to wrapping {@link getApiKey} as a
+   * 0/1-element list, so existing single-key construction is unchanged.
+   */
+  getApiKeys?: (providerId: ProviderId) => Promise<string[]>;
   onAttempt?: (event: RouteAttemptEvent) => void;
   providerWeights?: Record<ProviderId, number>;
   virtualKey?: string;
@@ -206,6 +213,15 @@ export function createRouter(config: RouterConfig = {}): Router {
       }
       return null;
     });
+  // Ordered BYOK keys (primary first). Defaults to wrapping resolveKey as a
+  // 0/1-element list so a router built with only `getApiKey` behaves exactly as
+  // before (single-key path, one streamChat attempt).
+  const resolveKeys =
+    config.getApiKeys ??
+    (async (providerId: ProviderId) => {
+      const k = await resolveKey(providerId);
+      return k ? [k] : [];
+    });
 
   const cooldownRetries = new Map<ProviderId, number>();
   const stickySessions = new Map<string, ProviderId>();
@@ -273,12 +289,16 @@ export function createRouter(config: RouterConfig = {}): Router {
   // don't hit the OS keychain twice for the same provider.
   const keyResolutionCache = new WeakMap<
     RouteRequest,
-    Map<ProviderId, Promise<string | null>>
+    Map<ProviderId, Promise<string[]>>
   >();
-  function keyFor(
+  // Ordered keys to try for a provider on THIS request: the per-request BYOK key
+  // (if any) takes precedence, then the keychain's ordered list (primary +
+  // fallbacks), deduped, order preserved. Memoized per request so eligibility and
+  // the winning stream call don't hit the OS keychain twice for one provider.
+  function keysFor(
     providerId: ProviderId,
     request: RouteRequest,
-  ): Promise<string | null> {
+  ): Promise<string[]> {
     let cache = keyResolutionCache.get(request);
     if (!cache) {
       cache = new Map();
@@ -286,12 +306,30 @@ export function createRouter(config: RouterConfig = {}): Router {
     }
     let pending = cache.get(providerId);
     if (!pending) {
-      pending = Promise.resolve(
-        request.keys?.[providerId] ?? resolveKey(providerId),
-      );
+      pending = (async () => {
+        const out: string[] = [];
+        const requestKey = request.keys?.[providerId];
+        if (requestKey) {
+          out.push(requestKey);
+        }
+        for (const key of await resolveKeys(providerId)) {
+          if (key) {
+            out.push(key);
+          }
+        }
+        return Array.from(new Set(out));
+      })();
       cache.set(providerId, pending);
     }
     return pending;
+  }
+  // The primary key (eligibility + back-compat). Identical to the old keyFor: for
+  // a request key it returns that; otherwise the first resolved key, else null.
+  async function keyFor(
+    providerId: ProviderId,
+    request: RouteRequest,
+  ): Promise<string | null> {
+    return (await keysFor(providerId, request))[0] ?? null;
   }
 
   async function buildStatus(): Promise<ProviderStatus[]> {
@@ -651,10 +689,11 @@ export function createRouter(config: RouterConfig = {}): Router {
           halfOpenProbes.delete(provider.id);
         };
 
-        // keyFor() prefers per-request BYOK keys (request.keys) then falls back to
-        // the gateway's configured resolveKey — merges the per-request-keys feature
-        // with the quota-reservation admission gate above.
-        const apiKey = (await keyFor(provider.id, request)) ?? undefined;
+        // keysFor() prefers per-request BYOK keys (request.keys) then appends the
+        // keychain's ordered list (primary + fallbacks) — merges the per-request-
+        // keys feature with the quota-reservation admission gate above. The
+        // streamChat call below walks these keys on an auth (401/403) failure.
+        const apiKeys = await keysFor(provider.id, request);
         let modelsToTry =
           provider.id === "groq"
             ? [requestedModel ?? GROQ_MODEL_70B, GROQ_MODEL_8B]
@@ -706,20 +745,49 @@ export function createRouter(config: RouterConfig = {}): Router {
               provider.id,
               model,
             );
-            const result = await provider.streamChat(request.messages, {
-              model,
-              apiKey,
-              webSearch: request.webSearch,
-              tools: request.tools,
-              toolChoice: request.toolChoice,
-              responseFormat: resolvedRf,
-              temperature: request.temperature,
-              maxTokens: request.maxTokens,
-              cacheHints: request.cachedContentHandle
-                ? { cachedContentHandle: request.cachedContentHandle }
-                : undefined,
-              signal: request.signal,
-            });
+            // BYOK PRIORITY + FALLBACK: walk the ordered keys for this provider.
+            // A 401/403 is thrown by streamChat PRE-stream (before the first
+            // chunk), so retrying with the next key here is safe — we never retry
+            // a key mid-stream. On such an auth failure WITH a next key available,
+            // retry the SAME provider+model with it (keep the reservation, do not
+            // abandon the provider). Any non-auth error (429/5xx/network/other),
+            // or exhausting the keys, throws to the EXISTING failover/abandon path
+            // below UNCHANGED. With zero or one key the loop runs exactly once →
+            // behavior is identical to the single-key path.
+            const attemptKeys: Array<string | undefined> =
+              apiKeys.length > 0 ? apiKeys : [undefined];
+            let keyIndex = 0;
+            let result!: Awaited<ReturnType<Provider["streamChat"]>>;
+            while (true) {
+              try {
+                result = await provider.streamChat(request.messages, {
+                  model,
+                  apiKey: attemptKeys[keyIndex],
+                  webSearch: request.webSearch,
+                  tools: request.tools,
+                  toolChoice: request.toolChoice,
+                  responseFormat: resolvedRf,
+                  temperature: request.temperature,
+                  maxTokens: request.maxTokens,
+                  cacheHints: request.cachedContentHandle
+                    ? { cachedContentHandle: request.cachedContentHandle }
+                    : undefined,
+                  signal: request.signal,
+                });
+                break;
+              } catch (keyError) {
+                const keyStatus =
+                  keyError instanceof ProviderHttpError
+                    ? keyError.status
+                    : undefined;
+                const isAuthError = keyStatus === 401 || keyStatus === 403;
+                if (isAuthError && keyIndex + 1 < attemptKeys.length) {
+                  keyIndex += 1;
+                  continue;
+                }
+                throw keyError;
+              }
+            }
 
             if (provider.id === "groq" && result.rateLimit) {
               ledger.applyGroqRateLimitFromHeaders(

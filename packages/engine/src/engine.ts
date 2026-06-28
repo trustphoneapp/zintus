@@ -34,7 +34,7 @@ import type {
   TraceAttempt,
 } from "@zintus/types";
 import { textOf, requiresVision, requiresStructuredOutput, requiresTools, hasToolTurns } from "@zintus/types";
-import { getKey } from "@zintus/keychain";
+import { getKey, getKeys } from "@zintus/keychain";
 import { ConversationStore } from "./conversation-store.js";
 import { exportRequestTrace, nowEpochMs } from "./otel.js";
 import { ResponseCache } from "@zintus/cache";
@@ -325,10 +325,31 @@ export function createEngine(config: EngineConfig = {}): Engine {
       return getKey(providerId);
     });
 
+  // BYOK PRIORITY + FALLBACK: the ordered keychain list (primary + fallbacks).
+  // The router walks these on a 401/403 before abandoning the provider. Local
+  // runtimes need no key. Precedence: an explicit `getApiKeys` wins; otherwise,
+  // if the caller overrode the single-key `getApiKey` (tests / embedded callers),
+  // wrap THAT as a 0/1 list so its behavior is unchanged; only the unconfigured
+  // default reads the keychain's ordered list (where fallbacks actually live).
+  const resolveApiKeys =
+    config.getApiKeys ??
+    (config.getApiKey
+      ? async (providerId: ProviderId) => {
+          const k = await resolveApiKey(providerId);
+          return k ? [k] : [];
+        }
+      : async (providerId: ProviderId) => {
+          if (providerId === "ollama" || providerId === "lmstudio") {
+            return [];
+          }
+          return getKeys(providerId);
+        });
+
   const router: Router = createRouter({
     ...config,
     dbPath: config.dbPath ?? DEFAULT_QUOTA_PATH,
     getApiKey: resolveApiKey,
+    getApiKeys: resolveApiKeys,
   });
 
   function updateMemoryAfterTurn(
