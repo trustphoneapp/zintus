@@ -240,6 +240,141 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/mcp/discover:
+    post:
+      tags: [MCP]
+      operationId: discoverMcpServer
+      summary: Connect (cached) to an MCP server and list its tools/resources/prompts
+      description: |
+        Connects the gateway to a single MCP (Model Context Protocol) server and
+        returns its advertised tools, resources, and prompts — for the UI's
+        Test-connection / tool-list flow. Connections are CACHED + reused. The
+        gateway HOSTS MCP clients server-side (the browser cannot spawn stdio).
+        No-custody: MCP traffic never touches the Zintus relay, and tool
+        args/results are never logged. Tools are returned both raw (`name`) and
+        namespaced (`namespacedName` = `mcp__<serverId>__<tool>`), the name the
+        chat path exposes to the model.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "200":
+          description: The server's namespaced tools, resources, and prompts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serverId: { type: string }
+                  tools:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        namespacedName: { type: string }
+                        description: { type: string }
+                        inputSchema: { type: object }
+                  resources: { type: array, items: { type: object } }
+                  prompts: { type: array, items: { type: object } }
+                  connectedAt: { type: integer }
+        "400":
+          description: Invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          description: |
+            The MCP server could not be reached (spawn failed, unreachable, or the
+            handshake timed out). Body is `{ error: { type:"mcp_connect_error", message } }`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /v1/mcp:
+    delete:
+      tags: [MCP]
+      operationId: disconnectMcpServer
+      summary: Disconnect + evict a cached MCP server connection
+      description: |
+        Disconnects a previously-connected MCP server (killing any stdio child)
+        and evicts it from the registry. Idempotent: returns `{ ok:true }` even
+        if the server was never connected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "200":
+          description: Disconnected (or no-op).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: Invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/mcp/disconnect:
+    post:
+      tags: [MCP]
+      operationId: disconnectMcpServerPost
+      summary: Disconnect + evict a cached MCP server connection (POST alias)
+      description: |
+        Identical to `DELETE /v1/mcp` — provided for clients/proxies that cannot
+        send a body with DELETE. Body is `{ config }`; idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  $ref: "#/components/schemas/MCPServerConfig"
+      responses:
+        "200":
+          description: Disconnected (or no-op).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+        "400":
+          description: Invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/status:
     get:
       tags: [Operations]
@@ -981,6 +1116,65 @@ components:
                 name: { type: string }
         response_format:
           $ref: "#/components/schemas/ResponseFormat"
+        mcp:
+          $ref: "#/components/schemas/MCPRequest"
+
+    MCPServerConfig:
+      type: object
+      description: |
+        How to reach an MCP (Model Context Protocol) server. Discriminated on
+        `transport`. `stdio` spawns a LOCAL process from the USER'S OWN config
+        (hosted by the loopback gateway — the browser cannot); `sse`/`http` reach
+        a remote MCP endpoint.
+      oneOf:
+        - type: object
+          required: [transport, command]
+          properties:
+            transport: { type: string, const: stdio }
+            command: { type: string }
+            args: { type: array, items: { type: string } }
+            env:
+              type: object
+              additionalProperties: { type: string }
+        - type: object
+          required: [transport, url]
+          properties:
+            transport: { type: string, const: sse }
+            url: { type: string, format: uri }
+            headers:
+              type: object
+              additionalProperties: { type: string }
+        - type: object
+          required: [transport, url]
+          properties:
+            transport: { type: string, const: http }
+            url: { type: string, format: uri }
+            headers:
+              type: object
+              additionalProperties: { type: string }
+
+    MCPRequest:
+      type: object
+      description: |
+        Additive chat block. When present, the gateway connects each listed MCP
+        server, merges their tools (filtered by `enabledTools`) with any client
+        `tools`, and runs a BOUNDED server-side tool loop (≤ 8 model calls),
+        emitting `mcp_tool_call` / `mcp_tool_result` SSE events. Absent ⇒ the
+        existing flow is unchanged.
+      required: [servers]
+      additionalProperties: false
+      properties:
+        servers:
+          type: array
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/MCPServerConfig"
+        enabledTools:
+          type: array
+          description: |
+            Optional allow-list of tool names to expose (raw `name` or namespaced
+            `mcp__<serverId>__<tool>`). Omit to expose every advertised tool.
+          items: { type: string }
 
     ResponseFormat:
       type: object

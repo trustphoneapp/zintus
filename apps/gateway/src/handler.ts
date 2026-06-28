@@ -33,7 +33,18 @@ import {
   isContentBlockArray,
   hasToolTurns,
   type ContentBlock,
+  type ToolResultContentBlock,
+  type ToolDefinition,
 } from "@zintus/types";
+import type { MCPServerConfig } from "@zintus/mcp";
+import { MCPRegistry, configId } from "./mcp-registry.js";
+import {
+  mcpToolsToDefinitions,
+  mcpToolName,
+  executeMcpToolCall,
+  isMcpToolCall,
+} from "./mcp-bridge.js";
+import type { ChatCompletionRequest } from "@zintus/schemas";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
@@ -44,6 +55,7 @@ import type { RateLimiter } from "./rate-limit.js";
 import {
   ChatCompletionRequestSchema,
   ResearchRequestSchema,
+  MCPDiscoverRequestSchema,
   formatIssues,
 } from "@zintus/schemas";
 import { compress } from "tokzen";
@@ -491,7 +503,20 @@ export interface GatewayHandlerDeps {
    * the prior trace-derived path. Created in index.ts for production.
    */
   activityStore?: ActivityStore;
+  /**
+   * MCP connection registry — the gateway HOSTS the MCP clients (the browser
+   * can't: no stdio). Injected from index.ts so its `disconnectAll()` can be
+   * called on graceful shutdown; a fresh one is created here when omitted (unit
+   * tests pass a fake-client-backed registry). Reused across requests so a
+   * server connects once.
+   */
+  mcpRegistry?: MCPRegistry;
 }
+
+/** Hard cap on SERVER-SIDE MCP tool-loop rounds (model calls) per request. Each
+ *  round may execute MCP tool calls and feed their results back; the cap bounds
+ *  a pathological model that calls tools forever. */
+const MAX_MCP_TOOL_ROUNDS = 8;
 
 /** BYOK-only fallback actions when a provider's quota is low/exhausted. */
 type RouteOption =
@@ -527,6 +552,7 @@ export function createGatewayHandler(
   const rateLimiter = deps.rateLimiter;
   const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
   const activityStore = deps.activityStore;
+  const mcpRegistry = deps.mcpRegistry ?? new MCPRegistry();
 
   /**
    * Persist a completed turn to the durable activity store (best-effort). A
@@ -586,7 +612,7 @@ export function createGatewayHandler(
       request.headers.get("origin"),
     );
     const headers: Record<string, string> = {
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type, Authorization",
       "Access-Control-Expose-Headers":
         "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, X-Zintus-Route-Reason, " +
@@ -837,6 +863,340 @@ export function createGatewayHandler(
     });
   }
 
+  /**
+   * Connect the MCP servers a chat request lists, gather + filter their tools,
+   * and return the merged ToolDefinitions plus a serverId→config map for routing
+   * tool calls back. Throws on connect/list failure so the caller can surface an
+   * honest error BEFORE opening the answer stream. Never logs tool args/results.
+   */
+  async function gatherMcpTools(mcp: NonNullable<ChatCompletionRequest["mcp"]>): Promise<{
+    tools: ToolDefinition[];
+    configsById: Map<string, MCPServerConfig>;
+  }> {
+    const configsById = new Map<string, MCPServerConfig>();
+    const tools: ToolDefinition[] = [];
+    const enabledSet = mcp.enabledTools ? new Set(mcp.enabledTools) : null;
+    for (const config of mcp.servers as MCPServerConfig[]) {
+      const serverId = configId(config);
+      configsById.set(serverId, config);
+      const client = await mcpRegistry.getOrConnect(config);
+      const advertised = await client.listTools();
+      // `enabledTools` may carry either the raw server-local name or the
+      // namespaced `mcp__<id>__<tool>` (whatever the UI surfaced from discover).
+      const filtered = enabledSet
+        ? advertised.filter(
+            (t) =>
+              enabledSet.has(t.name) ||
+              enabledSet.has(mcpToolName(serverId, t.name)),
+          )
+        : advertised;
+      tools.push(...mcpToolsToDefinitions(serverId, filtered));
+    }
+    return { tools, configsById };
+  }
+
+  /**
+   * SERVER-SIDE MCP chat path. Connects the listed MCP servers, merges their
+   * tools with any client `tools`, and runs a BOUNDED tool loop (≤
+   * MAX_MCP_TOOL_ROUNDS model calls): call the provider → if it returns
+   * `mcp__*` tool calls, execute them against the owning server and feed the
+   * results back, repeat → stream the final answer. Per-step tool-call /
+   * tool-result EVENTS are emitted in the SSE stream so the client can show
+   * "calling X / got result". A turn that calls NON-MCP (client) tools is handed
+   * off to the client unchanged (OpenAI tool_calls + finish_reason).
+   *
+   * NO-CUSTODY: MCP config/args/results never touch the relay and are never
+   * logged. stdio servers spawn the user's OWN local processes (their config) —
+   * fine on the loopback gateway (see mcp-registry header).
+   */
+  async function handleMcpChat(
+    request: Request,
+    requestId: string,
+    body: ChatCompletionRequest,
+    messages: ChatMessage[],
+  ): Promise<Response> {
+    let merged: { tools: ToolDefinition[]; configsById: Map<string, MCPServerConfig> };
+    try {
+      merged = await gatherMcpTools(body.mcp!);
+    } catch (error) {
+      metrics.recordError();
+      const message = error instanceof Error ? error.message : String(error);
+      // No tool args/results here — only a connection-level message — but scrub
+      // defensively (a server URL/header echo could carry a token).
+      log("warn", "mcp.connect_failed", { requestId });
+      return json(
+        request,
+        {
+          error: {
+            type: "mcp_connect_error",
+            message: `Failed to connect to an MCP server: ${redactSecrets(message)}`,
+          },
+        },
+        502,
+      );
+    }
+    const mergedTools: ToolDefinition[] = [
+      ...(body.tools ?? []),
+      ...merged.tools,
+    ];
+    const configsById = merged.configsById;
+
+    // Per-request abort: client disconnect OR a connect/start timeout tears down
+    // the in-flight upstream fetch (mirrors handleChatCompletions).
+    const upstreamAbort = new AbortController();
+    if (request.signal) {
+      if (request.signal.aborted) {
+        upstreamAbort.abort();
+      } else {
+        request.signal.addEventListener("abort", () => upstreamAbort.abort(), {
+          once: true,
+        });
+      }
+    }
+
+    metrics.recordChat("mcp" as ProviderId);
+    log("info", "mcp.chat", {
+      requestId,
+      servers: body.mcp!.servers.length,
+      mcpTools: merged.tools.length,
+      clientTools: body.tools?.length ?? 0,
+    });
+
+    const encoder = new TextEncoder();
+    const chunkFrame = (data: Record<string, unknown>): Uint8Array =>
+      encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        const working: ChatMessage[] = [...messages];
+        let capturedUsage: RouteUsage | undefined;
+        let lastResult:
+          | Awaited<ReturnType<Engine["routeAndStream"]>>
+          | undefined;
+        try {
+          for (let round = 0; round < MAX_MCP_TOOL_ROUNDS; round++) {
+            const result = await withTimeout(
+              engine.routeAndStream({
+                signal: upstreamAbort.signal,
+                onUsage: (usage) => {
+                  capturedUsage = usage;
+                },
+                messages: working,
+                model: body.model,
+                provider: body.provider,
+                mode: body.mode,
+                tools: mergedTools,
+                toolChoice: body.tool_choice,
+                stream: true,
+                virtualKey: body.virtual_key ?? body.virtualKey,
+                providerWeights: body.provider_weights ?? body.providerWeights,
+                strategy: body.strategy,
+                blockTrainingProviders: body.block_training,
+                allowTrainingProviders: body.allow_training,
+                keys: body.keys,
+                diffText: body.diff,
+                temperature: body.temperature,
+                maxTokens: body.max_tokens,
+              }),
+              requestTimeoutMs,
+            );
+            lastResult = result;
+
+            // Stream this round's text as it arrives (idle-watchdog protected).
+            let roundText = "";
+            for await (const piece of withIdleWatchdog(result.stream, {
+              idleMs: streamIdleTimeoutMs,
+              abort: upstreamAbort,
+            })) {
+              roundText += piece;
+              controller.enqueue(
+                chunkFrame({
+                  id: result.traceId,
+                  object: "chat.completion.chunk",
+                  model: result.model,
+                  provider: result.providerId,
+                  choices: [{ index: 0, delta: { content: piece } }],
+                }),
+              );
+            }
+
+            // Tool calls are fully populated only now that the text drained.
+            const toolCalls = result.toolCalls ?? [];
+            const mcpCalls = toolCalls.filter(isMcpToolCall);
+
+            // Final turn when there are no tool calls, OR the turn mixes in
+            // NON-MCP (client) tools we can't satisfy server-side → hand the
+            // whole turn off to the client via the existing OpenAI channel.
+            if (toolCalls.length === 0 || mcpCalls.length < toolCalls.length) {
+              if (toolCalls.length > 0) {
+                toolCalls.forEach((call, i) => {
+                  controller.enqueue(
+                    chunkFrame({
+                      id: result.traceId,
+                      object: "chat.completion.chunk",
+                      model: result.model,
+                      provider: result.providerId,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: {
+                            tool_calls: [
+                              {
+                                index: i,
+                                id: call.id,
+                                type: "function",
+                                function: {
+                                  name: call.name,
+                                  arguments: JSON.stringify(call.arguments),
+                                },
+                              },
+                            ],
+                          },
+                          finish_reason: null,
+                        },
+                      ],
+                    }),
+                  );
+                });
+                controller.enqueue(
+                  chunkFrame({
+                    id: result.traceId,
+                    object: "chat.completion.chunk",
+                    model: result.model,
+                    provider: result.providerId,
+                    choices: [
+                      { index: 0, delta: {}, finish_reason: "tool_calls" },
+                    ],
+                  }),
+                );
+              }
+              break;
+            }
+
+            // All tool calls are MCP → record the assistant turn, execute the
+            // tools, feed results back, and loop.
+            const assistantBlocks: ContentBlock[] = [];
+            if (roundText.length > 0) {
+              assistantBlocks.push({ type: "text", text: roundText });
+            }
+            for (const call of toolCalls) {
+              assistantBlocks.push(call);
+            }
+            working.push({ role: "assistant", content: assistantBlocks });
+
+            // Emit a "calling X" event per MCP tool call (mirrors the tool-call
+            // channel; carries `type:"mcp_tool_call"` so clients can discriminate).
+            mcpCalls.forEach((call, i) => {
+              controller.enqueue(
+                chunkFrame({
+                  id: result.traceId,
+                  object: "chat.completion.chunk",
+                  type: "mcp_tool_call",
+                  model: result.model,
+                  provider: result.providerId,
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: i,
+                            id: call.id,
+                            type: "function",
+                            function: {
+                              name: call.name,
+                              arguments: JSON.stringify(call.arguments),
+                            },
+                          },
+                        ],
+                      },
+                      finish_reason: null,
+                    },
+                  ],
+                }),
+              );
+            });
+
+            // Execute server-side. executeMcpToolCall never throws — a failure
+            // comes back as an isError tool_result the model can recover from.
+            const results: ToolResultContentBlock[] = await Promise.all(
+              mcpCalls.map((call) =>
+                executeMcpToolCall(mcpRegistry, configsById, call),
+              ),
+            );
+
+            // Emit a "got result" event per tool result.
+            for (const res of results) {
+              controller.enqueue(
+                chunkFrame({
+                  id: result.traceId,
+                  object: "chat.completion.chunk",
+                  type: "mcp_tool_result",
+                  model: result.model,
+                  provider: result.providerId,
+                  choices: [],
+                  tool_call_id: res.toolCallId,
+                  is_error: res.isError ?? false,
+                  content: res.content,
+                }),
+              );
+            }
+
+            working.push({ role: "user", content: results });
+          }
+
+          // Per-response transparency strip, once final token counts are known.
+          if (capturedUsage && lastResult) {
+            controller.enqueue(
+              chunkFrame({
+                ...buildUsageMetadata(
+                  capturedUsage,
+                  body.strategy,
+                  lastResult.privacyHonored,
+                  lastResult.routeReason,
+                ),
+                object: "chat.completion.chunk",
+                model: lastResult.model,
+                provider: lastResult.providerId,
+                choices: [],
+              }),
+            );
+          }
+          if (lastResult) {
+            recordTurnActivity(lastResult, capturedUsage);
+          }
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Stream failed";
+          metrics.recordError();
+          onError?.(error, { requestId, path: "/v1/chat/completions" });
+          log("error", "mcp.chat_failed", {
+            requestId,
+            error: redactSecrets(message),
+          });
+          controller.enqueue(
+            chunkFrame({ error: { message: redactSecrets(message) } }),
+          );
+        } finally {
+          controller.close();
+        }
+      },
+      cancel() {
+        upstreamAbort.abort();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        ...corsHeaders(request),
+      },
+    });
+  }
+
   async function handleChatCompletions(
     request: Request,
     requestId: string,
@@ -899,6 +1259,9 @@ export function createGatewayHandler(
     }
     const hasImages = imageTotal > 0;
     const wantsTools = (body.tools?.length ?? 0) > 0;
+    // MCP requested ⇒ the gateway will host the listed servers and add their
+    // tools, so this turn is effectively a tools turn for capability gating.
+    const mcpRequested = (body.mcp?.servers?.length ?? 0) > 0;
     // Explicit-provider gate: if the user PICKED a provider, never silently send
     // their image elsewhere — fail clearly if that provider/model can't see it.
     if (hasImages && body.provider && !supportsVision(body.provider, body.model)) {
@@ -907,8 +1270,20 @@ export function createGatewayHandler(
     // Same explicit-provider gate for tools: a tools-bearing request against a
     // provider/model that can't call tools hard-errors rather than silently
     // dropping the tools and returning a text-only answer.
-    if (wantsTools && body.provider && !supportsTools(body.provider, body.model)) {
+    if (
+      (wantsTools || mcpRequested) &&
+      body.provider &&
+      !supportsTools(body.provider, body.model)
+    ) {
       return json(request, UNSUPPORTED_TOOLS_ERROR, 422);
+    }
+    // ── MCP server-side tool loop ──────────────────────────────────────────
+    // Additive: present ONLY when the request carries `mcp.servers`. Connects
+    // each server (cached registry), merges their tools with any client `tools`,
+    // and runs a bounded server-side tool loop. The existing flow below is left
+    // byte-identical when `mcp` is absent.
+    if (mcpRequested && !hasImages) {
+      return handleMcpChat(request, requestId, body, messages);
     }
     // Same explicit-provider gate for STRICT structured output: a request that
     // DEMANDS schema-guaranteed JSON (json_schema + strict) against a picked
@@ -1530,6 +1905,94 @@ export function createGatewayHandler(
   }
 
   /**
+   * POST /v1/mcp/discover — connect (cached) to one MCP server and return its
+   * advertised tools/resources/prompts for the UI's Test-connection / tool list.
+   * Honest error (502) with a clear message on connect failure. Tool args/results
+   * are not involved here, and nothing is logged about the server's contents.
+   */
+  async function handleMcpDiscover(
+    request: Request,
+    requestId: string,
+  ): Promise<Response> {
+    const parsed = MCPDiscoverRequestSchema.safeParse(
+      await request.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return json(
+        request,
+        {
+          error: {
+            message: "Invalid request body",
+            issues: formatIssues(parsed.error),
+          },
+        },
+        400,
+      );
+    }
+    const config = parsed.data.config as MCPServerConfig;
+    try {
+      const client = await mcpRegistry.getOrConnect(config);
+      const [tools, resources, prompts] = await Promise.all([
+        client.listTools(),
+        client.listResources(),
+        client.listPrompts(),
+      ]);
+      const serverId = configId(config);
+      return json(request, {
+        serverId,
+        // Tools are returned BOTH raw (for display) and namespaced (the name the
+        // model/chat path will see) so the UI can drive `enabledTools`.
+        tools: tools.map((t) => ({
+          name: t.name,
+          namespacedName: mcpToolName(serverId, t.name),
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+        resources,
+        prompts,
+        connectedAt: mcpRegistry.info(config)?.connectedAt ?? Date.now(),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log("warn", "mcp.discover_failed", { requestId });
+      return json(
+        request,
+        {
+          error: {
+            type: "mcp_connect_error",
+            message: `Failed to connect to MCP server: ${redactSecrets(message)}`,
+          },
+        },
+        502,
+      );
+    }
+  }
+
+  /**
+   * DELETE /v1/mcp (body `{ config }`) — disconnect + evict a cached MCP server
+   * connection (idempotent: succeeds even if it was never connected).
+   */
+  async function handleMcpDisconnect(request: Request): Promise<Response> {
+    const parsed = MCPDiscoverRequestSchema.safeParse(
+      await request.json().catch(() => null),
+    );
+    if (!parsed.success) {
+      return json(
+        request,
+        {
+          error: {
+            message: "Invalid request body",
+            issues: formatIssues(parsed.error),
+          },
+        },
+        400,
+      );
+    }
+    await mcpRegistry.disconnect(parsed.data.config as MCPServerConfig);
+    return json(request, { ok: true });
+  }
+
+  /**
    * Deep research: decompose → parallel web search → synthesize, streamed as
    * SSE progress events. Requires an external search key (Tavily/Serper) since
    * it runs multiple provider-agnostic searches.
@@ -2104,6 +2567,37 @@ export function createGatewayHandler(
         // Scrub before echoing to the client: a re-thrown provider error (e.g. a
         // 401 body) can contain key material. The log line above is scrubbed by
         // the log fn; this is the matching scrub for the HTTP response body.
+        return json(request, { error: { message: redactSecrets(message) } }, 400);
+      }
+    }
+
+    // MCP: connect (cached) + list a server's tools/resources/prompts. Auth-gated
+    // above like every other /v1/* route.
+    if (url.pathname === "/v1/mcp/discover" && request.method === "POST") {
+      try {
+        return await handleMcpDiscover(request, requestId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Request failed";
+        metrics.recordError();
+        onError?.(error, { requestId, path: url.pathname });
+        log("error", "mcp.discover_error", { requestId });
+        return json(request, { error: { message: redactSecrets(message) } }, 400);
+      }
+    }
+
+    // MCP: disconnect + evict a cached server connection. Accept DELETE /v1/mcp
+    // and POST /v1/mcp/disconnect (both carry `{ config }`).
+    if (
+      (url.pathname === "/v1/mcp" && request.method === "DELETE") ||
+      (url.pathname === "/v1/mcp/disconnect" && request.method === "POST")
+    ) {
+      try {
+        return await handleMcpDisconnect(request);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Request failed";
+        metrics.recordError();
+        onError?.(error, { requestId, path: url.pathname });
+        log("error", "mcp.disconnect_error", { requestId });
         return json(request, { error: { message: redactSecrets(message) } }, 400);
       }
     }
