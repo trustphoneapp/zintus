@@ -350,6 +350,181 @@ describe("gateway handler", () => {
     expect(body.traces[0]?.traceId).toBe("t-0");
   });
 
+  test("GET /v1/activity returns normalized usage entries, respects ?limit, and is auth-gated", async () => {
+    const startedAt = new Date("2026-06-28T00:00:00.000Z");
+    const engine = fakeEngine({
+      // The handler fetches limit+1 to compute has_more honestly.
+      listTraces: (limit: number) =>
+        Array.from({ length: Math.min(limit, 3) }, (_unused, i) => ({
+          traceId: `act-${i}`,
+          startedAt,
+          attempts: [
+            {
+              providerId: "groq" as const,
+              model: "test-model",
+              status: "success" as const,
+              latencyMs: 42,
+            },
+          ],
+          winner: { providerId: "groq" as const, model: "test-model" },
+          totalLatencyMs: 100,
+        })),
+    });
+
+    // Auth-gated when a token is configured.
+    const guarded = makeHandler({ token: "secret" }, engine);
+    expect(
+      (await guarded(new Request("http://x/v1/activity"))).status,
+    ).toBe(401);
+
+    const handler = makeHandler({}, engine);
+    const res = await handler(new Request("http://x/v1/activity?limit=2"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      has_more: boolean;
+      data: Array<Record<string, unknown>>;
+    };
+    expect(body.object).toBe("list");
+    // Asked for 2 → page of 2, and a 3rd existed → has_more true.
+    expect(body.data).toHaveLength(2);
+    expect(body.has_more).toBe(true);
+
+    const entry = body.data[0] as {
+      id: string;
+      created: number;
+      provider: string;
+      model: string;
+      tokens: { input: number; output: number; total: number };
+      cost_usd: number;
+      saved_vs_baseline_usd: number;
+      latency_ms: number;
+      cache_hit: boolean;
+      route_reason?: string;
+    };
+    expect(entry.id).toBe("act-0");
+    expect(entry.created).toBe(Math.floor(startedAt.getTime() / 1000));
+    expect(entry.provider).toBe("groq");
+    expect(entry.model).toBe("test-model");
+    // No token usage recorded on the trace → honest zeros, never fabricated.
+    expect(entry.tokens).toEqual({ input: 0, output: 0, total: 0 });
+    expect(entry.cost_usd).toBe(0);
+    expect(entry.saved_vs_baseline_usd).toBe(0);
+    expect(entry.latency_ms).toBe(100);
+    expect(entry.cache_hit).toBe(false);
+    // route_reason omitted when the trace did not record one.
+    expect(entry.route_reason).toBeUndefined();
+  });
+
+  test("GET /v1/activity surfaces real recorded usage and is empty when none", async () => {
+    // A trace carrying optional usage telemetry → flows through normalized.
+    const richEngine = fakeEngine({
+      listTraces: () => [
+        {
+          traceId: "act-rich",
+          startedAt: new Date("2026-06-28T00:00:00.000Z"),
+          attempts: [],
+          winner: { providerId: "cerebras" as const, model: "llama" },
+          // Extended fields a trace MAY carry; read defensively.
+          tokens: { input: 10, output: 5, total: 15 },
+          cacheHit: true,
+          routeReason: "cheapest-healthy",
+        } as never,
+      ],
+    });
+    const handler = makeHandler({}, richEngine);
+    const res = await handler(new Request("http://x/v1/activity"));
+    const body = (await res.json()) as { data: Array<Record<string, unknown>> };
+    const entry = body.data[0] as Record<string, unknown>;
+    expect(entry.tokens).toEqual({ input: 10, output: 5, total: 15 });
+    expect(entry.cache_hit).toBe(true);
+    expect(entry.route_reason).toBe("cheapest-healthy");
+    expect(entry.provider).toBe("cerebras");
+
+    // Empty list when no usage has been recorded.
+    const emptyHandler = makeHandler({}, fakeEngine({ listTraces: () => [] }));
+    const emptyRes = await emptyHandler(new Request("http://x/v1/activity"));
+    const emptyBody = (await emptyRes.json()) as {
+      data: unknown[];
+      has_more: boolean;
+    };
+    expect(emptyBody.data).toEqual([]);
+    expect(emptyBody.has_more).toBe(false);
+  });
+
+  test("GET /v1/key returns per-provider quota status (null limit when unreported) and is auth-gated", async () => {
+    const engine = fakeEngine({
+      async getProviderStatus() {
+        return [
+          {
+            id: "groq",
+            name: "Groq",
+            color: "#fff",
+            priority: 1,
+            available: true,
+            hasKey: true,
+            inCooldown: false,
+            cooldownUntil: null,
+            requestsToday: 3,
+            tokensToday: 250,
+            lastReset: null,
+            tokensLimit: 1000,
+          },
+          {
+            id: "ollama",
+            name: "Ollama",
+            color: "#000",
+            priority: 2,
+            available: true,
+            hasKey: false,
+            inCooldown: false,
+            cooldownUntil: null,
+            requestsToday: 0,
+            tokensToday: 0,
+            lastReset: null,
+            // No tokensLimit → quota_limit must be null (never fabricated).
+          },
+        ];
+      },
+    });
+
+    // Auth-gated.
+    const guarded = makeHandler({ token: "secret" }, engine);
+    expect((await guarded(new Request("http://x/v1/key"))).status).toBe(401);
+
+    const handler = makeHandler({}, engine);
+    const res = await handler(new Request("http://x/v1/key"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      object: string;
+      label: string;
+      is_free_tier: boolean;
+      managed_keys_available: boolean;
+      providers: Array<{
+        id: string;
+        has_key: boolean;
+        quota_used: number;
+        quota_limit: number | null;
+        quota_remaining_ratio: number | null;
+      }>;
+    };
+    expect(body.object).toBe("key_status");
+    expect(body.label).toBe("zintus-gateway");
+    expect(body.is_free_tier).toBe(true);
+    expect(body.managed_keys_available).toBe(false);
+
+    const groq = body.providers.find((p) => p.id === "groq");
+    expect(groq?.quota_limit).toBe(1000);
+    expect(groq?.quota_used).toBe(250);
+    expect(groq?.quota_remaining_ratio).toBeCloseTo(0.75);
+
+    const ollama = body.providers.find((p) => p.id === "ollama");
+    expect(ollama?.has_key).toBe(false);
+    // Honest: no reported denominator → null, not a fabricated cap.
+    expect(ollama?.quota_limit).toBeNull();
+    expect(ollama?.quota_remaining_ratio).toBeNull();
+  });
+
   test("streams chat completions as SSE", async () => {
     const handler = makeHandler();
     const res = await handler(

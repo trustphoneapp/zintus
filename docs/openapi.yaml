@@ -328,6 +328,74 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/activity:
+    get:
+      tags: [Operations]
+      operationId: listActivity
+      summary: Paginated usage history (auth-gated)
+      description: |
+        OpenRouter-style `/activity`: a paginated feed of recorded request usage,
+        derived from the SAME routing traces as `/v1/traces` and normalized to a
+        stable per-request shape. Free-core: cost is `0` on the free tier and is
+        never fabricated; token counts default to `0` when not recorded,
+        `cache_hit` defaults to `false`, and `route_reason` is OMITTED when the
+        trace did not record one. Returns an empty `data` list when no usage has
+        been recorded.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Max entries to return. Defaults to 50, capped at 200.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: provider
+          in: query
+          required: false
+          description: Filter the page to a single provider id.
+          schema:
+            type: string
+        - name: model
+          in: query
+          required: false
+          description: Filter the page to a single model id.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Recorded usage entries, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/key:
+    get:
+      tags: [Operations]
+      operationId: getKeyStatus
+      summary: Key / quota introspection (auth-gated)
+      description: |
+        OpenRouter-style `/key`: introspection for the authed gateway token.
+        Free-core: `is_free_tier` is always true and `managed_keys_available` is
+        always false (Zintus never custodies provider keys). Per-provider quota is
+        sourced from the SAME live provider status as `/v1/status`. Honest:
+        `quota_limit` is null when the provider does not report a denominator
+        (never a fabricated cap), and `quota_remaining_ratio` is null whenever the
+        limit is unknown.
+      responses:
+        "200":
+          description: Token + per-provider quota status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeyStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /v1/traces:
     get:
       tags: [Operations]
@@ -1175,6 +1243,117 @@ components:
         note:
           type: string
           example: "estimate vs. paid-API list pricing"
+
+    ActivityEntry:
+      type: object
+      description: |
+        A single normalized usage record derived from a routing trace. Cost is
+        $0 on the free tier (never fabricated); token counts are 0 when not
+        recorded; `route_reason` is present only when the trace recorded one.
+      required:
+        [id, created, created_at, provider, model, tokens, cost_usd, saved_vs_baseline_usd, latency_ms, cache_hit]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: The trace id of the request.
+        created:
+          type: integer
+          description: Unix timestamp (seconds) when the request started.
+        created_at:
+          type: string
+          format: date-time
+          description: ISO-8601 start timestamp (same instant as `created`).
+        provider:
+          description: Winning provider id, or null when none was recorded.
+          oneOf:
+            - $ref: "#/components/schemas/ProviderId"
+            - type: "null"
+        model:
+          type: [string, "null"]
+        tokens:
+          type: object
+          required: [input, output, total]
+          additionalProperties: false
+          properties:
+            input: { type: integer }
+            output: { type: integer }
+            total: { type: integer }
+        cost_usd:
+          type: number
+          description: Real user cost. Always 0 on the free tier; never invented.
+        saved_vs_baseline_usd:
+          type: number
+          description: Estimated USD saved vs. a paid baseline. 0 when not derivable.
+        latency_ms:
+          type: [number, "null"]
+        cache_hit:
+          type: boolean
+        route_reason:
+          type: string
+          description: Present only when the trace recorded a routing reason.
+
+    ActivityList:
+      type: object
+      required: [object, data, has_more]
+      additionalProperties: false
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityEntry"
+        has_more:
+          type: boolean
+          description: True when more entries exist beyond the returned page.
+
+    KeyStatus:
+      type: object
+      required: [object, label, is_free_tier, providers, managed_keys_available]
+      additionalProperties: false
+      properties:
+        object:
+          type: string
+          const: key_status
+        label:
+          type: string
+          example: zintus-gateway
+        is_free_tier:
+          type: boolean
+          description: Always true — Zintus routes to provider free tiers.
+        providers:
+          type: array
+          items:
+            type: object
+            required:
+              [id, has_key, available, in_cooldown, quota_used, quota_limit, quota_remaining_ratio]
+            additionalProperties: false
+            properties:
+              id:
+                $ref: "#/components/schemas/ProviderId"
+              has_key: { type: boolean }
+              available: { type: boolean }
+              in_cooldown: { type: boolean }
+              quota_used: { type: integer }
+              quota_limit:
+                description: |
+                  The provider's reported quota denominator, or null when the
+                  provider does not report one (never a fabricated cap).
+                type: [integer, "null"]
+              quota_remaining_ratio:
+                description: |
+                  Remaining quota ratio (0..1), or null when `quota_limit` is
+                  unknown.
+                oneOf:
+                  - type: number
+                    minimum: 0
+                    maximum: 1
+                  - type: "null"
+        managed_keys_available:
+          type: boolean
+          description: Always false — Zintus never custodies provider keys.
 
     RouteOptions:
       type: object

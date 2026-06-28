@@ -19,6 +19,7 @@ import type {
   ChatMessage,
   ContextMode,
   ProviderId,
+  RequestTrace,
   RouteUsage,
 } from "@zintus/types";
 import {
@@ -97,6 +98,91 @@ function toModelEntry(m: CatalogModel) {
       badge: dp?.badge ?? "unknown",
       policy_url: dp?.policyUrl ?? "",
     }))(DATA_POLICIES[m.provider]),
+  };
+}
+
+/**
+ * Optional usage/telemetry a RequestTrace MAY carry at runtime but that the
+ * typed `RequestTrace` shape does not (yet) declare. The activity feed reads
+ * these defensively: present → surface the REAL recorded value, absent →
+ * an honest zero/false/omit. Nothing here is ever fabricated.
+ */
+interface TraceUsageExtras {
+  tokens?: { input?: number; output?: number; total?: number };
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+  };
+  cacheHit?: boolean;
+  routeReason?: string;
+  costUsd?: number;
+  savedVsBaselineUsd?: number;
+}
+
+/**
+ * Normalize a routing trace into an OpenRouter-style `/activity` entry. Built
+ * ONLY from data the gateway already records (the same `RequestTrace` exposed
+ * by `/v1/traces`), plus any optional usage fields the trace happens to carry.
+ * Honest by construction: cost is $0 on the free tier, token counts default to
+ * 0 when not recorded, `cache_hit` defaults to false, and `route_reason` is
+ * OMITTED entirely when the trace does not record one.
+ */
+function toActivityEntry(trace: RequestTrace) {
+  const extras = trace as RequestTrace & TraceUsageExtras;
+  // Winner is authoritative for provider/model; otherwise fall back to the last
+  // successful attempt, then the last attempt recorded.
+  const lastSuccess = [...trace.attempts]
+    .reverse()
+    .find((a) => a.status === "success");
+  const lastAttempt = trace.attempts[trace.attempts.length - 1];
+  const provider: ProviderId | null =
+    trace.winner?.providerId ??
+    lastSuccess?.providerId ??
+    lastAttempt?.providerId ??
+    null;
+  const model: string | null =
+    trace.winner?.model ?? lastSuccess?.model ?? lastAttempt?.model ?? null;
+
+  const inputTokens =
+    extras.tokens?.input ??
+    extras.usage?.inputTokens ??
+    extras.usage?.promptTokens ??
+    0;
+  const outputTokens =
+    extras.tokens?.output ??
+    extras.usage?.outputTokens ??
+    extras.usage?.completionTokens ??
+    0;
+  const totalTokens =
+    extras.tokens?.total ?? extras.usage?.totalTokens ?? inputTokens + outputTokens;
+
+  const latencyMs =
+    trace.totalLatencyMs ??
+    (trace.winner
+      ? lastSuccess?.latencyMs
+      : lastAttempt?.latencyMs) ??
+    null;
+
+  return {
+    id: trace.traceId,
+    // Unix seconds (OpenAI/OpenRouter convention), plus the ISO timestamp for
+    // callers that prefer it.
+    created: Math.floor(trace.startedAt.getTime() / 1000),
+    created_at: trace.startedAt.toISOString(),
+    provider,
+    model,
+    tokens: { input: inputTokens, output: outputTokens, total: totalTokens },
+    // Free-core: requests are served off free tiers, so the user's real cost is
+    // $0. Never invent a non-zero number.
+    cost_usd: extras.costUsd ?? 0,
+    saved_vs_baseline_usd: extras.savedVsBaselineUsd ?? 0,
+    latency_ms: latencyMs,
+    cache_hit: extras.cacheHit ?? false,
+    // route_reason only when the trace genuinely recorded one.
+    ...(extras.routeReason ? { route_reason: extras.routeReason } : {}),
   };
 }
 
@@ -1682,6 +1768,39 @@ export function createGatewayHandler(
       });
     }
 
+    // OpenRouter-style key/quota introspection for the authed gateway token.
+    // Free-core: no managed custody — `managed_keys_available` is always false
+    // and `is_free_tier` always true. Per-provider quota is sourced from the
+    // SAME live provider status as `/v1/status`. Honest: `quota_limit` is null
+    // when the provider does not report a denominator (never a fabricated cap),
+    // and `quota_remaining_ratio` is null whenever the limit is unknown.
+    if (url.pathname === "/v1/key" && request.method === "GET") {
+      const statuses = await engine.getProviderStatus();
+      return json(request, {
+        object: "key_status",
+        label: "zintus-gateway",
+        is_free_tier: true,
+        providers: statuses.map((status) => {
+          const quotaUsed = status.tokensToday;
+          const quotaLimit = status.tokensLimit ?? null;
+          const quotaRemainingRatio =
+            quotaLimit !== null && quotaLimit > 0
+              ? clamp01((quotaLimit - quotaUsed) / quotaLimit)
+              : null;
+          return {
+            id: status.id,
+            has_key: status.hasKey,
+            available: status.available,
+            in_cooldown: status.inCooldown,
+            quota_used: quotaUsed,
+            quota_limit: quotaLimit,
+            quota_remaining_ratio: quotaRemainingRatio,
+          };
+        }),
+        managed_keys_available: false,
+      });
+    }
+
     // Local, BYOK-only quota-exhaustion decision API. Auth-gated above like every
     // other /v1/* route (401 without the gateway token).
     if (url.pathname === "/v1/route/options" && request.method === "GET") {
@@ -1735,6 +1854,32 @@ export function createGatewayHandler(
     if (url.pathname === "/v1/traces" && request.method === "GET") {
       const limit = Number(url.searchParams.get("limit")) || 20;
       return json(request, { traces: engine.listTraces(limit) });
+    }
+
+    // OpenRouter-style `/activity`: paginated usage history derived from the SAME
+    // recorded routing traces as `/v1/traces`, normalized to a stable per-request
+    // shape. `?limit=` defaults to 50, capped at 200; `?provider=`/`?model=`
+    // narrow the page. Honest: only real recorded usage is surfaced (empty list
+    // when none) and cost is never fabricated.
+    if (url.pathname === "/v1/activity" && request.method === "GET") {
+      const rawLimit = Number(url.searchParams.get("limit"));
+      const limit =
+        Number.isFinite(rawLimit) && rawLimit > 0
+          ? Math.min(200, Math.floor(rawLimit))
+          : 50;
+      // Fetch one extra to honestly compute `has_more` without inventing a total.
+      const fetched = engine.listTraces(limit + 1);
+      const hasMore = fetched.length > limit;
+      const providerFilter = url.searchParams.get("provider");
+      const modelFilter = url.searchParams.get("model");
+      let data = fetched.slice(0, limit).map(toActivityEntry);
+      if (providerFilter) {
+        data = data.filter((entry) => entry.provider === providerFilter);
+      }
+      if (modelFilter) {
+        data = data.filter((entry) => entry.model === modelFilter);
+      }
+      return json(request, { object: "list", data, has_more: hasMore });
     }
 
     if (url.pathname === "/v1/savings" && request.method === "GET") {
