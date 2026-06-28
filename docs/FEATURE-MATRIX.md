@@ -2,7 +2,12 @@
 
 The single shared product contract. Every surface declares each capability so no
 surface **silently claims an unsupported feature**. Verified against code on
-`feat/cross-surface-parity` (off `main`), 2026-06-26.
+`feat/cross-surface-parity` (off `main`), 2026-06-26. The capability statuses
+(tool calling, structured output, multimodal, CSP) were **re-verified against
+code on `feat/desktop-parity`, 2026-06-28** — see the "Capability status"
+section below. Desktop tool/JSON/image UI was re-confirmed **absent** by reading
+`apps/desktop/app/_components/ChatPanel.tsx` (no Tools toggle, no JSON control,
+no image picker on this branch).
 
 Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupported ·
 ⚠️ **present but broken/misleading** (must fix or remove).
@@ -106,7 +111,7 @@ Verified green at audit time: `bun run typecheck` exit 0; full `bun run test` ex
 **Capability status — updated post-audit (2026-06-28).** The "absent stack-wide"
 line below was true at audit time but is now stale; the corrected picture:
 
-- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ❌ · Mobile ❌**.
+- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ✅ (built-in tools) · Mobile ❌**.
   Provider streaming (`packages/providers/src/utils.ts`), Gemini round-trip, and
   gateway 422-on-unsupported are tested; the CLI `--tools` loader
   (`apps/cli/src/commands/chat.ts`) is hardened (rejects null/array `parameters`).
@@ -118,14 +123,19 @@ line below was true at audit time but is now stale; the corrected picture:
   answers (`streamAssistant` in `chat/page.tsx`). Unit-tested
   (`apps/web/lib/web-tools.test.ts`). **Caveat:** the web set is BUILT-IN only — a
   UI for *user-defined* tools (arbitrary schemas/executors) is future work; the
-  gateway API + CLI accept arbitrary tool definitions today. **Desktop/mobile have
-  no tool UI (❌).**
-- **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web 🟡 · Desktop ❌ · Mobile ❌**.
+  gateway API + CLI accept arbitrary tool definitions today. **Desktop now has
+  parity:** the same built-in tools + Tools toggle + bounded execute→feed-back loop
+  landed in `apps/desktop/app/_components/ChatPanel.tsx` (`apps/desktop/lib/web-tools.ts`,
+  unit-tested), with tool-call cards in the desktop `MessageBubble`. Same BUILT-IN-only
+  caveat as web. **Mobile has no tool UI (❌).**
+- **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web ❌ (no UI) · Desktop ❌ · Mobile ❌**.
   Engine validate→repair + gateway strict-422 tested. Conservative: only Gemini is
-  `json_schema`; others `json_object`/prompt-level. **Web is 🟡 = library/plumbing
-  only:** `streamGatewayChat` can carry structured output but no web chat surface
-  requests `response_format` or renders the parsed JSON; **desktop/mobile have no
-  JSON UI (❌)**.
+  `json_schema` (close to guaranteed-shape); all others are `json_object` /
+  prompt-level, which is **best-effort, not guaranteed** JSON. **Web has no
+  structured-output UI (❌):** the shared `streamGatewayChat` lib *can* carry a
+  `response_format`, but no web chat surface requests one or renders parsed JSON
+  (verified: no `response_format` in `apps/web/app/**`), so there is nothing a
+  user can drive — library plumbing only. **Desktop/mobile have no JSON UI (❌)**.
 - **Multimodal image input** — proven on **web + CLI** (EXIF-stripped image blocks
   to a vision-capable model, hard-error rather than silent text-only fallback), and
   now also **maps to OpenRouter vision models**. **Desktop/mobile image UI is still
