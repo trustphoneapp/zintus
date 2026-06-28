@@ -5,6 +5,7 @@ import { tryGitDiff } from "@zintus/context-compiler";
 import { listKeys } from "@zintus/keychain";
 import { estimateCostUsd } from "@zintus/providers";
 import type {
+  ChatMessage,
   ContextMode,
   ImageContentBlock,
   RouteUsage,
@@ -13,6 +14,10 @@ import type {
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
 import { getActiveProject } from "../lib/projects.js";
+import {
+  BUILTIN_TOOL_DEFINITIONS,
+  runBuiltinToolLoop,
+} from "../lib/builtin-tools.js";
 import {
   buildChatContent,
   formatTurnSummary,
@@ -69,9 +74,12 @@ export interface ChatOptions {
    *  locally into vision content blocks before routing. */
   images?: string[];
   /** Path to a JSON file holding a `ToolDefinition[]` array. When set, the
-   *  request requires a tool-capable model and any tool calls the model makes
-   *  are printed after the response. */
+   *  request requires a tool-capable model and those definitions are offered. */
   toolsFile?: string;
+  /** Enable the CLI's built-in, executable tools (calculator, current_datetime,
+   *  random_number) — set by a bare `--tools` (no file). The CLI then runs the
+   *  real execute→feed-back loop, mirroring the web chat. */
+  builtinTools?: boolean;
 }
 
 export async function runChat(
@@ -173,46 +181,82 @@ export async function runChat(
     // Text prompt FIRST, then the image blocks in order. With no images this is
     // just the plain string (unchanged text-only shape).
     const userContent = buildChatContent(userText, imageBlocks);
-    const tools = options?.toolsFile ? loadTools(options.toolsFile) : undefined;
+    // `--tools <file>` offers the file's custom definitions; a bare `--tools`
+    // offers the CLI's built-in, EXECUTABLE tools. Either way, when the model
+    // emits tool calls we run the bounded execute→feed-back loop below — only
+    // built-in tool names actually run; an unknown tool is fed back as an honest
+    // error result (never silently executed).
+    const tools = options?.toolsFile
+      ? loadTools(options.toolsFile)
+      : options?.builtinTools
+        ? BUILTIN_TOOL_DEFINITIONS
+        : undefined;
+    const toolsEnabled = Boolean(tools);
     // Captured when the winning provider's stream completes — the real measured
     // token counts for this turn (never fabricated). Mirrors the gateway's
-    // `onUsage`-fed metadata frame.
+    // `onUsage`-fed metadata frame. Reflects the FINAL routed turn.
     let usage: RouteUsage | undefined;
-    const result = await engine.routeAndStream({
-      messages: [{ role: "user", content: userContent }],
-      provider: forcedProvider,
-      mode: options?.mode ?? config.contextMode,
-      threadId,
-      diffText,
-      tools,
-      onUsage: (u) => {
-        usage = u;
+
+    // Run the bounded execute→feed-back loop. With tools OFF this routes exactly
+    // once and prints the answer (path unchanged). With tools ON, each round
+    // routes the growing conversation, executes the built-in tool calls locally,
+    // feeds the results back as tool_result turns, and re-routes — bounded by
+    // MAX_TOOL_ROUNDS — until the model returns a final answer. Tool rounds run
+    // STATELESS (no threadId) for determinism, mirroring the web chat.
+    const initialMessages: ChatMessage[] = [
+      { role: "user", content: userContent },
+    ];
+    let firstRound = true;
+    const { finalResult: result } = await runBuiltinToolLoop(initialMessages, {
+      route: async (messages) => {
+        if (!firstRound) spinner.start("Routing tool follow-up");
+        return engine.routeAndStream({
+          messages,
+          provider: forcedProvider,
+          mode: options?.mode ?? config.contextMode,
+          // Tool rounds run stateless; the non-tools path keeps thread/diff context.
+          threadId: toolsEnabled ? undefined : threadId,
+          diffText: toolsEnabled ? undefined : diffText,
+          tools,
+          onUsage: (u) => {
+            usage = u;
+          },
+        });
       },
+      onRouted: async (turn) => {
+        const provider = (await engine.getProviderStatus()).find(
+          (p) => p.id === turn.providerId,
+        );
+        spinner.succeed(
+          `Routed to ${chalk.cyan(provider?.name ?? turn.providerId)} · trace ${chalk.dim(turn.traceId.slice(0, 8))}`,
+        );
+        firstRound = false;
+      },
+      onChunk: (chunk) => process.stdout.write(chunk),
+      onTurnEnd: () => process.stdout.write("\n"),
+      onToolCalls: (calls) => {
+        console.error(chalk.cyan(`\n${calls.length} tool call(s):`));
+        for (const call of calls) {
+          console.error(
+            `  ${chalk.bold(call.name)}(${JSON.stringify(call.arguments)})  ${chalk.dim(call.id)}`,
+          );
+        }
+      },
+      onToolResult: (r, call) => {
+        const label = r.isError ? chalk.yellow("error") : chalk.green("result");
+        console.error(
+          `  🔧 ${chalk.bold(call.name)} → ${label} ${chalk.dim(r.content)}`,
+        );
+      },
+      onStopped: (max) =>
+        console.error(
+          chalk.yellow(`⚠ tool loop stopped after ${max} rounds`),
+        ),
     });
 
     const provider = (await engine.getProviderStatus()).find(
       (p) => p.id === result.providerId,
     );
-    spinner.succeed(
-      `Routed to ${chalk.cyan(provider?.name ?? result.providerId)} · trace ${chalk.dim(result.traceId.slice(0, 8))}`,
-    );
-
-    for await (const chunk of result.stream) {
-      process.stdout.write(chunk);
-    }
-    process.stdout.write("\n");
-
-    // Tool calls are populated on the live channel once the stream drains. Print
-    // them honestly (the CLI does not auto-execute tools — the user runs them and
-    // can feed results back). Empty for a normal text turn.
-    if (result.toolCalls && result.toolCalls.length > 0) {
-      console.error(chalk.cyan(`\n${result.toolCalls.length} tool call(s):`));
-      for (const call of result.toolCalls) {
-        console.error(
-          `  ${chalk.bold(call.name)}(${JSON.stringify(call.arguments)})  ${chalk.dim(call.id)}`,
-        );
-      }
-    }
 
     // Post-turn transparency: provider · model, the route-reason headline, and
     // the REAL per-turn facts (tokens, cost estimate, quota). Everything here is

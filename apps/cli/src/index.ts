@@ -28,8 +28,9 @@ interface ChatCliOptions {
   diff?: boolean;
   // Repeatable `--image <path>`, collected into an array (max enforced in chat).
   image?: string[];
-  // Path to a JSON file of tool/function definitions (ToolDefinition[]).
-  tools?: string;
+  // From `--tools [file]`: `true` when bare (enable the built-in executable
+  // tools), or a path string to a JSON file of custom tool/function definitions.
+  tools?: string | boolean;
 }
 
 // Commander collector: accumulate each repeated `--image` into one array.
@@ -53,7 +54,10 @@ function toChatOptions(options: ChatCliOptions): ChatOptions {
     workspaceDir,
     diff: options.diff,
     images: options.image,
-    toolsFile: options.tools,
+    // A bare `--tools` (true) enables the built-in executable tools; a path
+    // string points at a custom ToolDefinition[] JSON file.
+    toolsFile: typeof options.tools === "string" ? options.tools : undefined,
+    builtinTools: options.tools === true,
   };
 }
 
@@ -74,8 +78,8 @@ program
     [],
   )
   .option(
-    "--tools <file>",
-    "Path to a JSON file of tool/function definitions (routes to a tool-capable model)",
+    "--tools [file]",
+    "Enable built-in executable tools (calculator, current_datetime, random_number) and run the execute→feed-back loop; pass a JSON file path for custom tool definitions",
   )
   .action(async (prompt: string, options: ChatCliOptions) => {
     await runChat(prompt, toChatOptions(options));
@@ -120,8 +124,8 @@ program
     [],
   )
   .option(
-    "--tools <file>",
-    "Path to a JSON file of tool/function definitions (routes to a tool-capable model)",
+    "--tools [file]",
+    "Enable built-in executable tools (calculator, current_datetime, random_number) and run the execute→feed-back loop; pass a JSON file path for custom tool definitions",
   )
   .action(async (prompt: string | undefined, options: ChatCliOptions) => {
     if (!prompt) {
