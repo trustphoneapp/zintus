@@ -8,11 +8,23 @@ import type {
 export const GATEWAY_URL =
   process.env.NEXT_PUBLIC_GATEWAY_URL ?? "http://localhost:8788";
 
-const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN?.trim() || "";
-
-/** Bearer header for the gateway, when a token is configured (network deploys). */
+/**
+ * Auth headers for the gateway — intentionally empty.
+ *
+ * Every consumer of this module is a `"use client"` component, so this code runs
+ * in the BROWSER. A gateway bearer token therefore CANNOT be sourced from an
+ * env var here: a `NEXT_PUBLIC_*` value would be inlined verbatim into the public
+ * client JS bundle and exposed to every visitor (the 2026-06-26 web audit P2
+ * "bundle-baked NEXT_PUBLIC_GATEWAY_TOKEN"), and a non-public env var is stripped
+ * to empty on the client. The hosted web targets the user's own LOOPBACK gateway,
+ * which is token-less. A network/shared gateway must front its own auth (a
+ * server-side proxy or session cookie) — never a token baked into this bundle.
+ *
+ * GUARD: do NOT reintroduce `process.env.NEXT_PUBLIC_GATEWAY_TOKEN` (or any other
+ * static secret) here — it would leak to anyone viewing the page source.
+ */
 export function gatewayAuthHeaders(): Record<string, string> {
-  return GATEWAY_TOKEN ? { Authorization: `Bearer ${GATEWAY_TOKEN}` } : {};
+  return {};
 }
 
 /** True when the gateway runs on this machine (safe to pass BYOK keys to). */

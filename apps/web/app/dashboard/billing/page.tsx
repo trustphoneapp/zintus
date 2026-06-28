@@ -8,6 +8,8 @@ import {
   fetchUsageHistory,
   fetchReferralStats,
   openBillingPortal,
+  formatReferralEarned,
+  REFERRAL_PAYOUTS_LIVE,
   type BillingStatus,
   type UsageCurrent,
   type ReferralStats,
@@ -27,10 +29,6 @@ function fmtDate(ts: number | null): string {
     day: "numeric",
     year: "numeric",
   });
-}
-
-function fmtCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 const TIER_LABEL: Record<BillingStatus["tier"], string> = {
@@ -383,7 +381,7 @@ export default function BillingPage() {
                   { label: "Total referrals", value: referral.total },
                   { label: "Confirmed", value: referral.confirmed },
                   { label: "Pending", value: referral.pending },
-                  { label: "Earned", value: fmtCents(referral.earned_cents) },
+                  { label: "Earned", value: formatReferralEarned(referral.earned_cents) },
                 ].map(({ label, value }) => (
                   <div
                     key={label}
@@ -417,6 +415,18 @@ export default function BillingPage() {
                   </div>
                 ))}
               </div>
+            )}
+            {referral && !REFERRAL_PAYOUTS_LIVE && (
+              <p
+                style={{
+                  margin: "0.75rem 0 0",
+                  fontSize: "0.78rem",
+                  color: "#94a3b8",
+                }}
+              >
+                Referral payouts are coming soon. Commissions accrue once managed-key
+                billing is live, but can&apos;t be withdrawn yet.
+              </p>
             )}
           </>
         ) : (

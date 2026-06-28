@@ -24,6 +24,29 @@ export interface ReferralStats {
   earned_cents: number;
 }
 
+// Referral commissions accrue server-side (the relay tracks commission_cents via
+// Stripe `invoice.paid`), but there is NO payout/disbursement path yet AND the
+// managed-key paid tiers that generate those commissions are themselves gated
+// (MANAGED_KEYS_AVAILABLE = false in app/pricing/page.tsx + the relay). Until a
+// disbursement path ships, surfacing a non-zero "Earned $X" would imply real,
+// withdrawable money the user cannot actually receive. Flip to true ONLY once
+// referral payouts are genuinely live.
+export const REFERRAL_PAYOUTS_LIVE = false;
+
+/**
+ * Honest label for the referral "Earned" stat. While payouts are gated we never
+ * render a dollar figure (which would imply withdrawable earnings) — we render
+ * "Coming soon". Once REFERRAL_PAYOUTS_LIVE flips, the accrued commission is
+ * formatted as USD.
+ */
+export function formatReferralEarned(
+  earnedCents: number,
+  payoutsLive: boolean = REFERRAL_PAYOUTS_LIVE,
+): string {
+  if (!payoutsLive) return "Coming soon";
+  return `$${(earnedCents / 100).toFixed(2)}`;
+}
+
 export async function fetchBillingStatus(): Promise<BillingStatus | null> {
   try {
     const res = await fetch(`${RELAY_URL}/api/billing/status`, { credentials: 'include' });
