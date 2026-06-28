@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Engine } from "@zintus/engine";
+import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
@@ -450,6 +454,113 @@ describe("gateway handler", () => {
     };
     expect(emptyBody.data).toEqual([]);
     expect(emptyBody.has_more).toBe(false);
+  });
+
+  test("GET /v1/activity reads the DURABLE store first, honoring ?since/?limit/?provider + retention_days", async () => {
+    const store = new ActivityStore(
+      join(mkdtempSync(join(tmpdir(), "zintus-activity-h-")), "activity.db"),
+    );
+    const base = Math.floor(Date.UTC(2026, 5, 28, 0, 0, 0) / 1000);
+    store.recordActivity({
+      traceId: "d-old",
+      created: base - 10_000,
+      provider: "cerebras",
+      model: "llama-3.1-8b",
+      inputTokens: 5,
+      outputTokens: 2,
+      costUsd: 0,
+      savedVsBaselineUsd: 0,
+      latencyMs: 30,
+      cacheHit: false,
+      routeReason: null,
+    });
+    store.recordActivity({
+      traceId: "d-new",
+      created: base,
+      provider: "groq",
+      model: "llama-3.3-70b-versatile",
+      inputTokens: 10,
+      outputTokens: 5,
+      costUsd: 0,
+      savedVsBaselineUsd: 0.0009,
+      latencyMs: 120,
+      cacheHit: false,
+      routeReason: "cheapest-healthy",
+    });
+
+    // Engine traces are non-empty; the durable store must take precedence.
+    const engine = fakeEngine({
+      listTraces: () => [
+        { traceId: "trace-only", startedAt: new Date(), attempts: [] },
+      ],
+    });
+    const handler = makeHandler({}, engine, { activityStore: store });
+
+    const res = await handler(new Request("http://x/v1/activity"));
+    const body = (await res.json()) as {
+      data: Array<Record<string, unknown>>;
+      has_more: boolean;
+      retention_days: number;
+    };
+    // Durable rows (newest-first), not the trace ring.
+    expect(body.data.map((e) => e.id)).toEqual(["d-new", "d-old"]);
+    expect(body.retention_days).toBe(30);
+    const top = body.data[0] as Record<string, unknown>;
+    expect(top.tokens).toEqual({ input: 10, output: 5, total: 15 });
+    expect(top.cost_usd).toBe(0);
+    expect(top.route_reason).toBe("cheapest-healthy");
+
+    // ?since drops the older row.
+    const sinceRes = await handler(
+      new Request(`http://x/v1/activity?since=${base - 100}`),
+    );
+    const sinceBody = (await sinceRes.json()) as { data: Array<{ id: string }> };
+    expect(sinceBody.data.map((e) => e.id)).toEqual(["d-new"]);
+
+    // ?provider filter.
+    const provRes = await handler(
+      new Request("http://x/v1/activity?provider=cerebras"),
+    );
+    const provBody = (await provRes.json()) as { data: Array<{ id: string }> };
+    expect(provBody.data.map((e) => e.id)).toEqual(["d-old"]);
+
+    // ?limit caps the page and drives has_more honestly.
+    const limitRes = await handler(new Request("http://x/v1/activity?limit=1"));
+    const limitBody = (await limitRes.json()) as {
+      data: unknown[];
+      has_more: boolean;
+    };
+    expect(limitBody.data).toHaveLength(1);
+    expect(limitBody.has_more).toBe(true);
+
+    store.close();
+  });
+
+  test("GET /v1/activity falls back to the trace path when the durable store is empty", async () => {
+    const store = new ActivityStore(
+      join(mkdtempSync(join(tmpdir(), "zintus-activity-e-")), "activity.db"),
+    );
+    const engine = fakeEngine({
+      listTraces: () => [
+        {
+          traceId: "fallback-trace",
+          startedAt: new Date("2026-06-28T00:00:00.000Z"),
+          attempts: [],
+          winner: { providerId: "groq" as const, model: "test-model" },
+          totalLatencyMs: 50,
+        },
+      ],
+    });
+    const handler = makeHandler({}, engine, { activityStore: store });
+    const res = await handler(new Request("http://x/v1/activity"));
+    const body = (await res.json()) as {
+      data: Array<{ id: string }>;
+      retention_days?: number;
+    };
+    // Empty store → trace-derived entry, and no retention_days on the fallback.
+    expect(body.data.map((e) => e.id)).toEqual(["fallback-trace"]);
+    expect(body.retention_days).toBeUndefined();
+    store.close();
   });
 
   test("GET /v1/key returns per-provider quota status (null limit when unreported) and is auth-gated", async () => {

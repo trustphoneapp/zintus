@@ -15,6 +15,11 @@ import {
   detectLocalRuntimes as defaultDetectLocalRuntimes,
   type LocalRuntimes,
 } from "./local-runtimes.js";
+import {
+  activityRecordToEntry,
+  ACTIVITY_RETENTION_DAYS,
+  type ActivityStore,
+} from "./activity-store.js";
 import type {
   ChatMessage,
   ContextMode,
@@ -478,6 +483,14 @@ export interface GatewayHandlerDeps {
    * can assert `use_local` / `localAvailable` without a live runtime.
    */
   detectLocalRuntimes?: () => Promise<LocalRuntimes>;
+  /**
+   * Durable usage-history store (bun:sqlite, ~/.zintus/activity.db). When
+   * provided, GET /v1/activity reads from it first (falling back to the
+   * in-memory trace path when it is empty/unavailable) and each completed turn
+   * is persisted to it best-effort. Omitted in unit tests → behaviour is exactly
+   * the prior trace-derived path. Created in index.ts for production.
+   */
+  activityStore?: ActivityStore;
 }
 
 /** BYOK-only fallback actions when a provider's quota is low/exhausted. */
@@ -513,6 +526,54 @@ export function createGatewayHandler(
   const getDraining = deps.getDraining;
   const rateLimiter = deps.rateLimiter;
   const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
+  const activityStore = deps.activityStore;
+
+  /**
+   * Persist a completed turn to the durable activity store (best-effort). A
+   * write failure must NEVER break the chat response — it is logged and
+   * swallowed. Honest: cost is $0 (free-core), tokens/latency/savings stay null
+   * when the turn did not record them (no fabricated values).
+   */
+  function recordTurnActivity(
+    result: {
+      traceId?: string;
+      providerId: string;
+      model: string;
+      cacheHit?: string;
+      routeReason?: string;
+    },
+    usage: RouteUsage | undefined,
+  ): void {
+    if (!activityStore || !result.traceId) {
+      return;
+    }
+    try {
+      const inputTokens = usage?.inputTokens ?? null;
+      const outputTokens = usage?.outputTokens ?? null;
+      activityStore.recordActivity({
+        traceId: result.traceId,
+        created: Math.floor(Date.now() / 1000),
+        provider: usage?.providerId ?? result.providerId ?? null,
+        model: usage?.model ?? result.model ?? null,
+        inputTokens,
+        outputTokens,
+        // Free-core: served off free tiers, so the user's real cost is $0.
+        costUsd: 0,
+        savedVsBaselineUsd:
+          inputTokens != null && outputTokens != null
+            ? savedVsClaudeSonnet(inputTokens, outputTokens)
+            : null,
+        latencyMs: usage?.latencyMs ?? null,
+        cacheHit: result.cacheHit != null && result.cacheHit !== "miss",
+        routeReason: result.routeReason ?? null,
+      });
+    } catch (error) {
+      log("warn", "activity.record_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
   const maxMessages = config.maxMessages ?? DEFAULT_MAX_MESSAGES;
   const requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
@@ -1199,6 +1260,8 @@ export function createGatewayHandler(
           metaHeaders,
         );
       }
+      // Durable usage history: this turn completed and its usage is known.
+      recordTurnActivity(result, capturedUsage);
       return json(
         request,
         {
@@ -1417,6 +1480,9 @@ export function createGatewayHandler(
               );
             }
           }
+          // The stream drained without error → a real completed turn. Persist
+          // it to the durable activity store (best-effort, never throws here).
+          recordTurnActivity(result, capturedUsage);
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
           const message =
@@ -1856,28 +1922,67 @@ export function createGatewayHandler(
       return json(request, { traces: engine.listTraces(limit) });
     }
 
-    // OpenRouter-style `/activity`: paginated usage history derived from the SAME
-    // recorded routing traces as `/v1/traces`, normalized to a stable per-request
-    // shape. `?limit=` defaults to 50, capped at 200; `?provider=`/`?model=`
-    // narrow the page. Honest: only real recorded usage is surfaced (empty list
-    // when none) and cost is never fabricated.
+    // OpenRouter-style `/activity`: paginated, persistent usage history. Reads
+    // from the DURABLE activity store first (~/.zintus/activity.db, pruned to a
+    // 30-day window), and falls back to the in-memory trace path when the store
+    // is empty/unavailable — keeping the exact Phase-5 entry shape either way.
+    // `?limit=` defaults to 50, capped at 200; `?provider=`/`?model=` narrow the
+    // page; `?since=` (unix seconds) bounds the date window. Honest: only real
+    // recorded usage is surfaced (empty list when none); cost is never fabricated.
     if (url.pathname === "/v1/activity" && request.method === "GET") {
       const rawLimit = Number(url.searchParams.get("limit"));
       const limit =
         Number.isFinite(rawLimit) && rawLimit > 0
           ? Math.min(200, Math.floor(rawLimit))
           : 50;
+      const providerFilter = url.searchParams.get("provider");
+      const modelFilter = url.searchParams.get("model");
+      const rawSince = Number(url.searchParams.get("since"));
+      const since =
+        Number.isFinite(rawSince) && rawSince > 0 ? Math.floor(rawSince) : undefined;
+
+      // ── Durable path ───────────────────────────────────────────────────────
+      if (activityStore) {
+        try {
+          // Fetch one extra to honestly compute `has_more` without a total.
+          const rows = activityStore.listActivity({
+            limit: limit + 1,
+            since,
+            provider: providerFilter,
+            model: modelFilter,
+          });
+          if (rows.length > 0) {
+            const hasMore = rows.length > limit;
+            const data = rows.slice(0, limit).map(activityRecordToEntry);
+            return json(request, {
+              object: "list",
+              data,
+              has_more: hasMore,
+              retention_days: ACTIVITY_RETENTION_DAYS,
+            });
+          }
+          // Empty store → fall through to the trace-derived path below.
+        } catch (error) {
+          log("warn", "activity.read_failed", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          // Store unavailable → fall through to the trace-derived path below.
+        }
+      }
+
+      // ── Fallback: in-memory trace ring ──────────────────────────────────────
       // Fetch one extra to honestly compute `has_more` without inventing a total.
       const fetched = engine.listTraces(limit + 1);
       const hasMore = fetched.length > limit;
-      const providerFilter = url.searchParams.get("provider");
-      const modelFilter = url.searchParams.get("model");
       let data = fetched.slice(0, limit).map(toActivityEntry);
       if (providerFilter) {
         data = data.filter((entry) => entry.provider === providerFilter);
       }
       if (modelFilter) {
         data = data.filter((entry) => entry.model === modelFilter);
+      }
+      if (since !== undefined) {
+        data = data.filter((entry) => entry.created >= since);
       }
       return json(request, { object: "list", data, has_more: hasMore });
     }

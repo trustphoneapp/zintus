@@ -16,6 +16,7 @@ export {
 import { createEngine } from "@zintus/engine";
 import { loadPolicy, watchPolicy, redactSecrets } from "@zintus/router";
 import { DEFAULT_CONFIG } from "@zintus/types";
+import { ActivityStore } from "./activity-store.js";
 import { buildGatewayConfig, type GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type LogFn } from "./handler.js";
 import { createErrorSink } from "./observability.js";
@@ -69,6 +70,11 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     policy,
   });
 
+  // Durable, machine-local usage history (~/.zintus/activity.db, beside the
+  // quota ledger) so GET /v1/activity is a real persistent 30-day feed. Opened
+  // once and pruned on open; local-only, never sent anywhere.
+  const activityStore = new ActivityStore();
+
   const log: LogFn = (level, message, fields = {}) => {
     // Redact any provider/secret token before the structured line is emitted —
     // an upstream error echoed into `fields` (e.g. a 401 body) can carry a key.
@@ -119,6 +125,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       log,
       onError,
       rateLimiter,
+      activityStore,
       getDraining: () => draining,
       // Real, in-flight-aware free-tier quota signal for Tokzen's quota-aware
       // compression dial (was always the hardcoded 1.0 default before wiring).
