@@ -47,7 +47,11 @@ import {
   hasProviderSendConsent,
 } from "@/lib/consent";
 import { getActiveProject, setActiveProjectId } from "@/lib/projects";
-import { extractArtifacts, type Artifact } from "@/lib/artifacts";
+import {
+  extractArtifacts,
+  foldArtifactVersions,
+  type Artifact,
+} from "@/lib/artifacts";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
@@ -620,7 +624,7 @@ export function ChatPanel() {
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
   const { artifactList, artifactsByMessage } = useMemo(() => {
-    const list: Artifact[] = [];
+    const flat: Artifact[] = [];
     const byMessage: Record<string, Artifact[]> = {};
     for (const m of messages) {
       if (m.role !== "assistant" || !m.content) continue;
@@ -630,10 +634,11 @@ export function ChatPanel() {
       }));
       if (arts.length > 0) {
         byMessage[m.id] = arts;
-        list.push(...arts);
+        flat.push(...arts);
       }
     }
-    return { artifactList: list, artifactsByMessage: byMessage };
+    // Fold re-emitted bodies into version histories so one artifact ≠ many.
+    return { artifactList: foldArtifactVersions(flat), artifactsByMessage: byMessage };
   }, [messages]);
 
   const openArtifact = useCallback((id: string) => {

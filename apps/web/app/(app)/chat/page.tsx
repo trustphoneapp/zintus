@@ -4,7 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { MessageBubble } from "@/app/_components/MessageBubble";
 import { ArtifactPanel } from "@/app/_components/ArtifactPanel";
-import { extractArtifacts, type Artifact } from "@/lib/artifacts";
+import {
+  extractArtifacts,
+  foldArtifactVersions,
+  type Artifact,
+} from "@/lib/artifacts";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { ConsentDialog } from "@/app/_components/ConsentDialog";
@@ -272,7 +276,7 @@ export default function ChatPage() {
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
   const { artifactList, artifactsByMessage } = useMemo(() => {
-    const list: Artifact[] = [];
+    const flat: Artifact[] = [];
     const byMessage: Record<string, Artifact[]> = {};
     for (const m of messages) {
       if (m.role !== "assistant" || !m.content) continue;
@@ -282,10 +286,11 @@ export default function ChatPage() {
       }));
       if (arts.length > 0) {
         byMessage[m.id] = arts;
-        list.push(...arts);
+        flat.push(...arts);
       }
     }
-    return { artifactList: list, artifactsByMessage: byMessage };
+    // Fold re-emitted bodies into version histories so one artifact ≠ many.
+    return { artifactList: foldArtifactVersions(flat), artifactsByMessage: byMessage };
   }, [messages]);
 
   const openArtifact = useCallback((id: string) => {
