@@ -83,14 +83,21 @@ Web tool calling ships **built-in tools only** (calculator, `current_datetime`,
 - [ ] A web UI for **user-defined** tools (arbitrary schemas + executors) is
       unbuilt; scope the executor sandbox/CSP story before shipping it.
 
-## 6. Web structured-output UI `[FOLLOW-UP]`
+## 6. Structured-output UI — web ✅, CLI not yet `[FOLLOW-UP]`
 
-Structured/JSON output is live on **gateway API + CLI**; the web shared lib
-(`streamGatewayChat`) can carry a `response_format` but **no web surface requests
-one or renders parsed JSON** (verified absent in `apps/web/app/**`).
+Status corrected on `feat/zintus-10-10`:
+- **Web structured output is now LIVE** — `chat/page.tsx` persists a `jsonEnabled`
+  toggle and sends `response_format: { type: "json_object" }` through
+  `chat-client.ts` → `gateway.ts` → the gateway handler. The old "no web surface
+  requests one" claim is stale.
+- **CLI structured output is NOT yet wired** — `apps/cli/src/**` has **no**
+  `response_format` request (grep clean); the CLI `--json` flag is *output
+  formatting*, not a model structured-output request. Any "structured output live
+  on CLI" claim is an over-claim until built.
 
-- [ ] If web structured output is desired, add the request + a JSON-render
-      surface, then update `FEATURE-MATRIX.md`.
+- [ ] Add a CLI `response_format` request (a `--json-schema`/`--json` model flag,
+      distinct from output formatting) for true cross-surface parity, then update
+      `FEATURE-MATRIX.md`.
 - [ ] Keep the honesty caveat: only **Gemini** is `json_schema`; all other
       providers are `json_object`/prompt-level (**best-effort, not guaranteed**).
 

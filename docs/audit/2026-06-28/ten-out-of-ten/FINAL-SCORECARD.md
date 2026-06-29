@@ -6,6 +6,10 @@ or summaries — and the relevant test suites were re-run green. This supersedes
 `RE-SCORE.md` by folding in the mobile-parity, BYOK-fallback, catalog-37, and
 PDF-input work that RE-SCORE explicitly deferred.*
 
+> **Path note:** bare `chat/page.tsx` citations below refer to
+> `apps/web/app/(app)/chat/page.tsx` (the App-Router route group). Line numbers
+> were accurate at capture time; treat them as anchors, not guarantees.
+
 ## Verdict: 10/10? **NO — honest overall ≈ 7.5/10.** Two axes are genuine 10s.
 
 Zintus moved from a credible **beta+ (~6.5)** to a strong, unusually consistent and
