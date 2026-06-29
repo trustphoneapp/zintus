@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import { Navbar } from "@/components/marketing/Navbar";
 import { Footer } from "@/components/marketing/Footer";
-import { PROVIDERS, MODELS, type Model, type Provider } from "@/data/providers";
+import { PROVIDERS, MODELS, isRoutableModel, type Model, type Provider } from "@/data/providers";
 import { CATALOG_STATS } from "@/data/catalog-stats";
 import { TIER_COLORS, contextTokens, priceKey, usd } from "./helpers";
 
@@ -27,7 +27,15 @@ type SortKey = "price" | "context" | "name";
 const BADGE_LABEL: Record<Provider["badge"], string> = {
   integrated: "Integrated",
   "add-key": "Add your key",
-  "coming-soon": "Coming soon",
+  "coming-soon": "Planned",
+};
+
+// A planned ("coming-soon") provider is NOT yet routable — make that explicit on
+// hover so the label is never mistaken for an actionable "Add your key" CTA.
+const BADGE_TITLE: Record<Provider["badge"], string> = {
+  integrated: "Routable today — no key needed for the free tier",
+  "add-key": "Routable today — add your own key (BYOK)",
+  "coming-soon": "Planned — not yet routable; listed for transparency",
 };
 
 const BADGE_COLOR: Record<Provider["badge"], string> = {
@@ -35,6 +43,32 @@ const BADGE_COLOR: Record<Provider["badge"], string> = {
   "add-key": VIOLET,
   "coming-soon": "#94A3B8",
 };
+
+const SLATE = "#94A3B8";
+
+/** Honest "Planned — not yet routable" pill for models whose provider the router
+ *  cannot reach yet. Visually distinct (muted/slate) and carries no CTA. */
+function PlannedBadge() {
+  return (
+    <span
+      title="Planned — not yet routable; listed for transparency"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        borderRadius: 6,
+        padding: "2px 8px",
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: "0.03em",
+        color: SLATE,
+        border: `1px solid color-mix(in oklab, ${SLATE} 40%, transparent)`,
+        background: `color-mix(in oklab, ${SLATE} 14%, transparent)`,
+      }}
+    >
+      Planned
+    </span>
+  );
+}
 
 function Chip({
   label,
@@ -161,8 +195,8 @@ export default function CatalogPage() {
           <h1 className="m-title">Providers and models Zintus routes to</h1>
           <p className="m-subtitle">
             {stats.totalProviders} providers · {stats.totalModels} models ·{" "}
-            {stats.freeModels} free · {stats.integratedProviders} integrated today, the rest via
-            your key.
+            {stats.freeModels} free · {stats.routableProviders} routable today,{" "}
+            {stats.plannedProviders} planned (not yet routable).
           </p>
 
           {/* honest stat strip */}
@@ -285,7 +319,10 @@ export default function CatalogPage() {
                   <div className="m-provider-card" key={m.id}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                       <h3>{m.name}</h3>
-                      <TierBadge tier={m.tier} />
+                      <div style={{ display: "inline-flex", gap: 6, flexShrink: 0 }}>
+                        {isRoutableModel(m) ? null : <PlannedBadge />}
+                        <TierBadge tier={m.tier} />
+                      </div>
                     </div>
                     <span>{PROVIDER_NAME.get(m.provider) ?? m.provider} · {m.family}</span>
                     <div style={{ marginTop: "0.7rem", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
@@ -316,6 +353,7 @@ export default function CatalogPage() {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                       <h3>{p.name}</h3>
                       <span
+                        title={BADGE_TITLE[p.badge]}
                         style={{
                           fontSize: 11,
                           fontWeight: 700,
