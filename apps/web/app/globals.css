@@ -4226,7 +4226,12 @@ body:has(.dashboard-container) {
 }
 .chat-attach svg,
 .chat-mic svg {
-  /* Defensive: pin the icon stroke to the button color so no reset can dim it. */
+  /* THE FIX: as flex items the composer icons' width attribute was ignored and
+     they collapsed to ~2px wide (a faint sliver/dot). Force the box + no-shrink so
+     they render as full 18px icons; pin the stroke so no reset can dim them. */
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
   stroke: currentColor;
 }
 .chat-attach:hover {
