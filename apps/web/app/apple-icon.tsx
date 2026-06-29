@@ -3,10 +3,10 @@ import { ImageResponse } from "next/og";
 // Next.js App Router generated apple-touch-icon (file convention: app/apple-icon).
 // https://nextjs.org/docs/app/api-reference/file-conventions/metadata/app-icons
 //
-// PLACEHOLDER Zintus mark — the same minimal geometric "Z" on brand violet as
-// app/icon.svg. It is a stand-in pending the real brand asset. [HUMAN] when the
-// final logo exists, drop a static `app/apple-icon.png` (180×180) in to replace
-// this generated route.
+// Zintus apple-touch-icon — the networked "Z" brand mark, matching app/icon.svg
+// and components/ZintusLogo.tsx (no longer a divergent placeholder). A final
+// designer-delivered static `app/apple-icon.png` (180×180) can still drop in over
+// this generated route later.
 //
 // Generated via next/og's ImageResponse (same approach as app/opengraph-image.tsx)
 // because no raster/PNG tooling is available in this environment to hand-author a
@@ -31,13 +31,22 @@ export default function AppleIcon() {
         }}
       >
         <svg width="116" height="116" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+          {/* Z strokes: top -> diagonal -> bottom (single path for Satori) */}
           <path
-            d="M168 176H344L168 336H344"
+            d="M112 128 L400 128 L112 384 L400 384"
             stroke="#FFFFFF"
-            strokeWidth="48"
+            strokeWidth="38"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
+          {/* Dimmer midpoint nodes */}
+          <circle cx="312" cy="213" r="22" fill="#C4B5FD" />
+          <circle cx="200" cy="299" r="22" fill="#C4B5FD" />
+          {/* Corner node endpoints */}
+          <circle cx="112" cy="128" r="38" fill="#FFFFFF" />
+          <circle cx="400" cy="128" r="38" fill="#FFFFFF" />
+          <circle cx="112" cy="384" r="38" fill="#FFFFFF" />
+          <circle cx="400" cy="384" r="38" fill="#FFFFFF" />
         </svg>
       </div>
     ),

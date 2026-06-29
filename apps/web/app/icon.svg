@@ -1,10 +1,10 @@
 <svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Zintus">
   <!--
-    PLACEHOLDER Zintus mark — a minimal geometric "Z" on the brand violet.
-    This is a stand-in pending the real brand asset. [HUMAN] replace this file
-    (and the matching app/apple-icon.tsx) with the final logo when it exists.
-    Monochrome-friendly: the "Z" reads as a single bold stroke, so it still
-    works when a platform renders the mark in one flat colour.
+    Zintus favicon — the networked "Z" brand mark (same geometry as
+    components/ZintusLogo.tsx, scaled 16x from its 0 0 32 32 viewBox), white on
+    the brand-violet rounded square. The nodes evoke the routing/network theme,
+    matching the in-app logo instead of a divergent placeholder. A final
+    designer-delivered raster can still drop in over this later.
   -->
   <defs>
     <linearGradient id="zintus-mark" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
@@ -13,5 +13,21 @@
     </linearGradient>
   </defs>
   <rect width="512" height="512" rx="112" fill="url(#zintus-mark)" />
-  <path d="M168 176H344L168 336H344" stroke="#FFFFFF" stroke-width="48" stroke-linecap="round" stroke-linejoin="round" />
+
+  <!-- Z strokes: top -> diagonal -> bottom -->
+  <g stroke="#FFFFFF" stroke-width="38" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="112" y1="128" x2="400" y2="128" />
+    <line x1="400" y1="128" x2="112" y2="384" />
+    <line x1="112" y1="384" x2="400" y2="384" />
+  </g>
+
+  <!-- Dimmer midpoint nodes along the diagonal -->
+  <circle cx="312" cy="213" r="22" fill="#C4B5FD" />
+  <circle cx="200" cy="299" r="22" fill="#C4B5FD" />
+
+  <!-- Filled node endpoints (the four corners of the Z) -->
+  <circle cx="112" cy="128" r="38" fill="#FFFFFF" />
+  <circle cx="400" cy="128" r="38" fill="#FFFFFF" />
+  <circle cx="112" cy="384" r="38" fill="#FFFFFF" />
+  <circle cx="400" cy="384" r="38" fill="#FFFFFF" />
 </svg>
