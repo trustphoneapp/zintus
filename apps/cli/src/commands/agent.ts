@@ -2,6 +2,7 @@ import { createInterface } from "node:readline/promises";
 import chalk from "chalk";
 import ora from "ora";
 import { listKeys } from "@zintus/keychain";
+import { embedBatch, embeddingMode } from "@zintus/memory";
 import type { ChatMessage } from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
@@ -53,8 +54,11 @@ function buildSystemPreamble(
   const lines = [
     "You are a coding agent operating inside a SANDBOX.",
     `All file operations are confined to this root: ${root}`,
-    "You have these tools: read_file, list_directory, search_code (read-only) and",
-    "write_file, apply_edit (mutating, each gated by user confirmation).",
+    "You have these tools: read_file, list_directory, search_code, find_relevant_code",
+    "(read-only) and write_file, apply_edit (mutating, each gated by user confirmation).",
+    "find_relevant_code does relevance retrieval for a natural-language query (semantic",
+    "when an embedder is configured, else a key-free lexical ranking) — use it to locate",
+    "WHERE a concept lives; use search_code when you know an exact substring.",
   ];
   if (allowRun) {
     lines.push(
@@ -74,7 +78,7 @@ function buildSystemPreamble(
   lines.push(
     "Rules:",
     "- Use paths RELATIVE to the sandbox root. Paths that escape the root are rejected.",
-    "- Investigate with read_file/list_directory/search_code before editing.",
+    "- Investigate with find_relevant_code/search_code/read_file/list_directory before editing.",
     "- Prefer apply_edit for surgical changes; old_string must be an exact, unique match.",
     allowRun
       ? "- The only way to run anything is run_command with an allowlisted command — there is no shell; never claim to run other commands."
@@ -147,6 +151,12 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
       }
     : interactiveConfirm();
 
+  // find_relevant_code ranking: use REAL semantic embeddings only when a genuine
+  // embedder is configured (Ollama). Otherwise leave `embed` undefined so the
+  // tool uses its key-free lexical fallback rather than a degraded keyword-hash
+  // embedding masquerading as semantic search.
+  const semanticEmbed =
+    embeddingMode() === "ollama" ? (texts: string[]) => embedBatch(texts) : undefined;
   const ctx: AgentToolContext = {
     sandbox,
     confirm,
@@ -155,6 +165,15 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     run: options?.allowRun
       ? { allow: true, budget: { used: 0, max: DEFAULT_RUN_BUDGET } }
       : undefined,
+    semantic: {
+      embed: semanticEmbed,
+      onIndexBuilt: ({ mode, filesIndexed, chunksIndexed }) =>
+        console.error(
+          chalk.dim(
+            `🔎 find_relevant_code index ready (${mode} ranking · ${filesIndexed} file(s), ${chunksIndexed} chunk(s))`,
+          ),
+        ),
+    },
   };
 
   console.error(chalk.cyan(`🤖 agent · sandbox root: ${chalk.bold(sandbox.root)}`));

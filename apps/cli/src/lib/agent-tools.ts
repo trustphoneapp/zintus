@@ -2,13 +2,16 @@ import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { CodeIndex, type CodeChunkHit } from "@zintus/codebase-indexer";
 import type {
   ChatMessage,
   ToolCallContentBlock,
@@ -258,6 +261,32 @@ export interface AgentRunConfig {
   spawn?: RunCommandSpawn;
 }
 
+/**
+ * Optional configuration for the (read-only) find_relevant_code tool.
+ *
+ * The tool ALWAYS works, key-free. The only thing this config decides is the
+ * RANKING strategy:
+ *  - `embed` PROVIDED  => semantic VECTOR search (cosine over real embeddings).
+ *    Wire a real embedder here (e.g. @zintus/memory's embedBatch when Ollama is
+ *    configured). Pass ONLY a genuinely semantic embedder — a degraded
+ *    keyword-hash embedder should be left undefined so the explicit lexical
+ *    ranking (below) is used instead.
+ *  - `embed` ABSENT    => key-free LEXICAL fallback (query-term / identifier /
+ *    symbol-declaration / filename overlap). Useful offline, NOT true semantic.
+ */
+export interface AgentSemanticConfig {
+  /** A semantic embedder. Present => vector search; absent => lexical fallback. */
+  embed?: (texts: string[]) => Promise<number[][]>;
+  /** Base directory for the per-run temp index DB (default OS temp dir). */
+  indexDir?: string;
+  /** Fired once, when the per-run index is first built (logging / tests). */
+  onIndexBuilt?: (info: {
+    mode: "vector" | "lexical";
+    filesIndexed: number;
+    chunksIndexed: number;
+  }) => void;
+}
+
 export interface AgentToolContext {
   sandbox: AgentSandbox;
   /** Gate invoked before every applied mutation AND before every command run. */
@@ -265,6 +294,8 @@ export interface AgentToolContext {
   budget: MutationBudget;
   /** Opt-in run_command support. When absent, run_command is disabled. */
   run?: AgentRunConfig;
+  /** Optional ranking config for find_relevant_code (absent => lexical fallback). */
+  semantic?: AgentSemanticConfig;
 }
 
 interface AgentTool {
@@ -515,6 +546,231 @@ const searchCode: AgentTool = {
   },
 };
 
+// --- find_relevant_code (semantic / lexical retrieval) ---------------------
+
+/** Default and hard cap on results returned by find_relevant_code. */
+export const DEFAULT_SEMANTIC_RESULTS = 5;
+export const MAX_SEMANTIC_RESULTS = 20;
+/** Per-result snippet char cap (chunks are ~40-80 lines; this bounds payload). */
+export const MAX_SNIPPET_CHARS = 1600;
+/** Cap on distinct query terms used for lexical scoring (bounds the regex work). */
+const MAX_QUERY_TERMS = 24;
+
+/** The built, cached per-run index plus the ranking mode it will use. */
+interface BuiltSemanticIndex {
+  mode: "vector" | "lexical";
+  index: CodeIndex;
+  /** Temp dir holding the sqlite db (cleaned by the OS / test teardown). */
+  dbDir: string;
+}
+
+/**
+ * Per-AGENT-RUN cache: the index is built once and reused across every
+ * find_relevant_code call. Keyed by the AgentToolContext object (one per run),
+ * via a WeakMap so it never leaks across runs and needs no caller bookkeeping.
+ */
+const semanticIndexCache = new WeakMap<
+  AgentToolContext,
+  Promise<BuiltSemanticIndex>
+>();
+
+function getOrBuildSemanticIndex(
+  ctx: AgentToolContext,
+): Promise<BuiltSemanticIndex> {
+  const cached = semanticIndexCache.get(ctx);
+  if (cached) return cached;
+  const promise = buildSemanticIndex(ctx);
+  semanticIndexCache.set(ctx, promise);
+  return promise;
+}
+
+async function buildSemanticIndex(
+  ctx: AgentToolContext,
+): Promise<BuiltSemanticIndex> {
+  const embed = ctx.semantic?.embed;
+  const mode: "vector" | "lexical" = embed ? "vector" : "lexical";
+  const baseDir = ctx.semantic?.indexDir ?? tmpdir();
+  mkdirSync(baseDir, { recursive: true });
+  const dbDir = mkdtempSync(path.join(baseDir, "zintus-agent-index-"));
+  // CodeIndex.indexWorkspace only walks UNDER the given root and already skips
+  // node_modules/.git/build dirs, binaries and oversized files — so indexing the
+  // sandbox root is itself confined to the sandbox. In lexical mode we hand it a
+  // no-op embedder so indexing skips all (pointless, possibly degraded) embedding
+  // work; ranking happens over the raw chunk text instead.
+  const index = new CodeIndex({
+    dbPath: path.join(dbDir, "code.db"),
+    embed: embed ?? noopEmbed,
+  });
+  const stats = await index.indexWorkspace(ctx.sandbox.root);
+  ctx.semantic?.onIndexBuilt?.({
+    mode,
+    filesIndexed: stats.filesIndexed,
+    chunksIndexed: stats.chunksIndexed,
+  });
+  return { mode, index, dbDir };
+}
+
+/** Lexical-mode embedder: produces no vectors so indexWorkspace stores chunks
+ *  WITHOUT embeddings (and never calls a real, possibly key-gated, embedder). */
+const noopEmbed = async (texts: string[]): Promise<number[][]> =>
+  texts.map(() => []);
+
+function clampSemanticLimit(raw: unknown): number {
+  const n =
+    typeof raw === "number" && Number.isFinite(raw)
+      ? Math.floor(raw)
+      : DEFAULT_SEMANTIC_RESULTS;
+  return Math.max(1, Math.min(MAX_SEMANTIC_RESULTS, n));
+}
+
+function capSnippet(content: string): string {
+  if (content.length <= MAX_SNIPPET_CHARS) return content;
+  return `${content.slice(0, MAX_SNIPPET_CHARS)}\n…[snippet truncated]`;
+}
+
+/** Distinct, lowercased query terms (>=2 chars), capped. */
+function queryTerms(query: string): string[] {
+  const seen = new Set<string>();
+  for (const tok of query.toLowerCase().split(/[^a-z0-9_]+/)) {
+    if (tok.length >= 2) seen.add(tok);
+    if (seen.size >= MAX_QUERY_TERMS) break;
+  }
+  return [...seen];
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * KEY-FREE lexical relevance score for one chunk against the query terms.
+ * Rewards (per distinct term): a filename hit, whole-word identifier matches
+ * (with a small frequency bump), and — most strongly — the term appearing as a
+ * DECLARED symbol name (function/class/const/...). A multiplier rewards chunks
+ * that cover MORE of the distinct query terms. This is keyword/symbol overlap,
+ * NOT semantic meaning — but it makes the tool genuinely useful with no key.
+ */
+function lexicalScore(
+  terms: string[],
+  chunk: { path: string; content: string },
+): number {
+  if (!terms.length) return 0;
+  const content = chunk.content;
+  const lower = content.toLowerCase();
+  const pathLower = chunk.path.toLowerCase();
+  let score = 0;
+  let matchedDistinct = 0;
+  for (const term of terms) {
+    let termScore = 0;
+    if (pathLower.includes(term)) termScore += 3;
+    const esc = escapeRegExp(term);
+    const wordMatches = (lower.match(new RegExp(`\\b${esc}\\b`, "g")) ?? [])
+      .length;
+    if (wordMatches > 0) {
+      termScore += 1 + Math.log2(1 + wordMatches);
+      if (
+        new RegExp(
+          `\\b(?:function|class|interface|type|enum|struct|impl|trait|def|fn|func|const|let|var)\\s+${esc}\\b`,
+          "i",
+        ).test(content)
+      ) {
+        termScore += 4;
+      }
+    } else if (lower.includes(term)) {
+      termScore += 0.5; // partial / substring hit
+    }
+    if (termScore > 0) matchedDistinct += 1;
+    score += termScore;
+  }
+  if (score === 0) return 0;
+  // Reward breadth of coverage across the distinct query terms.
+  return score * (1 + matchedDistinct / terms.length);
+}
+
+function rankLexically(
+  query: string,
+  chunks: Array<{
+    path: string;
+    startLine: number;
+    endLine: number;
+    content: string;
+  }>,
+): CodeChunkHit[] {
+  const terms = queryTerms(query);
+  const scored: CodeChunkHit[] = [];
+  for (const chunk of chunks) {
+    const score = lexicalScore(terms, chunk);
+    if (score > 0) scored.push({ ...chunk, score });
+  }
+  scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
+
+const findRelevantCode: AgentTool = {
+  mutating: false,
+  requiresConfirmation: false,
+  definition: {
+    name: "find_relevant_code",
+    description:
+      "Find the code most RELEVANT to a natural-language query across the whole sandbox, returning the top files with their line range + a snippet. Use this to locate WHERE a concept/feature lives when you don't know the exact text to grep for — it complements search_code (literal substring). Ranking: when a semantic embedder is configured it uses vector similarity; otherwise it falls back to a KEY-FREE lexical ranking (query-term, identifier, symbol-declaration and filename overlap) that still works offline but is not true semantic search. Read-only; the index is built once per run and results + snippets are capped.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "Natural-language description of the code you're looking for",
+        },
+        limit: {
+          type: "number",
+          description: `Max results (default ${DEFAULT_SEMANTIC_RESULTS}, max ${MAX_SEMANTIC_RESULTS})`,
+        },
+      },
+      required: ["query"],
+    },
+  },
+  execute: async (args, ctx) => {
+    const query = String(args.query ?? "");
+    if (!query.trim()) return err("query is required");
+    const limit = clampSemanticLimit(args.limit);
+
+    const built = await getOrBuildSemanticIndex(ctx);
+    // Over-fetch in vector mode so sandbox filtering still leaves `limit` hits.
+    const hits =
+      built.mode === "vector"
+        ? await built.index.searchCode(query, limit * 4)
+        : rankLexically(query, built.index.allChunks());
+
+    const root = ctx.sandbox.root;
+    const results: {
+      file: string;
+      startLine: number;
+      endLine: number;
+      score: number;
+      snippet: string;
+    }[] = [];
+    for (const hit of hits) {
+      // Defense in depth: only ever surface files INSIDE the sandbox root, even
+      // though CodeIndex already walked only under it.
+      const abs = path.resolve(hit.path);
+      if (!isWithin(root, abs)) continue;
+      results.push({
+        file: ctx.sandbox.relative(abs),
+        startLine: hit.startLine,
+        endLine: hit.endLine,
+        score: Math.round(hit.score * 1000) / 1000,
+        snippet: capSnippet(hit.content),
+      });
+      if (results.length >= limit) break;
+    }
+    return ok({
+      query,
+      mode: built.mode,
+      resultCount: results.length,
+      results,
+    });
+  },
+};
+
 const writeFile: AgentTool = {
   mutating: true,
   requiresConfirmation: true,
@@ -746,6 +1002,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   readFile,
   listDirectory,
   searchCode,
+  findRelevantCode,
   writeFile,
   applyEdit,
   runCommand,
