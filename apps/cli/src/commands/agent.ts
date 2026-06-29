@@ -13,12 +13,18 @@ import {
   DEFAULT_RUN_BUDGET,
   MAX_AGENT_ROUNDS_CAP,
   RUN_COMMAND_TOOL_NAME,
+  UPDATE_PLAN_TOOL_NAME,
   type AgentToolContext,
+  type ChangeLogEntry,
   type ConfirmWrite,
+  type PlanStep,
+  createPlanState,
   createSandbox,
   executeAgentToolCall,
   isMutatingTool,
+  planStatusSummary,
   runAgentToolLoop,
+  summarizeChanges,
 } from "../lib/agent-tools.js";
 import {
   type AgentMcpToolset,
@@ -59,6 +65,10 @@ function buildSystemPreamble(
     "find_relevant_code does relevance retrieval for a natural-language query (semantic",
     "when an embedder is configured, else a key-free lexical ranking) — use it to locate",
     "WHERE a concept lives; use search_code when you know an exact substring.",
+    "You ALSO have update_plan: BEFORE you start editing, call it once with a short",
+    "ordered list of steps for this task. As you work, call it again to mark a step",
+    "'in_progress' when you begin it and 'done' when you finish it (re-send the full",
+    "list each time). The plan is yours and is shown to the user; it edits nothing.",
   ];
   if (allowRun) {
     lines.push(
@@ -85,6 +95,23 @@ function buildSystemPreamble(
       : "- There is no shell. Do not claim to run commands.",
     "- When the task is complete, stop calling tools and give a short summary of what you changed.",
   );
+  return lines.join("\n");
+}
+
+/** Render the model's plan with per-step status icons, for terminal display. The
+ *  plan is the MODEL'S — we print exactly the steps/statuses it set, nothing more. */
+function renderPlan(steps: PlanStep[]): string {
+  const lines = [chalk.cyan(`\n📋 Plan (${planStatusSummary(steps)}):`)];
+  steps.forEach((s, i) => {
+    const n = `${i + 1}.`;
+    if (s.status === "done") {
+      lines.push(`  ${chalk.green("✔")} ${chalk.dim(`${n} ${s.text}`)}`);
+    } else if (s.status === "in_progress") {
+      lines.push(`  ${chalk.yellow("◐")} ${chalk.bold(`${n} ${s.text}`)}`);
+    } else {
+      lines.push(`  ${chalk.dim("○")} ${n} ${s.text}`);
+    }
+  });
   return lines.join("\n");
 }
 
@@ -157,10 +184,15 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
   // embedding masquerading as semantic search.
   const semanticEmbed =
     embeddingMode() === "ollama" ? (texts: string[]) => embedBatch(texts) : undefined;
+  // The model's plan + the per-file change log live in the run context so the
+  // update_plan tool and gatedWrite can record into them; the CLI renders both.
+  const changeLog: ChangeLogEntry[] = [];
   const ctx: AgentToolContext = {
     sandbox,
     confirm,
     budget: { used: 0, max: DEFAULT_MUTATION_BUDGET },
+    plan: createPlanState(),
+    changeLog,
     // run_command is OFF unless explicitly opted in via --allow-run.
     run: options?.allowRun
       ? { allow: true, budget: { used: 0, max: DEFAULT_RUN_BUDGET } }
@@ -237,6 +269,9 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     ];
 
     let firstRound = true;
+    // The last allowlisted verification command's pass/fail, surfaced in the
+    // end-of-run summary (honest: only set when run_command actually ran).
+    let lastVerification: { command: string; pass: boolean } | null = null;
     const { rounds } = await runAgentToolLoop(initialMessages, {
       maxRounds,
       route: async (messages) => {
@@ -283,9 +318,11 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
           const tag =
             call.name === RUN_COMMAND_TOOL_NAME
               ? chalk.red("[run]")
-              : isMutatingTool(call.name)
-                ? chalk.magenta("[write]")
-                : chalk.dim("[read]");
+              : call.name === UPDATE_PLAN_TOOL_NAME
+                ? chalk.blue("[plan]")
+                : isMutatingTool(call.name)
+                  ? chalk.magenta("[write]")
+                  : chalk.dim("[read]");
           console.error(
             `  ${tag} ${chalk.bold(call.name)}(${JSON.stringify(call.arguments)})`,
           );
@@ -301,10 +338,59 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
             : `${r.content.length} char(s)`
           : r.content.slice(0, 400);
         console.error(`  🔧 ${chalk.bold(call.name)} → ${label} ${chalk.dim(summary)}`);
+        // When the model (re)sets its plan, render the updated plan + statuses so
+        // a multi-step run stays legible. ctx.plan holds the model's own steps.
+        if (call.name === UPDATE_PLAN_TOOL_NAME && !r.isError && ctx.plan?.steps.length) {
+          console.error(renderPlan(ctx.plan.steps));
+        }
+        // Capture the final verification command's pass/fail for the summary.
+        if (call.name === RUN_COMMAND_TOOL_NAME && !r.isError) {
+          try {
+            const parsed = JSON.parse(r.content) as Record<string, unknown>;
+            if (!parsed.declined && typeof parsed.exitCode !== "undefined") {
+              lastVerification = {
+                command: String(parsed.command ?? ""),
+                pass: parsed.exitCode === 0,
+              };
+            }
+          } catch {
+            // Non-JSON / unparseable — leave verification status unchanged.
+          }
+        }
       },
       onStopped: (max) =>
         console.error(chalk.yellow(`⚠ agent loop stopped after ${max} rounds (bounded)`)),
     });
+
+    // End-of-run change summary: the files ACTUALLY mutated through the loop,
+    // with per-file write counts, plus the final verification result if one ran.
+    // Only writes that hit disk are listed — we never claim an un-applied change.
+    const summary = summarizeChanges(changeLog);
+    if (summary.files.length > 0) {
+      console.error(
+        chalk.cyan(
+          `\n📝 Changes (${summary.mutations} mutation(s) across ${summary.files.length} file(s)):`,
+        ),
+      );
+      for (const f of summary.files) {
+        const times = f.writes > 1 ? chalk.dim(` ×${f.writes}`) : "";
+        console.error(
+          `  ${chalk.green("•")} ${f.path}${times} ${chalk.dim(`(${f.tools.join(", ")})`)}`,
+        );
+      }
+    } else {
+      console.error(chalk.dim("\n📝 No files were changed."));
+    }
+    if (lastVerification) {
+      const v = lastVerification as { command: string; pass: boolean };
+      const verdict = v.pass ? chalk.green("PASS") : chalk.red("FAIL");
+      console.error(`  ${chalk.bold("verify")} ${chalk.dim(v.command)} → ${verdict}`);
+    }
+    // If the model left a plan, show its final status so a multi-step run closes
+    // legibly (the plan is the model's; statuses are exactly what it last set).
+    if (ctx.plan && ctx.plan.steps.length > 0) {
+      console.error(chalk.dim(`\nFinal plan status: ${planStatusSummary(ctx.plan.steps)}`));
+    }
 
     console.error(
       chalk.dim(

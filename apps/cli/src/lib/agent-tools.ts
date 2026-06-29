@@ -112,6 +112,11 @@ const SAFE_TOKEN = /^[A-Za-z0-9._/@-]+$/;
 export const DEFAULT_AGENT_ROUNDS = 15;
 export const MAX_AGENT_ROUNDS_CAP = 40;
 
+/** Cap on plan steps the model may set (bounded — the plan stays legible). */
+export const MAX_PLAN_STEPS = 20;
+/** Per-step text cap (a plan step is a short line, not a paragraph). */
+export const MAX_PLAN_STEP_CHARS = 200;
+
 /** Directories never walked by search_code / list recursion. */
 const IGNORED_DIRS = new Set([
   "node_modules",
@@ -233,6 +238,116 @@ export interface RunBudget {
   readonly max: number;
 }
 
+/** Status of a single plan step. The model owns these — we NEVER auto-advance a
+ *  step the model didn't itself mark (honest planning, no fake autonomy). */
+export type PlanStepStatus = "pending" | "in_progress" | "done";
+
+/** One ordered step in the model's plan. */
+export interface PlanStep {
+  text: string;
+  status: PlanStepStatus;
+}
+
+/**
+ * The model-driven plan for an agent run, captured + tracked in loop state. The
+ * plan is the MODEL'S: it is set (and re-set, with updated statuses) via the
+ * update_plan tool. `revision` counts how many times the model rewrote it.
+ */
+export interface PlanState {
+  steps: PlanStep[];
+  revision: number;
+}
+
+/** A fresh, empty plan (revision 0, no steps) for the start of a run. */
+export function createPlanState(): PlanState {
+  return { steps: [], revision: 0 };
+}
+
+const PLAN_STATUSES: ReadonlySet<string> = new Set<PlanStepStatus>([
+  "pending",
+  "in_progress",
+  "done",
+]);
+
+/**
+ * Normalize the model-supplied `steps` argument into a bounded PlanStep[], or
+ * return an error. Accepts either bare strings (=> pending) or {step|text, status}
+ * objects. Over-long lists/texts are truncated rather than rejected (bounded).
+ */
+function normalizePlanSteps(raw: unknown): PlanStep[] | { error: string } {
+  if (!Array.isArray(raw)) return { error: "steps must be an array" };
+  if (raw.length === 0) return { error: "steps must be a non-empty array" };
+  const steps: PlanStep[] = [];
+  for (const item of raw.slice(0, MAX_PLAN_STEPS)) {
+    let text: string;
+    let status: PlanStepStatus = "pending";
+    if (typeof item === "string") {
+      text = item;
+    } else if (item != null && typeof item === "object") {
+      const obj = item as Record<string, unknown>;
+      text = String(obj.step ?? obj.text ?? "");
+      const s = typeof obj.status === "string" ? obj.status : "pending";
+      status = PLAN_STATUSES.has(s) ? (s as PlanStepStatus) : "pending";
+    } else {
+      continue;
+    }
+    text = text.trim();
+    if (!text) continue;
+    if (text.length > MAX_PLAN_STEP_CHARS) {
+      text = `${text.slice(0, MAX_PLAN_STEP_CHARS)}…`;
+    }
+    steps.push({ text, status });
+  }
+  if (steps.length === 0) return { error: "no valid steps provided" };
+  return steps;
+}
+
+/** A one-line "N/M done[, K in progress]" summary of a plan's status. */
+export function planStatusSummary(steps: PlanStep[]): string {
+  const done = steps.filter((s) => s.status === "done").length;
+  const inProgress = steps.filter((s) => s.status === "in_progress").length;
+  return `${done}/${steps.length} done${inProgress ? `, ${inProgress} in progress` : ""}`;
+}
+
+/** One applied write, recorded as the run progresses (for the change summary). */
+export interface ChangeLogEntry {
+  /** Path relative to the sandbox root. */
+  path: string;
+  /** The tool that performed the write (write_file | apply_edit). */
+  tool: string;
+  /** Bytes written by this mutation. */
+  bytes: number;
+}
+
+/** A per-file rollup of the change log (distinct files, write counts, tools). */
+export interface RunChangeSummary {
+  files: { path: string; writes: number; tools: string[] }[];
+  /** Total applied mutations (== changeLog.length == budget.used). */
+  mutations: number;
+}
+
+/**
+ * Roll a change log up into a per-DISTINCT-file summary. Only files ACTUALLY
+ * mutated through the loop appear — we never claim a write that didn't happen.
+ */
+export function summarizeChanges(changeLog: ChangeLogEntry[]): RunChangeSummary {
+  const byPath = new Map<
+    string,
+    { path: string; writes: number; tools: Set<string> }
+  >();
+  for (const e of changeLog) {
+    const cur =
+      byPath.get(e.path) ?? { path: e.path, writes: 0, tools: new Set<string>() };
+    cur.writes += 1;
+    cur.tools.add(e.tool);
+    byPath.set(e.path, cur);
+  }
+  const files = [...byPath.values()]
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .map((f) => ({ path: f.path, writes: f.writes, tools: [...f.tools] }));
+  return { files, mutations: changeLog.length };
+}
+
 /** The result of one spawned verification command (already truncated/normalized).
  *  Injectable so tests never spawn a real process. */
 export interface RunCommandResult {
@@ -296,6 +411,12 @@ export interface AgentToolContext {
   run?: AgentRunConfig;
   /** Optional ranking config for find_relevant_code (absent => lexical fallback). */
   semantic?: AgentSemanticConfig;
+  /** Model-driven plan, captured + tracked across the run. ABSENT => update_plan
+   *  is a no-op error and the run proceeds without a plan (back-compat). */
+  plan?: PlanState;
+  /** Optional per-file change log; gatedWrite appends each APPLIED mutation here.
+   *  ABSENT => no change summary is collected (back-compat). */
+  changeLog?: ChangeLogEntry[];
 }
 
 interface AgentTool {
@@ -384,6 +505,9 @@ async function gatedWrite(
   mkdirSync(parent, { recursive: true });
   writeFileSync(absPath, newText, "utf8");
   ctx.budget.used += 1;
+  // Record the applied mutation for the end-of-run change summary (honest: only
+  // writes that actually hit disk are logged).
+  ctx.changeLog?.push({ path: display, tool: toolName, bytes });
   return ok({
     applied: true,
     path: display,
@@ -842,6 +966,56 @@ const applyEdit: AgentTool = {
   },
 };
 
+/** The model-visible name of the planning tool. */
+export const UPDATE_PLAN_TOOL_NAME = "update_plan";
+
+const updatePlan: AgentTool = {
+  mutating: false,
+  requiresConfirmation: false,
+  definition: {
+    name: UPDATE_PLAN_TOOL_NAME,
+    description:
+      "Record or update your ordered plan for the task. Call this FIRST, before editing, with a short ordered list of steps; then call it again as you work to update step statuses (mark a step 'in_progress' when you start it and 'done' when you finish it). Always re-send the FULL ordered list. This plan is shown to the user — it does not read or write files and does not count against any budget.",
+    parameters: {
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          description: `The full ordered plan (max ${MAX_PLAN_STEPS} steps).`,
+          items: {
+            type: "object",
+            properties: {
+              step: { type: "string", description: "Short description of the step" },
+              status: {
+                type: "string",
+                enum: ["pending", "in_progress", "done"],
+                description: "Step status (defaults to pending)",
+              },
+            },
+            required: ["step"],
+          },
+        },
+      },
+      required: ["steps"],
+    },
+  },
+  execute: async (args, ctx) => {
+    if (!ctx.plan) {
+      return err("planning is not enabled for this run");
+    }
+    const normalized = normalizePlanSteps(args.steps);
+    if (!Array.isArray(normalized)) return err(normalized.error);
+    ctx.plan.steps = normalized;
+    ctx.plan.revision += 1;
+    return ok({
+      planUpdated: true,
+      revision: ctx.plan.revision,
+      steps: normalized.map((s) => ({ step: s.text, status: s.status })),
+      summary: planStatusSummary(normalized),
+    });
+  },
+};
+
 /** Truncate `s` to MAX_RUN_OUTPUT_BYTES, marking when bytes were dropped. */
 function truncateOutput(s: string): { text: string; truncated: boolean } {
   const buf = Buffer.from(s, "utf8");
@@ -999,6 +1173,7 @@ const runCommand: AgentTool = {
 };
 
 export const AGENT_TOOLS: AgentTool[] = [
+  updatePlan,
   readFile,
   listDirectory,
   searchCode,
