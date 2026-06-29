@@ -4,6 +4,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { QuotaBar } from "@/app/_components/QuotaBar";
 import { Icon } from "@/app/_components/Icons";
 import { RouteAdvisor } from "./RouteAdvisor";
+import { KeyManager } from "./KeyManager";
 import {
   deriveProviderStatus,
   statusNeedsAdvice,
@@ -211,17 +212,10 @@ export default function ProvidersPage() {
     selected,
     passphrase,
     statusMessage,
-    validating,
-    keys,
     setPassphrase,
     setSelected,
     unlock,
-    saveKey,
-    removeKey,
-    validateKey,
   } = useProviderStatusStore();
-  const [draftKey, setDraftKey] = useState("");
-  const [saving, setSaving] = useState(false);
   const [stats, setStats] = useState<Partial<Record<ProviderId, ProviderStat>>>({});
 
   useEffect(() => {
@@ -494,12 +488,12 @@ export default function ProvidersPage() {
             })}
       </div>
 
-      {/* Key priority & fallback — now LIVE in the local gateway, not a stub.
-          The router stores an ordered key list per provider in the OS keychain
-          and tries the next key on an auth (401/403) failure before abandoning
-          the provider (OpenRouter-style). This web cockpit manages the PRIMARY
-          key here; add fallback keys to the ordered list with the CLI
-          (`zintus keys`) where the keychain lives. No custody — keys stay local. */}
+      {/* Key priority & fallback — manageable here in the cockpit, end to end.
+          The selected provider's card below holds an ORDERED key list (primary +
+          fallbacks): add, reorder, test, and remove keys. The first key is the
+          primary; the local gateway walks the list on an auth (401/403) failure
+          before abandoning the provider (OpenRouter-style). No custody — keys are
+          encrypted on this device and never sent anywhere except your gateway. */}
       <div className="vault-card">
         <div className="provider-card-top" style={{ marginBottom: 6 }}>
           <div className="provider-card-title">
@@ -509,10 +503,10 @@ export default function ProvidersPage() {
           <span className="provider-badge ok">Active</span>
         </div>
         <p className="vault-hint">
-          Add a primary key per provider here. Your local gateway keeps an ordered
-          key list per provider and, on an authentication failure, automatically
-          retries the next key before failing over to another provider — keys are
-          never sent anywhere except your own gateway.
+          Add an ordered key list per provider below — a primary plus any number of
+          fallbacks. On an authentication failure your local gateway automatically
+          retries the next key in priority order before failing over to another
+          provider. Keys are never sent anywhere except your own gateway.
         </p>
       </div>
 
@@ -541,61 +535,7 @@ export default function ProvidersPage() {
           </span>
         </div>
         <CapabilityBadges providerId={selected} />
-        <label>
-          API key
-          <input
-            type="password"
-            value={draftKey}
-            onChange={(event) => setDraftKey(event.target.value)}
-            placeholder={`Paste your ${PROVIDER_BY_ID[selected].name} API key`}
-          />
-        </label>
-        <div className="actions">
-          <button
-            type="button"
-            onClick={() => void validateKey(selected, draftKey.trim())}
-            disabled={validating || saving || !draftKey.trim()}
-          >
-            {validating ? (
-              <>
-                <span className="btn-spinner" aria-hidden="true" />
-                Validating…
-              </>
-            ) : (
-              "Validate"
-            )}
-          </button>
-          <button
-            type="button"
-            disabled={saving || validating || !draftKey.trim()}
-            onClick={() => {
-              setSaving(true);
-              void saveKey(selected, draftKey.trim())
-                .then(() => setDraftKey(""))
-                .finally(() => setSaving(false));
-            }}
-          >
-            {saving ? (
-              <>
-                <span className="btn-spinner" aria-hidden="true" />
-                Saving…
-              </>
-            ) : (
-              "Save encrypted"
-            )}
-          </button>
-          {keys[selected] ? (
-            <button
-              type="button"
-              className="secondary"
-              disabled={saving || validating}
-              onClick={() => void removeKey(selected)}
-            >
-              Remove key
-            </button>
-          ) : null}
-        </div>
-        <p className="vault-hint">Stored locally — never sent to any server except the provider.</p>
+        <KeyManager providerId={selected} />
       </div>
 
       {statusMessage ? <p className="status-banner">{statusMessage}</p> : null}

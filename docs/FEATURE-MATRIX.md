@@ -44,7 +44,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
 | 17 | projects / workspaces | ✅ | ✅ | ✅ | ✅ | all 4; CLI `projects list/create/use/clear/delete` (CRUD live-verified) + `chat` injects the active project's instructions + default provider |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
-| 19 | provider key management | ✅ | ✅ | ⚠️ | ✅ | web `LocalKeyManager`, CLI `keys` work; **desktop `ProvidersScreen` is broken** — frontend (`lib/tauri.ts`) calls the uninitialized `tauri-plugin-keyring-api` plugin instead of the shipped Rust `keyring_*` cmds (`lib.rs:11-34`), so "Save key" fails; also no key→gateway sync (gateway reads service `zintus`, desktop writes `com.zintus.desktop`). See Audit corrections. |
+| 19 | provider key management | ✅ | ✅ | ✅ | ✅ | web `LocalKeyManager`, CLI `keys`, and desktop all work. **RESOLVED on `feat/zintus-10-10`**: desktop frontend (`lib/tauri.ts:38,52,61`) now calls the shipped Rust `keyring_*` cmds via `invoke()` (registered in `src-tauri/src/lib.rs:68-71`), and the Rust service name is unified to `"zintus"` (`lib.rs:12`) matching the gateway/CLI (`packages/keychain/src/storage.ts`), so desktop-entered keys are visible to the chat path. Covered by `apps/desktop/lib/tauri.test.ts`. See Audit corrections. |
 | 20 | provider key test | ✅ | 🟡 | 🟡 | ✅ | mobile explicit Test; CLI now has `zintus keys test <provider>`; web/desktop validate-on-save only |
 | 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |
 | 22 | one-tap local runtime | ✅ | ❌ | ❌ | 🚫 | CLI = `--provider ollama` |
@@ -71,10 +71,13 @@ Several rows above were stale/optimistic. Corrected inline; recorded here with c
   (→ `plugin:keyring|*`), but that plugin is **not initialized** — `src-tauri/src/lib.rs:58-60`
   registers only pty+updater. The app *does* ship working Rust keyring commands
   (`lib.rs:11-34` `keyring_get/set/delete`, wired into the invoke handler), so the fix
-  is to **repoint the frontend to `invoke("keyring_*")`** — *not* "no keyring backend."
-  Separately there is **no key→gateway sync**: desktop uses service `com.zintus.desktop`
-  while the gateway reads `zintus` (`packages/keychain/src/storage.ts:6`), so desktop
-  keys aren't visible to the chat path even once stored. (#19 desktop ✅→⚠️.)
+  was to **repoint the frontend to `invoke("keyring_*")`** — *not* "no keyring backend."
+  Separately there was **no key→gateway sync**: desktop used service `com.zintus.desktop`
+  while the gateway reads `zintus` (`packages/keychain/src/storage.ts`), so desktop
+  keys weren't visible to the chat path even once stored. **RESOLVED on `feat/zintus-10-10`**:
+  the frontend now invokes the Rust `keyring_*` commands and the Rust `SERVICE` constant is
+  unified to `"zintus"` (`src-tauri/src/lib.rs:12,68-71`), so desktop-entered keys reach the
+  gateway. (#19 desktop ⚠️→✅; covered by `apps/desktop/lib/tauri.test.ts`.)
 - **Web report-AI (#27) is absent**, not partial — no report control in
   `MessageBubble.tsx`. (#27 web 🟡→❌.) **RESOLVED 2026-06-27** — web `MessageBubble`
   now has a "Report" control (on-device `zintus:reported-responses.v1`, parity with
@@ -98,9 +101,13 @@ Several rows above were stale/optimistic. Corrected inline; recorded here with c
   note (web fixes, below) was overstated for web. **RESOLVED 2026-06-27** — the projects
   form now has a Strategy select (Default/Fastest/Economy/Quality/Capability/Balanced);
   web-created projects persist + apply it.
-- **Private Mode** is best-effort and **not fully honest**: `"unknown"`-training
-  providers aren't filtered (`packages/providers/src/data-policies.ts:131`) and there's
-  no per-response "not honored" signal — tracked as a P0 honesty fix (separate PR).
+- **Private Mode** — **RESOLVED on `feat/zintus-10-10`**: `"unknown"`-training providers
+  ARE now conservatively filtered. The router uses `mayTrainOnUserData`
+  (`packages/providers/src/data-policies.ts:142` — `trainsOnData !== false`, so unknown ⇒
+  may-train ⇒ filtered) under `blockTrainingProviders` (`packages/router/src/factory.ts`).
+  When filtering would strand the request, the winner carries `privacyHonored: false` so
+  surfaces can say privacy could not be honored instead of silently using a training
+  provider. Honest caveat that remains: there is no per-response privacy badge on every UI.
 - **Whole Mobile column = `feat/mobile-serious-app`, not this branch** (see caveat at
   top): the rich features are confirmed **absent** here; the on-branch app is a basic
   single-screen text chat.
@@ -131,11 +138,21 @@ line below was true at audit time but is now stale; the corrected picture:
 - **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web ❌ (no request UI yet) · Desktop ✅ (JSON toggle, Phase 7) · Mobile ❌**. NOTE the inversion: desktop has a request toggle but web chat does not yet — a known consistency gap (10/10 verdict).
   Engine validate→repair + gateway strict-422 tested. Conservative: only Gemini is
   `json_schema` (close to guaranteed-shape); all others are `json_object` /
-  prompt-level, which is **best-effort, not guaranteed** JSON. **Web has no
-  structured-output UI (❌):** the shared `streamGatewayChat` lib *can* carry a
-  `response_format`, but no web chat surface requests one or renders parsed JSON
-  (verified: no `response_format` in `apps/web/app/**`), so there is nothing a
-  user can drive — library plumbing only. **Desktop/mobile have no JSON UI (❌)**.
+  prompt-level, which is **best-effort, not guaranteed** JSON. **CLI now sends a
+  real model `response_format` (✅):** `zintus chat --json` requests
+  `{ type: "json_object" }` and `--json-schema <file|inline>` (`--strict` to
+  demand a guaranteeing provider) requests `{ type: "json_schema", … }` — threaded
+  through `engine.routeAndStream`, with the validated JSON pretty-printed and a
+  non-conforming result reported as a **non-fatal warning** (never a crash). This
+  is a true model structured-output request, distinct from the older `--json`
+  *output-formatting* flags on other subcommands. Same honesty caveat: only
+  **Gemini** guarantees `json_schema`; other providers degrade to best-effort
+  `json_object`/prompt coercion, validated locally. Unit-tested in
+  `apps/cli/src/commands/chat-content.test.ts`. **Web has no structured-output UI
+  (❌):** the shared `streamGatewayChat` lib *can* carry a `response_format`, but
+  no web chat surface requests one or renders parsed JSON (verified: no
+  `response_format` in `apps/web/app/**`), so there is nothing a user can drive —
+  library plumbing only. **Mobile has no JSON UI (❌)**.
 - **Multimodal image input** — proven on **web + CLI + desktop** (Phase 7;
   EXIF-stripped image blocks to a vision-capable model, hard-error rather than silent
   text-only fallback), and now also **maps to OpenRouter vision models**. **Mobile
@@ -268,8 +285,9 @@ leaks no raw key — but caught a P1 + P2, both fixed:
   Windows build, and that HTTPS web→`http://localhost:8788` still works on current
   Chrome (Private-Network-Access) — both pre-existing.
 - **P2 remaining (careful follow-up):** web CSP `script-src 'unsafe-inline'`;
-  Stripe webhook not itself flag-gated (defense-in-depth); Private Mode passes
-  `"unknown"`-training providers; bundle-baked `NEXT_PUBLIC_GATEWAY_TOKEN`.
+  Stripe webhook not itself flag-gated (defense-in-depth); bundle-baked
+  `NEXT_PUBLIC_GATEWAY_TOKEN`. (Private Mode now conservatively filters
+  `"unknown"`-training providers — see the Private Mode note above.)
 
 ## How to keep this honest
 

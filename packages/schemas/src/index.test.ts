@@ -173,6 +173,57 @@ describe("ChatCompletionRequestSchema tools / tool_choice", () => {
   });
 });
 
+describe("ChatCompletionRequestSchema provider routing (OpenRouter-style)", () => {
+  test("legacy forced-provider STRING still validates", () => {
+    const parsed = ChatCompletionRequestSchema.safeParse({
+      messages: [{ role: "user", content: "hi" }],
+      provider: "groq",
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect(parsed.data.provider).toBe("groq");
+  });
+
+  test("OpenRouter-style provider OBJECT validates ({ order, sort, allow_fallbacks })", () => {
+    const parsed = ChatCompletionRequestSchema.safeParse({
+      messages: [{ role: "user", content: "hi" }],
+      provider: {
+        order: ["groq", "gemini"],
+        sort: "latency",
+        allow_fallbacks: false,
+      },
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success && typeof parsed.data.provider === "object") {
+      expect(parsed.data.provider.order).toEqual(["groq", "gemini"]);
+      expect(parsed.data.provider.sort).toBe("latency");
+      expect(parsed.data.provider.allow_fallbacks).toBe(false);
+    }
+  });
+
+  test("each sort value validates; an unknown sort is rejected", () => {
+    for (const sort of ["price", "throughput", "latency"]) {
+      const parsed = ChatCompletionRequestSchema.safeParse({
+        messages: [{ role: "user", content: "hi" }],
+        provider: { sort },
+      });
+      expect(parsed.success).toBe(true);
+    }
+    const bad = ChatCompletionRequestSchema.safeParse({
+      messages: [{ role: "user", content: "hi" }],
+      provider: { sort: "quality" },
+    });
+    expect(bad.success).toBe(false);
+  });
+
+  test("an unknown provider id in `order` is rejected", () => {
+    const parsed = ChatCompletionRequestSchema.safeParse({
+      messages: [{ role: "user", content: "hi" }],
+      provider: { order: ["groq", "not-a-provider"] },
+    });
+    expect(parsed.success).toBe(false);
+  });
+});
+
 describe("ResponseFormatSchema", () => {
   const personSchema = {
     type: "object",

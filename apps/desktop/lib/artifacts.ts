@@ -264,3 +264,169 @@ function referenceLine(a: Artifact): string {
     a.kind === "html" ? "HTML" : a.kind === "svg" ? "SVG" : (a.language ?? "code");
   return `\n> 📄 ${a.title} — ${kind} in the artifacts panel\n`;
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Iterative artifacts — versioning model.
+ *
+ * The detector above is a viewer: it slices the model's text into Artifacts.
+ * Real "Artifacts / Canvas" parity means one artifact has a STABLE IDENTITY
+ * across a conversation and a list of VERSIONS: each time the model re-emits the
+ * same artifact (same kind + title) we append a version instead of spawning a
+ * brand-new artifact, and the user can save their own edits as a version too.
+ *
+ * This is a pure layer ON TOP of extractArtifacts — existing callers/tests are
+ * untouched. Identity is content-free (kind + normalised title) so a revised
+ * body still merges into the same artifact. All helpers below are DOM-free and
+ * kept byte-for-byte identical to apps/web/lib/artifacts.ts.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/** Where a version came from: the model's reply, or a local user edit. */
+export type ArtifactSource = "model" | "user-edit";
+
+/** One immutable snapshot of an artifact's body. */
+export interface ArtifactVersion {
+  content: string;
+  kind: ArtifactKind;
+  language?: string;
+  title: string;
+  /** Human label, contiguous within the artifact: "v1", "v2", … */
+  label: string;
+  /** Origin of this snapshot. */
+  source: ArtifactSource;
+  /** Epoch ms when the snapshot was captured. */
+  createdAt: number;
+  /** The flat Artifact id this version was extracted from (for UI mapping). */
+  sourceId?: string;
+}
+
+/** An artifact with a stable identity and its ordered version history. */
+export interface VersionedArtifact {
+  /** Stable across the conversation (derived from identity, not content). */
+  id: string;
+  /** kind / language / title always reflect the LATEST version. */
+  kind: ArtifactKind;
+  language?: string;
+  title: string;
+  versions: ArtifactVersion[];
+}
+
+/**
+ * Content-free identity anchor: same kind + same (normalised) title ⇒ same
+ * artifact, even if the body changed. This is what lets a re-emitted artifact
+ * append a version rather than duplicate. Kept deliberately simple/stable.
+ */
+export function artifactIdentity(a: {
+  kind: ArtifactKind;
+  title: string;
+}): string {
+  return `${a.kind}::${a.title.trim().toLowerCase()}`;
+}
+
+type IncomingArtifact = Pick<Artifact, "content" | "kind" | "title"> & {
+  language?: string;
+  id?: string;
+};
+
+/**
+ * Append `incoming` to `existing` as a new version, or seed a fresh
+ * VersionedArtifact when `existing` is null. If the incoming body is identical
+ * to the latest version's body, this is a no-op (no duplicate version) — so a
+ * message that re-renders unchanged never bloats the history. The top-level
+ * kind/language/title always track the newest version.
+ */
+export function upsertArtifactVersion(
+  existing: VersionedArtifact | null,
+  incoming: IncomingArtifact,
+  opts?: { source?: ArtifactSource; createdAt?: number },
+): VersionedArtifact {
+  const source: ArtifactSource = opts?.source ?? "model";
+  const createdAt = opts?.createdAt ?? Date.now();
+
+  if (!existing) {
+    const v: ArtifactVersion = {
+      content: incoming.content,
+      kind: incoming.kind,
+      language: incoming.language,
+      title: incoming.title,
+      label: "v1",
+      source,
+      createdAt,
+      sourceId: incoming.id,
+    };
+    return {
+      id: artifactIdentity(incoming),
+      kind: incoming.kind,
+      language: incoming.language,
+      title: incoming.title,
+      versions: [v],
+    };
+  }
+
+  const last = existing.versions[existing.versions.length - 1];
+  if (last && last.content === incoming.content) {
+    // Same body — keep history clean, but adopt any newer source id so inline
+    // references from the latest message still resolve to this artifact.
+    if (incoming.id && last.sourceId !== incoming.id) {
+      const versions = existing.versions.slice();
+      versions[versions.length - 1] = { ...last, sourceId: incoming.id };
+      return { ...existing, versions };
+    }
+    return existing;
+  }
+
+  const v: ArtifactVersion = {
+    content: incoming.content,
+    kind: incoming.kind,
+    language: incoming.language,
+    title: incoming.title,
+    label: `v${existing.versions.length + 1}`,
+    source,
+    createdAt,
+    sourceId: incoming.id,
+  };
+  return {
+    id: existing.id,
+    kind: incoming.kind,
+    language: incoming.language,
+    title: incoming.title,
+    versions: [...existing.versions, v],
+  };
+}
+
+/**
+ * A plain Artifact view of one version — so `artifactExtension`/`artifactMime`,
+ * Copy, Download and the preview all work per-version with zero special-casing.
+ * Out-of-range indices clamp to the nearest valid version.
+ */
+export function artifactAtVersion(a: VersionedArtifact, i: number): Artifact {
+  const idx = Math.max(0, Math.min(i, a.versions.length - 1));
+  const v = a.versions[idx]!;
+  return {
+    id: a.id,
+    kind: v.kind,
+    language: v.language,
+    title: v.title,
+    content: v.content,
+  };
+}
+
+/**
+ * Fold a flat, document-ordered list of extracted Artifacts (typically one
+ * conversation's worth, ids namespaced per message) into VersionedArtifacts:
+ * artifacts sharing an identity collapse into one entry whose versions are the
+ * successive bodies, in order. First-seen order is preserved.
+ */
+export function foldArtifactVersions(
+  artifacts: Artifact[],
+  now: number = Date.now(),
+): VersionedArtifact[] {
+  const order: string[] = [];
+  const byKey = new Map<string, VersionedArtifact>();
+  for (const a of artifacts) {
+    const key = artifactIdentity(a);
+    const existing = byKey.get(key) ?? null;
+    if (!existing) order.push(key);
+    byKey.set(key, upsertArtifactVersion(existing, a, { source: "model", createdAt: now }));
+  }
+  return order.map((k) => byKey.get(k)!);
+}

@@ -19,6 +19,29 @@ function formatUsd(value: number): string {
   return value < 0.01 ? `~$${value.toFixed(4)}` : `~$${value.toFixed(2)}`;
 }
 
+// Per-response Private-Mode badge — mirrors apps/web TransparencyStrip's pill copy
+// + honesty exactly: "honored" only when a no-training provider served the turn;
+// "not honored" when Private Mode was on but a may-train provider was used anyway.
+const PRIVACY_HONORED_TITLE =
+  "Private Mode was on and the request was served by a provider with a no-training policy. Your prompt is not used to train models.";
+const PRIVACY_BROKEN_TITLE =
+  "Private Mode was on, but every available provider may train on data (or has an undocumented policy), so one was used anyway. Add a no-training provider key (e.g. Groq, Cerebras, Mistral) or run Ollama locally.";
+
+function privacyPillStyle(honored: boolean): React.CSSProperties {
+  const tone = honored ? "#22c55e" : "#f59e0b";
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "0 7px",
+    borderRadius: 999,
+    border: `0.5px solid color-mix(in oklch, ${tone} 40%, transparent)`,
+    background: `color-mix(in oklch, ${tone} 12%, transparent)`,
+    color: tone,
+    fontWeight: 600,
+  };
+}
+
 /** Pretty, single-line args for the compact call card. */
 function formatArgs(args: unknown, pretty: boolean): string {
   let value: unknown = args;
@@ -388,6 +411,15 @@ export function MessageBubble({
           message.meta.savedVsBaselineUsd > 0 ? (
             <span className="response-meta-saved">
               ≈ {formatUsd(message.meta.savedVsBaselineUsd)} vs Claude Sonnet
+            </span>
+          ) : null}
+          {message.meta.privacyHonored === true ? (
+            <span style={privacyPillStyle(true)} title={PRIVACY_HONORED_TITLE}>
+              ✓ Private Mode honored
+            </span>
+          ) : message.meta.privacyHonored === false ? (
+            <span style={privacyPillStyle(false)} title={PRIVACY_BROKEN_TITLE}>
+              ⚠ Private Mode not honored
             </span>
           ) : null}
         </div>

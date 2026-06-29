@@ -108,6 +108,70 @@ export function structuredOutputLabel(level: CatalogStructuredOutput): string {
   }
 }
 
+/**
+ * Honest, MEASURED per-provider performance attached to each `/v1/models` entry
+ * (`stats` block on the gateway response). Each metric is `null` until the
+ * provider has enough recent samples to publish a truthful value — we NEVER
+ * fabricate a 0 ms / 100% for an unmeasured provider. `samples` is the raw
+ * attempt count behind the numbers.
+ *   - `latency_p95_ms` — p95 latency in milliseconds over a recent window
+ *   - `throughput_tps` — output tokens/sec
+ *   - `uptime`         — success rate in 0..1
+ */
+export interface CatalogModelStats {
+  latency_p95_ms: number | null;
+  throughput_tps: number | null;
+  uptime: number | null;
+  samples: number;
+}
+
+/**
+ * Read the measured `stats` block off a catalog model defensively. The gateway
+ * adds it to every `/v1/models` entry, but it may be absent on an older gateway —
+ * `null` then, so the UI shows "no data yet" rather than guessing. Each metric is
+ * coerced to a real number or `null` (never a fabricated default).
+ */
+export function modelStats(model: CatalogModelDto): CatalogModelStats | null {
+  const raw = (model as { stats?: Partial<CatalogModelStats> | null }).stats;
+  if (!raw || typeof raw !== "object") return null;
+  return {
+    latency_p95_ms:
+      typeof raw.latency_p95_ms === "number" ? raw.latency_p95_ms : null,
+    throughput_tps:
+      typeof raw.throughput_tps === "number" ? raw.throughput_tps : null,
+    uptime: typeof raw.uptime === "number" ? raw.uptime : null,
+    samples: typeof raw.samples === "number" ? raw.samples : 0,
+  };
+}
+
+/** True when at least one metric has been measured (so the row is worth showing). */
+export function hasMeasuredStats(stats: CatalogModelStats | null): boolean {
+  return (
+    stats != null &&
+    (stats.latency_p95_ms != null ||
+      stats.throughput_tps != null ||
+      stats.uptime != null)
+  );
+}
+
+/** p95 latency → "320 ms"; `null` (insufficient samples) → "—". Never a fake 0. */
+export function formatLatencyMs(value: number | null): string {
+  return value == null ? "—" : `${Math.round(value)} ms`;
+}
+
+/** Throughput → "45.5 tok/s" / "120 tok/s"; `null` → "—". */
+export function formatThroughputTps(value: number | null): string {
+  if (value == null) return "—";
+  return `${value >= 100 ? Math.round(value) : value.toFixed(1)} tok/s`;
+}
+
+/** Uptime (success rate 0..1) → "99%" / "99.5%"; `null` → "—". Never a fake 100%. */
+export function formatUptime(value: number | null): string {
+  if (value == null) return "—";
+  const pct = Math.round(value * 1000) / 10;
+  return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
+}
+
 export const DATA_POLICY_LABEL: Record<CatalogDataPolicyBadge, string> = {
   "no-training": "🟢 No training",
   trains: "🔴 May train",

@@ -1,4 +1,20 @@
-// Zintus public catalog data — providers and models the router can reach.
+// Zintus public catalog data — providers and models, split honestly by what the
+// router can ACTUALLY reach today vs. what is planned.
+//
+// HONESTY RULE (hard): the catalog must never imply a capability with no real
+// code path. The router can route to exactly 12 provider IDs — the closed
+// `ProviderId` union in @zintus/types (engine wiring in @zintus/router): cerebras,
+// groq, gemini, openrouter, cohere, mistral, deepseek, fireworks, xai,
+// huggingface, lmstudio, ollama. Those 12 are ROUTABLE; their badges are
+// "integrated" (or "add-key" for the openrouter BYOK key) and that is honest.
+// EVERY other provider/model below is listed for transparency/roadmap only and
+// is NOT yet routable: providers carry badge "coming-soon" and models are
+// flagged via `isRoutableModel()` so the UI renders an honest "Planned — not
+// yet routable" label and shows NO actionable "Add your key" CTA. Under-claim
+// when unsure. Core stays free; no key custody.
+//
+// SPLIT: 55 providers total = 12 routable + 43 planned (not yet routable).
+//        100 models total   = 64 routable + 36 planned (not yet routable).
 //
 // A catalog names what it routes to, so provider and model names are verbatim.
 // `freetier` records whether a provider exposes a no-key free tier.
@@ -38,7 +54,38 @@ export interface Model {
   routingTags: string[];
 }
 
-// ── PROVIDERS (55) — 12 integrated, 18 add-key BYOK, 25 via aggregator ──────────
+// The provider IDs the router can actually reach today. This is the closed
+// `ProviderId` union from @zintus/types, kept in sync by the catalog honesty test.
+// Anything not in this set is "Planned — not yet routable" in the catalog UI.
+export const ROUTABLE_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  "cerebras",
+  "groq",
+  "gemini",
+  "openrouter",
+  "cohere",
+  "mistral",
+  "deepseek",
+  "fireworks",
+  "xai",
+  "huggingface",
+  "lmstudio",
+  "ollama",
+]);
+
+/** True if the router can reach this provider today. */
+export function isRoutableProvider(id: string): boolean {
+  return ROUTABLE_PROVIDER_IDS.has(id);
+}
+
+/** True if the router can reach this model's provider today. A non-routable
+ *  model is "Planned — not yet routable" and must not show an "Add your key" CTA. */
+export function isRoutableModel(model: Pick<Model, "provider">): boolean {
+  return ROUTABLE_PROVIDER_IDS.has(model.provider);
+}
+
+// ── PROVIDERS (55) — 12 routable (integrated + openrouter BYOK), 43 planned ─────
+//     Planned providers carry badge "coming-soon": listed for transparency, not
+//     yet routable. They render as "Planned", never "Add your key".
 export const PROVIDERS: Provider[] = [
   // Tier 1 — integrated (12)
   { id: "cerebras", name: "Cerebras", type: "inference", models: 4, contextMax: "128K", freetier: true, tier: "direct", badge: "integrated", specialty: "Fastest sustained throughput (~1,800 tok/s)" },
@@ -54,55 +101,58 @@ export const PROVIDERS: Provider[] = [
   { id: "ollama", name: "Ollama", type: "local", models: 999, contextMax: "∞", freetier: true, tier: "local", badge: "integrated", specialty: "Unlimited local · any open-weight model" },
   { id: "lmstudio", name: "LM Studio", type: "local", models: 999, contextMax: "∞", freetier: true, tier: "local", badge: "integrated", specialty: "Desktop GUI · local inference · offline" },
 
-  // Tier 2 — add-key BYOK (18)
-  { id: "anthropic", name: "Anthropic", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "direct", badge: "add-key", specialty: "Claude Opus 4.8 · Sonnet 4.6 · Haiku 4.5" },
-  { id: "openai", name: "OpenAI", type: "frontier", models: 8, contextMax: "1M", freetier: false, tier: "direct", badge: "add-key", specialty: "GPT-5.5 · o3 · o4-mini · GPT-4.1 family" },
-  { id: "together", name: "Together AI", type: "inference", models: 200, contextMax: "128K", freetier: false, tier: "direct", badge: "add-key", specialty: "200+ models · fine-tuning · batch API" },
-  { id: "deepinfra", name: "DeepInfra", type: "inference", models: 100, contextMax: "1M", freetier: false, tier: "direct", badge: "add-key", specialty: "Cheapest per-token · widest open catalog" },
-  { id: "novita", name: "Novita AI", type: "inference", models: 100, contextMax: "131K", freetier: false, tier: "direct", badge: "add-key", specialty: "100+ models · competitive pricing" },
-  { id: "sambanova", name: "SambaNova", type: "inference", models: 4, contextMax: "131K", freetier: false, tier: "direct", badge: "add-key", specialty: "Highest throughput · enterprise SLA" },
-  { id: "nebius", name: "Nebius AI", type: "inference", models: 20, contextMax: "131K", freetier: false, tier: "direct", badge: "add-key", specialty: "EU sovereign · GDPR · data residency" },
-  { id: "perplexity", name: "Perplexity (Sonar)", type: "search", models: 5, contextMax: "200K", freetier: false, tier: "direct", badge: "add-key", specialty: "Web-grounded · live citations per response" },
-  { id: "cloudflare", name: "Cloudflare AI", type: "inference", models: 30, contextMax: "128K", freetier: true, tier: "direct", badge: "add-key", specialty: "Edge inference · Workers native · free tier" },
-  { id: "bedrock", name: "AWS Bedrock", type: "cloud", models: 30, contextMax: "1M", freetier: false, tier: "cloud", badge: "add-key", specialty: "Enterprise compliance · VPC · regional routing" },
-  { id: "vertex", name: "Google Vertex AI", type: "cloud", models: 15, contextMax: "1M", freetier: false, tier: "cloud", badge: "add-key", specialty: "Gemini with data residency · HIPAA · SOC 2" },
-  { id: "azure", name: "Azure OpenAI", type: "cloud", models: 12, contextMax: "128K", freetier: false, tier: "cloud", badge: "add-key", specialty: "GPT family · enterprise · private endpoints" },
-  { id: "replicate", name: "Replicate", type: "inference", models: 100, contextMax: "128K", freetier: false, tier: "direct", badge: "add-key", specialty: "Model marketplace · community fine-tunes" },
-  { id: "featherless", name: "Featherless AI", type: "inference", models: 50, contextMax: "131K", freetier: false, tier: "direct", badge: "add-key", specialty: "Flat-rate $99/mo · unlimited open-weight" },
-  { id: "lepton", name: "Lepton AI", type: "inference", models: 20, contextMax: "128K", freetier: false, tier: "direct", badge: "add-key", specialty: "Fast inference · serverless · OpenAI-compat" },
-  { id: "lambda", name: "Lambda AI", type: "inference", models: 10, contextMax: "128K", freetier: false, tier: "direct", badge: "add-key", specialty: "GPU cloud · H100 · OpenAI-compatible API" },
-  { id: "baseten", name: "Baseten", type: "inference", models: 20, contextMax: "128K", freetier: false, tier: "direct", badge: "add-key", specialty: "Custom model deploy · production-grade" },
-  { id: "nvidia-nim", name: "NVIDIA NIM", type: "inference", models: 10, contextMax: "1M", freetier: false, tier: "direct", badge: "add-key", specialty: "Nemotron family · optimized NVIDIA hardware" },
+  // Tier 2 — planned / not yet routable (18) · badge "coming-soon"
+  { id: "anthropic", name: "Anthropic", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Claude Opus 4.8 · Sonnet 4.6 · Haiku 4.5" },
+  { id: "openai", name: "OpenAI", type: "frontier", models: 8, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "GPT-5.5 · o3 · o4-mini · GPT-4.1 family" },
+  { id: "together", name: "Together AI", type: "inference", models: 200, contextMax: "128K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "200+ models · fine-tuning · batch API" },
+  { id: "deepinfra", name: "DeepInfra", type: "inference", models: 100, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Cheapest per-token · widest open catalog" },
+  { id: "novita", name: "Novita AI", type: "inference", models: 100, contextMax: "131K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "100+ models · competitive pricing" },
+  { id: "sambanova", name: "SambaNova", type: "inference", models: 4, contextMax: "131K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Highest throughput · enterprise SLA" },
+  { id: "nebius", name: "Nebius AI", type: "inference", models: 20, contextMax: "131K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "EU sovereign · GDPR · data residency" },
+  { id: "perplexity", name: "Perplexity (Sonar)", type: "search", models: 5, contextMax: "200K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Web-grounded · live citations per response" },
+  { id: "cloudflare", name: "Cloudflare AI", type: "inference", models: 30, contextMax: "128K", freetier: true, tier: "direct", badge: "coming-soon", specialty: "Edge inference · Workers native · free tier" },
+  { id: "bedrock", name: "AWS Bedrock", type: "cloud", models: 30, contextMax: "1M", freetier: false, tier: "cloud", badge: "coming-soon", specialty: "Enterprise compliance · VPC · regional routing" },
+  { id: "vertex", name: "Google Vertex AI", type: "cloud", models: 15, contextMax: "1M", freetier: false, tier: "cloud", badge: "coming-soon", specialty: "Gemini with data residency · HIPAA · SOC 2" },
+  { id: "azure", name: "Azure OpenAI", type: "cloud", models: 12, contextMax: "128K", freetier: false, tier: "cloud", badge: "coming-soon", specialty: "GPT family · enterprise · private endpoints" },
+  { id: "replicate", name: "Replicate", type: "inference", models: 100, contextMax: "128K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Model marketplace · community fine-tunes" },
+  { id: "featherless", name: "Featherless AI", type: "inference", models: 50, contextMax: "131K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Flat-rate $99/mo · unlimited open-weight" },
+  { id: "lepton", name: "Lepton AI", type: "inference", models: 20, contextMax: "128K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Fast inference · serverless · OpenAI-compat" },
+  { id: "lambda", name: "Lambda AI", type: "inference", models: 10, contextMax: "128K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "GPU cloud · H100 · OpenAI-compatible API" },
+  { id: "baseten", name: "Baseten", type: "inference", models: 20, contextMax: "128K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Custom model deploy · production-grade" },
+  { id: "nvidia-nim", name: "NVIDIA NIM", type: "inference", models: 10, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Nemotron family · optimized NVIDIA hardware" },
 
-  // Tier 3 — via aggregator (25)
-  { id: "moonshot", name: "Moonshot AI", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "meta", badge: "add-key", specialty: "Kimi K2.7 Code · frontier coding" },
-  { id: "minimax", name: "MiniMax", type: "frontier", models: 3, contextMax: "1M", freetier: false, tier: "meta", badge: "add-key", specialty: "MiniMax M3 · 1M context · promo pricing" },
-  { id: "stepfun", name: "StepFun", type: "frontier", models: 3, contextMax: "256K", freetier: false, tier: "meta", badge: "add-key", specialty: "Step 3.7 Flash · fast · multimodal" },
-  { id: "zai", name: "Z.AI (GLM)", type: "frontier", models: 5, contextMax: "200K", freetier: true, tier: "meta", badge: "add-key", specialty: "GLM family · free tier · multilingual" },
-  { id: "poolside", name: "Poolside", type: "coding", models: 2, contextMax: "256K", freetier: true, tier: "meta", badge: "add-key", specialty: "Laguna · coding agents · free tier" },
-  { id: "nous", name: "Nous Research", type: "inference", models: 5, contextMax: "131K", freetier: false, tier: "meta", badge: "add-key", specialty: "Hermes family · strong instruction following" },
-  { id: "noushermes", name: "01.AI", type: "frontier", models: 3, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "Yi family · multilingual · Chinese lab" },
-  { id: "inflection", name: "Inflection AI", type: "frontier", models: 2, contextMax: "131K", freetier: false, tier: "meta", badge: "add-key", specialty: "Pi · conversational AI · emotional intelligence" },
-  { id: "reka", name: "Reka AI", type: "frontier", models: 3, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "Multimodal · strong on video understanding" },
-  { id: "ai21", name: "AI21 Labs", type: "frontier", models: 4, contextMax: "256K", freetier: false, tier: "meta", badge: "add-key", specialty: "Jamba family · hybrid SSM-Transformer" },
-  { id: "comet", name: "Comet API", type: "inference", models: 10, contextMax: "128K", freetier: true, tier: "meta", badge: "add-key", specialty: "Aggregator · competitive pricing" },
-  { id: "siliconflow", name: "SiliconFlow", type: "inference", models: 30, contextMax: "131K", freetier: true, tier: "meta", badge: "add-key", specialty: "Chinese inference · Qwen + DeepSeek hosting" },
-  { id: "aihubmix", name: "AiHubMix", type: "inference", models: 50, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "Multi-provider aggregator · competitive rates" },
-  { id: "ovhcloud", name: "OVHcloud AI", type: "inference", models: 15, contextMax: "131K", freetier: false, tier: "meta", badge: "add-key", specialty: "European sovereign · OpenAI-compatible" },
-  { id: "nscale", name: "Nscale", type: "inference", models: 10, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "EU sovereign · GDPR · OpenAI-compatible" },
-  { id: "mancer", name: "Mancer", type: "inference", models: 8, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "Privacy-first · no logging · uncensored" },
-  { id: "klusterai", name: "Kluster AI", type: "inference", models: 5, contextMax: "131K", freetier: false, tier: "meta", badge: "add-key", specialty: "Batch processing · cost-optimized" },
-  { id: "deepbricks", name: "DeepBricks", type: "inference", models: 20, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "OpenAI-compatible · wide model access" },
-  { id: "nineteen", name: "Nineteen AI", type: "inference", models: 10, contextMax: "131K", freetier: false, tier: "meta", badge: "add-key", specialty: "Decentralized inference · competitive" },
-  { id: "hyperbolic", name: "Hyperbolic", type: "inference", models: 10, contextMax: "131K", freetier: true, tier: "meta", badge: "add-key", specialty: "GPU marketplace · fine-tuning · free credits" },
-  { id: "infermatic", name: "Infermatic", type: "inference", models: 8, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "Low-cost inference · open models" },
-  { id: "avian", name: "Avian", type: "inference", models: 5, contextMax: "128K", freetier: false, tier: "meta", badge: "add-key", specialty: "OpenAI-compatible · fast routing" },
-  { id: "chutes", name: "Chutes AI", type: "inference", models: 10, contextMax: "128K", freetier: true, tier: "meta", badge: "add-key", specialty: "Decentralized · community-run GPUs" },
-  { id: "friendliai", name: "FriendliAI", type: "inference", models: 8, contextMax: "131K", freetier: false, tier: "meta", badge: "add-key", specialty: "Production-grade · SLA · OpenAI-compat" },
-  { id: "predibase", name: "Predibase", type: "inference", models: 10, contextMax: "131K", freetier: false, tier: "meta", badge: "add-key", specialty: "LoRA fine-tuning · serverless adapters" },
+  // Tier 3 — planned / not yet routable (25) · badge "coming-soon"
+  { id: "moonshot", name: "Moonshot AI", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Kimi K2.7 Code · frontier coding" },
+  { id: "minimax", name: "MiniMax", type: "frontier", models: 3, contextMax: "1M", freetier: false, tier: "meta", badge: "coming-soon", specialty: "MiniMax M3 · 1M context · promo pricing" },
+  { id: "stepfun", name: "StepFun", type: "frontier", models: 3, contextMax: "256K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Step 3.7 Flash · fast · multimodal" },
+  { id: "zai", name: "Z.AI (GLM)", type: "frontier", models: 5, contextMax: "200K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "GLM family · free tier · multilingual" },
+  { id: "poolside", name: "Poolside", type: "coding", models: 2, contextMax: "256K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "Laguna · coding agents · free tier" },
+  { id: "nous", name: "Nous Research", type: "inference", models: 5, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Hermes family · strong instruction following" },
+  { id: "noushermes", name: "01.AI", type: "frontier", models: 3, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Yi family · multilingual · Chinese lab" },
+  { id: "inflection", name: "Inflection AI", type: "frontier", models: 2, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Pi · conversational AI · emotional intelligence" },
+  { id: "reka", name: "Reka AI", type: "frontier", models: 3, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Multimodal · strong on video understanding" },
+  { id: "ai21", name: "AI21 Labs", type: "frontier", models: 4, contextMax: "256K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Jamba family · hybrid SSM-Transformer" },
+  { id: "comet", name: "Comet API", type: "inference", models: 10, contextMax: "128K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "Aggregator · competitive pricing" },
+  { id: "siliconflow", name: "SiliconFlow", type: "inference", models: 30, contextMax: "131K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "Chinese inference · Qwen + DeepSeek hosting" },
+  { id: "aihubmix", name: "AiHubMix", type: "inference", models: 50, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Multi-provider aggregator · competitive rates" },
+  { id: "ovhcloud", name: "OVHcloud AI", type: "inference", models: 15, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "European sovereign · OpenAI-compatible" },
+  { id: "nscale", name: "Nscale", type: "inference", models: 10, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "EU sovereign · GDPR · OpenAI-compatible" },
+  { id: "mancer", name: "Mancer", type: "inference", models: 8, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Privacy-first · no logging · uncensored" },
+  { id: "klusterai", name: "Kluster AI", type: "inference", models: 5, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Batch processing · cost-optimized" },
+  { id: "deepbricks", name: "DeepBricks", type: "inference", models: 20, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "OpenAI-compatible · wide model access" },
+  { id: "nineteen", name: "Nineteen AI", type: "inference", models: 10, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Decentralized inference · competitive" },
+  { id: "hyperbolic", name: "Hyperbolic", type: "inference", models: 10, contextMax: "131K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "GPU marketplace · fine-tuning · free credits" },
+  { id: "infermatic", name: "Infermatic", type: "inference", models: 8, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Low-cost inference · open models" },
+  { id: "avian", name: "Avian", type: "inference", models: 5, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "OpenAI-compatible · fast routing" },
+  { id: "chutes", name: "Chutes AI", type: "inference", models: 10, contextMax: "128K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "Decentralized · community-run GPUs" },
+  { id: "friendliai", name: "FriendliAI", type: "inference", models: 8, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Production-grade · SLA · OpenAI-compat" },
+  { id: "predibase", name: "Predibase", type: "inference", models: 10, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "LoRA fine-tuning · serverless adapters" },
 ];
 
 // ── MODELS (100) — curated across families ──────────────────────────────────────
+//     64 are routable today (provider in ROUTABLE_PROVIDER_IDS); the other 36 are
+//     "Planned — not yet routable" (isRoutableModel() === false) and the catalog
+//     UI labels them as such — names/prices are kept verbatim for transparency.
 export const MODELS: Model[] = [
   // Anthropic (5)
   { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "anthropic", family: "claude", contextWindow: "200K", inputPer1M: 1.00, outputPer1M: 5.00, tier: "T1", free: false, specialty: "Claude quality at T1 price", routingTags: ["claude","quality","balanced"] },

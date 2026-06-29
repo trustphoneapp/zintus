@@ -1,4 +1,9 @@
-# feat: Zintus 10/10 — MCP, tool calling, artifacts, cross-platform parity
+# feat: Zintus path-to-10 — MCP, tool calling, artifacts, cross-platform parity
+
+> Honest status: this is the **path-to-10** push, not a 10/10 claim. Independent
+> re-benchmark puts the product at ~7/10 overall (two genuine 10s: the Tokzen
+> savings moat and route-reason transparency). See
+> `docs/audit/2026-06-28/ten-out-of-ten/`.
 
 A production-grade, local-first AI router. 126 commits. Suite green (0 failures);
 typecheck clean across web/desktop/mobile. No `main` changes. Payments are

@@ -1,4 +1,9 @@
-export type { Router, RouterConfig, RouteAttemptEvent } from "./factory.js";
+export type {
+  Router,
+  RouterConfig,
+  RouteAttemptEvent,
+  ProviderStats,
+} from "./factory.js";
 export {
   createRouter,
   reservedOutputTokens,

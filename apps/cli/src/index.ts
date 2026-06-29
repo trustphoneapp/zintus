@@ -4,6 +4,7 @@ import chalk from "chalk";
 import { PROVIDER_IDS, type ContextMode } from "@zintus/types";
 import { redactSecrets } from "@zintus/router";
 import { runChat, type ChatOptions } from "./commands/chat.js";
+import { buildResponseFormat } from "./commands/chat-content.js";
 import {
   runKeysSet,
   runKeysList,
@@ -34,6 +35,13 @@ interface ChatCliOptions {
   // `--mcp` / `--no-mcp`: force MCP on/off for this turn. Undefined = auto (on
   // when servers are enabled). Commander stores `--no-mcp` as `mcp: false`.
   mcp?: boolean;
+  // `--json`: ask the model for a JSON object (response_format json_object).
+  json?: boolean;
+  // `--json-schema <file|inline>`: ask for schema-constrained JSON. Commander
+  // camelCases the long flag to `jsonSchema`.
+  jsonSchema?: string;
+  // `--strict`: with --json-schema, DEMAND a provider that guarantees conformance.
+  strict?: boolean;
 }
 
 // Commander collector: accumulate each repeated `--image` into one array.
@@ -62,6 +70,13 @@ function toChatOptions(options: ChatCliOptions): ChatOptions {
     toolsFile: typeof options.tools === "string" ? options.tools : undefined,
     builtinTools: options.tools === true,
     mcp: options.mcp,
+    // `--json` / `--json-schema [--strict]` → a model `response_format` request.
+    // Throws a clear error on a malformed schema (caught by the top-level handler).
+    responseFormat: buildResponseFormat({
+      json: options.json,
+      jsonSchema: options.jsonSchema,
+      strict: options.strict,
+    }),
   };
 }
 
@@ -84,6 +99,18 @@ program
   .option(
     "--tools [file]",
     "Enable built-in executable tools (calculator, current_datetime, random_number) and run the execute→feed-back loop; pass a JSON file path for custom tool definitions",
+  )
+  .option(
+    "--json",
+    "Ask the model for a JSON object (response_format json_object). Best-effort: validated locally, not schema-guaranteed",
+  )
+  .option(
+    "--json-schema <file|inline>",
+    "Ask for schema-constrained JSON from a JSON Schema file path or inline JSON. GUARANTEED only on Gemini; other providers degrade to best-effort json_object/prompt",
+  )
+  .option(
+    "--strict",
+    "With --json-schema, DEMAND a provider that guarantees conformance (Gemini); hard-error if none is eligible",
   )
   .option(
     "--no-mcp",
@@ -140,6 +167,18 @@ program
     "Enable built-in executable tools (calculator, current_datetime, random_number) and run the execute→feed-back loop; pass a JSON file path for custom tool definitions",
   )
   .option(
+    "--json",
+    "Ask the model for a JSON object (response_format json_object). Best-effort: validated locally, not schema-guaranteed",
+  )
+  .option(
+    "--json-schema <file|inline>",
+    "Ask for schema-constrained JSON from a JSON Schema file path or inline JSON. GUARANTEED only on Gemini; other providers degrade to best-effort json_object/prompt",
+  )
+  .option(
+    "--strict",
+    "With --json-schema, DEMAND a provider that guarantees conformance (Gemini); hard-error if none is eligible",
+  )
+  .option(
     "--no-mcp",
     "Skip enabled MCP servers for this turn (default: enabled servers are offered)",
   )
@@ -166,6 +205,10 @@ program
     "Sandbox root the agent is confined to (default: current dir)",
   )
   .option("--yes", "Auto-apply file writes WITHOUT confirmation (dangerous)")
+  .option(
+    "--allow-run",
+    "Let the agent run ALLOWLISTED verification commands (bun test/typecheck/lint/build) to check its edits; still gated by confirmation",
+  )
   .option("--max-rounds <n>", "Cap the tool loop rounds (default 15)")
   .option(
     "--mcp <name...>",
@@ -178,6 +221,7 @@ program
       options: {
         root?: string;
         yes?: boolean;
+        allowRun?: boolean;
         maxRounds?: string;
         mcp?: string[] | boolean;
         // Commander sets `mcp: false` for `--no-mcp`.
@@ -198,6 +242,7 @@ program
       await runAgent(task, {
         root: options.root,
         yes: options.yes,
+        allowRun: options.allowRun,
         maxRounds,
         mcp: mcpNames,
         noMcp,

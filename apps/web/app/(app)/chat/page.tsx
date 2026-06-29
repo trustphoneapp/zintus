@@ -4,8 +4,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { MessageBubble } from "@/app/_components/MessageBubble";
 import { ArtifactPanel } from "@/app/_components/ArtifactPanel";
-import { extractArtifacts, type Artifact } from "@/lib/artifacts";
+import {
+  extractArtifacts,
+  foldArtifactVersions,
+  type Artifact,
+} from "@/lib/artifacts";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
+import { StructuredOutputControl } from "@/app/_components/StructuredOutputControl";
+import {
+  buildResponseFormat,
+  parseStructuredResponse,
+  validateAgainstSchema,
+  LEGACY_JSON_KEY,
+  STRUCTURED_MODE_KEY,
+  STRUCTURED_SCHEMA_KEY,
+  type StructuredMode,
+} from "@/lib/structured-output";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { ConsentDialog } from "@/app/_components/ConsentDialog";
 import { Icon } from "@/app/_components/Icons";
@@ -250,20 +264,47 @@ export default function ChatPage() {
     return false;
   });
 
-  // Structured-output (JSON) toggle (persisted): when on, the turn requests
-  // response_format json_object. The gateway resolves the best level the chosen
-  // provider can serve, or returns an honest 422 when it can't. Parity w/ desktop.
-  const [jsonEnabled, setJsonEnabled] = useState(() => {
+  // Structured-output control (persisted): off / json_object / json_schema. In
+  // json_schema mode the user pastes a JSON Schema; we build the exact
+  // `response_format` the gateway/engine already accept. The gateway resolves the
+  // best level the chosen provider can serve, or returns an honest 422. Only
+  // Gemini guarantees json_schema; others are best-effort (see the caveat).
+  const [jsonMode, setJsonMode] = useState<StructuredMode>(() => {
     if (typeof localStorage !== "undefined") {
-      return localStorage.getItem("zintus:json") === "true";
+      const saved = localStorage.getItem(STRUCTURED_MODE_KEY);
+      if (saved === "json_object" || saved === "json_schema" || saved === "off") {
+        return saved;
+      }
+      // Migrate the legacy boolean toggle → json_object.
+      if (localStorage.getItem(LEGACY_JSON_KEY) === "true") return "json_object";
     }
-    return false;
+    return "off";
   });
+  const [jsonSchemaText, setJsonSchemaText] = useState(() =>
+    typeof localStorage !== "undefined"
+      ? (localStorage.getItem(STRUCTURED_SCHEMA_KEY) ?? "")
+      : "",
+  );
   useEffect(() => {
     if (typeof localStorage !== "undefined") {
-      localStorage.setItem("zintus:json", String(jsonEnabled));
+      localStorage.setItem(STRUCTURED_MODE_KEY, jsonMode);
     }
-  }, [jsonEnabled]);
+  }, [jsonMode]);
+  useEffect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STRUCTURED_SCHEMA_KEY, jsonSchemaText);
+    }
+  }, [jsonSchemaText]);
+
+  // The built response_format for this turn (or an inline error when a pasted
+  // json_schema is malformed — we then BLOCK the send and never ship a broken
+  // schema). Recomputed only when the mode/schema changes.
+  const structuredBuild = useMemo(
+    () => buildResponseFormat({ mode: jsonMode, schemaText: jsonSchemaText }),
+    [jsonMode, jsonSchemaText],
+  );
+  const schemaError =
+    jsonMode === "json_schema" ? (structuredBuild.error ?? null) : null;
 
   // ── Artifacts / canvas side panel ─────────────────────────────────────────
   // The panel lists every artifact-worthy block (substantial code, full HTML,
@@ -272,7 +313,7 @@ export default function ChatPage() {
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
   const { artifactList, artifactsByMessage } = useMemo(() => {
-    const list: Artifact[] = [];
+    const flat: Artifact[] = [];
     const byMessage: Record<string, Artifact[]> = {};
     for (const m of messages) {
       if (m.role !== "assistant" || !m.content) continue;
@@ -282,10 +323,11 @@ export default function ChatPage() {
       }));
       if (arts.length > 0) {
         byMessage[m.id] = arts;
-        list.push(...arts);
+        flat.push(...arts);
       }
     }
-    return { artifactList: list, artifactsByMessage: byMessage };
+    // Fold re-emitted bodies into version histories so one artifact ≠ many.
+    return { artifactList: foldArtifactVersions(flat), artifactsByMessage: byMessage };
   }, [messages]);
 
   const openArtifact = useCallback((id: string) => {
@@ -552,6 +594,10 @@ export default function ChatPage() {
         // ignore malformed storage
       }
 
+      // The last assistant text streamed this turn — used after the loop to
+      // locally validate a json_schema response (non-blocking honesty notice).
+      let finalText = "";
+
       try {
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
           let streamedText = "";
@@ -574,7 +620,7 @@ export default function ChatPage() {
             webSearch: webSearchEnabled,
             temperature: activePreset?.temperature,
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
-            responseFormat: jsonEnabled ? { type: "json_object" } : undefined,
+            responseFormat: structuredBuild.responseFormat,
             mcp,
             signal: controller.signal,
             onChunk: (text) => {
@@ -589,6 +635,7 @@ export default function ChatPage() {
             },
           });
 
+          finalText = streamedText;
           setActiveProvider(result.providerId);
           if (useThread) setThreadId(result.threadId);
           patchMessage(currentAssistantId, {
@@ -676,6 +723,25 @@ export default function ChatPage() {
           appendMessage(next);
           currentAssistantId = next.id;
         }
+
+        // json_schema turn: validate the response LOCALLY and, if it doesn't
+        // conform, surface a NON-BLOCKING notice. The output still renders
+        // (MessageBubble shows the JSON) — best-effort honesty, never a crash.
+        const schema = structuredBuild.responseFormat?.schema;
+        if (schema && finalText.trim()) {
+          const parsed = parseStructuredResponse(finalText);
+          if (parsed !== undefined) {
+            const issues = validateAgainstSchema(parsed, schema);
+            if (issues.length > 0) {
+              const first = issues[0]!;
+              const more = issues.length > 1 ? ` (+${issues.length - 1} more)` : "";
+              setNotice({
+                tone: "warn",
+                text: `Response doesn't match the schema: ${first.path} ${first.message}${more}. Showing it anyway.`,
+              });
+            }
+          }
+        }
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") {
           return;
@@ -712,7 +778,7 @@ export default function ChatPage() {
       settings,
       threadId,
       toolsEnabled,
-      jsonEnabled,
+      structuredBuild,
       updateMessage,
       webSearchEnabled,
       incognito,
@@ -740,6 +806,12 @@ export default function ChatPage() {
     // Consent before the first send to a third-party provider (parity w/ mobile+desktop).
     if (!hasProviderSendConsent()) {
       setConsentOpen(true);
+      return;
+    }
+    // Never send a broken json_schema: surface the parse error and hold the turn.
+    if (schemaError) {
+      setNotice({ tone: "error", text: `JSON Schema is invalid: ${schemaError}` });
+      setMoreOpen(true);
       return;
     }
     const prompt = input.trim();
@@ -863,6 +935,7 @@ export default function ChatPage() {
     input,
     loading,
     messages,
+    schemaError,
     selectedProvider,
     settings,
     streamAssistant,
@@ -1255,6 +1328,7 @@ export default function ChatPage() {
                 className={`chat-tool-toggle${
                   webSearchEnabled ||
                   toolsEnabled ||
+                  jsonMode !== "off" ||
                   activePreset ||
                   activeProjectName ||
                   settings.blockTrainingProviders
@@ -1323,17 +1397,15 @@ export default function ChatPage() {
                     >
                       🔧 Tools
                     </button>
-                    <button
-                      type="button"
-                      className={`chat-tool-toggle${jsonEnabled ? " active" : ""}`}
-                      aria-pressed={jsonEnabled}
-                      aria-label="Toggle JSON output"
-                      onClick={() => setJsonEnabled((v) => !v)}
-                      title="Request structured JSON output. The gateway resolves the best level the chosen provider can serve, or returns an honest error when it can't."
-                    >
-                      {"{}"} JSON
-                    </button>
                   </div>
+
+                  <StructuredOutputControl
+                    mode={jsonMode}
+                    schemaText={jsonSchemaText}
+                    error={schemaError}
+                    onModeChange={setJsonMode}
+                    onSchemaTextChange={setJsonSchemaText}
+                  />
 
                   {presets.length > 0 ? (
                     <>

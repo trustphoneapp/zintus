@@ -4933,6 +4933,87 @@ body:has(.dashboard-container) {
   background: rgba(148, 163, 184, 0.1);
 }
 
+/* Version switcher: prev/next + "vN of M" + source badge. */
+.artifact-versions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 0.5px solid var(--c-border);
+}
+.artifact-version-nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--color-text-sub);
+  background: none;
+  border: 0.5px solid var(--c-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.artifact-version-nav:hover:not(:disabled) {
+  color: var(--color-text);
+  background: rgba(148, 163, 184, 0.1);
+}
+.artifact-version-nav:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.artifact-version-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-sub);
+}
+.artifact-version-source {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: var(--color-text-muted);
+  background: rgba(148, 163, 184, 0.12);
+}
+.artifact-version-source-user-edit {
+  color: var(--color-purple-light, #7C3AED);
+  background: var(--color-purple-faint, color-mix(in oklch, #7C3AED 12%, transparent));
+}
+
+/* In-panel editor for "Save as new version". */
+.artifact-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 8px;
+}
+.artifact-editor-area {
+  flex: 1;
+  min-height: 240px;
+  width: 100%;
+  resize: none;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  line-height: 1.55;
+  tab-size: 2;
+  color: var(--color-text);
+  background: #0a0e13;
+  border: 0.5px solid var(--c-border);
+  border-radius: 8px;
+  padding: 12px;
+}
+.artifact-editor-area:focus {
+  outline: none;
+  border-color: var(--color-purple-light, #7C3AED);
+}
+
 .artifact-body {
   flex: 1;
   min-height: 0;

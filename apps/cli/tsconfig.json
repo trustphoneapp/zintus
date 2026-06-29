@@ -13,6 +13,9 @@
     { "path": "../../packages/providers" },
     { "path": "../../packages/keychain" },
     { "path": "../../packages/router" },
-    { "path": "../../packages/engine" }
+    { "path": "../../packages/engine" },
+    { "path": "../../packages/memory" },
+    { "path": "../../packages/codebase-indexer" },
+    { "path": "../../packages/tokzen" }
   ]
 }

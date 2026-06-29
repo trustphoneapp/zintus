@@ -1,7 +1,15 @@
 import type { CSSProperties } from "react";
 import type { CatalogModelDto } from "@/lib/gateway";
 import { CapabilityChips } from "./CapabilityChips";
-import { DATA_POLICY_LABEL, priceLabel } from "./format";
+import {
+  DATA_POLICY_LABEL,
+  formatLatencyMs,
+  formatThroughputTps,
+  formatUptime,
+  hasMeasuredStats,
+  modelStats,
+  priceLabel,
+} from "./format";
 
 const PRICE_TONE: Record<string, CSSProperties> = {
   free: { color: "var(--color-green)" },
@@ -28,6 +36,8 @@ export function ModelCard({
   onToggleCompare: () => void;
 }) {
   const price = priceLabel(model);
+  const stats = modelStats(model);
+  const measured = hasMeasuredStats(stats);
   return (
     <div
       className={`provider-card${selectedForCompare ? " selected" : ""}`}
@@ -92,6 +102,26 @@ export function ModelCard({
             {price.detail}
           </span>
         ) : null}
+      </div>
+
+      <div
+        className="provider-card-stats"
+        title={
+          measured
+            ? `Measured over a recent window (${stats?.samples ?? 0} recent requests).`
+            : "Not enough recent requests to measure yet."
+        }
+        style={{ display: "flex", flexWrap: "wrap", gap: 10 }}
+      >
+        {measured ? (
+          <>
+            <span>p95 {formatLatencyMs(stats?.latency_p95_ms ?? null)}</span>
+            <span>{formatUptime(stats?.uptime ?? null)} uptime</span>
+            <span>{formatThroughputTps(stats?.throughput_tps ?? null)}</span>
+          </>
+        ) : (
+          <span>no data yet</span>
+        )}
       </div>
     </div>
   );

@@ -83,16 +83,32 @@ Web tool calling ships **built-in tools only** (calculator, `current_datetime`,
 - [ ] A web UI for **user-defined** tools (arbitrary schemas + executors) is
       unbuilt; scope the executor sandbox/CSP story before shipping it.
 
-## 6. Web structured-output UI `[FOLLOW-UP]`
+## 6. Structured-output UI — web ✅, CLI ✅ (landed)
 
-Structured/JSON output is live on **gateway API + CLI**; the web shared lib
-(`streamGatewayChat`) can carry a `response_format` but **no web surface requests
-one or renders parsed JSON** (verified absent in `apps/web/app/**`).
+Status corrected on `feat/zintus-10-10`:
+- **Web structured output is now LIVE** — `chat/page.tsx` persists a `jsonEnabled`
+  toggle and sends `response_format: { type: "json_object" }` through
+  `chat-client.ts` → `gateway.ts` → the gateway handler. The old "no web surface
+  requests one" claim is stale.
+- **CLI structured output is now LANDED** — `zintus chat --json` sends a real
+  model `response_format: { type: "json_object" }`, and `--json-schema
+  <file|inline>` (with `--strict` to demand a guaranteeing provider) sends
+  `{ type: "json_schema", schema, strict }`. The flag is built in
+  `apps/cli/src/commands/chat-content.ts` (`buildResponseFormat`) and threaded
+  through `engine.routeAndStream` in `apps/cli/src/commands/chat.ts` — a true
+  model structured-output request, distinct from the older `--json`
+  *output-formatting* flags on `research`/`keys list`/`mcp list`/`cloud`. The
+  validated JSON is pretty-printed to stdout; a non-conforming result is surfaced
+  as a **non-fatal warning** with the validation issues, never a crash. Honesty
+  caveat is carried in help text + output. Unit-tested in
+  `apps/cli/src/commands/chat-content.test.ts`.
 
-- [ ] If web structured output is desired, add the request + a JSON-render
-      surface, then update `FEATURE-MATRIX.md`.
-- [ ] Keep the honesty caveat: only **Gemini** is `json_schema`; all other
-      providers are `json_object`/prompt-level (**best-effort, not guaranteed**).
+- [x] CLI `response_format` request landed (a `--json-schema`/`--json`/`--strict`
+      model flag, distinct from output formatting) for true cross-surface parity;
+      `FEATURE-MATRIX.md` updated.
+- Honesty caveat held: only **Gemini** guarantees `json_schema`; all other
+  providers are `json_object`/prompt-level (**best-effort, not guaranteed**),
+  validated locally.
 
 ## 7. Legal / store / deploy `[HUMAN]`
 
@@ -116,8 +132,10 @@ These are tracked elsewhere and are explicitly **not** silent gaps:
 - [ ] Multimodal image input is **🟡 pending a keyed end-to-end smoke**
       (browser canvas → Gemini); code + tests + web build are green, but the live
       keyed run is the `[HUMAN]` gate. `docs/multimodal-image-input.md`.
-- [ ] Private Mode is **best-effort**: `"unknown"`-training providers aren't
-      filtered and there is no per-response "not honored" badge.
+- [ ] Private Mode is **best-effort**: `"unknown"`-training providers ARE now
+      conservatively filtered (`mayTrainOnUserData`), and a stranded request carries
+      `privacyHonored: false`; the remaining gap is a per-response "not honored"
+      badge on every surface.
 - [ ] Web CSP still allows `script-src 'unsafe-inline'`; Stripe webhook not
       itself flag-gated; bundle-baked `NEXT_PUBLIC_GATEWAY_TOKEN`.
 - [ ] CLI `research` is faithful but **never executed** (key-gated); no

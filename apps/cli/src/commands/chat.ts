@@ -8,6 +8,7 @@ import type {
   ChatMessage,
   ContextMode,
   ImageContentBlock,
+  ResponseFormat,
   RouteUsage,
   ToolDefinition,
 } from "@zintus/types";
@@ -20,6 +21,7 @@ import {
 } from "../lib/builtin-tools.js";
 import {
   buildChatContent,
+  formatStructuredOutput,
   formatTurnSummary,
   loadImages,
   normalizeChatError,
@@ -92,6 +94,12 @@ export interface ChatOptions {
    *  `false` (`--no-mcp`) forces it off; `true` (`--mcp`) forces it on. When
    *  active the chat runs through the local gateway, which hosts the servers. */
   mcp?: boolean;
+  /** Structured-output request (`--json` / `--json-schema`). When set, the model
+   *  is asked for JSON (`response_format`), the result is buffered + validated by
+   *  the engine, and the CLI pretty-prints it. HONESTY: only Gemini guarantees
+   *  `json_schema`; other providers are best-effort `json_object`/prompt coercion.
+   *  Absent ⇒ unchanged plain-text streaming. */
+  responseFormat?: ResponseFormat;
 }
 
 /** One streamed SSE chunk from the gateway chat endpoint, narrowed to the fields
@@ -263,11 +271,25 @@ export async function runChat(
     console.error(chalk.dim(`📁 project: ${project.name}`));
   }
 
+  // Structured output (`--json` / `--json-schema`) runs on the DIRECT engine
+  // path, which buffers + validates the JSON. The MCP (gateway) path is text-only
+  // and does not carry `responseFormat`, so a structured request skips MCP — and
+  // if the user explicitly forced `--mcp`, we say so rather than silently dropping
+  // either the tools or the JSON guarantee.
+  const structured = Boolean(options?.responseFormat);
+  if (structured && options?.mcp === true) {
+    console.error(
+      chalk.yellow(
+        "Structured output (--json) runs on the direct engine path — MCP is skipped this turn.",
+      ),
+    );
+  }
+
   // MCP: when servers are enabled (and not `--no-mcp`), or `--mcp` is forced,
   // the chat MUST run through the local gateway — the in-process engine can't
   // host MCP. This is a separate, text-only path; the normal (non-MCP) chat
   // below is unchanged. `--mcp` with nothing enabled is an honest no-op hint.
-  if (options?.mcp !== false) {
+  if (!structured && options?.mcp !== false) {
     const mcp = buildChatMcpConfig(await loadMcpServers());
     if (mcp) {
       await runMcpChat(prompt, mcp, options, project);
@@ -366,11 +388,22 @@ export async function runChat(
     // emits tool calls we run the bounded execute→feed-back loop below — only
     // built-in tool names actually run; an unknown tool is fed back as an honest
     // error result (never silently executed).
-    const tools = options?.toolsFile
+    const requestedTools = options?.toolsFile
       ? loadTools(options.toolsFile)
       : options?.builtinTools
         ? BUILTIN_TOOL_DEFINITIONS
         : undefined;
+    // The engine's structured-output path BUFFERS + validates and does not run a
+    // tool loop, so `--tools` + `--json` don't combine. Be honest: drop the tools
+    // for this turn and say so, rather than offering tools that silently won't run.
+    if (structured && requestedTools) {
+      console.error(
+        chalk.dim(
+          "note: tools are ignored with structured output (--json / --json-schema).",
+        ),
+      );
+    }
+    const tools = structured ? undefined : requestedTools;
     const toolsEnabled = Boolean(tools);
     // Captured when the winning provider's stream completes — the real measured
     // token counts for this turn (never fabricated). Mirrors the gateway's
@@ -387,6 +420,10 @@ export async function runChat(
       { role: "user", content: userContent },
     ];
     let firstRound = true;
+    // For a structured turn the engine BUFFERS the validated JSON and replays it
+    // as a single chunk; we capture it here (instead of streaming it to stdout) so
+    // we can pretty-print + validate-report it after the turn.
+    let structuredRaw = "";
     const { finalResult: result } = await runBuiltinToolLoop(initialMessages, {
       route: async (messages) => {
         if (!firstRound) spinner.start("Routing tool follow-up");
@@ -398,6 +435,12 @@ export async function runChat(
           threadId: toolsEnabled ? undefined : threadId,
           diffText: toolsEnabled ? undefined : diffText,
           tools,
+          responseFormat: options?.responseFormat,
+          // Private Mode (block-training) from config: route away from providers
+          // that may train on user data. The router reports back whether it could
+          // honor it (`result.privacyHonored`), surfaced in the turn summary below.
+          blockTrainingProviders: config.blockTrainingProviders,
+          allowTrainingProviders: config.allowTrainingProviders,
           onUsage: (u) => {
             usage = u;
           },
@@ -412,8 +455,17 @@ export async function runChat(
         );
         firstRound = false;
       },
-      onChunk: (chunk) => process.stdout.write(chunk),
-      onTurnEnd: () => process.stdout.write("\n"),
+      onChunk: (chunk) => {
+        // Structured turns are pretty-printed AFTER validation, not streamed raw.
+        if (structured) {
+          structuredRaw += chunk;
+          return;
+        }
+        process.stdout.write(chunk);
+      },
+      onTurnEnd: () => {
+        if (!structured) process.stdout.write("\n");
+      },
       onToolCalls: (calls) => {
         console.error(chalk.cyan(`\n${calls.length} tool call(s):`));
         for (const call of calls) {
@@ -433,6 +485,22 @@ export async function runChat(
           chalk.yellow(`⚠ tool loop stopped after ${max} rounds`),
         ),
     });
+
+    // Structured output: pretty-print the validated JSON to stdout (clean for
+    // piping) and surface the honest transparency note + any non-conforming
+    // warning on stderr. A non-conforming result is reported, NOT crashed.
+    if (structured) {
+      const render = formatStructuredOutput({
+        verdict: result.structuredOutput,
+        parsed: result.parsed,
+        raw: structuredRaw,
+      });
+      process.stdout.write(
+        render.body.endsWith("\n") ? render.body : `${render.body}\n`,
+      );
+      for (const note of render.notes) console.error(chalk.dim(note));
+      for (const warning of render.warnings) console.error(chalk.yellow(warning));
+    }
 
     const provider = (await engine.getProviderStatus()).find(
       (p) => p.id === result.providerId,
@@ -462,6 +530,9 @@ export async function runChat(
       // tokensLimit is undefined when the engine has no reported daily cap — pass
       // it through as null so the renderer prints "limit unknown", not a guess.
       quotaLimit: provider?.tokensLimit ?? null,
+      // Private-Mode honesty: undefined when block-training wasn't requested (line
+      // omitted), true/false when the router actually evaluated it this turn.
+      privacyHonored: result.privacyHonored,
     });
     console.error(chalk.dim(summary));
 

@@ -185,15 +185,15 @@ export default function DownloadPage() {
 
           {/* ── CLI ─────────────────────────────────────────── */}
           <section style={sectionStyle}>
-            <Header icon={Terminal} title="CLI" badge={{ text: "Stable", tone: "ok" }} />
+            <Header icon={Terminal} title="CLI" badge={{ text: "Beta", tone: "soon" }} />
             <p style={leadStyle}>
-              Install the <code style={{ color: "#c4b5fd" }}>zintus</code> command globally from npm.
-              Keys are stored in your OS keychain — never sent anywhere. Runs on the Bun runtime.
+              The <code style={{ color: "#c4b5fd" }}>zintus</code> CLI is not yet published to npm —
+              build it from source with Bun (it uses <code>bun:sqlite</code>, so it runs on Bun, not Node).
+              Keys are stored in your OS keychain — never sent anywhere.
             </p>
-            <CommandBlock label="NPM" lines={["npm install -g zintus", "zintus init", "zintus chat \"hello\""]} />
+            <CommandBlock label="BUILD FROM SOURCE" lines={["git clone https://github.com/trustphoneapp/zintus", "cd zintus && bun install", "bun run --filter zintus build", "zintus chat \"hello\""]} />
             <p style={noteStyle}>
-              Prefer to build from source? Clone the repo and run{" "}
-              <code>bun install &amp;&amp; cd apps/cli &amp;&amp; bun run build</code>.
+              A global <code>npm install -g zintus</code> is coming once the package is published.
             </p>
             <a href={REPO_URL} style={linkBtn} target="_blank" rel="noopener noreferrer">
               Source on GitHub <ExternalLink size={13} />

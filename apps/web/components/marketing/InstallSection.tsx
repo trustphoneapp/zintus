@@ -23,7 +23,8 @@ export function InstallSection() {
           <p className="m-eyebrow">For developers</p>
           <h2 className="m-title">Up in 60 seconds</h2>
           <p className="m-subtitle">
-            Install the CLI from npm. Keys are stored in your OS keychain — never sent anywhere.
+            Build the CLI from source with Bun (npm publish coming soon). Keys are
+            stored in your OS keychain — never sent anywhere.
           </p>
         </Reveal>
         <Reveal delay={0.08}>

@@ -68,6 +68,7 @@ function fakeEngine(overrides: Partial<Engine> = {}): Engine {
     },
     getSavings: () => ({ byProvider: {}, total: 0 }),
     getQuotaRemaining: () => 1,
+    getProviderStats: () => null,
     updatePolicy: () => {},
     probeProviders: async () => [],
     listThreads: () => [],
@@ -273,6 +274,110 @@ describe("/v1/research idle protection", () => {
       globalThis.setTimeout = realSetTimeout;
       globalThis.clearTimeout = realClearTimeout;
     }
+  });
+
+  test("wires extractClaims + emits a conflict event when sources contradict", async () => {
+    // Two distinct domains so a [1][2] claim is structurally "corroborated", and
+    // a multi-result search so corroboration has ≥2 sources to compare.
+    const conflictSearch: RunFallbackSearch = (async () => ({
+      servedBy: "tavily" as const,
+      results: [
+        { title: "A says 10", url: "https://a.com/x", content: "The value is 10." },
+        { title: "B says 50", url: "https://b.com/y", content: "The value is 50." },
+      ],
+    })) as RunFallbackSearch;
+    installSearchMock(conflictSearch);
+
+    // Route the single engine entrypoint by prompt content: decompose,
+    // claim-extraction, conflict-judging, and synthesis each get a canned reply.
+    let extractCalled = false;
+    let conflictJudged = false;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        const content = (request.messages ?? [])
+          .map((m) => m.content)
+          .join("\n");
+        let out = "The value of X is disputed [1][2].";
+        if (content.includes("web-search queries")) {
+          out = '["sub query one","sub query two","sub query three"]';
+        } else if (content.includes("check-worthy factual claims")) {
+          extractCalled = true;
+          out = '["The value of X is disputed"]';
+        } else if (content.includes("CONTRADICT")) {
+          conflictJudged = true;
+          out = "CONTRADICT";
+        }
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          stream: (async function* () {
+            yield out;
+          })(),
+        };
+      },
+    });
+    const handler = await makeHandler(
+      { streamIdleTimeoutMs: 2000, requestTimeoutMs: 2000 },
+      engine,
+    );
+    const res = await handler(
+      researchRequest({ query: "q", depth: "standard" }),
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // extractClaims is wired into the deps and actually invoked in prod.
+    expect(extractCalled).toBe(true);
+    // The conflict-detection pass ran and surfaced a "sources disagree" event.
+    expect(conflictJudged).toBe(true);
+    expect(text).toContain("event: conflict");
+    expect(text).toContain("event: done");
+    expect(text).not.toContain("event: error");
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  test("emits a deepening progress event when a gap drives a follow-up round", async () => {
+    installSearchMock(cannedSearch);
+    // Standard depth runs one deepening round. Route the single engine
+    // entrypoint by prompt: decompose returns real sub-queries; synthesis yields
+    // an uncited gap claim so the round finds something to deepen on.
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        const content = (request.messages ?? [])
+          .map((m) => m.content)
+          .join("\n");
+        let out =
+          "A specific factual claim that clearly needs more corroboration here.";
+        if (content.includes("web-search queries")) {
+          out = '["alpha sub query","beta sub query","gamma sub query"]';
+        } else if (content.includes("check-worthy factual claims")) {
+          out =
+            '["A specific factual claim that clearly needs more corroboration here"]';
+        }
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          stream: (async function* () {
+            yield out;
+          })(),
+        };
+      },
+    });
+    const handler = await makeHandler(
+      { streamIdleTimeoutMs: 2000, requestTimeoutMs: 2000 },
+      engine,
+    );
+    const res = await handler(
+      researchRequest({ query: "q", depth: "standard" }),
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // The iterative-deepening round announced itself over SSE.
+    expect(text).toContain("event: deepening");
+    expect(text).toContain("event: done");
+    expect(text).not.toContain("event: error");
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
   test("idle watchdog RESETS on each event — slow-but-progressing stream completes", async () => {

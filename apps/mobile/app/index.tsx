@@ -38,6 +38,13 @@ import {
 import { toChatMessages, type ChatMeta } from "@/lib/messages";
 import { migrateLegacyKeys } from "@/lib/secure-keys";
 import { COLORS } from "@/lib/theme";
+import {
+  extractArtifacts,
+  foldArtifactVersions,
+  type Artifact,
+  type VersionedArtifact,
+} from "@/lib/artifacts";
+import { ArtifactsModal } from "@/components/ArtifactsModal";
 
 // "auto" is a UI-only sentinel: it sends NO provider so the gateway routes
 // using the configured strategy.
@@ -135,9 +142,31 @@ function asStructuredJson(content: string): string | null {
   }
 }
 
+/**
+ * Fold the whole conversation's assistant turns into versioned artifacts: each
+ * message is extracted (ids namespaced per message), concatenated in order, then
+ * `foldArtifactVersions` merges same-identity blocks into one entry with a
+ * version history. This is what powers the cross-message "vN of M" switcher —
+ * the same iterative-artifacts model web/desktop use.
+ */
+function conversationArtifacts(messages: Message[]): VersionedArtifact[] {
+  const flat: Artifact[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant" || message.streaming || !message.content) {
+      continue;
+    }
+    for (const artifact of extractArtifacts(message.content)) {
+      flat.push({ ...artifact, id: `${message.id}:${artifact.id}` });
+    }
+  }
+  return foldArtifactVersions(flat);
+}
+
 export default function ChatScreen() {
   const router = useRouter();
   const [messages, setMessages] = useState<Message[]>([]);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [openArtifacts, setOpenArtifacts] = useState<VersionedArtifact[]>([]);
   const [input, setInput] = useState("");
   const [selectedProvider, setSelectedProvider] =
     useState<ProviderSelection>("auto");
@@ -542,6 +571,13 @@ export default function ChatScreen() {
           // monospace (the response_format: json_object path), never faking it.
           const structuredJson =
             !isUser && !item.streaming ? asStructuredJson(item.content) : null;
+          // Count of artifact-worthy blocks in THIS turn — drives the
+          // "Artifacts (N)" affordance. The viewer itself shows the whole
+          // conversation's folded version history.
+          const artifactCount =
+            !isUser && !item.streaming && item.content
+              ? extractArtifacts(item.content).length
+              : 0;
           return (
             <View
               style={[
@@ -637,22 +673,74 @@ export default function ChatScreen() {
                   ) : (
                     <View />
                   )}
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.copyButton,
-                      pressed && styles.pressed,
+                  <View style={styles.footerActions}>
+                    {artifactCount > 0 ? (
+                      <Pressable
+                        style={({ pressed }) => [
+                          styles.copyButton,
+                          styles.artifactButton,
+                          pressed && styles.pressed,
+                        ]}
+                        onPress={() => {
+                          setOpenArtifacts(conversationArtifacts(messages));
+                          setArtifactsOpen(true);
+                        }}
+                      >
+                        <Text style={styles.artifactText}>
+                          {`📄 Artifacts (${artifactCount})`}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.copyButton,
+                        pressed && styles.pressed,
+                      ]}
+                      onPress={() => {
+                        void copyMessage(item.content);
+                      }}
+                    >
+                      <Text style={styles.copyText}>Copy</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : null}
+
+              {/* Per-response Private-Mode badge — mirrors web/desktop's pill
+                  copy + honesty exactly. `privacyHonored` is undefined when
+                  Private Mode was off (no badge), true when a no-training
+                  provider served the turn, false when a may-train provider was
+                  used anyway. Never claim "honored" unless the gateway confirmed it. */}
+              {!isUser && !item.streaming && item.meta?.privacyHonored != null ? (
+                <View
+                  style={[
+                    styles.privacyBadge,
+                    item.meta.privacyHonored
+                      ? styles.privacyBadgeHonored
+                      : styles.privacyBadgeBroken,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.privacyBadgeText,
+                      { color: item.meta.privacyHonored ? COLORS.good : COLORS.warn },
                     ]}
-                    onPress={() => {
-                      void copyMessage(item.content);
-                    }}
                   >
-                    <Text style={styles.copyText}>Copy</Text>
-                  </Pressable>
+                    {item.meta.privacyHonored
+                      ? "✓ Private Mode honored"
+                      : "⚠ Private Mode not honored"}
+                  </Text>
                 </View>
               ) : null}
             </View>
           );
         }}
+      />
+
+      <ArtifactsModal
+        visible={artifactsOpen}
+        artifacts={openArtifacts}
+        onClose={() => setArtifactsOpen(false)}
       />
 
       <View style={styles.composer}>
@@ -778,6 +866,26 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     marginBottom: 6,
   },
+  privacyBadge: {
+    alignSelf: "flex-start",
+    marginTop: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  privacyBadgeHonored: {
+    borderColor: COLORS.good,
+    backgroundColor: "rgba(52,211,153,0.12)",
+  },
+  privacyBadgeBroken: {
+    borderColor: COLORS.warn,
+    backgroundColor: "rgba(245,158,11,0.12)",
+  },
+  privacyBadgeText: {
+    fontSize: 11,
+    fontWeight: "600",
+  },
   jsonBlock: {
     backgroundColor: COLORS.surface,
     borderRadius: 8,
@@ -832,6 +940,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   attribution: { color: COLORS.muted, fontSize: 11 },
+  footerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
   copyButton: {
     paddingHorizontal: 10,
     paddingVertical: 4,
@@ -840,6 +949,8 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   copyText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "600" },
+  artifactButton: { borderColor: COLORS.accent },
+  artifactText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "600" },
   composer: {
     flexDirection: "row",
     gap: 8,

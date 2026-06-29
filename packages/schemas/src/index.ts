@@ -136,6 +136,24 @@ const RoutingStrategySchema = z.enum([
 ]);
 const SearchDepthSchema = z.enum(["basic", "standard", "deep"]);
 
+// OpenRouter-style provider routing preferences. The chat body's `provider`
+// field accepts EITHER the legacy Zintus forced-provider STRING (`"groq"` — pins
+// the request to one provider) OR this OBJECT (OpenRouter's shape), which the
+// gateway MAPS onto the existing strategy / priority / failover machinery:
+//   • `order`           → per-request provider preference order (sticky order)
+//   • `sort:"latency"`  → `fastest` strategy   (lowest measured p95 wins)
+//   • `sort:"price"`    → `economy` strategy   (cheapest paid-equivalent wins)
+//   • `sort:"throughput"` → `fastest` strategy (Zintus's speed signal is p95
+//                            latency; throughput and latency are correlated and
+//                            we never fabricate a tokens/sec ranking we lack)
+//   • `allow_fallbacks:false` → pin the request to the FIRST eligible provider
+//                            (no failover to other providers/models)
+export const ProviderRoutingSchema = z.object({
+  order: z.array(ProviderIdSchema).optional(),
+  sort: z.enum(["price", "throughput", "latency"]).optional(),
+  allow_fallbacks: z.boolean().optional(),
+});
+
 export const SearchOptionsSchema = z.object({
   enabled: z.boolean().optional(),
   depth: SearchDepthSchema.optional(),
@@ -235,7 +253,10 @@ export const ChatCompletionRequestSchema = z.object({
     .optional(),
   model: z.string().optional(),
   stream: z.boolean().optional(),
-  provider: ProviderIdSchema.optional(),
+  // Either the legacy forced-provider STRING or the OpenRouter-style routing
+  // OBJECT (mapped onto strategy/priority/failover by the gateway). See
+  // ProviderRoutingSchema.
+  provider: z.union([ProviderIdSchema, ProviderRoutingSchema]).optional(),
   thread_id: z.string().optional(),
   mode: ContextModeSchema.optional(),
   virtual_key: z.string().optional(),
@@ -269,6 +290,7 @@ export const ChatCompletionRequestSchema = z.object({
 });
 
 export type ChatCompletionRequest = z.infer<typeof ChatCompletionRequestSchema>;
+export type ProviderRouting = z.infer<typeof ProviderRoutingSchema>;
 
 // ── Gateway: deep research ─────────────────────────────────────────────────
 

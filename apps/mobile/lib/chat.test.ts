@@ -50,6 +50,22 @@ describe("parseChatMeta", () => {
     expect(meta?.routeReason).toBeUndefined();
     expect(meta?.routingStrategy).toBe("auto");
   });
+
+  it("carries private_mode_honored=false honestly (NOT dropped to undefined)", () => {
+    // Private Mode was on but a may-train provider was used — the badge must show
+    // the ⚠ "not honored" state, so the parse keeps `false` (distinct from absent).
+    const meta = parseChatMeta({
+      type: "metadata",
+      provider: "groq",
+      private_mode_honored: false,
+    });
+    expect(meta?.privacyHonored).toBe(false);
+  });
+
+  it("leaves privacyHonored undefined when Private Mode was off (no badge)", () => {
+    const meta = parseChatMeta({ type: "metadata", provider: "gemini" });
+    expect(meta?.privacyHonored).toBeUndefined();
+  });
 });
 
 describe("buildChatRequestBody", () => {

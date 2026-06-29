@@ -5,7 +5,7 @@ const CARDS = [
   {
     icon: Terminal,
     name: "CLI",
-    lines: ["npm install -g zintus", "zintus chat 'hello'"],
+    lines: ["build from source (Bun)", "zintus chat 'hello'"],
     href: "#install",
     mono: true,
   },

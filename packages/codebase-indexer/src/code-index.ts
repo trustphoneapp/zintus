@@ -386,6 +386,34 @@ export class CodeIndex {
     return scored.slice(0, topK);
   }
 
+  /**
+   * Return every stored chunk (path + 1-based inclusive line range + content),
+   * UNRANKED and without embeddings. Intended for callers that do their own
+   * ranking — e.g. a key-free lexical fallback — when no semantic embedder is
+   * available. Cheap: a single table scan of the already-chunked index.
+   */
+  allChunks(): Array<{
+    path: string;
+    startLine: number;
+    endLine: number;
+    content: string;
+  }> {
+    const rows = this.sqlite
+      .query("SELECT path, start_line, end_line, content FROM code_chunks")
+      .all() as Array<{
+        path: string;
+        start_line: number;
+        end_line: number;
+        content: string;
+      }>;
+    return rows.map((row) => ({
+      path: row.path,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      content: row.content,
+    }));
+  }
+
   close(): void {
     this.sqlite.close();
   }

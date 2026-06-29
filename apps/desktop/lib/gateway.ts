@@ -144,6 +144,22 @@ function parseHeaderNumber(value: string | null): number | null {
 }
 
 /**
+ * Read the gateway's `X-Zintus-Private-Honored` response header into a tri-state.
+ * Returns `undefined` when the header is absent (Private Mode was off, so no claim
+ * is made), `true`/`false` for an explicit `"true"`/`"false"`. Any other value is
+ * treated as absent — we under-claim rather than guess. The metadata SSE frame
+ * carries the same signal; this header is the fallback known before the stream.
+ */
+export function readPrivacyHonored(headers: Headers): boolean | undefined {
+  const raw = headers.get("X-Zintus-Private-Honored");
+  if (raw == null) return undefined;
+  const value = raw.trim().toLowerCase();
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return undefined;
+}
+
+/**
  * Read the compression headers off a chat response. Returns null unless a real
  * saving is present — matching the gateway, which omits the headers entirely
  * when no compression happened (so the badge shows nothing).
@@ -352,6 +368,16 @@ export interface ResponseMeta {
    * assistant turn — the prominent "why this route" signal the audit flagged missing.
    */
   routeReason?: string;
+  /**
+   * Private-Mode honesty: `undefined` when Private Mode (block-training) was off,
+   * `true` when the turn was served by a no-training provider, `false` when Private
+   * Mode was on but every available provider may train (or has an undocumented
+   * policy) so one was used anyway. Mirrors the web TransparencyStrip pill — never
+   * shown as honored unless the gateway confirmed it. Read from the metadata SSE
+   * frame's `private_mode_honored`, with the `X-Zintus-Private-Honored` response
+   * header as a fallback (known before the stream even starts).
+   */
+  privacyHonored?: boolean;
 }
 
 interface GatewayChunk {
@@ -379,6 +405,7 @@ interface GatewayChunk {
   saved_vs_claude_sonnet?: number;
   routing_strategy?: string;
   route_reason?: string;
+  private_mode_honored?: boolean;
   // server-side MCP tool-loop event fields (type === "mcp_tool_call" |
   // "mcp_tool_result"). A result frame carries the call id + outcome at the top
   // level (its `choices` is empty); a call frame reuses the tool-call delta shape.
@@ -713,6 +740,10 @@ export async function streamGatewayChat(params: {
 
   // Compression savings ride along as response headers (known before streaming).
   const compression = readCompressionStats(response.headers) ?? undefined;
+  // Private-Mode honesty also rides a response header (known before the stream).
+  // The metadata SSE frame may restate it; the frame wins when present, but this
+  // gives the badge a value even if that frame never arrives.
+  const headerPrivacyHonored = readPrivacyHonored(response.headers);
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -723,6 +754,11 @@ export async function streamGatewayChat(params: {
   let traceId: string | undefined;
   let output = "";
   const meta: ResponseMeta = {};
+  // Seed from the header so the badge is honest even if the metadata frame is
+  // missing; the frame's `private_mode_honored` overrides it below when present.
+  if (headerPrivacyHonored !== undefined) {
+    meta.privacyHonored = headerPrivacyHonored;
+  }
   // Accumulate streamed tool-call fragments by their `index`. The gateway emits
   // each call's name once and its arguments as a (possibly fragmented) JSON
   // string; we concatenate then parse once the stream ends. The fold + finalize
@@ -784,6 +820,9 @@ export async function streamGatewayChat(params: {
         }
         if (chunk.route_reason != null) {
           meta.routeReason = chunk.route_reason;
+        }
+        if (chunk.private_mode_honored != null) {
+          meta.privacyHonored = chunk.private_mode_honored;
         }
         continue;
       }
