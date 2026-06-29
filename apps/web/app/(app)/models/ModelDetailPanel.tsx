@@ -6,6 +6,10 @@ import type { CatalogModelDto } from "@/lib/gateway";
 import { CapabilityChips } from "./CapabilityChips";
 import {
   DATA_POLICY_LABEL,
+  formatLatencyMs,
+  formatThroughputTps,
+  formatUptime,
+  modelStats,
   priceLabel,
   resolveProviderId,
   structuredOutputLabel,
@@ -61,6 +65,7 @@ export function ModelDetailPanel({
   // action is disabled rather than silently selecting the wrong provider.
   const providerId = resolveProviderId(model.owned_by);
   const { pricing } = model;
+  const stats = modelStats(model);
 
   return (
     <div
@@ -141,6 +146,29 @@ export function ModelDetailPanel({
           {model.data_policy.retention ? (
             <Row label="Retention" value={model.data_policy.retention} />
           ) : null}
+        </div>
+
+        {/* Honest MEASURED performance — each metric is "—" until the provider
+            has enough recent samples; we never fabricate a 0 / 100%. */}
+        <div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              justifyContent: "space-between",
+              gap: 8,
+              fontSize: 12,
+              color: "var(--color-text-muted)",
+            }}
+          >
+            <span>Measured performance</span>
+            <span title="Computed from recent routed requests for this provider — null until there are enough samples.">
+              recent window{stats ? ` · ${stats.samples} samples` : ""}
+            </span>
+          </div>
+          <Row label="Latency p95" value={formatLatencyMs(stats?.latency_p95_ms ?? null)} />
+          <Row label="Uptime" value={formatUptime(stats?.uptime ?? null)} />
+          <Row label="Throughput" value={formatThroughputTps(stats?.throughput_tps ?? null)} />
         </div>
 
         {model.data_policy.policy_url ? (
