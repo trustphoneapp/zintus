@@ -1513,7 +1513,7 @@ export default function ChatPage() {
                 onClick={() => fileInputRef.current?.click()}
                 aria-label="Attach an image, PDF, or text file"
               >
-                <Icon name="image" size={16} />
+                <Icon name="paperclip" size={16} />
               </button>
             </Tooltip>
             <textarea

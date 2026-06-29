@@ -16,8 +16,11 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "X-Frame-Options", value: "DENY" },
   {
+    // microphone=(self): voice dictation (Web Speech API) needs mic on OUR
+    // origin. microphone=() disabled it for everyone — the browser then blocks
+    // it with NO permission prompt. camera/geolocation stay fully disabled.
     key: "Permissions-Policy",
-    value: "camera=(), microphone=(), geolocation=()",
+    value: "camera=(), microphone=(self), geolocation=()",
   },
   {
     key: "Strict-Transport-Security",
