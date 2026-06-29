@@ -1585,7 +1585,7 @@ export default function ChatPage() {
                 onClick={() => fileInputRef.current?.click()}
                 aria-label="Attach an image, PDF, or text file"
               >
-                <Icon name="paperclip" size={16} />
+                <Icon name="paperclip" size={18} />
               </button>
             </Tooltip>
             <textarea
@@ -1634,7 +1634,7 @@ export default function ChatPage() {
                   aria-label={speech.listening ? "Stop dictation" : "Start dictation"}
                   aria-pressed={speech.listening}
                 >
-                  <Icon name="mic" size={16} />
+                  <Icon name="mic" size={18} />
                 </button>
               </Tooltip>
             ) : (
@@ -1645,7 +1645,7 @@ export default function ChatPage() {
                   disabled
                   aria-label="Voice input not available in this browser"
                 >
-                  <Icon name="mic" size={16} />
+                  <Icon name="mic" size={18} />
                 </button>
               </Tooltip>
             )}
