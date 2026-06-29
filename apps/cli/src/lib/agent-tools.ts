@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -35,7 +36,31 @@ export type { ToolExecutionResult, ToolLoopTurn } from "./builtin-tools.js";
  *     injectable confirm() to return true before touching disk; a decline returns
  *     "user declined" and applies nothing.
  *
- * There is deliberately NO shell / run_command tool in v1.
+ * RUN_COMMAND — the ONE side-effecting non-file tool. It exists so the agent can
+ * close the write→run→verify→iterate loop (run the project's tests/typecheck/
+ * lint/build, read the failure, fix it). It is emphatically NOT a shell, and its
+ * security model is as load-bearing as the sandbox above:
+ *  a. ALLOWLIST-ONLY — the model passes a `command` string; we split it into argv
+ *     on whitespace and accept it ONLY if it matches a fixed allowlist of
+ *     side-effect-bounded *verification* commands (see RUN_ALLOWLIST). Anything
+ *     else — rm, git, curl/wget, package installs, unknown binaries — is refused
+ *     with NO process spawned.
+ *  b. ARGV-ONLY, NO SHELL — we spawn the argv array directly (spawnSync, shell:
+ *     false). No string is ever handed to a shell, so `;`, `&&`, `|`, backticks,
+ *     `$( )`, redirection, globbing and newlines cannot chain or inject; tokens
+ *     containing shell metacharacters are rejected before any match attempt.
+ *  c. CONFINED — cwd is pinned to the sandbox root; the only variable argument
+ *     (a `bun test <path>` target) must resolve INSIDE the sandbox or it is
+ *     rejected (no spawn). A hard 120s timeout and an output byte-cap bound the
+ *     blast radius; stdout/stderr are captured and truncated, never streamed to a
+ *     shell.
+ *  d. GATED + BUDGETED — it requires the SAME injectable confirm() gate as the
+ *     write tools (a decline runs nothing) AND it is OFF unless the run config is
+ *     present and `allow` is true (the CLI gates this behind `--allow-run`). Each
+ *     actual run counts against a bounded run-budget (analogous to the mutation
+ *     budget) so the agent cannot loop forever re-running tests.
+ * The exit code + truncated output are fed back into the agent loop so the model
+ * can read failures and iterate.
  */
 
 /** Max bytes for a single read or write (1 MiB). */
@@ -43,6 +68,42 @@ export const MAX_FILE_BYTES = 1024 * 1024;
 
 /** Default and hard cap on applied mutations (write_file + apply_edit) per run. */
 export const DEFAULT_MUTATION_BUDGET = 50;
+
+/** Default cap on run_command invocations per agent run (bounds the verify loop). */
+export const DEFAULT_RUN_BUDGET = 10;
+
+/** Hard wall-clock timeout for a single run_command (ms). */
+export const RUN_COMMAND_TIMEOUT_MS = 120_000;
+
+/** Byte cap applied to EACH of the captured stdout/stderr before feed-back. */
+export const MAX_RUN_OUTPUT_BYTES = 16 * 1024;
+
+/**
+ * The fixed allowlist of verification commands run_command may execute. Each entry
+ * is the EXACT argv prefix that must match; `trailingPath: true` additionally
+ * permits at most one extra token that must resolve to a path INSIDE the sandbox.
+ * Nothing here mutates state outside build/test output dirs, reaches the network
+ * by design, or accepts free-form arguments.
+ */
+interface AllowedCommand {
+  argv: readonly string[];
+  /** Allow at most one extra trailing token, validated as a sandbox-relative path. */
+  trailingPath?: boolean;
+}
+export const RUN_ALLOWLIST: readonly AllowedCommand[] = [
+  { argv: ["bun", "run", "test"] },
+  { argv: ["bun", "run", "typecheck"] },
+  { argv: ["bun", "run", "lint"] },
+  { argv: ["bun", "run", "build"] },
+  { argv: ["bun", "run", "check"] },
+  // `bun test` with an optional single sandbox-relative file/dir target.
+  { argv: ["bun", "test"], trailingPath: true },
+];
+
+/** Tokens may only contain these chars — anything else (`;`, `&`, `|`, backtick,
+ *  `$`, `(`, `)`, `<`, `>`, quotes, spaces-within, NUL) means a metachar/injection
+ *  attempt and the whole command is refused before any allowlist match. */
+const SAFE_TOKEN = /^[A-Za-z0-9._/@-]+$/;
 
 /** Default agent loop rounds and the hard ceiling a caller may request. */
 export const DEFAULT_AGENT_ROUNDS = 15;
@@ -163,16 +224,55 @@ export interface MutationBudget {
   readonly max: number;
 }
 
+/** Per-run run_command accounting (bounds the verify loop). */
+export interface RunBudget {
+  used: number;
+  readonly max: number;
+}
+
+/** The result of one spawned verification command (already truncated/normalized).
+ *  Injectable so tests never spawn a real process. */
+export interface RunCommandResult {
+  /** Process exit code, or null if it was killed (e.g. on timeout). */
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** True if the command was killed for exceeding the timeout. */
+  timedOut: boolean;
+}
+
+/** Spawn an allowlisted argv inside `cwd` with a hard timeout. INJECTABLE so tests
+ *  exercise the allowlist/gate/budget WITHOUT running real commands. */
+export type RunCommandSpawn = (
+  argv: string[],
+  opts: { cwd: string; timeoutMs: number },
+) => RunCommandResult | Promise<RunCommandResult>;
+
+/** Opt-in configuration enabling run_command. ABSENT (or allow=false) means the
+ *  tool refuses with no spawn — the safest default posture (gated by --allow-run). */
+export interface AgentRunConfig {
+  /** Master switch. False/absent => run_command refuses before doing anything. */
+  allow: boolean;
+  budget: RunBudget;
+  /** Defaults to a real spawnSync-backed runner; overridden in tests. */
+  spawn?: RunCommandSpawn;
+}
+
 export interface AgentToolContext {
   sandbox: AgentSandbox;
-  /** Gate invoked before every applied mutation. Required. */
+  /** Gate invoked before every applied mutation AND before every command run. */
   confirm: ConfirmWrite;
   budget: MutationBudget;
+  /** Opt-in run_command support. When absent, run_command is disabled. */
+  run?: AgentRunConfig;
 }
 
 interface AgentTool {
   definition: ToolDefinition;
+  /** Writes to disk (counts against the mutation budget). */
   mutating: boolean;
+  /** Side-effecting — must pass the confirm() gate before it acts. */
+  requiresConfirmation: boolean;
   execute: (
     args: Record<string, unknown>,
     ctx: AgentToolContext,
@@ -264,6 +364,7 @@ async function gatedWrite(
 
 const readFile: AgentTool = {
   mutating: false,
+  requiresConfirmation: false,
   definition: {
     name: "read_file",
     description:
@@ -290,6 +391,7 @@ const readFile: AgentTool = {
 
 const listDirectory: AgentTool = {
   mutating: false,
+  requiresConfirmation: false,
   definition: {
     name: "list_directory",
     description:
@@ -324,6 +426,7 @@ const MAX_SEARCH_FILES = 5000;
 
 const searchCode: AgentTool = {
   mutating: false,
+  requiresConfirmation: false,
   definition: {
     name: "search_code",
     description:
@@ -414,6 +517,7 @@ const searchCode: AgentTool = {
 
 const writeFile: AgentTool = {
   mutating: true,
+  requiresConfirmation: true,
   definition: {
     name: "write_file",
     description:
@@ -440,6 +544,7 @@ const writeFile: AgentTool = {
 
 const applyEdit: AgentTool = {
   mutating: true,
+  requiresConfirmation: true,
   definition: {
     name: "apply_edit",
     description:
@@ -481,13 +586,173 @@ const applyEdit: AgentTool = {
   },
 };
 
+/** Truncate `s` to MAX_RUN_OUTPUT_BYTES, marking when bytes were dropped. */
+function truncateOutput(s: string): { text: string; truncated: boolean } {
+  const buf = Buffer.from(s, "utf8");
+  if (buf.length <= MAX_RUN_OUTPUT_BYTES) return { text: s, truncated: false };
+  const head = buf.subarray(0, MAX_RUN_OUTPUT_BYTES).toString("utf8");
+  return {
+    text: `${head}\n…[truncated ${buf.length - MAX_RUN_OUTPUT_BYTES} bytes]`,
+    truncated: true,
+  };
+}
+
+/**
+ * Parse a model-supplied command STRING into a validated argv, or return an error.
+ * Pure + side-effect-free: it NEVER spawns. Enforces (in order): non-empty,
+ * tokenizes on whitespace ONLY (no shell), every token must match SAFE_TOKEN (so
+ * metachars/injection are refused), the argv must match a RUN_ALLOWLIST entry, and
+ * any `trailingPath` argument must resolve INSIDE the sandbox.
+ */
+export function resolveAllowedCommand(
+  command: string,
+  sandbox: AgentSandbox,
+): { argv: string[] } | { error: string } {
+  if (typeof command !== "string" || command.trim() === "") {
+    return { error: "command is required" };
+  }
+  if (command.includes("\0")) return { error: "command contains a null byte" };
+  const tokens = command.trim().split(/\s+/);
+  for (const tok of tokens) {
+    if (!SAFE_TOKEN.test(tok)) {
+      return {
+        error: `command token "${tok}" contains disallowed characters (no shell metacharacters or chaining)`,
+      };
+    }
+  }
+  for (const allowed of RUN_ALLOWLIST) {
+    const base = allowed.argv;
+    const prefixMatches =
+      tokens.length >= base.length && base.every((t, i) => tokens[i] === t);
+    if (!prefixMatches) continue;
+    const extra = tokens.slice(base.length);
+    if (extra.length === 0) return { argv: [...tokens] };
+    if (allowed.trailingPath && extra.length === 1) {
+      // The single target must resolve inside the sandbox or we refuse (no spawn).
+      try {
+        sandbox.resolve(extra[0]!);
+      } catch (e) {
+        return {
+          error: e instanceof Error ? e.message : "path argument escapes the sandbox",
+        };
+      }
+      return { argv: [...tokens] };
+    }
+    // Right prefix but too many / disallowed trailing args.
+    return {
+      error: `command "${command}" has arguments that are not allowed`,
+    };
+  }
+  return {
+    error: `command not allowed: "${command}". Allowed: ${RUN_ALLOWLIST.map((a) => a.argv.join(" ") + (a.trailingPath ? " [path]" : "")).join(", ")}`,
+  };
+}
+
+/** The default spawner: runs the argv directly (NO shell), pinned to `cwd`, with a
+ *  hard timeout and a large maxBuffer (output is truncated downstream regardless). */
+const defaultRunSpawn: RunCommandSpawn = (argv, opts) => {
+  const [cmd, ...rest] = argv;
+  const res = spawnSync(cmd!, rest, {
+    cwd: opts.cwd,
+    timeout: opts.timeoutMs,
+    shell: false, // argv-only — never hand a string to a shell.
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const timedOut =
+    res.error != null &&
+    (res.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
+  const stderr = res.error && !timedOut
+    ? `${res.stderr ?? ""}\n${res.error.message}`
+    : res.stderr ?? "";
+  return {
+    code: res.status,
+    stdout: res.stdout ?? "",
+    stderr,
+    timedOut,
+  };
+};
+
+const runCommand: AgentTool = {
+  mutating: false,
+  requiresConfirmation: true,
+  definition: {
+    name: "run_command",
+    description:
+      "Run ONE allowlisted verification command at the sandbox root to check your edits (write→run→verify→fix). Allowed: `bun run test`, `bun run typecheck`, `bun run lint`, `bun run build`, `bun run check`, and `bun test <path>`. This is NOT a shell: no other commands, no chaining (`;`/`&&`/`|`/`$()`/backticks), no flags. Requires user confirmation and is bounded by a run budget; returns the exit code and (truncated) output so you can read failures and fix them.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: {
+          type: "string",
+          description:
+            "One allowlisted command exactly, e.g. 'bun run test' or 'bun test path/to/file.test.ts'",
+        },
+      },
+      required: ["command"],
+    },
+  },
+  execute: async (args, ctx) => {
+    // OFF by default: refuse with NO spawn unless explicitly enabled (--allow-run).
+    if (!ctx.run || !ctx.run.allow) {
+      return err(
+        "run_command is disabled. Re-run with --allow-run to let the agent run allowlisted verification commands.",
+      );
+    }
+    const resolved = resolveAllowedCommand(String(args.command ?? ""), ctx.sandbox);
+    if ("error" in resolved) return err(resolved.error); // rejected — never spawned
+
+    // Budget BEFORE the gate (mirrors gatedWrite): an exhausted budget refuses
+    // without prompting and without spawning.
+    if (ctx.run.budget.used >= ctx.run.budget.max) {
+      return err(
+        `run budget exhausted (${ctx.run.budget.max} commands) — refusing further runs`,
+      );
+    }
+
+    const argvStr = resolved.argv.join(" ");
+    const approved = await ctx.confirm({
+      toolName: "run_command",
+      path: argvStr,
+      diff: `$ ${argvStr}`,
+    });
+    if (!approved) {
+      return ok({ declined: true, message: "user declined the command", command: argvStr });
+    }
+
+    const spawn = ctx.run.spawn ?? defaultRunSpawn;
+    const result = await spawn(resolved.argv, {
+      cwd: ctx.sandbox.root,
+      timeoutMs: RUN_COMMAND_TIMEOUT_MS,
+    });
+    ctx.run.budget.used += 1;
+
+    const out = truncateOutput(result.stdout);
+    const errOut = truncateOutput(result.stderr);
+    return ok({
+      command: argvStr,
+      exitCode: result.code,
+      timedOut: result.timedOut,
+      stdout: out.text,
+      stderr: errOut.text,
+      outputTruncated: out.truncated || errOut.truncated,
+      runsUsed: ctx.run.budget.used,
+      runsRemaining: ctx.run.budget.max - ctx.run.budget.used,
+    });
+  },
+};
+
 export const AGENT_TOOLS: AgentTool[] = [
   readFile,
   listDirectory,
   searchCode,
   writeFile,
   applyEdit,
+  runCommand,
 ];
+
+/** The model-visible name of the opt-in run_command tool. */
+export const RUN_COMMAND_TOOL_NAME = "run_command";
 
 /** Definitions offered to the model for `zintus agent`. */
 export const AGENT_TOOL_DEFINITIONS: ToolDefinition[] = AGENT_TOOLS.map(
@@ -499,6 +764,12 @@ const AGENT_TOOLS_BY_NAME = new Map(AGENT_TOOLS.map((t) => [t.definition.name, t
 /** True if `name` is a mutating agent tool (for transparency labeling). */
 export function isMutatingTool(name: string): boolean {
   return AGENT_TOOLS_BY_NAME.get(name)?.mutating ?? false;
+}
+
+/** True if `name` is a side-effecting tool gated by the confirm() prompt
+ *  (write_file, apply_edit, run_command). */
+export function toolRequiresConfirmation(name: string): boolean {
+  return AGENT_TOOLS_BY_NAME.get(name)?.requiresConfirmation ?? false;
 }
 
 /**

@@ -9,7 +9,9 @@ import {
   AGENT_TOOL_DEFINITIONS,
   DEFAULT_AGENT_ROUNDS,
   DEFAULT_MUTATION_BUDGET,
+  DEFAULT_RUN_BUDGET,
   MAX_AGENT_ROUNDS_CAP,
+  RUN_COMMAND_TOOL_NAME,
   type AgentToolContext,
   type ConfirmWrite,
   createSandbox,
@@ -38,16 +40,30 @@ export interface AgentOptions {
   mcp?: string[];
   /** Disable MCP entirely — the prior file-tool-only behaviour. */
   noMcp?: boolean;
+  /** Opt in to the allowlisted run_command verification tool (off by default). */
+  allowRun?: boolean;
 }
 
 /** The instruction that frames the task and the sandbox rules for the model. */
-function buildSystemPreamble(root: string, mcpToolCount: number): string {
+function buildSystemPreamble(
+  root: string,
+  mcpToolCount: number,
+  allowRun: boolean,
+): string {
   const lines = [
     "You are a coding agent operating inside a SANDBOX.",
     `All file operations are confined to this root: ${root}`,
     "You have these tools: read_file, list_directory, search_code (read-only) and",
     "write_file, apply_edit (mutating, each gated by user confirmation).",
   ];
+  if (allowRun) {
+    lines.push(
+      "You ALSO have run_command: run ONE allowlisted verification command",
+      "(bun run test / typecheck / lint / build, or bun test <path>) at the root to",
+      "check your edits, then read failures and fix them. It is NOT a shell — only",
+      "those commands run, and each is gated by confirmation and a run budget.",
+    );
+  }
   if (mcpToolCount > 0) {
     lines.push(
       `You ALSO have ${mcpToolCount} connected MCP tool(s) named mcp__<server>__<tool>`,
@@ -60,21 +76,31 @@ function buildSystemPreamble(root: string, mcpToolCount: number): string {
     "- Use paths RELATIVE to the sandbox root. Paths that escape the root are rejected.",
     "- Investigate with read_file/list_directory/search_code before editing.",
     "- Prefer apply_edit for surgical changes; old_string must be an exact, unique match.",
-    "- There is no shell. Do not claim to run commands.",
+    allowRun
+      ? "- The only way to run anything is run_command with an allowlisted command — there is no shell; never claim to run other commands."
+      : "- There is no shell. Do not claim to run commands.",
     "- When the task is complete, stop calling tools and give a short summary of what you changed.",
   );
   return lines.join("\n");
 }
 
 /** An interactive y/N confirm gate over stdin/stdout. Replaced by an auto-yes
- *  gate when --yes is set, and injectable in tests. Default is NO. */
+ *  gate when --yes is set, and injectable in tests. Default is NO. Handles both
+ *  file writes (a diff preview) and run_command (the argv preview). */
 function interactiveConfirm(): ConfirmWrite {
   return async ({ toolName, path, diff }) => {
-    console.error(chalk.yellow(`\n✎ ${toolName} wants to write ${chalk.bold(path)}:`));
-    console.error(diff);
+    const isRun = toolName === RUN_COMMAND_TOOL_NAME;
+    if (isRun) {
+      console.error(chalk.yellow(`\n▶ ${toolName} wants to run:`));
+      console.error(chalk.bold(diff));
+    } else {
+      console.error(chalk.yellow(`\n✎ ${toolName} wants to write ${chalk.bold(path)}:`));
+      console.error(diff);
+    }
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     try {
-      const answer = (await rl.question(chalk.bold("Apply this change? [y/N] "))).trim().toLowerCase();
+      const prompt = isRun ? "Run this command? [y/N] " : "Apply this change? [y/N] ";
+      const answer = (await rl.question(chalk.bold(prompt))).trim().toLowerCase();
       return answer === "y" || answer === "yes";
     } finally {
       rl.close();
@@ -113,8 +139,9 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
   // mutation requires an interactive y/N (default NO).
   const confirm: ConfirmWrite = options?.yes
     ? async ({ toolName, path }) => {
+        const verb = toolName === RUN_COMMAND_TOOL_NAME ? "running" : "applying";
         console.error(
-          chalk.yellow(`⚠ --yes: auto-applying ${toolName} → ${path} (gate bypassed)`),
+          chalk.yellow(`⚠ --yes: auto-${verb} ${toolName} → ${path} (gate bypassed)`),
         );
         return true;
       }
@@ -124,11 +151,20 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     sandbox,
     confirm,
     budget: { used: 0, max: DEFAULT_MUTATION_BUDGET },
+    // run_command is OFF unless explicitly opted in via --allow-run.
+    run: options?.allowRun
+      ? { allow: true, budget: { used: 0, max: DEFAULT_RUN_BUDGET } }
+      : undefined,
   };
 
   console.error(chalk.cyan(`🤖 agent · sandbox root: ${chalk.bold(sandbox.root)}`));
   if (options?.yes) {
     console.error(chalk.yellow("⚠ --yes: write confirmation gate is DISABLED for this run."));
+  }
+  if (options?.allowRun) {
+    console.error(
+      chalk.yellow("⚠ --allow-run: the agent may run allowlisted verification commands (gated)."),
+    );
   }
 
   // Connect the configured MCP servers IN-PROCESS (the CLI is Bun, it hosts the
@@ -162,7 +198,12 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
   }
 
   const mcpToolCount = mcp?.size ?? 0;
-  const toolDefinitions = [...AGENT_TOOL_DEFINITIONS, ...(mcp?.definitions ?? [])];
+  // Only offer run_command to the model when the user opted in (--allow-run);
+  // otherwise the tool is both hidden AND refused at execution.
+  const fileToolDefinitions = options?.allowRun
+    ? AGENT_TOOL_DEFINITIONS
+    : AGENT_TOOL_DEFINITIONS.filter((d) => d.name !== RUN_COMMAND_TOOL_NAME);
+  const toolDefinitions = [...fileToolDefinitions, ...(mcp?.definitions ?? [])];
 
   const spinner = ora("Routing request").start();
   const config = await loadConfig();
@@ -172,7 +213,7 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     const initialMessages: ChatMessage[] = [
       {
         role: "user",
-        content: `${buildSystemPreamble(sandbox.root, mcpToolCount)}\n\n---\n\nTask:\n${task}`,
+        content: `${buildSystemPreamble(sandbox.root, mcpToolCount, options?.allowRun ?? false)}\n\n---\n\nTask:\n${task}`,
       },
     ];
 
@@ -220,7 +261,12 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
             console.error(`  ${chalk.blue("[mcp]")} ${chalk.bold(call.name)}(${argNames})`);
             continue;
           }
-          const tag = isMutatingTool(call.name) ? chalk.magenta("[write]") : chalk.dim("[read]");
+          const tag =
+            call.name === RUN_COMMAND_TOOL_NAME
+              ? chalk.red("[run]")
+              : isMutatingTool(call.name)
+                ? chalk.magenta("[write]")
+                : chalk.dim("[read]");
           console.error(
             `  ${tag} ${chalk.bold(call.name)}(${JSON.stringify(call.arguments)})`,
           );

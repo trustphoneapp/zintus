@@ -166,6 +166,10 @@ program
     "Sandbox root the agent is confined to (default: current dir)",
   )
   .option("--yes", "Auto-apply file writes WITHOUT confirmation (dangerous)")
+  .option(
+    "--allow-run",
+    "Let the agent run ALLOWLISTED verification commands (bun test/typecheck/lint/build) to check its edits; still gated by confirmation",
+  )
   .option("--max-rounds <n>", "Cap the tool loop rounds (default 15)")
   .option(
     "--mcp <name...>",
@@ -178,6 +182,7 @@ program
       options: {
         root?: string;
         yes?: boolean;
+        allowRun?: boolean;
         maxRounds?: string;
         mcp?: string[] | boolean;
         // Commander sets `mcp: false` for `--no-mcp`.
@@ -198,6 +203,7 @@ program
       await runAgent(task, {
         root: options.root,
         yes: options.yes,
+        allowRun: options.allowRun,
         maxRounds,
         mcp: mcpNames,
         noMcp,

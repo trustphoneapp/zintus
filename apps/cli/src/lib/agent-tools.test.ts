@@ -17,13 +17,20 @@ import {
   DEFAULT_AGENT_ROUNDS,
   MAX_AGENT_ROUNDS_CAP,
   MAX_FILE_BYTES,
+  MAX_RUN_OUTPUT_BYTES,
+  RUN_COMMAND_TIMEOUT_MS,
+  type AgentRunConfig,
   type AgentToolContext,
   type ConfirmWrite,
+  type RunCommandResult,
+  type RunCommandSpawn,
   buildDiff,
   createSandbox,
   executeAgentToolCall,
   isMutatingTool,
+  resolveAllowedCommand,
   runAgentToolLoop,
+  toolRequiresConfirmation,
   type ToolLoopTurn,
 } from "./agent-tools.js";
 import type { ToolExecutionResult } from "./builtin-tools.js";
@@ -283,11 +290,12 @@ describe("read-only tools", () => {
 });
 
 describe("tool surface + helpers", () => {
-  it("exposes exactly the five agent tools", () => {
+  it("exposes exactly the six agent tools", () => {
     expect(AGENT_TOOL_DEFINITIONS.map((t) => t.name).sort()).toEqual([
       "apply_edit",
       "list_directory",
       "read_file",
+      "run_command",
       "search_code",
       "write_file",
     ]);
@@ -297,20 +305,261 @@ describe("tool surface + helpers", () => {
     expect(isMutatingTool("write_file")).toBe(true);
     expect(isMutatingTool("apply_edit")).toBe(true);
     expect(isMutatingTool("read_file")).toBe(false);
+    expect(isMutatingTool("run_command")).toBe(false); // side-effecting, not a write
     expect(isMutatingTool("nope")).toBe(false);
+  });
+
+  it("flags tools that require confirmation (writes + run_command)", () => {
+    expect(toolRequiresConfirmation("write_file")).toBe(true);
+    expect(toolRequiresConfirmation("apply_edit")).toBe(true);
+    expect(toolRequiresConfirmation("run_command")).toBe(true);
+    expect(toolRequiresConfirmation("read_file")).toBe(false);
+    expect(toolRequiresConfirmation("search_code")).toBe(false);
+    expect(toolRequiresConfirmation("nope")).toBe(false);
   });
 
   it("unknown tool => surfaced as an error, never executed", async () => {
     const ctx = ctxWith(true);
-    const r = await executeAgentToolCall(call("run_command", { cmd: "rm -rf /" }), ctx);
+    const r = await executeAgentToolCall(call("delete_everything", { cmd: "rm -rf /" }), ctx);
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("unknown tool: run_command");
+    expect(r.content).toContain("unknown tool: delete_everything");
   });
 
   it("buildDiff shows removed and added lines", () => {
     const d = buildDiff("f.txt", "a\nb\nc", "a\nX\nc");
     expect(d).toContain("- b");
     expect(d).toContain("+ X");
+  });
+});
+
+/** A run-enabled ctx whose confirm gate AND spawn are recorded, so the allowlist /
+ *  gate / budget can be exercised WITHOUT launching any real process. */
+function runCtx(opts: {
+  confirm?: boolean;
+  allow?: boolean;
+  budgetMax?: number;
+  spawnResult?: Partial<RunCommandResult>;
+}): AgentToolContext & {
+  confirmCalls: { path: string; diff: string }[];
+  spawnCalls: { argv: string[]; cwd: string; timeoutMs: number }[];
+} {
+  const confirmCalls: { path: string; diff: string }[] = [];
+  const spawnCalls: { argv: string[]; cwd: string; timeoutMs: number }[] = [];
+  const confirm: ConfirmWrite = ({ path: p, diff }) => {
+    confirmCalls.push({ path: p, diff });
+    return opts.confirm ?? true;
+  };
+  const spawn: RunCommandSpawn = (argv, o) => {
+    spawnCalls.push({ argv, cwd: o.cwd, timeoutMs: o.timeoutMs });
+    return { code: 0, stdout: "ok", stderr: "", timedOut: false, ...opts.spawnResult };
+  };
+  const run: AgentRunConfig = {
+    allow: opts.allow ?? true,
+    budget: { used: 0, max: opts.budgetMax ?? 10 },
+    spawn,
+  };
+  return {
+    sandbox: createSandbox(root),
+    confirm,
+    budget: { used: 0, max: 50 },
+    run,
+    confirmCalls,
+    spawnCalls,
+  };
+}
+
+describe("resolveAllowedCommand (pure validator — never spawns)", () => {
+  const sandbox = () => createSandbox(root);
+  it("accepts each allowlisted verification command", () => {
+    for (const cmd of [
+      "bun run test",
+      "bun run typecheck",
+      "bun run lint",
+      "bun run build",
+      "bun run check",
+      "bun test",
+    ]) {
+      const r = resolveAllowedCommand(cmd, sandbox());
+      expect("argv" in r).toBe(true);
+    }
+  });
+
+  it("rejects non-allowlisted commands", () => {
+    for (const cmd of [
+      "git status",
+      "curl http://evil",
+      "wget http://evil",
+      "bun install",
+      "npm run test",
+      "node script.js",
+      "rm -rf /",
+    ]) {
+      const r = resolveAllowedCommand(cmd, sandbox());
+      expect("error" in r).toBe(true);
+    }
+  });
+
+  it("rejects shell metacharacters / chaining tokens", () => {
+    for (const cmd of [
+      "bun test; rm -rf /",
+      "bun run test && rm -rf /",
+      "bun run test | cat",
+      "bun test `rm -rf /`",
+      "bun test $(rm -rf /)",
+      "bun run test > /etc/passwd",
+    ]) {
+      const r = resolveAllowedCommand(cmd, sandbox());
+      expect("error" in r).toBe(true);
+    }
+  });
+
+  it("rejects a bun test path that escapes the sandbox", () => {
+    const r = resolveAllowedCommand("bun test ../../etc/passwd", sandbox());
+    expect("error" in r).toBe(true);
+  });
+
+  it("accepts bun test with a sandbox-relative path", () => {
+    writeFileSync(path.join(root, "x.test.ts"), "", "utf8");
+    const r = resolveAllowedCommand("bun test x.test.ts", sandbox());
+    expect("argv" in r && r.argv).toEqual(["bun", "test", "x.test.ts"]);
+  });
+});
+
+describe("run_command tool", () => {
+  it("is DISABLED with no run config — refuses, no spawn, no confirm", async () => {
+    const ctx = ctxWith(true); // ctxWith has no run config
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "bun run test" }),
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("disabled");
+    expect(ctx.confirmCalls).toHaveLength(0);
+  });
+
+  it("is DISABLED when run.allow is false — no spawn, no confirm", async () => {
+    const ctx = runCtx({ allow: false });
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "bun run test" }),
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("disabled");
+    expect(ctx.spawnCalls).toHaveLength(0);
+    expect(ctx.confirmCalls).toHaveLength(0);
+  });
+
+  it("REJECTS a non-allowlisted command with no spawn and no confirm", async () => {
+    const ctx = runCtx({});
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "rm -rf /" }),
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("not allowed");
+    expect(ctx.spawnCalls).toHaveLength(0);
+    expect(ctx.confirmCalls).toHaveLength(0);
+  });
+
+  it("REJECTS metachar injection / chaining with no spawn", async () => {
+    for (const command of [
+      "bun test; rm -rf /",
+      "bun run test && rm -rf /",
+      "bun run test | cat",
+      "bun test `rm -rf /`",
+      "bun test $(rm -rf /)",
+    ]) {
+      const ctx = runCtx({});
+      const r = await executeAgentToolCall(call("run_command", { command }), ctx);
+      expect(r.isError).toBe(true);
+      expect(ctx.spawnCalls).toHaveLength(0);
+      expect(ctx.confirmCalls).toHaveLength(0);
+    }
+  });
+
+  it("REJECTS a cwd escape via the bun test path with no spawn", async () => {
+    const ctx = runCtx({});
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "bun test ../../etc/passwd" }),
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(ctx.spawnCalls).toHaveLength(0);
+    expect(ctx.confirmCalls).toHaveLength(0);
+  });
+
+  it("runs an allowlisted command: argv, cwd, timeout, exit code + output, budget", async () => {
+    const ctx = runCtx({ spawnResult: { code: 1, stdout: "FAILED 2 tests", stderr: "boom" } });
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "bun run test" }),
+      ctx,
+    );
+    expect(r.isError).toBe(false);
+    const parsed = JSON.parse(r.content);
+    expect(parsed.exitCode).toBe(1);
+    expect(parsed.stdout).toBe("FAILED 2 tests");
+    expect(parsed.stderr).toContain("boom");
+    expect(parsed.runsUsed).toBe(1);
+    // exactly one spawn, with the right argv / cwd / hard timeout.
+    expect(ctx.spawnCalls).toHaveLength(1);
+    expect(ctx.spawnCalls[0]!.argv).toEqual(["bun", "run", "test"]);
+    expect(ctx.spawnCalls[0]!.cwd).toBe(ctx.sandbox.root);
+    expect(ctx.spawnCalls[0]!.timeoutMs).toBe(RUN_COMMAND_TIMEOUT_MS);
+    expect(ctx.run!.budget.used).toBe(1);
+    // the gate saw the argv preview.
+    expect(ctx.confirmCalls[0]!.diff).toContain("bun run test");
+  });
+
+  it("does NOT run when confirmation is denied — no spawn, budget untouched", async () => {
+    const ctx = runCtx({ confirm: false });
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "bun run test" }),
+      ctx,
+    );
+    expect(r.isError).toBe(false);
+    expect(JSON.parse(r.content).declined).toBe(true);
+    expect(ctx.spawnCalls).toHaveLength(0);
+    expect(ctx.run!.budget.used).toBe(0);
+  });
+
+  it("respects the run budget — refuses further runs with no extra spawn", async () => {
+    const ctx = runCtx({ budgetMax: 1 });
+    const r1 = await executeAgentToolCall(
+      call("run_command", { command: "bun run test" }),
+      ctx,
+    );
+    expect(r1.isError).toBe(false);
+    const r2 = await executeAgentToolCall(
+      call("run_command", { command: "bun run typecheck" }),
+      ctx,
+    );
+    expect(r2.isError).toBe(true);
+    expect(r2.content).toContain("run budget exhausted");
+    expect(ctx.spawnCalls).toHaveLength(1); // second run never spawned
+  });
+
+  it("truncates oversized output to the byte cap", async () => {
+    const big = "a".repeat(MAX_RUN_OUTPUT_BYTES + 500);
+    const ctx = runCtx({ spawnResult: { code: 0, stdout: big, stderr: "" } });
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "bun run build" }),
+      ctx,
+    );
+    const parsed = JSON.parse(r.content);
+    expect(parsed.outputTruncated).toBe(true);
+    expect(parsed.stdout).toContain("truncated");
+    expect(parsed.stdout.length).toBeLessThan(big.length);
+  });
+
+  it("surfaces a timeout through to the model", async () => {
+    const ctx = runCtx({ spawnResult: { code: null, stdout: "", stderr: "", timedOut: true } });
+    const r = await executeAgentToolCall(
+      call("run_command", { command: "bun run test" }),
+      ctx,
+    );
+    const parsed = JSON.parse(r.content);
+    expect(parsed.timedOut).toBe(true);
+    expect(parsed.exitCode).toBe(null);
   });
 });
 
