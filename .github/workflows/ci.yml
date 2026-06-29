@@ -13,7 +13,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       - run: bun run typecheck
 
   security:
@@ -33,7 +33,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       # Dependency audit. Currently non-gating (continue-on-error) while the
       # known transitive highs (undici via wrangler, xmldom via expo) are worked
       # down; flip to gating by removing continue-on-error once `bun audit
@@ -73,7 +73,7 @@ jobs:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       # tokzen resolves to ./dist (a build artifact, gitignored). Build it so
       # gateway code importing "tokzen" loads at runtime in tests.
       - run: bun run --filter tokzen build
@@ -95,7 +95,7 @@ jobs:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       - run: bun run --filter tokzen build
       # bun+vitest lcov merge with per-prefix gate (scripts/coverage.ts).
       - run: bun run test:coverage
@@ -124,7 +124,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       # Per-package tsc needs referenced projects' built outputs: tokzen ships a
       # ./dist build (tsup), and the workspace packages use composite project
       # references (tsc -b builds their dist/*.d.ts) — without these, isolated
@@ -146,7 +146,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       # Build referenced project outputs first (see apps job): tokzen ./dist +
       # composite refs, else isolated typecheck fails with TS2307 / TS6305.
       - run: bun run --filter tokzen build
@@ -161,7 +161,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       - run: bun run --filter tokzen build
       # Mirror release-cli.yml: smoke the real publish artifact (dist/cli.js),
       # not `bun run dev`, so CI can't pass on a bundle that fails to build/boot.
@@ -182,7 +182,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       - run: bun run --filter tokzen build
       - name: Start gateway
         run: bun run apps/gateway/src/index.ts &
@@ -219,7 +219,7 @@ jobs:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       # tokzen ships a real dist (tsup) — verify it builds, then the composite
       # project build produces every workspace package's declaration outputs.
       - run: bun run --filter tokzen build
@@ -284,7 +284,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: bun install
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       - run: bun run --filter tokzen build
       - name: Install k6
         uses: grafana/setup-k6-action@v1
@@ -328,7 +328,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - run: bun install --frozen-lockfile
+      - run: for i in 1 2 3; do if bun install --frozen-lockfile; then exit 0; fi; sleep 15; done; exit 1
       - run: bun run --filter tokzen build
       - name: Generate merged coverage (coverage/lcov.info)
         run: bun run test:coverage
