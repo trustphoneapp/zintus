@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   parseMcpToolEvent,
+  readPrivacyHonored,
   splitMcpToolName,
   streamGatewayChat,
   summarizeToolArgs,
@@ -127,7 +128,10 @@ describe("streamGatewayChat — mcp body wiring + frame parsing (synthetic SSE)"
 
   // Desktop's stream first probes /health (resolveGatewayUrl), then POSTs the
   // chat. This mock answers both and captures the chat body for assertions.
-  function installFetch(frames: unknown[]): { sentBody: () => Record<string, unknown> } {
+  function installFetch(
+    frames: unknown[],
+    extraHeaders?: Record<string, string>,
+  ): { sentBody: () => Record<string, unknown> } {
     let captured: Record<string, unknown> = {};
     const sse =
       frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join("") + "data: [DONE]\n\n";
@@ -139,7 +143,7 @@ describe("streamGatewayChat — mcp body wiring + frame parsing (synthetic SSE)"
       captured = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return new Response(sse, {
         status: 200,
-        headers: { "content-type": "text/event-stream" },
+        headers: { "content-type": "text/event-stream", ...extraHeaders },
       });
     }) as unknown as typeof fetch;
     return { sentBody: () => captured };
@@ -228,5 +232,111 @@ describe("streamGatewayChat — mcp body wiring + frame parsing (synthetic SSE)"
     });
     expect(sentBody().mcp).toBeUndefined();
     expect(result.toolEvents).toBeUndefined();
+  });
+
+  test("parses private_mode_honored from the metadata frame onto meta", async () => {
+    installFetch([
+      {
+        id: "t",
+        provider: "groq",
+        model: "m",
+        choices: [{ delta: { content: "hi" }, finish_reason: null }],
+      },
+      {
+        type: "metadata",
+        provider: "groq",
+        model: "m",
+        choices: [],
+        private_mode_honored: true,
+      },
+    ]);
+    const result = await streamGatewayChat({
+      messages: [{ role: "user", content: "hi" }],
+      blockTraining: true,
+      onChunk: () => {},
+    });
+    expect(result.meta?.privacyHonored).toBe(true);
+  });
+
+  test("carries the NOT-honored signal honestly (false, not dropped)", async () => {
+    installFetch([
+      {
+        id: "t",
+        provider: "openai",
+        model: "m",
+        choices: [{ delta: { content: "hi" }, finish_reason: null }],
+      },
+      {
+        type: "metadata",
+        provider: "openai",
+        model: "m",
+        choices: [],
+        private_mode_honored: false,
+      },
+    ]);
+    const result = await streamGatewayChat({
+      messages: [{ role: "user", content: "hi" }],
+      blockTraining: true,
+      onChunk: () => {},
+    });
+    expect(result.meta?.privacyHonored).toBe(false);
+  });
+
+  test("falls back to the X-Zintus-Private-Honored header when no meta frame", async () => {
+    installFetch(
+      [
+        {
+          id: "t",
+          provider: "groq",
+          model: "m",
+          choices: [{ delta: { content: "hi" }, finish_reason: null }],
+        },
+      ],
+      { "X-Zintus-Private-Honored": "true" },
+    );
+    const result = await streamGatewayChat({
+      messages: [{ role: "user", content: "hi" }],
+      blockTraining: true,
+      onChunk: () => {},
+    });
+    expect(result.meta?.privacyHonored).toBe(true);
+  });
+
+  test("leaves privacyHonored undefined when Private Mode was off", async () => {
+    installFetch([
+      {
+        id: "t",
+        provider: "groq",
+        model: "m",
+        choices: [{ delta: { content: "hi" }, finish_reason: null }],
+      },
+      { type: "metadata", provider: "groq", model: "m", choices: [] },
+    ]);
+    const result = await streamGatewayChat({
+      messages: [{ role: "user", content: "hi" }],
+      onChunk: () => {},
+    });
+    expect(result.meta?.privacyHonored).toBeUndefined();
+  });
+});
+
+describe("readPrivacyHonored — X-Zintus-Private-Honored header → tri-state", () => {
+  test("'true' → true, 'false' → false", () => {
+    expect(readPrivacyHonored(new Headers({ "X-Zintus-Private-Honored": "true" }))).toBe(
+      true,
+    );
+    expect(
+      readPrivacyHonored(new Headers({ "X-Zintus-Private-Honored": "false" })),
+    ).toBe(false);
+  });
+
+  test("absent header → undefined (no claim made)", () => {
+    expect(readPrivacyHonored(new Headers())).toBeUndefined();
+  });
+
+  test("garbage value → undefined (under-claim, never guess)", () => {
+    expect(
+      readPrivacyHonored(new Headers({ "X-Zintus-Private-Honored": "maybe" })),
+    ).toBeUndefined();
   });
 });

@@ -436,6 +436,11 @@ export async function runChat(
           diffText: toolsEnabled ? undefined : diffText,
           tools,
           responseFormat: options?.responseFormat,
+          // Private Mode (block-training) from config: route away from providers
+          // that may train on user data. The router reports back whether it could
+          // honor it (`result.privacyHonored`), surfaced in the turn summary below.
+          blockTrainingProviders: config.blockTrainingProviders,
+          allowTrainingProviders: config.allowTrainingProviders,
           onUsage: (u) => {
             usage = u;
           },
@@ -525,6 +530,9 @@ export async function runChat(
       // tokensLimit is undefined when the engine has no reported daily cap — pass
       // it through as null so the renderer prints "limit unknown", not a guess.
       quotaLimit: provider?.tokensLimit ?? null,
+      // Private-Mode honesty: undefined when block-training wasn't requested (line
+      // omitted), true/false when the router actually evaluated it this turn.
+      privacyHonored: result.privacyHonored,
     });
     console.error(chalk.dim(summary));
 

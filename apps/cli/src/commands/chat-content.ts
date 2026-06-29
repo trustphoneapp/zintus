@@ -138,6 +138,15 @@ export interface TurnFacts {
   quotaUsed?: number;
   /** Provider's daily token cap — `null`/`undefined` when not reported. */
   quotaLimit?: number | null;
+  /**
+   * Private-Mode honesty signal. `undefined` when Private Mode (block-training)
+   * was NOT requested — the line is omitted entirely. `true` when the request was
+   * served by a no-training provider. `false` when Private Mode was on but every
+   * available provider may train (or has an undocumented policy), so one was used
+   * anyway. Mirrors the web TransparencyStrip pill exactly — never claim "honored"
+   * unless the gateway/router actually confirmed it.
+   */
+  privacyHonored?: boolean;
 }
 
 /**
@@ -175,6 +184,16 @@ export function formatTurnSummary(facts: TurnFacts): string {
   if (quota) parts.push(quota);
   if (parts.length > 0) {
     lines.push(parts.join(" · "));
+  }
+  // Private Mode line — printed ONLY when block-training was requested (the
+  // signal is `undefined` otherwise). Honest by construction: "honored" only
+  // when the router confirmed a no-training provider served the turn; "NOT
+  // honored" when Private Mode was on but a may-train provider was used anyway.
+  // Mirrors the web TransparencyStrip pill's meaning exactly.
+  if (facts.privacyHonored === true) {
+    lines.push("Private Mode: honored ✓");
+  } else if (facts.privacyHonored === false) {
+    lines.push("Private Mode: NOT honored ⚠ (a may-train provider was used)");
   }
   return lines.join("\n");
 }

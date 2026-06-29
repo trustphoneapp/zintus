@@ -650,6 +650,33 @@ export default function ChatScreen() {
                   </Pressable>
                 </View>
               ) : null}
+
+              {/* Per-response Private-Mode badge — mirrors web/desktop's pill
+                  copy + honesty exactly. `privacyHonored` is undefined when
+                  Private Mode was off (no badge), true when a no-training
+                  provider served the turn, false when a may-train provider was
+                  used anyway. Never claim "honored" unless the gateway confirmed it. */}
+              {!isUser && !item.streaming && item.meta?.privacyHonored != null ? (
+                <View
+                  style={[
+                    styles.privacyBadge,
+                    item.meta.privacyHonored
+                      ? styles.privacyBadgeHonored
+                      : styles.privacyBadgeBroken,
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.privacyBadgeText,
+                      { color: item.meta.privacyHonored ? COLORS.good : COLORS.warn },
+                    ]}
+                  >
+                    {item.meta.privacyHonored
+                      ? "✓ Private Mode honored"
+                      : "⚠ Private Mode not honored"}
+                  </Text>
+                </View>
+              ) : null}
             </View>
           );
         }}
@@ -777,6 +804,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     marginBottom: 6,
+  },
+  privacyBadge: {
+    alignSelf: "flex-start",
+    marginTop: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
+  privacyBadgeHonored: {
+    borderColor: COLORS.good,
+    backgroundColor: "rgba(52,211,153,0.12)",
+  },
+  privacyBadgeBroken: {
+    borderColor: COLORS.warn,
+    backgroundColor: "rgba(245,158,11,0.12)",
+  },
+  privacyBadgeText: {
+    fontSize: 11,
+    fontWeight: "600",
   },
   jsonBlock: {
     backgroundColor: COLORS.surface,

@@ -239,6 +239,43 @@ describe("formatTurnSummary", () => {
     expect(out).not.toContain("1000000");
     expect(out).toContain("~$0.0012 est");
   });
+
+  it("prints 'Private Mode: honored ✓' when block-training was honored", () => {
+    const out = formatTurnSummary({
+      providerLabel: "Groq",
+      model: "llama-3.3-70b",
+      inputTokens: 10,
+      outputTokens: 20,
+      privacyHonored: true,
+    });
+    expect(out).toContain("Private Mode: honored ✓");
+    expect(out).not.toContain("NOT honored");
+  });
+
+  it("prints the honest NOT-honored line when a may-train provider was used", () => {
+    const out = formatTurnSummary({
+      providerLabel: "openai",
+      model: "gpt-4o-mini",
+      inputTokens: 10,
+      outputTokens: 20,
+      privacyHonored: false,
+    });
+    expect(out).toContain(
+      "Private Mode: NOT honored ⚠ (a may-train provider was used)",
+    );
+    // Never claim "honored" when the flag is false (under-claim, like web).
+    expect(out).not.toContain("Private Mode: honored");
+  });
+
+  it("omits the Private Mode line entirely when block-training wasn't requested", () => {
+    const out = formatTurnSummary({
+      providerLabel: "openai",
+      model: "gpt-4o-mini",
+      inputTokens: 10,
+      outputTokens: 20,
+    });
+    expect(out).not.toContain("Private Mode");
+  });
 });
 
 describe("normalizeChatError", () => {
