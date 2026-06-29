@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CodeIndex, type CodeChunkHit } from "@zintus/codebase-indexer";
+import { CodeIndex, type CodeChunkHit, isSourceFile } from "@zintus/codebase-indexer";
 import type {
   ChatMessage,
   ContentBlock,
@@ -1116,16 +1116,705 @@ const applyEdit: AgentTool = {
       count += 1;
       idx = content.indexOf(oldString, idx + oldString.length);
     }
-    if (count === 0) return err("old_string not found in file (no edit applied)");
-    if (count > 1) {
+    const display = ctx.sandbox.relative(abs);
+    if (count === 0) {
+      // RECOVERY-oriented miss (B4): instead of a bare "not found", show the closest
+      // region(s) of the file so the model can re-copy the anchor EXACTLY and retry,
+      // or fall down the ladder to apply_diff.
+      const near = nearMatchContext(content, oldString);
       return err(
-        `old_string matches ${count} times — make it unique (no edit applied)`,
+        `old_string not found in ${display} (no edit applied). ` +
+          `Closest region(s) in the current file — copy the anchor text EXACTLY from here, ` +
+          `or use apply_diff for a multi-hunk change:\n${near}`,
+      );
+    }
+    if (count > 1) {
+      // RECOVERY-oriented non-unique (B4): show WHERE each occurrence is so the model
+      // can add surrounding lines to disambiguate.
+      const regions = occurrenceRegions(content, oldString, 3);
+      return err(
+        `old_string matches ${count} times in ${display} (no edit applied). ` +
+          `Occurrence region(s) — add surrounding lines to make old_string unique, ` +
+          `or use apply_diff:\n${regions}`,
       );
     }
     const newText = content.replace(oldString, newString);
     return gatedWrite(ctx, "apply_edit", abs, content, newText);
   },
 };
+
+// --- B4: edit-format fallback ladder + failed-edit recovery -----------------
+//
+// The edit ladder, narrowest → widest:
+//   apply_edit  — ONE exact, unique old_string replacement (surgical).
+//   apply_diff  — a unified diff OR search/replace blocks: surgical MULTI-hunk,
+//                 applied ATOMICALLY (all-or-nothing) with the same gate/budget.
+//   write_file  — whole-file rewrite (last resort).
+// When apply_edit misses, it no longer just errors — it re-shows the closest region(s)
+// so the model can retry precisely (Aider's evidence: a real diff format took GPT-4T's
+// refactor score 20%→61%). apply_diff is the middle rung for "several edits at once".
+
+/** Max numbered context lines shown around a near-match / occurrence (bounded). */
+const RECOVERY_RADIUS = 3;
+/** Cap on the total chars of a recovery region blob fed back (bounded, honest). */
+const MAX_RECOVERY_CHARS = 2000;
+
+/** 1-based line number containing the character at byte offset `idx` in `content`. */
+function lineOfOffset(content: string, idx: number): number {
+  let line = 1;
+  for (let i = 0; i < idx && i < content.length; i += 1) {
+    if (content[i] === "\n") line += 1;
+  }
+  return line;
+}
+
+/** Render a numbered window of `lines` around `centerIdx0` (0-based), marking the
+ *  center line with `»`. Bounded by RECOVERY_RADIUS on each side. */
+function renderRegion(lines: string[], centerIdx0: number, radius = RECOVERY_RADIUS): string {
+  const from = Math.max(0, centerIdx0 - radius);
+  const to = Math.min(lines.length - 1, centerIdx0 + radius);
+  const out: string[] = [];
+  for (let i = from; i <= to; i += 1) {
+    const marker = i === centerIdx0 ? "»" : " ";
+    out.push(`  ${marker} ${i + 1}: ${lines[i]}`);
+  }
+  return out.join("\n");
+}
+
+/** Cheap line-similarity in [0,1]: exact-trim=1, substring=0.7, else token overlap. */
+function lineSimilarity(a: string, b: string): number {
+  const ta = a.trim();
+  const tb = b.trim();
+  if (!ta || !tb) return 0;
+  if (ta === tb) return 1;
+  if (ta.includes(tb) || tb.includes(ta)) return 0.7;
+  const sa = new Set(ta.split(/\W+/).filter(Boolean));
+  const sb = new Set(tb.split(/\W+/).filter(Boolean));
+  if (sa.size === 0 || sb.size === 0) return 0;
+  let inter = 0;
+  for (const t of sa) if (sb.has(t)) inter += 1;
+  return 0.6 * (inter / Math.max(sa.size, sb.size));
+}
+
+/** Cap a recovery blob to MAX_RECOVERY_CHARS (honest truncation marker). */
+function capRecovery(s: string): string {
+  if (s.length <= MAX_RECOVERY_CHARS) return s;
+  return `${s.slice(0, MAX_RECOVERY_CHARS)}\n  …[regions truncated]`;
+}
+
+/**
+ * For an apply_edit MISS: find the file region(s) most similar to `needle`'s anchor
+ * (its first non-blank line) and render a few numbered context windows so the model
+ * can re-copy the exact text. Falls back to the file head when there's no anchor.
+ */
+function nearMatchContext(content: string, needle: string): string {
+  const lines = content.split("\n");
+  const anchor = needle.split("\n").find((l) => l.trim().length > 0) ?? "";
+  if (!anchor.trim()) {
+    return capRecovery(renderRegion(lines, 0, Math.min(7, lines.length)));
+  }
+  const scored = lines
+    .map((l, i) => ({ i, score: lineSimilarity(l, anchor) }))
+    .filter((s) => s.score >= 0.3)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+  if (scored.length === 0) {
+    return capRecovery(
+      `(no similar line found — the anchor "${anchor.trim().slice(0, 80)}" does not appear)\n` +
+        renderRegion(lines, 0, Math.min(7, lines.length)),
+    );
+  }
+  return capRecovery(scored.map((s) => renderRegion(lines, s.i)).join("\n  --\n"));
+}
+
+/** For an apply_edit NON-UNIQUE: render the region around each of the first `max`
+ *  occurrences of `needle`, with line numbers, so the model can disambiguate. */
+function occurrenceRegions(content: string, needle: string, max: number): string {
+  const lines = content.split("\n");
+  const out: string[] = [];
+  let idx = content.indexOf(needle);
+  let shown = 0;
+  while (idx !== -1 && shown < max) {
+    const lineNo = lineOfOffset(content, idx);
+    out.push(renderRegion(lines, lineNo - 1));
+    shown += 1;
+    idx = content.indexOf(needle, idx + needle.length);
+  }
+  return capRecovery(out.join("\n  --\n"));
+}
+
+/** One parsed hunk: the text to find (`search`) and what to replace it with. */
+interface DiffHunk {
+  search: string;
+  replace: string;
+  /** 1-based original-line hint from a `@@ -N,.. @@` header (disambiguates), or null. */
+  lineHint: number | null;
+  /** Human label for error messages (e.g. "hunk 2"). */
+  label: string;
+}
+
+const SEARCH_REPLACE_RE =
+  /<{5,}\s*SEARCH\s*\n([\s\S]*?)\n?={5,}\s*\n([\s\S]*?)\n?>{5,}\s*REPLACE/g;
+
+/** Parse Aider-style search/replace blocks, or return null if none are present. */
+function parseSearchReplaceBlocks(diff: string): DiffHunk[] | null {
+  const hunks: DiffHunk[] = [];
+  let m: RegExpExecArray | null;
+  SEARCH_REPLACE_RE.lastIndex = 0;
+  let n = 0;
+  while ((m = SEARCH_REPLACE_RE.exec(diff)) !== null) {
+    n += 1;
+    hunks.push({
+      search: m[1] ?? "",
+      replace: m[2] ?? "",
+      lineHint: null,
+      label: `block ${n}`,
+    });
+  }
+  return hunks.length > 0 ? hunks : null;
+}
+
+/**
+ * Parse a unified diff into hunks. Lenient on purpose (models drop the leading space
+ * on context lines, omit the file headers, etc.): file headers and `\ No newline`
+ * markers are skipped; ` `/`-`/`+` are context/remove/add; an unprefixed line inside a
+ * hunk is treated as context. Each hunk records the `@@ -N` line hint when present.
+ */
+function parseUnifiedDiff(diff: string): DiffHunk[] {
+  const lines = diff.replace(/\r\n/g, "\n").split("\n");
+  const hunks: DiffHunk[] = [];
+  let search: string[] | null = null;
+  let replace: string[] = [];
+  let hint: number | null = null;
+  const flush = () => {
+    if (search !== null) {
+      hunks.push({
+        search: search.join("\n"),
+        replace: replace.join("\n"),
+        lineHint: hint,
+        label: `hunk ${hunks.length + 1}`,
+      });
+    }
+    search = null;
+    replace = [];
+    hint = null;
+  };
+  for (const raw of lines) {
+    if (/^@@/.test(raw)) {
+      flush();
+      search = [];
+      const mm = raw.match(/@@\s*-(\d+)/);
+      hint = mm ? Number(mm[1]) : null;
+      continue;
+    }
+    if (search === null) continue; // preamble before the first hunk
+    if (/^(---|\+\+\+|diff --git|index )/.test(raw)) continue; // file headers
+    if (raw.startsWith("\\")) continue; // "\ No newline at end of file"
+    if (raw.startsWith(" ")) {
+      search.push(raw.slice(1));
+      replace.push(raw.slice(1));
+    } else if (raw.startsWith("-")) {
+      search.push(raw.slice(1));
+    } else if (raw.startsWith("+")) {
+      replace.push(raw.slice(1));
+    } else {
+      // Unprefixed line inside a hunk — treat as context (lenient).
+      search.push(raw);
+      replace.push(raw);
+    }
+  }
+  flush();
+  return hunks;
+}
+
+/** The outcome of applying hunks to a file's content (pure, no fs). */
+type ApplyHunksResult =
+  | { ok: true; content: string }
+  | { ok: false; error: string };
+
+/**
+ * Apply `hunks` to `content` ATOMICALLY against a working copy: every hunk must
+ * locate its `search` text or NOTHING is changed. Multiple matches are disambiguated
+ * by the hunk's line hint (nearest), else rejected as ambiguous. A trailing-whitespace
+ * tolerant retry handles models that mangle indentation. On any failure the returned
+ * error is RECOVERABLE (names the hunk + shows the nearest region) and the caller
+ * writes nothing.
+ */
+function applyHunks(content: string, hunks: DiffHunk[]): ApplyHunksResult {
+  let working = content;
+  for (const hunk of hunks) {
+    if (hunk.search === "") {
+      // Pure insertion. Only safe deterministically for a brand-new/empty file.
+      if (working === "") {
+        working = hunk.replace;
+        continue;
+      }
+      return {
+        ok: false,
+        error:
+          `${hunk.label} has no context/removed lines to locate the change in a non-empty file. ` +
+          "Include the surrounding lines (as context), or use write_file for a whole-file rewrite.",
+      };
+    }
+    const located = locate(working, hunk);
+    if (located == null) {
+      const lines = working.split("\n");
+      const anchorIdx = hunk.lineHint ? Math.min(hunk.lineHint - 1, lines.length - 1) : 0;
+      return {
+        ok: false,
+        error:
+          `${hunk.label} did not apply: its context was not found in the file (no change written). ` +
+          `Nearest region:\n${capRecovery(renderRegion(lines, Math.max(0, anchorIdx), 5))}`,
+      };
+    }
+    if (located === "ambiguous") {
+      return {
+        ok: false,
+        error:
+          `${hunk.label} matches multiple locations and no line hint disambiguates it (no change written). ` +
+          "Add more surrounding context lines so the hunk is unique.",
+      };
+    }
+    working =
+      working.slice(0, located.start) + hunk.replace + working.slice(located.end);
+  }
+  return { ok: true, content: working };
+}
+
+/** Locate a hunk's search text in `content`. Returns the chosen {start,end} byte
+ *  range, "ambiguous" when several match and no hint picks one, or null when absent.
+ *  Tries an exact match first, then a trailing-whitespace-tolerant match. */
+function locate(
+  content: string,
+  hunk: DiffHunk,
+): { start: number; end: number } | "ambiguous" | null {
+  const exact = allIndexes(content, hunk.search);
+  const chosen = pick(content, exact, hunk.search.length, hunk.lineHint);
+  if (chosen) return chosen;
+  if (exact.length > 1) return "ambiguous";
+  // Trailing-whitespace tolerant retry: re-match against per-line right-trimmed text.
+  const rtrim = (s: string) => s.split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
+  const tContent = rtrim(content);
+  const tSearch = rtrim(hunk.search);
+  const tIdxs = allIndexes(tContent, tSearch);
+  if (tIdxs.length === 0) return null;
+  if (tIdxs.length > 1 && hunk.lineHint == null) return "ambiguous";
+  // Map the trimmed match back to the real content by line number (line starts are
+  // preserved by per-line right-trim — only intra-line trailing ws changes length).
+  const targetLine = lineOfOffset(tContent, pickIndex(tContent, tIdxs, hunk.lineHint));
+  const realStart = offsetOfLine(content, targetLine);
+  const searchLineCount = hunk.search.split("\n").length;
+  const realEnd = offsetOfLine(content, targetLine + searchLineCount) - 1;
+  return { start: realStart, end: Math.max(realStart, realEnd) };
+}
+
+/** All byte offsets at which `needle` occurs in `hay` (non-overlapping). */
+function allIndexes(hay: string, needle: string): number[] {
+  if (needle === "") return [];
+  const out: number[] = [];
+  let i = hay.indexOf(needle);
+  while (i !== -1) {
+    out.push(i);
+    i = hay.indexOf(needle, i + needle.length);
+  }
+  return out;
+}
+
+/** Choose one match offset: the only one, or — when several — the nearest to the
+ *  line hint; null when ambiguous. */
+function pick(
+  content: string,
+  idxs: number[],
+  len: number,
+  lineHint: number | null,
+): { start: number; end: number } | null {
+  if (idxs.length === 0) return null;
+  if (idxs.length === 1) return { start: idxs[0]!, end: idxs[0]! + len };
+  if (lineHint == null) return null;
+  const start = pickIndex(content, idxs, lineHint);
+  return { start, end: start + len };
+}
+
+/** Pick the offset whose line number is closest to `lineHint` (or the first). */
+function pickIndex(content: string, idxs: number[], lineHint: number | null): number {
+  if (lineHint == null) return idxs[0]!;
+  let best = idxs[0]!;
+  let bestDist = Infinity;
+  for (const i of idxs) {
+    const dist = Math.abs(lineOfOffset(content, i) - lineHint);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/** Byte offset where 1-based `line` begins (clamped to content length). */
+function offsetOfLine(content: string, line: number): number {
+  if (line <= 1) return 0;
+  let seen = 1;
+  for (let i = 0; i < content.length; i += 1) {
+    if (content[i] === "\n") {
+      seen += 1;
+      if (seen === line) return i + 1;
+    }
+  }
+  return content.length;
+}
+
+/** The model-visible name of the multi-hunk diff applier (B4). */
+export const APPLY_DIFF_TOOL_NAME = "apply_diff";
+
+const applyDiff: AgentTool = {
+  mutating: true,
+  requiresConfirmation: true,
+  definition: {
+    name: APPLY_DIFF_TOOL_NAME,
+    description:
+      "Apply several surgical edits to ONE existing file at once, given a unified diff " +
+      "(`@@` hunks with ` ` context / `-` removed / `+` added lines) OR Aider-style " +
+      "search/replace blocks (`<<<<<<< SEARCH` … `=======` … `>>>>>>> REPLACE`). This is " +
+      "the MIDDLE rung of the edit ladder: use apply_edit for a single exact change, " +
+      "apply_diff for multi-hunk changes, write_file for a whole-file rewrite. Applied " +
+      "ATOMICALLY — if any hunk's context is not found, NOTHING is written and you get an " +
+      "honest error naming the failing hunk and the nearest region. Requires user " +
+      "confirmation and counts against the mutation budget.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path relative to the sandbox root" },
+        diff: {
+          type: "string",
+          description:
+            "A unified diff or search/replace blocks describing the change to this file",
+        },
+      },
+      required: ["path", "diff"],
+    },
+  },
+  execute: async (args, ctx) => {
+    const abs = ctx.sandbox.resolve(String(args.path ?? ""));
+    const diff = String(args.diff ?? "");
+    if (!diff.trim()) return err("diff is required");
+    if (existsSync(abs) && statSync(abs).isDirectory()) {
+      return err(`path is a directory, not a file: ${args.path}`);
+    }
+    const content = existsSync(abs) ? readFileSync(abs, "utf8") : "";
+    const hunks = parseSearchReplaceBlocks(diff) ?? parseUnifiedDiff(diff);
+    if (hunks.length === 0) {
+      return err(
+        "no hunks found in diff — provide a unified diff (with `@@` headers) or " +
+          "search/replace blocks (`<<<<<<< SEARCH` … `=======` … `>>>>>>> REPLACE`)",
+      );
+    }
+    const applied = applyHunks(content, hunks);
+    if (!applied.ok) return err(applied.error); // atomic: nothing written
+    if (applied.content === content) {
+      return err("diff is a no-op (the file already matches the desired state)");
+    }
+    return gatedWrite(ctx, APPLY_DIFF_TOOL_NAME, abs, content, applied.content);
+  },
+};
+
+// --- B5: NOTES.md scratchpad (working memory) -------------------------------
+//
+// A lightweight, persistent, agent-OWNED scratchpad inside the sandbox so the agent
+// can record findings/decisions/plan-progress across rounds AND survive B1 context
+// compaction or a cold start (the file persists; `convo` does not). It is path-confined
+// to NOTES.md at the sandbox root and BOUNDED in size.
+//
+// GATE CHOICE (documented + honest): append_note is EXEMPT from the write-confirmation
+// gate and the mutation budget. Rationale: it is append-only, writes ONLY to the
+// agent's own NOTES.md (never user source), is size-capped, and prompting on every
+// thought would make working memory unusable. It is therefore NOT counted in the
+// end-of-run code-change summary (it is not a code edit). It remains fully bounded and
+// sandbox-confined — the two honesty properties that matter.
+
+/** Fixed scratchpad filename at the sandbox root. */
+export const NOTES_FILENAME = "NOTES.md";
+/** Hard cap on the scratchpad file size (oldest entries are trimmed past this). */
+export const MAX_NOTES_BYTES = 64 * 1024;
+/** Per-entry text cap (a note is a short line, not a document). */
+export const MAX_NOTE_CHARS = 2000;
+
+/** Absolute, sandbox-confined path to the scratchpad (always inside the root). */
+export function notesPath(sandbox: AgentSandbox): string {
+  return sandbox.resolve(NOTES_FILENAME);
+}
+
+const readNotes: AgentTool = {
+  mutating: false,
+  requiresConfirmation: false,
+  definition: {
+    name: "read_notes",
+    description:
+      "Read your persistent scratchpad (NOTES.md at the sandbox root) — your working " +
+      "memory of findings, decisions and plan progress that survives across rounds and " +
+      "context compaction. Read-only. Call it when resuming a long task to recall what " +
+      "you already learned.",
+    parameters: { type: "object", properties: {} },
+  },
+  execute: async (_args, ctx) => {
+    const abs = notesPath(ctx.sandbox);
+    if (!existsSync(abs)) return ok({ path: NOTES_FILENAME, notes: "", empty: true });
+    return ok({ path: NOTES_FILENAME, notes: readFileSync(abs, "utf8") });
+  },
+};
+
+const appendNote: AgentTool = {
+  mutating: false,
+  requiresConfirmation: false,
+  definition: {
+    name: "append_note",
+    description:
+      "Append a short timestamped bullet to your persistent scratchpad (NOTES.md at the " +
+      "sandbox root). Use it to record findings, decisions, what you've done and what's " +
+      "left, so a long run stays coherent and survives context compaction. The file " +
+      "persists and is size-bounded (oldest entries are trimmed). Low-friction: it is " +
+      "NOT gated by a confirmation prompt (it is your own scratchpad, never user source).",
+    parameters: {
+      type: "object",
+      properties: {
+        note: { type: "string", description: "The note text (a short line)" },
+      },
+      required: ["note"],
+    },
+  },
+  execute: async (args, ctx) => {
+    let note = String(args.note ?? "").trim();
+    if (!note) return err("note is required");
+    note = note.replace(/\s*\n\s*/g, " "); // keep each entry to one bullet line
+    if (note.length > MAX_NOTE_CHARS) note = `${note.slice(0, MAX_NOTE_CHARS)}…`;
+    const abs = notesPath(ctx.sandbox);
+    const existing = existsSync(abs) ? readFileSync(abs, "utf8") : "";
+    const header = existing ? "" : "# Agent scratchpad (NOTES.md)\n\n";
+    const entry = `- [${new Date().toISOString()}] ${note}\n`;
+    let next = `${existing}${header}${entry}`;
+    // Bound the file: if over cap, drop the OLDEST entry lines (keep the header +
+    // newest), prepending an honest trim marker.
+    if (Buffer.byteLength(next, "utf8") > MAX_NOTES_BYTES) {
+      next = trimNotes(next);
+    }
+    writeFileSync(abs, next, "utf8");
+    return ok({
+      path: NOTES_FILENAME,
+      appended: true,
+      bytes: Buffer.byteLength(next, "utf8"),
+    });
+  },
+};
+
+/** Trim a scratchpad to under MAX_NOTES_BYTES by dropping the oldest bullet lines,
+ *  keeping the newest tail and a single honest "[older notes trimmed]" marker. */
+function trimNotes(text: string): string {
+  const lines = text.split("\n");
+  const marker = "- [older notes trimmed]";
+  // Keep the newest lines that fit, reserving room for the marker.
+  const kept: string[] = [];
+  let bytes = Buffer.byteLength(`${marker}\n`, "utf8");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const ln = lines[i]!;
+    const add = Buffer.byteLength(`${ln}\n`, "utf8");
+    if (bytes + add > MAX_NOTES_BYTES) break;
+    kept.unshift(ln);
+    bytes += add;
+  }
+  return `${marker}\n${kept.join("\n")}`;
+}
+
+// --- B6: repo-map v0 (grep/regex-based ranked declarations) -----------------
+//
+// A compact, HEURISTIC map of the repo's top-level declarations, built at run start
+// from a regex scan over source files (NO tree-sitter, NO embeddings — those are
+// deferred). It gives the model a sense of structure instead of blind grep. Bounded:
+// files scanned, symbols per file, lines and chars are all capped, and it skips
+// gracefully on a huge repo. Honest: it is labelled as a heuristic, possibly-incomplete
+// map. Sandbox-confined: it only walks under the given root and skips symlinks.
+
+/** Max source files scanned before the map stops (graceful on huge repos). */
+export const MAX_REPO_MAP_FILES = 2000;
+/** Max declaration lines emitted into the injected summary. */
+export const MAX_REPO_MAP_LINES = 60;
+/** Hard char cap on the injected summary (token budget guard). */
+export const MAX_REPO_MAP_CHARS = 6000;
+/** Max symbols listed per file in the summary. */
+export const MAX_REPO_MAP_SYMBOLS_PER_FILE = 8;
+/** Above this many files, skip the O(files²)-ish referenced-ness signal (stay fast). */
+export const REPO_MAP_REFERENCEDNESS_LIMIT = 500;
+
+/** Matches a top-level declaration at column 0, capturing the kind + the symbol name.
+ *  Covers TS/JS/Python/Go/Rust/etc. broadly (heuristic — not a parser). */
+const REPO_MAP_DECL_RE =
+  /^(export\s+)?(default\s+)?(pub\s+|public\s+)?(async\s+)?(abstract\s+)?(function\*?|class|interface|type|enum|struct|trait|impl|def|fn|func|const|let|var)\s+([A-Za-z_$][\w$]*)/;
+
+/** One declared symbol found by the scanner. */
+export interface RepoSymbol {
+  name: string;
+  kind: string;
+  exported: boolean;
+}
+
+/** One ranked source file in the repo map. */
+export interface RepoMapEntry {
+  /** Path relative to the scan root. */
+  path: string;
+  symbols: RepoSymbol[];
+  exportedCount: number;
+  referencedBy: number;
+  score: number;
+}
+
+/** The built repo map: ranked entries + a bounded, injectable text summary. */
+export interface RepoMap {
+  entries: RepoMapEntry[];
+  /** The bounded, human/model-readable summary to inject into the preamble. */
+  text: string;
+  filesScanned: number;
+  /** True if the scan hit MAX_REPO_MAP_FILES and stopped early (honest). */
+  filesTruncated: boolean;
+}
+
+/** Extract top-level declarations (column-0 anchored) from one file's content. */
+function extractDeclarations(content: string): RepoSymbol[] {
+  const out: RepoSymbol[] = [];
+  const seen = new Set<string>();
+  for (const line of content.split("\n")) {
+    const m = REPO_MAP_DECL_RE.exec(line);
+    if (!m) continue;
+    const exported = Boolean(m[1] || m[3]);
+    const kind = (m[6] ?? "").replace("*", "");
+    const name = m[7] ?? "";
+    if (!name) continue;
+    // Non-exported const/let/var top-level is mostly noise — keep only exported ones.
+    if (!exported && (kind === "const" || kind === "let" || kind === "var")) continue;
+    const key = `${kind} ${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ name, kind, exported });
+  }
+  return out;
+}
+
+/**
+ * Build a HEURISTIC, ranked repo map by scanning source files under `root`. Ranking
+ * signals (all cheap): exported-symbol count, referenced-ness (how many OTHER scanned
+ * files mention the file's basename — skipped above REPO_MAP_REFERENCEDNESS_LIMIT files),
+ * and a path bonus (prefer src/, penalize depth). Bounded + sandbox-confined.
+ */
+export function buildRepoMap(
+  root: string,
+  opts?: {
+    maxFiles?: number;
+    maxLines?: number;
+    maxChars?: number;
+    maxSymbolsPerFile?: number;
+  },
+): RepoMap {
+  const maxFiles = opts?.maxFiles ?? MAX_REPO_MAP_FILES;
+  const maxLines = opts?.maxLines ?? MAX_REPO_MAP_LINES;
+  const maxChars = opts?.maxChars ?? MAX_REPO_MAP_CHARS;
+  const maxSymbols = opts?.maxSymbolsPerFile ?? MAX_REPO_MAP_SYMBOLS_PER_FILE;
+  const canonical = existsSync(root) ? realpathSync(root) : root;
+
+  // Pass 1: collect declarations per source file (bounded by maxFiles).
+  const files: { path: string; content: string; symbols: RepoSymbol[] }[] = [];
+  let filesScanned = 0;
+  let filesTruncated = false;
+  const walk = (dir: string): void => {
+    if (filesScanned >= maxFiles) {
+      filesTruncated = true;
+      return;
+    }
+    let dirents;
+    try {
+      dirents = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of dirents) {
+      if (filesScanned >= maxFiles) {
+        filesTruncated = true;
+        return;
+      }
+      if (e.isSymbolicLink()) continue; // no escape via symlink (sandbox-confined)
+      const child = path.join(dir, e.name);
+      if (!isWithin(canonical, child)) continue;
+      if (e.isDirectory()) {
+        if (IGNORED_DIRS.has(e.name)) continue;
+        walk(child);
+        continue;
+      }
+      if (!e.isFile() || !isSourceFile(child)) continue;
+      filesScanned += 1;
+      let st;
+      try {
+        st = statSync(child);
+      } catch {
+        continue;
+      }
+      if (st.size > MAX_FILE_BYTES) continue;
+      let content: string;
+      try {
+        content = readFileSync(child, "utf8");
+      } catch {
+        continue;
+      }
+      if (content.includes("\0")) continue; // skip binary
+      const symbols = extractDeclarations(content);
+      if (symbols.length === 0) continue;
+      files.push({ path: path.relative(canonical, child), content, symbols });
+    }
+  };
+  if (existsSync(canonical) && statSync(canonical).isDirectory()) walk(canonical);
+
+  // Pass 2: referenced-ness (cheap, only on modestly-sized repos).
+  const computeRefs = files.length <= REPO_MAP_REFERENCEDNESS_LIMIT;
+  const basenames = files.map((f) => path.basename(f.path).replace(/\.[^.]+$/, ""));
+  const entries: RepoMapEntry[] = files.map((f, i) => {
+    const exportedCount = f.symbols.filter((s) => s.exported).length;
+    let referencedBy = 0;
+    if (computeRefs) {
+      const base = basenames[i]!;
+      if (base.length >= 2) {
+        const re = new RegExp(`\\b${escapeRegExp(base)}\\b`);
+        for (let j = 0; j < files.length; j += 1) {
+          if (j === i) continue;
+          if (re.test(files[j]!.content)) referencedBy += 1;
+        }
+      }
+    }
+    const depth = f.path.split("/").length - 1;
+    const pathBonus = (/(^|\/)src\//.test(f.path) ? 2 : 0) - depth * 0.3;
+    const score = exportedCount * 3 + f.symbols.length + referencedBy * 2 + pathBonus;
+    return { path: f.path, symbols: f.symbols, exportedCount, referencedBy, score };
+  });
+  entries.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
+
+  // Build the bounded summary text.
+  const head = filesTruncated
+    ? `Repo map (heuristic, grep-based; top-level declarations — SCAN CAPPED at ${maxFiles} files, may be incomplete):`
+    : "Repo map (heuristic, grep-based; top-level declarations — may be incomplete):";
+  const out: string[] = [head];
+  let usedLines = 0;
+  for (const entry of entries) {
+    if (usedLines >= maxLines) break;
+    const shown = [...entry.symbols]
+      .sort((a, b) => Number(b.exported) - Number(a.exported))
+      .slice(0, maxSymbols);
+    const extra = entry.symbols.length - shown.length;
+    const syms = shown
+      .map((s) => `${s.exported ? "" : "·"}${s.kind} ${s.name}`)
+      .join(", ");
+    const more = extra > 0 ? ` (+${extra} more)` : "";
+    const line = `  ${entry.path}: ${syms}${more}`;
+    if (out.join("\n").length + line.length + 1 > maxChars) break;
+    out.push(line);
+    usedLines += 1;
+  }
+  const text = out.length > 1 ? out.join("\n") : "";
+  return { entries, text, filesScanned, filesTruncated };
+}
 
 /** The model-visible name of the planning tool. */
 export const UPDATE_PLAN_TOOL_NAME = "update_plan";
@@ -1390,8 +2079,11 @@ export const AGENT_TOOLS: AgentTool[] = [
   searchCode,
   findRelevantCode,
   retrieveTool,
+  readNotes,
+  appendNote,
   writeFile,
   applyEdit,
+  applyDiff,
   runCommand,
 ];
 

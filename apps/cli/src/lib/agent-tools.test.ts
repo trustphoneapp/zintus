@@ -290,12 +290,15 @@ describe("read-only tools", () => {
 });
 
 describe("tool surface + helpers", () => {
-  it("exposes exactly the nine agent tools", () => {
+  it("exposes exactly the twelve agent tools", () => {
     expect(AGENT_TOOL_DEFINITIONS.map((t) => t.name).sort()).toEqual([
+      "append_note",
+      "apply_diff",
       "apply_edit",
       "find_relevant_code",
       "list_directory",
       "read_file",
+      "read_notes",
       "retrieve",
       "run_command",
       "search_code",
@@ -307,17 +310,23 @@ describe("tool surface + helpers", () => {
   it("flags only the mutating tools", () => {
     expect(isMutatingTool("write_file")).toBe(true);
     expect(isMutatingTool("apply_edit")).toBe(true);
+    expect(isMutatingTool("apply_diff")).toBe(true);
     expect(isMutatingTool("read_file")).toBe(false);
     expect(isMutatingTool("run_command")).toBe(false); // side-effecting, not a write
+    // append_note writes to the agent's own scratchpad but is EXEMPT from the
+    // mutation budget/gate by design (B5) — so it is not flagged as a mutating tool.
+    expect(isMutatingTool("append_note")).toBe(false);
     expect(isMutatingTool("nope")).toBe(false);
   });
 
   it("flags tools that require confirmation (writes + run_command)", () => {
     expect(toolRequiresConfirmation("write_file")).toBe(true);
     expect(toolRequiresConfirmation("apply_edit")).toBe(true);
+    expect(toolRequiresConfirmation("apply_diff")).toBe(true);
     expect(toolRequiresConfirmation("run_command")).toBe(true);
     expect(toolRequiresConfirmation("read_file")).toBe(false);
     expect(toolRequiresConfirmation("search_code")).toBe(false);
+    expect(toolRequiresConfirmation("append_note")).toBe(false); // low-friction scratchpad
     expect(toolRequiresConfirmation("nope")).toBe(false);
   });
 
