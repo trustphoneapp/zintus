@@ -66,6 +66,7 @@
     "drizzle-orm": "^0.45.0",
     "ink": "^5.2.0",
     "ora": "^8.2.0",
-    "react": "^19.2.0"
+    "react": "^19.2.0",
+    "tokzen": "workspace:*"
   }
 }

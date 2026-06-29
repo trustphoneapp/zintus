@@ -14,9 +14,11 @@ import path from "node:path";
 import { CodeIndex, type CodeChunkHit } from "@zintus/codebase-indexer";
 import type {
   ChatMessage,
+  ContentBlock,
   ToolCallContentBlock,
   ToolDefinition,
 } from "@zintus/types";
+import { countTokensFast, createCCRStore, retrieve } from "tokzen";
 import type { ToolExecutionResult, ToolLoopTurn } from "./builtin-tools.js";
 
 export type { ToolExecutionResult, ToolLoopTurn } from "./builtin-tools.js";
@@ -111,6 +113,25 @@ const SAFE_TOKEN = /^[A-Za-z0-9._/@-]+$/;
 /** Default agent loop rounds and the hard ceiling a caller may request. */
 export const DEFAULT_AGENT_ROUNDS = 15;
 export const MAX_AGENT_ROUNDS_CAP = 40;
+
+/**
+ * Context-management (B1) defaults. The agent's `convo` grows unbounded with every
+ * tool_result fed back; left alone it eventually crosses the provider context window
+ * on long tasks. We track an APPROXIMATE token size of `convo` (via tokzen's
+ * `countTokensFast`) and, once it crosses `DEFAULT_CONTEXT_BUDGET_TOKENS`, COMPACT by
+ * EVICTING the bulky tool_result blocks in the OLDER middle of the conversation into a
+ * content-addressed (CCR) store, leaving a short, honest pointer the model can pull
+ * back on demand via the `retrieve` tool. Nothing is fabricated and nothing is silently
+ * lost — every evicted block is re-fetchable by hash.
+ */
+/** Token budget that triggers compaction (sane CLI default; most models are ≥128k). */
+export const DEFAULT_CONTEXT_BUDGET_TOKENS = 96_000;
+/** Trailing ReAct turns kept VERBATIM (each round adds an assistant + a tool_result
+ *  message, so the live tail spans `2 × liveTailTurns` messages — kept atomic). */
+export const DEFAULT_LIVE_TAIL_TURNS = 3;
+/** Minimum token size of a tool_result before it is eligible for eviction (tiny
+ *  results cost nothing to keep and stay legible inline). */
+export const DEFAULT_MIN_EVICT_TOKENS = 200;
 
 /** Cap on plan steps the model may set (bounded — the plan stays legible). */
 export const MAX_PLAN_STEPS = 20;
@@ -402,6 +423,143 @@ export interface AgentSemanticConfig {
   }) => void;
 }
 
+// --- B1: context management (tool-result eviction + compaction) -------------
+
+/** The content-addressed retrieval store backing eviction. Structural alias for
+ *  tokzen's CCR store so we needn't import its (un-exported) interface name. */
+export type CCRStore = ReturnType<typeof createCCRStore>;
+
+/** Create a CCR store for a run. Thin wrapper so the CLI/tests have one import site. */
+export function createContextStore(dbPath?: string): CCRStore {
+  return createCCRStore(dbPath);
+}
+
+/** The dim, honest pointer that REPLACES an evicted tool_result's content. It states
+ *  the exact token count saved and the hash to pull the original back with. */
+export function formatEvictionPointer(tokens: number, hash: string): string {
+  return `[evicted ${tokens} tokens — retrieve("${hash}") to restore]`;
+}
+
+/** Matches a content string that is already an eviction pointer (so we never
+ *  double-evict a pointer or store a pointer as if it were real content). */
+const EVICTION_POINTER_RE = /^\[evicted \d+ tokens — retrieve\("[0-9a-fA-F]+"\) to restore\]$/;
+export function isEvictionPointer(s: string): boolean {
+  return EVICTION_POINTER_RE.test(s.trim());
+}
+
+/** Serialize one content block to plain text for APPROXIMATE token counting. */
+function blockToText(b: ContentBlock): string {
+  switch (b.type) {
+    case "text":
+      return b.text;
+    case "tool_call":
+      return `${b.name} ${JSON.stringify(b.arguments)}`;
+    case "tool_result":
+      return b.content;
+    case "image":
+      return "[image]";
+    default:
+      return "";
+  }
+}
+
+/** Serialize one message to plain text (string content passes through). */
+function messageToText(m: ChatMessage): string {
+  return typeof m.content === "string"
+    ? m.content
+    : m.content.map(blockToText).join("\n");
+}
+
+/** Approximate token size of the whole conversation (serialized, then tokzen). */
+export function countConvoTokens(messages: ChatMessage[]): number {
+  return countTokensFast(messages.map(messageToText).join("\n"));
+}
+
+/** Configuration for between-rounds context compaction. Injectable end-to-end so
+ *  tests drive it with a temp store + a tiny budget. ABSENT on the loop => no
+ *  compaction (back-compat: the loop behaves exactly as before). */
+export interface AgentContextConfig {
+  /** Store evicted tool_result bodies are written to (retrievable by hash). */
+  store: CCRStore;
+  /** Token budget that triggers compaction (default DEFAULT_CONTEXT_BUDGET_TOKENS). */
+  budgetTokens?: number;
+  /** Verbatim trailing turns (default DEFAULT_LIVE_TAIL_TURNS). */
+  liveTailTurns?: number;
+  /** Min tool_result token size eligible for eviction (default DEFAULT_MIN_EVICT_TOKENS). */
+  minEvictTokens?: number;
+  /** Tag stored entries with this session id (for store-side grouping/TTL). */
+  sessionId?: string;
+}
+
+/** The outcome of a compaction pass (honest, fully accounted). */
+export interface CompactionResult {
+  /** True only when at least one block was actually evicted. */
+  compacted: boolean;
+  /** Approx tokens removed from `convo` by this pass (before − after). */
+  savedTokens: number;
+  /** Number of tool_result blocks evicted into the store. */
+  evicted: number;
+  tokensBefore: number;
+  tokensAfter: number;
+}
+
+/**
+ * Compact `convo` IN PLACE when it crosses the token budget by evicting the bulky
+ * tool_result blocks in its OLDER middle into `cfg.store`, replacing each with a short
+ * pointer. PRESERVED verbatim, always: (a) the FIRST message (system preamble + task),
+ * and (b) the live tail — the last `2 × liveTailTurns` messages, which keeps every
+ * tool_call and its matching tool_result atomic (we never split a pair). Returns a
+ * fully-accounted CompactionResult. Bounded + honest: under budget => no-op; evicted
+ * content is never lost — the model can `retrieve("<hash>")` it back on demand.
+ */
+export function maybeCompactConvo(
+  convo: ChatMessage[],
+  cfg: AgentContextConfig,
+): CompactionResult {
+  const budget = cfg.budgetTokens ?? DEFAULT_CONTEXT_BUDGET_TOKENS;
+  const tokensBefore = countConvoTokens(convo);
+  if (tokensBefore <= budget) {
+    return {
+      compacted: false,
+      savedTokens: 0,
+      evicted: 0,
+      tokensBefore,
+      tokensAfter: tokensBefore,
+    };
+  }
+  const tailTurns = cfg.liveTailTurns ?? DEFAULT_LIVE_TAIL_TURNS;
+  const minEvict = cfg.minEvictTokens ?? DEFAULT_MIN_EVICT_TOKENS;
+  // Keep message[0] (preamble+task) and the last 2×turns messages verbatim. The
+  // eviction zone is the older middle: [1, length − tailCount).
+  const tailCount = Math.max(0, tailTurns) * 2;
+  const evictEnd = Math.max(1, convo.length - tailCount);
+  let evicted = 0;
+  for (let i = 1; i < evictEnd; i += 1) {
+    const m = convo[i]!;
+    if (typeof m.content === "string" || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (block.type !== "tool_result") continue;
+      if (isEvictionPointer(block.content)) continue; // already evicted — skip
+      const tk = countTokensFast(block.content);
+      if (tk < minEvict) continue; // small results stay inline (legible, cheap)
+      const hash = cfg.store.store(block.content, "tool_result", {
+        sessionId: cfg.sessionId,
+        originalTokens: tk,
+      });
+      block.content = formatEvictionPointer(tk, hash);
+      evicted += 1;
+    }
+  }
+  const tokensAfter = countConvoTokens(convo);
+  return {
+    compacted: evicted > 0,
+    savedTokens: Math.max(0, tokensBefore - tokensAfter),
+    evicted,
+    tokensBefore,
+    tokensAfter,
+  };
+}
+
 export interface AgentToolContext {
   sandbox: AgentSandbox;
   /** Gate invoked before every applied mutation AND before every command run. */
@@ -417,6 +575,9 @@ export interface AgentToolContext {
   /** Optional per-file change log; gatedWrite appends each APPLIED mutation here.
    *  ABSENT => no change summary is collected (back-compat). */
   changeLog?: ChangeLogEntry[];
+  /** Context-management config. Its `store` backs the `retrieve` tool so the model
+   *  can pull evicted tool_result content back by hash. ABSENT => retrieve refuses. */
+  context?: AgentContextConfig;
 }
 
 interface AgentTool {
@@ -1016,6 +1177,56 @@ const updatePlan: AgentTool = {
   },
 };
 
+/** The model-visible name of the context-retrieval tool (B1). */
+export const RETRIEVE_TOOL_NAME = "retrieve";
+
+/**
+ * B1 retrieval tool: restore the FULL content of a tool_result that was evicted from
+ * the conversation to save context. The model is handed a pointer
+ * `[evicted N tokens — retrieve("<hash>") to restore]`; calling this with that hash
+ * returns the original verbatim (or, with an optional `query`, only the most relevant
+ * sections via the store's BM25). Read-only; honest — it can only return content that
+ * was actually stored.
+ */
+const retrieveTool: AgentTool = {
+  mutating: false,
+  requiresConfirmation: false,
+  definition: {
+    name: RETRIEVE_TOOL_NAME,
+    description:
+      "Restore the full content of an earlier tool result that was EVICTED from the conversation to save context. When you see a pointer like `[evicted 1234 tokens — retrieve(\"abc123\") to restore]`, call this with that hash to read the original content. Optionally pass `query` to get only the most relevant sections of a large result. Read-only.",
+    parameters: {
+      type: "object",
+      properties: {
+        hash: {
+          type: "string",
+          description: "The hash from an `[evicted … retrieve(\"<hash>\")]` pointer",
+        },
+        query: {
+          type: "string",
+          description: "Optional: return only sections relevant to this query",
+        },
+      },
+      required: ["hash"],
+    },
+  },
+  execute: async (args, ctx) => {
+    const store = ctx.context?.store;
+    if (!store) {
+      return err("retrieve is unavailable: no context store is configured for this run");
+    }
+    const hash = String(args.hash ?? "").trim();
+    if (!hash) return err("hash is required");
+    const query =
+      typeof args.query === "string" && args.query.trim() ? args.query : undefined;
+    const content = retrieve(hash, query, store);
+    if (content == null) {
+      return err(`no evicted content found for hash ${hash}`);
+    }
+    return ok({ hash, content });
+  },
+};
+
 /** Truncate `s` to MAX_RUN_OUTPUT_BYTES, marking when bytes were dropped. */
 function truncateOutput(s: string): { text: string; truncated: boolean } {
   const buf = Buffer.from(s, "utf8");
@@ -1178,6 +1389,7 @@ export const AGENT_TOOLS: AgentTool[] = [
   listDirectory,
   searchCode,
   findRelevantCode,
+  retrieveTool,
   writeFile,
   applyEdit,
   runCommand,
@@ -1257,6 +1469,12 @@ export interface AgentLoopHandlers<R extends ToolLoopTurn> {
     call: ToolCallContentBlock,
   ) => void | Promise<void>;
   onStopped?: (maxRounds: number) => void;
+  /** B1: between-rounds context compaction. ABSENT => the loop never compacts
+   *  (back-compat). When the serialized `convo` crosses the budget, the loop evicts
+   *  bulky older tool_results into `context.store` and replaces them with pointers. */
+  context?: AgentContextConfig;
+  /** Fired only when a compaction pass actually evicted something (for a dim log). */
+  onCompact?: (result: CompactionResult) => void;
 }
 
 /**
@@ -1268,7 +1486,7 @@ export interface AgentLoopHandlers<R extends ToolLoopTurn> {
 export async function runAgentToolLoop<R extends ToolLoopTurn>(
   messages: ChatMessage[],
   handlers: AgentLoopHandlers<R>,
-): Promise<{ finalResult: R; rounds: number }> {
+): Promise<{ finalResult: R; rounds: number; convo: ChatMessage[] }> {
   const maxRounds = Math.min(
     handlers.maxRounds ?? DEFAULT_AGENT_ROUNDS,
     MAX_AGENT_ROUNDS_CAP,
@@ -1289,13 +1507,13 @@ export async function runAgentToolLoop<R extends ToolLoopTurn>(
     handlers.onTurnEnd?.();
 
     const calls = result.toolCalls ?? [];
-    if (calls.length === 0) return { finalResult: result, rounds: round + 1 };
+    if (calls.length === 0) return { finalResult: result, rounds: round + 1, convo };
 
     handlers.onToolCalls?.(calls);
 
     if (round === maxRounds) {
       handlers.onStopped?.(maxRounds);
-      return { finalResult: result, rounds: round + 1 };
+      return { finalResult: result, rounds: round + 1, convo };
     }
 
     const results: ToolExecutionResult[] = [];
@@ -1323,7 +1541,116 @@ export async function runAgentToolLoop<R extends ToolLoopTurn>(
         isError: r.isError,
       })),
     });
+
+    // B1: after appending this round's tool results, compact if we've crossed the
+    // token budget. Eviction mutates `convo` in place (older bulky tool_results ->
+    // pointers); the live tail + preamble are preserved, and evicted content stays
+    // retrievable by hash. No-op (and no log) when under budget.
+    if (handlers.context) {
+      const compaction = maybeCompactConvo(convo, handlers.context);
+      if (compaction.compacted) handlers.onCompact?.(compaction);
+    }
   }
 
-  return { finalResult, rounds: maxRounds + 1 };
+  return { finalResult, rounds: maxRounds + 1, convo };
+}
+
+// --- B3: test-gated verify→revise controller --------------------------------
+
+/** Bounded number of revise rounds the controller will drive on a FAILING verify
+ *  before surfacing an honest failure. A deterministic gate, not a workflow engine. */
+export const MAX_REVISE = 2;
+
+/** The result of one deterministic verify run (already parsed from run_command). */
+export interface VerifyOutcome {
+  /** True iff the verify command exited 0. */
+  pass: boolean;
+  /** The exact allowlisted command that ran (e.g. "bun run test"). */
+  command: string;
+  /** Truncated captured output, for feeding a failure back to the model. */
+  stdout?: string;
+  stderr?: string;
+  /** Process exit code (null if killed/timed-out). */
+  code?: number | null;
+}
+
+/** Injectable dependencies for the verify→revise controller. Everything the
+ *  controller needs is a function so it is fully unit-testable WITHOUT spawning a
+ *  process or routing a real model. */
+export interface VerifyReviseDeps {
+  /** True iff the model made mutating edits this run (no edits => no verify). */
+  editsMade: () => boolean;
+  /** Run the project verify command deterministically (through the existing
+   *  run_command allowlist/budget/confirm). Return null if it could NOT run
+   *  (disabled / declined / budget exhausted) — treated as "skip", never "pass". */
+  runVerify: () => Promise<VerifyOutcome | null>;
+  /** Re-enter the writer loop with the failure fed back; returns the grown convo. */
+  revise: (
+    convo: ChatMessage[],
+    failure: VerifyOutcome,
+  ) => Promise<{ convo: ChatMessage[]; rounds: number }>;
+  /** Revise bound (default MAX_REVISE). */
+  maxRevise?: number;
+  /** Fired with each verify result (e.g. to record the last PASS/FAIL for the UI). */
+  onVerify?: (outcome: VerifyOutcome) => void;
+  /** Fired before each revise round (attempt is 1-based). */
+  onRevise?: (attempt: number, max: number) => void;
+  /** Fired when verify STILL fails after `maxRevise` revisions (honest surface). */
+  onExhausted?: (outcome: VerifyOutcome, revisions: number) => void;
+}
+
+/** The outcome of the controller. `verified` is null when verify never ran (no edits
+ *  or could-not-run), else the FINAL pass/fail — never a fabricated success. */
+export interface VerifyReviseResult {
+  convo: ChatMessage[];
+  verified: boolean | null;
+  /** How many revise rounds were driven (0..maxRevise). */
+  revisions: number;
+  /** Total writer-loop rounds consumed by revises (for the run summary). */
+  reviseRounds: number;
+}
+
+/**
+ * The deterministic verify→revise gate (B3). After the writer signals completion,
+ * IF edits were made: run the project verify command; on FAILURE feed the failure back
+ * and let the model revise, bounded by `maxRevise` rounds; re-verify after each revise.
+ * On a passing verify it returns immediately (no revise). On exhaustion it surfaces an
+ * honest failure (`verified:false`, `onExhausted`) — it NEVER claims success. This is a
+ * gate, not a plan state-machine: it fires only on a real exit code.
+ */
+export async function runVerifyReviseController(
+  convo: ChatMessage[],
+  deps: VerifyReviseDeps,
+): Promise<VerifyReviseResult> {
+  const max = deps.maxRevise ?? MAX_REVISE;
+  let current = convo;
+  let revisions = 0;
+  let reviseRounds = 0;
+
+  // Gate: no edits this run => nothing to verify (also the shape of "off when the
+  // model changed nothing"). The caller additionally gates on --allow-run.
+  if (!deps.editsMade()) {
+    return { convo: current, verified: null, revisions, reviseRounds };
+  }
+
+  for (;;) {
+    const outcome = await deps.runVerify();
+    if (!outcome) {
+      // Could not run (disabled/declined/budget) — surface nothing, claim nothing.
+      return { convo: current, verified: null, revisions, reviseRounds };
+    }
+    deps.onVerify?.(outcome);
+    if (outcome.pass) {
+      return { convo: current, verified: true, revisions, reviseRounds };
+    }
+    if (revisions >= max) {
+      deps.onExhausted?.(outcome, revisions);
+      return { convo: current, verified: false, revisions, reviseRounds };
+    }
+    revisions += 1;
+    deps.onRevise?.(revisions, max);
+    const revised = await deps.revise(current, outcome);
+    current = revised.convo;
+    reviseRounds += revised.rounds;
+  }
 }

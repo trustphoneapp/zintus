@@ -3,7 +3,12 @@ import chalk from "chalk";
 import ora from "ora";
 import { listKeys } from "@zintus/keychain";
 import { embedBatch, embeddingMode } from "@zintus/memory";
-import type { ChatMessage } from "@zintus/types";
+import type {
+  AppConfig,
+  ChatMessage,
+  RoutingStrategy,
+  ToolDefinition,
+} from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
 import {
@@ -14,16 +19,21 @@ import {
   MAX_AGENT_ROUNDS_CAP,
   RUN_COMMAND_TOOL_NAME,
   UPDATE_PLAN_TOOL_NAME,
+  type AgentContextConfig,
+  type AgentLoopHandlers,
   type AgentToolContext,
   type ChangeLogEntry,
   type ConfirmWrite,
   type PlanStep,
+  type VerifyOutcome,
+  createContextStore,
   createPlanState,
   createSandbox,
   executeAgentToolCall,
   isMutatingTool,
   planStatusSummary,
   runAgentToolLoop,
+  runVerifyReviseController,
   summarizeChanges,
 } from "../lib/agent-tools.js";
 import {
@@ -49,6 +59,40 @@ export interface AgentOptions {
   noMcp?: boolean;
   /** Opt in to the allowlisted run_command verification tool (off by default). */
   allowRun?: boolean;
+  /** The verify command the B3 gate runs deterministically after edits (must be on
+   *  the run_command allowlist). Only used when allowRun is set. Default "bun run test". */
+  verifyCommand?: string;
+}
+
+/** The DEFAULT project verify command the B3 gate runs (allowlisted). */
+export const DEFAULT_VERIFY_COMMAND = "bun run test";
+
+/**
+ * B2 — the per-call routing strategy SEAM. Builds the RouteRequest for one agent turn,
+ * threading a routing `strategy` WITHOUT hardcoding a provider/model — so the router
+ * still picks the best/cheapest model across all providers WITHIN the chosen tier.
+ * The main writer loop passes the user's configured strategy (honest: we never
+ * silently override an explicit "fastest" with "quality"); internal/auxiliary callers
+ * (e.g. a cheap triage/explorer) can request `"economy"`. The chosen strategy is
+ * already surfaced in the engine's route-reason line.
+ */
+export function buildAgentRouteRequest(opts: {
+  messages: ChatMessage[];
+  mode: AppConfig["contextMode"];
+  tools: ToolDefinition[];
+  strategy: RoutingStrategy | "weighted";
+}): {
+  messages: ChatMessage[];
+  mode: AppConfig["contextMode"];
+  tools: ToolDefinition[];
+  strategy: RoutingStrategy | "weighted";
+} {
+  return {
+    messages: opts.messages,
+    mode: opts.mode,
+    tools: opts.tools,
+    strategy: opts.strategy,
+  };
 }
 
 /** The instruction that frames the task and the sandbox rules for the model. */
@@ -187,12 +231,21 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
   // The model's plan + the per-file change log live in the run context so the
   // update_plan tool and gatedWrite can record into them; the CLI renders both.
   const changeLog: ChangeLogEntry[] = [];
+  // B1: the CCR store backs context compaction (evicted tool_results land here) AND
+  // the `retrieve` tool (the model pulls them back by hash). One store per run,
+  // closed in the finally below.
+  const ccrStore = createContextStore();
+  const contextConfig: AgentContextConfig = {
+    store: ccrStore,
+    sessionId: `agent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  };
   const ctx: AgentToolContext = {
     sandbox,
     confirm,
     budget: { used: 0, max: DEFAULT_MUTATION_BUDGET },
     plan: createPlanState(),
     changeLog,
+    context: contextConfig,
     // run_command is OFF unless explicitly opted in via --allow-run.
     run: options?.allowRun
       ? { allow: true, budget: { used: 0, max: DEFAULT_RUN_BUDGET } }
@@ -272,15 +325,28 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     // The last allowlisted verification command's pass/fail, surfaced in the
     // end-of-run summary (honest: only set when run_command actually ran).
     let lastVerification: { command: string; pass: boolean } | null = null;
-    const { rounds } = await runAgentToolLoop(initialMessages, {
-      maxRounds,
-      route: async (messages) => {
-        if (!firstRound) spinner.start("Routing tool follow-up");
-        return engine.routeAndStream({
+    // B2: one place that builds a routed turn, threading a routing STRATEGY (the
+    // moat) without ever hardcoding a provider/model. The writer uses the user's
+    // configured strategy; the optional override is the seam an internal/cheap call
+    // (triage/explorer) uses to request "economy".
+    const routeTurn = (
+      messages: ChatMessage[],
+      strategy?: RoutingStrategy | "weighted",
+    ) =>
+      engine.routeAndStream(
+        buildAgentRouteRequest({
           messages,
           mode: config.contextMode,
           tools: toolDefinitions,
-        });
+          strategy: strategy ?? config.routingStrategy,
+        }),
+      );
+    type AgentTurn = Awaited<ReturnType<typeof engine.routeAndStream>>;
+    const loopHandlers: AgentLoopHandlers<AgentTurn> = {
+      maxRounds,
+      route: async (messages) => {
+        if (!firstRound) spinner.start("Routing tool follow-up");
+        return routeTurn(messages);
       },
       // Route MCP calls to the in-process MCP clients; everything else to the
       // sandboxed file executor. Both feed back into the SAME bounded loop.
@@ -360,7 +426,97 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
       },
       onStopped: (max) =>
         console.error(chalk.yellow(`⚠ agent loop stopped after ${max} rounds (bounded)`)),
-    });
+      // B1: compact the conversation between rounds once it crosses the token budget,
+      // printing an honest dim line of tokens saved + tool_results evicted.
+      context: contextConfig,
+      onCompact: (r) =>
+        console.error(
+          chalk.dim(
+            `🗜 compacted context (saved ${r.savedTokens} tokens, ${r.evicted} result(s) evicted)`,
+          ),
+        ),
+    };
+
+    let { rounds, convo } = await runAgentToolLoop(initialMessages, loopHandlers);
+
+    // B3: deterministic test-gated verify→revise gate. Only when --allow-run is on AND
+    // the model actually edited files this run. The controller runs the project verify
+    // command through the EXISTING run_command machinery (allowlist/budget/confirm
+    // intact); on a non-zero exit it feeds the failure back and lets the model revise,
+    // bounded by MAX_REVISE rounds, then surfaces an honest failure — never a fake PASS.
+    if (options?.allowRun && ctx.run) {
+      const verifyCommand = options?.verifyCommand ?? DEFAULT_VERIFY_COMMAND;
+      const runVerify = async (): Promise<VerifyOutcome | null> => {
+        const result = await executeAgentToolCall(
+          {
+            id: `verify_${Date.now().toString(36)}`,
+            name: RUN_COMMAND_TOOL_NAME,
+            arguments: { command: verifyCommand },
+          },
+          ctx,
+        );
+        if (result.isError) {
+          console.error(
+            chalk.dim(
+              `verify could not run (${verifyCommand}): ${result.content.slice(0, 160)}`,
+            ),
+          );
+          return null;
+        }
+        try {
+          const parsed = JSON.parse(result.content) as Record<string, unknown>;
+          if (parsed.declined || typeof parsed.exitCode === "undefined") return null;
+          return {
+            command: String(parsed.command ?? verifyCommand),
+            pass: parsed.exitCode === 0,
+            code: parsed.exitCode as number | null,
+            stdout: typeof parsed.stdout === "string" ? parsed.stdout : "",
+            stderr: typeof parsed.stderr === "string" ? parsed.stderr : "",
+          };
+        } catch {
+          return null;
+        }
+      };
+      const controlled = await runVerifyReviseController(convo, {
+        editsMade: () => changeLog.length > 0,
+        runVerify,
+        onVerify: (o) => {
+          lastVerification = { command: o.command, pass: o.pass };
+        },
+        onRevise: (attempt, max) =>
+          console.error(
+            chalk.dim(
+              `↻ verification failed — asking the model to revise (attempt ${attempt}/${max})`,
+            ),
+          ),
+        onExhausted: (o, revisions) =>
+          console.error(
+            chalk.red(
+              `⚠ verification still failing after ${revisions} revision(s): ${o.command} — surfaced honestly (no success claimed)`,
+            ),
+          ),
+        revise: async (current, failure) => {
+          const withFailure: ChatMessage[] = [
+            ...current,
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `The verification command \`${failure.command}\` FAILED (exit ${failure.code ?? "null"}). ` +
+                    "Diagnose the cause from the output below and FIX it, then stop.\n\n" +
+                    `stdout:\n${failure.stdout ?? ""}\n\nstderr:\n${failure.stderr ?? ""}`,
+                },
+              ],
+            },
+          ];
+          const r = await runAgentToolLoop(withFailure, loopHandlers);
+          return { convo: r.convo, rounds: r.rounds };
+        },
+      });
+      rounds += controlled.reviseRounds;
+    }
 
     // End-of-run change summary: the files ACTUALLY mutated through the loop,
     // with per-file write counts, plus the final verification result if one ran.
@@ -406,5 +562,11 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
   } finally {
     // Lifecycle: tear down every connected MCP server on every exit path.
     await mcp?.disconnect();
+    // Close the CCR store opened for context eviction (releases the sqlite handle).
+    try {
+      ccrStore.close();
+    } catch {
+      // Already closed / never opened — nothing to release.
+    }
   }
 }

@@ -290,12 +290,13 @@ describe("read-only tools", () => {
 });
 
 describe("tool surface + helpers", () => {
-  it("exposes exactly the eight agent tools", () => {
+  it("exposes exactly the nine agent tools", () => {
     expect(AGENT_TOOL_DEFINITIONS.map((t) => t.name).sort()).toEqual([
       "apply_edit",
       "find_relevant_code",
       "list_directory",
       "read_file",
+      "retrieve",
       "run_command",
       "search_code",
       "update_plan",
