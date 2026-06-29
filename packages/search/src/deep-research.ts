@@ -4,6 +4,13 @@ export type ResearchDepth = "quick" | "standard" | "deep";
 
 /** Hard ceiling on extra corroboration rounds, regardless of config. */
 export const MAX_VERIFICATION_PASSES = 3;
+/**
+ * Hard ceiling on iterative-deepening rounds, regardless of config. Equal to
+ * MAX_VERIFICATION_PASSES so the unified deepening/verification loop never runs
+ * more rounds than verification's own cap (each round may emit a `verifying`
+ * event, so the two caps must agree to keep cost — and emitted events — bounded).
+ */
+export const MAX_DEEPENING_ROUNDS = MAX_VERIFICATION_PASSES;
 /** Hard ceiling on the number of ranked sources kept for synthesis. */
 export const MAX_SOURCES = 40;
 /** Hard ceiling on how many corroboration sub-queries a verification pass fires. */
@@ -18,10 +25,23 @@ export interface VerificationConfig {
   passes?: number;
 }
 
+export interface DeepeningConfig {
+  /**
+   * Number of iterative-deepening rounds to run after the initial synthesis. A
+   * round identifies knowledge GAPS (weakly-backed claims + under-covered
+   * sub-questions), fires bounded follow-up searches to close them, and
+   * re-synthesizes an improved answer. Defaults to a per-depth value (quick 0,
+   * standard 1, deep 2); always clamped to [0, MAX_DEEPENING_ROUNDS].
+   */
+  rounds?: number;
+}
+
 export interface DeepResearchOptions {
   depth: ResearchDepth;
   /** Cross-verification configuration (bounded; see MAX_VERIFICATION_PASSES). */
   verification?: VerificationConfig;
+  /** Iterative-deepening configuration (bounded; see MAX_DEEPENING_ROUNDS). */
+  deepening?: DeepeningConfig;
   /** Override the per-depth source ceiling (bounded by MAX_SOURCES). */
   maxSources?: number;
 }
@@ -44,6 +64,21 @@ export function verificationPassCount(
   const want = requested ?? base;
   if (!Number.isFinite(want)) return base;
   return Math.max(0, Math.min(MAX_VERIFICATION_PASSES, Math.floor(want)));
+}
+
+/**
+ * How many iterative-deepening rounds to run for a depth, honoring an explicit
+ * override but always clamped to [0, MAX_DEEPENING_ROUNDS] so cost stays
+ * predictable. Defaults: quick 0 (single-pass, unchanged), standard 1, deep 2.
+ */
+export function deepeningRoundCount(
+  depth: ResearchDepth,
+  requested?: number,
+): number {
+  const base = depth === "quick" ? 0 : depth === "standard" ? 1 : 2;
+  const want = requested ?? base;
+  if (!Number.isFinite(want)) return base;
+  return Math.max(0, Math.min(MAX_DEEPENING_ROUNDS, Math.floor(want)));
 }
 
 /**
@@ -160,14 +195,25 @@ export type DeepResearchEvent =
   // New: a single claim whose corroborating sources were found to CONTRADICT
   // each other. Additive — existing clients ignore unknown SSE event types.
   | { type: "conflict"; claim: string; sources: ResearchSource[] }
+  // New: an iterative-deepening round is starting — `followups` are the
+  // gap-closing queries it is about to search (weakly-backed claims +
+  // under-covered sub-questions). Lets the UI show "digging deeper (round 2)…".
+  // Additive — existing clients ignore unknown SSE event types.
+  | { type: "deepening"; round: number; followups: string[] }
   // `done` is enriched with structurally-bound citations + a verification
-  // summary. The original `sources` field is preserved (ResearchSource extends
-  // SearchResult), so existing consumers keep working.
+  // summary + a deepening summary. The original `sources` field is preserved
+  // (ResearchSource extends SearchResult), so existing consumers keep working.
   | {
       type: "done";
       sources: ResearchSource[];
       citations: Citation[];
       verification: VerificationSummary;
+      /**
+       * Iterative-deepening outcome: how many rounds actually closed gaps and
+       * the total number of NEW sources those rounds added beyond the initial
+       * set. `rounds: 0` means single-pass (quick depth, or no gaps found).
+       */
+      deepening: { rounds: number; newSources: number };
     }
   | { type: "error"; message: string };
 
@@ -366,6 +412,43 @@ async function deriveVerifyQueries(
   return out;
 }
 
+/**
+ * Identify decomposed sub-questions with WEAK coverage in the gathered sources:
+ * a sub-question whose meaningful keywords appear in NONE of the source
+ * titles/contents is treated as a knowledge gap and re-searched. Conservative —
+ * a sub-question with no meaningful keywords is skipped (never a fabricated gap).
+ */
+function uncoveredSubQuestions(
+  subQueries: string[],
+  sources: ResearchSource[],
+): string[] {
+  const haystack = sources
+    .map((s) => `${s.title} ${s.content}`)
+    .join(" ")
+    .toLowerCase();
+  const out: string[] = [];
+  for (const sq of subQueries) {
+    const words = sq.toLowerCase().match(/[a-z0-9]{4,}/g) ?? [];
+    if (words.length === 0) continue;
+    if (!words.some((w) => haystack.includes(w))) out.push(sq);
+  }
+  return out;
+}
+
+/** Merge query lists, drop short/duplicate entries, cap at MAX_VERIFY_QUERIES. */
+function boundedFollowups(...lists: string[][]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const q of lists.flat()) {
+    const trimmed = q.trim();
+    if (trimmed.length < 8 || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+    if (out.length >= MAX_VERIFY_QUERIES) break;
+  }
+  return out;
+}
+
 async function collect(stream: AsyncIterable<string>): Promise<string> {
   let text = "";
   for await (const chunk of stream) text += chunk;
@@ -388,6 +471,11 @@ export async function* deepResearch(
     const { depth } = options;
     const count = subQueryCount(depth);
     const passes = verificationPassCount(depth, options.verification?.passes);
+    const deepRounds = deepeningRoundCount(depth, options.deepening?.rounds);
+    // One unified loop drives both corroboration (verification) and gap-closing
+    // (deepening). Verification owns the first `passes` rounds; deepening can
+    // extend a little further. `rounds` is the bounded iteration count.
+    const rounds = Math.max(passes, deepRounds);
     const ceiling = sourceCeiling(depth, options.maxSources);
 
     const subQueries =
@@ -430,58 +518,89 @@ export async function* deepResearch(
 
     let answer: string;
     let passesRun = 0;
+    let deepeningRoundsRun = 0;
+    let deepeningNewSources = 0;
 
-    if (passes === 0) {
+    if (rounds === 0) {
+      // Single-pass (quick depth, or no verification/deepening configured):
+      // search once, synthesize once. Behavior is unchanged.
       answer = yield* synthesizeStreamed();
     } else {
-      // Initial draft, buffered: used only to find weakly-backed claims.
+      // Initial draft, buffered: used only to find gaps to deepen on.
       answer = await collect(deps.synthesize(query, formatContext(sources)));
       let streamed = false;
 
-      for (let pass = 1; pass <= passes; pass++) {
-        const citations = bindCitations(answer, sources);
-        const verifyQueries = await deriveVerifyQueries(answer, citations, deps);
-        // Nothing weak left to corroborate → stop early (bounded, honest).
-        if (verifyQueries.length === 0) break;
-        passesRun = pass;
-        yield { type: "verifying", pass, claims: verifyQueries };
+      // Unified deepening/verification loop. Each round identifies knowledge
+      // GAPS (weakly-backed claims for corroboration + under-covered
+      // sub-questions), fires bounded follow-up searches to close them, merges
+      // the new sources, and re-synthesizes an improved answer. The first
+      // `passes` rounds also count as verification (emitting verifying /
+      // verification_complete). Fail-soft: any error in a round falls back to
+      // the best answer so far and stops deepening — research never crashes.
+      for (let round = 1; round <= rounds; round++) {
+        let roundFailed = false;
+        try {
+          const citations = bindCitations(answer, sources);
+          // Weakly-backed claims (uncited / single-source / conflicted) drive
+          // corroboration; under-covered sub-questions drive gap-filling.
+          const weakQueries = await deriveVerifyQueries(answer, citations, deps);
+          const gapQueries = uncoveredSubQuestions(subQueries, sources);
+          const followups = boundedFollowups(weakQueries, gapQueries);
+          // Nothing left to deepen → stop early (bounded, honest).
+          if (followups.length === 0) break;
 
-        const found = await Promise.all(
-          verifyQueries.map(async (q) => {
-            try {
-              return await deps.search(q);
-            } catch {
-              return [] as SearchResult[];
-            }
-          }),
-        );
-        const before = sources.length;
-        sources = consolidate([...sources, ...found.flat()], ceiling);
-        const newSources = Math.max(0, sources.length - before);
+          yield { type: "deepening", round, followups };
 
-        // Stream the final planned pass directly to the user; buffer earlier
-        // refinements so the answer is shown exactly once.
-        if (pass === passes) {
-          answer = yield* synthesizeStreamed();
-          streamed = true;
-        } else {
-          answer = await collect(
-            deps.synthesize(query, formatContext(sources)),
+          // Verification owns the first `passes` rounds, and only when there is
+          // an actual weakly-backed claim to corroborate (preserves the existing
+          // verifying / verification_complete contract).
+          const isVerification = round <= passes && weakQueries.length > 0;
+          if (isVerification) {
+            passesRun = round;
+            yield { type: "verifying", pass: round, claims: weakQueries };
+          }
+
+          // Follow-up searches: a thrown search rejects the round (caught below)
+          // so we fall back to the best answer so far — never a partial mess.
+          const found = await Promise.all(
+            followups.map((q) => deps.search(q)),
           );
-        }
+          const before = sources.length;
+          sources = consolidate([...sources, ...found.flat()], ceiling);
+          const newSources = Math.max(0, sources.length - before);
+          deepeningNewSources += newSources;
+          deepeningRoundsRun = round;
 
-        const refined = summarize(bindCitations(answer, sources), pass);
-        yield {
-          type: "verification_complete",
-          pass,
-          newSources,
-          corroborated: refined.corroboratedClaims,
-          uncorroborated: refined.uncitedClaims,
-        };
+          // Stream the final planned round directly to the user; buffer earlier
+          // refinements so the answer is shown exactly once.
+          if (round === rounds) {
+            answer = yield* synthesizeStreamed();
+            streamed = true;
+          } else {
+            answer = await collect(
+              deps.synthesize(query, formatContext(sources)),
+            );
+          }
+
+          if (isVerification) {
+            const refined = summarize(bindCitations(answer, sources), round);
+            yield {
+              type: "verification_complete",
+              pass: round,
+              newSources,
+              corroborated: refined.corroboratedClaims,
+              uncorroborated: refined.uncitedClaims,
+            };
+          }
+        } catch {
+          // Fail-soft: keep the best answer so far and stop deepening.
+          roundFailed = true;
+        }
+        if (roundFailed) break;
       }
 
-      // If verification bailed before the streaming pass (no weak claims left),
-      // the user has not seen a streamed answer yet — present it now.
+      // If deepening bailed before the streaming round (no gaps left, or a round
+      // failed), the user has not seen a streamed answer yet — present it now.
       if (!streamed) {
         answer = yield* synthesizeStreamed();
       }
@@ -520,6 +639,10 @@ export async function* deepResearch(
       sources,
       citations,
       verification: summarize(citations, passesRun),
+      deepening: {
+        rounds: deepeningRoundsRun,
+        newSources: deepeningNewSources,
+      },
     };
   } catch (error) {
     yield {

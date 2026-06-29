@@ -3,12 +3,14 @@ import {
   deepResearch,
   subQueryCount,
   verificationPassCount,
+  deepeningRoundCount,
   sourceCeiling,
   normalizeUrl,
   dedupeResults,
   rankSources,
   bindCitations,
   MAX_VERIFICATION_PASSES,
+  MAX_DEEPENING_ROUNDS,
   MAX_SOURCES,
   type DeepResearchDeps,
   type DeepResearchEvent,
@@ -52,6 +54,20 @@ describe("verificationPassCount", () => {
     // Hard cap protects cost.
     expect(verificationPassCount("deep", 99)).toBe(MAX_VERIFICATION_PASSES);
     expect(verificationPassCount("deep", -5)).toBe(0);
+  });
+});
+
+describe("deepeningRoundCount", () => {
+  test("per-depth defaults (none for quick, lighter for standard)", () => {
+    expect(deepeningRoundCount("quick")).toBe(0);
+    expect(deepeningRoundCount("standard")).toBe(1);
+    expect(deepeningRoundCount("deep")).toBe(2);
+  });
+
+  test("configurable, clamped to [0, cap]", () => {
+    expect(deepeningRoundCount("deep", 0)).toBe(0);
+    expect(deepeningRoundCount("deep", 99)).toBe(MAX_DEEPENING_ROUNDS);
+    expect(deepeningRoundCount("standard", -5)).toBe(0);
   });
 });
 
@@ -478,6 +494,170 @@ describe("deepResearch verification pipeline", () => {
     );
     expect(extractClaims).toHaveBeenCalled();
     expect(searched).toContain("targeted corroboration query here");
+  });
+});
+
+// ── iterative deepening ──────────────────────────────────────────────────────
+
+describe("deepResearch iterative deepening", () => {
+  // Synthesis that reports how many sources it was given (one [n] marker per
+  // source in the formatted context), plus an uncited gap claim so every round
+  // still finds something to deepen on.
+  const countingSynth = async function* (
+    _q: string,
+    context: string,
+  ): AsyncGenerator<string> {
+    const n = (context.match(/\[\d+\]/g) ?? []).length;
+    yield `Synthesis drawn from ${n} sources, with an uncited gap claim that needs more support here.`;
+  };
+
+  function doneDeepening(events: DeepResearchEvent[]) {
+    return doneEvent(events).deepening;
+  }
+
+  test("deep depth deepens: a gap triggers a follow-up search + re-synthesis with a new source", async () => {
+    let searchCount = 0;
+    const events = await run(
+      "a deep question about a complex topic",
+      { depth: "deep", verification: { passes: 0 }, deepening: { rounds: 1 } },
+      {
+        decompose: async (_q, n) =>
+          Array.from({ length: n }, (_, i) => `distinct subquestion ${i}`),
+        // Unique URL per call so follow-ups add genuinely new sources.
+        search: async () => {
+          searchCount++;
+          return [
+            {
+              title: `Source ${searchCount}`,
+              url: `https://src-${searchCount}.com/p`,
+              content: "evidence",
+              score: 0.5,
+            },
+          ];
+        },
+        synthesize: countingSynth,
+      },
+    );
+
+    // A deepening round was announced with follow-up queries.
+    const deepening = events.filter((e) => e.type === "deepening");
+    expect(deepening.length).toBeGreaterThanOrEqual(1);
+    if (deepening[0]?.type === "deepening") {
+      expect(deepening[0].round).toBe(1);
+      expect(deepening[0].followups.length).toBeGreaterThan(0);
+    }
+
+    // It fired follow-up searches beyond the initial 5 sub-queries…
+    expect(searchCount).toBeGreaterThan(subQueryCount("deep"));
+    // …and the final answer incorporated the new sources (more than the initial set).
+    const done = doneEvent(events);
+    expect(done.sources.length).toBeGreaterThan(subQueryCount("deep"));
+    const finalAnswer = events
+      .filter((e) => e.type === "answer_chunk")
+      .map((e) => (e.type === "answer_chunk" ? e.text : ""))
+      .join("");
+    expect(finalAnswer).toContain(`from ${done.sources.length} sources`);
+
+    // Deepening summary surfaced on done (additive).
+    expect(done.deepening.rounds).toBe(1);
+    expect(done.deepening.newSources).toBeGreaterThan(0);
+    // Verification was disabled, so deepening ran independently of it.
+    expect(events.some((e) => e.type === "verifying")).toBe(false);
+  });
+
+  test("deepening round count respects the depth cap", async () => {
+    const events = await run(
+      "deep question with persistent gaps",
+      { depth: "deep", deepening: { rounds: 99 } },
+      {
+        decompose: async (_q, n) =>
+          Array.from({ length: n }, (_, i) => `subquestion topic ${i}`),
+        // Unique URL each call → new weak claims keep appearing, so without a
+        // cap the loop would deepen forever.
+        search: async (q) => [
+          {
+            title: q,
+            url: `https://u-${Math.random()}.com`,
+            content: "c",
+            score: 0.5,
+          },
+        ],
+        synthesize: async function* () {
+          yield "An unsupported assertion that clearly needs more corroboration here.";
+        },
+      },
+    );
+    const deepening = events.filter((e) => e.type === "deepening");
+    expect(deepening.length).toBeLessThanOrEqual(MAX_DEEPENING_ROUNDS);
+    expect(doneDeepening(events).rounds).toBeLessThanOrEqual(
+      MAX_DEEPENING_ROUNDS,
+    );
+  });
+
+  test("quick depth does zero deepening (unchanged single pass)", async () => {
+    let synthCalls = 0;
+    const events = await run(
+      "q",
+      { depth: "quick" },
+      {
+        decompose: async () => ["x"],
+        search: async () => [
+          { title: "T", url: "https://t.com", content: "c", score: 0.5 },
+        ],
+        synthesize: async function* () {
+          synthCalls++;
+          yield "Quick answer with an uncited gap claim that needs more support here.";
+        },
+      },
+    );
+    expect(events.some((e) => e.type === "deepening")).toBe(false);
+    expect(doneDeepening(events).rounds).toBe(0);
+    expect(doneDeepening(events).newSources).toBe(0);
+    expect(synthCalls).toBe(1);
+  });
+
+  test("a thrown follow-up search falls back to the first answer (fail-soft)", async () => {
+    let calls = 0;
+    const events = await run(
+      "q",
+      { depth: "deep", verification: { passes: 0 }, deepening: { rounds: 1 } },
+      {
+        decompose: async (_q, n) =>
+          Array.from({ length: n }, (_, i) => `initial sub ${i}`),
+        search: async () => {
+          calls++;
+          // The 5 initial sub-query searches succeed; the deepening follow-up
+          // search (call 6+) explodes.
+          if (calls <= subQueryCount("deep")) {
+            return [
+              {
+                title: `S${calls}`,
+                url: `https://s${calls}.com`,
+                content: "c",
+                score: 0.5,
+              },
+            ];
+          }
+          throw new Error("follow-up search exploded");
+        },
+        synthesize: countingSynth,
+      },
+    );
+
+    // Never crashed.
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    // A deepening attempt was announced before it failed.
+    expect(events.some((e) => e.type === "deepening")).toBe(true);
+    // Fell back to the FIRST answer (the 5 initial sources), not a re-synthesis
+    // with merged follow-up sources.
+    const finalAnswer = events
+      .filter((e) => e.type === "answer_chunk")
+      .map((e) => (e.type === "answer_chunk" ? e.text : ""))
+      .join("");
+    expect(finalAnswer).toContain(`from ${subQueryCount("deep")} sources`);
+    // The failed round did not count or add sources.
+    expect(doneDeepening(events).rounds).toBe(0);
+    expect(doneDeepening(events).newSources).toBe(0);
   });
 });
 

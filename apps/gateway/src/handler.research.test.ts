@@ -336,6 +336,50 @@ describe("/v1/research idle protection", () => {
     expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
+  test("emits a deepening progress event when a gap drives a follow-up round", async () => {
+    installSearchMock(cannedSearch);
+    // Standard depth runs one deepening round. Route the single engine
+    // entrypoint by prompt: decompose returns real sub-queries; synthesis yields
+    // an uncited gap claim so the round finds something to deepen on.
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        const content = (request.messages ?? [])
+          .map((m) => m.content)
+          .join("\n");
+        let out =
+          "A specific factual claim that clearly needs more corroboration here.";
+        if (content.includes("web-search queries")) {
+          out = '["alpha sub query","beta sub query","gamma sub query"]';
+        } else if (content.includes("check-worthy factual claims")) {
+          out =
+            '["A specific factual claim that clearly needs more corroboration here"]';
+        }
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          stream: (async function* () {
+            yield out;
+          })(),
+        };
+      },
+    });
+    const handler = await makeHandler(
+      { streamIdleTimeoutMs: 2000, requestTimeoutMs: 2000 },
+      engine,
+    );
+    const res = await handler(
+      researchRequest({ query: "q", depth: "standard" }),
+    );
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    // The iterative-deepening round announced itself over SSE.
+    expect(text).toContain("event: deepening");
+    expect(text).toContain("event: done");
+    expect(text).not.toContain("event: error");
+    expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
   test("idle watchdog RESETS on each event — slow-but-progressing stream completes", async () => {
     installSearchMock(cannedSearch);
     // The synthesis stream yields a chunk every 20ms across a span (~120ms) that
