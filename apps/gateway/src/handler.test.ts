@@ -28,6 +28,7 @@ function fakeEngine(overrides: Partial<Engine> = {}): Engine {
     },
     getSavings: () => ({ byProvider: {}, total: 0 }),
     getQuotaRemaining: () => 1,
+    getProviderStats: () => null,
     updatePolicy: () => {},
     probeProviders: async () => [],
     listThreads: () => [],
@@ -1925,5 +1926,166 @@ describe("structured / JSON output", () => {
     );
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type") ?? "").toContain("text/event-stream");
+  });
+});
+
+describe("/v1/models — honest measured provider stats", () => {
+  type ModelEntry = {
+    id: string;
+    owned_by: string;
+    stats: {
+      latency_p95_ms: number | null;
+      throughput_tps: number | null;
+      uptime: number | null;
+      samples: number;
+    };
+  };
+
+  test("stats fields exist and are NULL when no accessor is wired", async () => {
+    const handler = makeHandler();
+    const res = await handler(
+      new Request("http://x/v1/models", { method: "GET" }),
+    );
+    const body = (await res.json()) as { data: ModelEntry[] };
+    expect(body.data.length).toBeGreaterThan(0);
+    for (const m of body.data) {
+      expect(m.stats).toBeDefined();
+      expect(m.stats.latency_p95_ms).toBeNull();
+      expect(m.stats.throughput_tps).toBeNull();
+      expect(m.stats.uptime).toBeNull();
+      expect(m.stats.samples).toBe(0);
+    }
+  });
+
+  test("stats reflect the injected accessor; null-when-insufficient is preserved", async () => {
+    const handler = makeHandler({}, fakeEngine(), {
+      // groq has plenty of samples → measured numbers; everyone else has too few
+      // → metrics stay null while `samples` is carried honestly.
+      getProviderStats: (provider) =>
+        provider === "groq"
+          ? {
+              latencyP95Ms: 123,
+              throughputTps: 45.5,
+              successRate: 0.99,
+              samples: 50,
+            }
+          : {
+              latencyP95Ms: null,
+              throughputTps: null,
+              successRate: null,
+              samples: 1,
+            },
+    });
+    const res = await handler(
+      new Request("http://x/v1/models", { method: "GET" }),
+    );
+    const body = (await res.json()) as { data: ModelEntry[] };
+
+    const measured = body.data.filter((m) => m.stats.samples === 50);
+    const insufficient = body.data.filter((m) => m.stats.samples === 1);
+    expect(measured.length).toBeGreaterThan(0);
+    expect(insufficient.length).toBeGreaterThan(0);
+    for (const m of measured) {
+      expect(m.stats.latency_p95_ms).toBe(123);
+      expect(m.stats.throughput_tps).toBe(45.5);
+      expect(m.stats.uptime).toBe(0.99);
+    }
+    // Honesty: too few samples → metrics null (NOT 0), but the raw count rides along.
+    for (const m of insufficient) {
+      expect(m.stats.latency_p95_ms).toBeNull();
+      expect(m.stats.throughput_tps).toBeNull();
+      expect(m.stats.uptime).toBeNull();
+      expect(m.stats.samples).toBe(1);
+    }
+  });
+});
+
+describe("chat provider routing (OpenRouter-style body → strategy/weights/forced)", () => {
+  type Captured = {
+    provider?: string;
+    strategy?: string;
+    providerWeights?: Record<string, number>;
+  };
+
+  function capturingHandler() {
+    let captured: Captured | undefined;
+    const engine = fakeEngine({
+      async routeAndStream(request) {
+        captured = {
+          provider: request.provider,
+          strategy: request.strategy,
+          providerWeights: request.providerWeights,
+        };
+        return {
+          providerId: "groq",
+          model: "m",
+          traceId: "t",
+          threadId: "th",
+          compileTraceId: undefined,
+          stream: (async function* () {
+            yield "ok";
+          })(),
+        };
+      },
+    });
+    return { handler: makeHandler({}, engine), get: () => captured };
+  }
+
+  async function post(handler: ReturnType<typeof makeHandler>, body: unknown) {
+    const res = await handler(
+      new Request("http://x/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+    await res.text(); // drain the SSE stream
+    return res;
+  }
+
+  const messages = [{ role: "user", content: "hi" }];
+
+  test('sort:"latency" selects the fastest-latency strategy (no forced provider)', async () => {
+    const { handler, get } = capturingHandler();
+    await post(handler, { messages, provider: { sort: "latency" } });
+    expect(get()?.strategy).toBe("fastest");
+    expect(get()?.provider).toBeUndefined();
+  });
+
+  test('sort:"throughput" also maps to fastest (Zintus speed signal is p95)', async () => {
+    const { handler, get } = capturingHandler();
+    await post(handler, { messages, provider: { sort: "throughput" } });
+    expect(get()?.strategy).toBe("fastest");
+  });
+
+  test('sort:"price" maps to the economy strategy', async () => {
+    const { handler, get } = capturingHandler();
+    await post(handler, { messages, provider: { sort: "price" } });
+    expect(get()?.strategy).toBe("economy");
+  });
+
+  test("allow_fallbacks:false pins to order[0] → single provider, no failover", async () => {
+    const { handler, get } = capturingHandler();
+    await post(handler, {
+      messages,
+      provider: { order: ["groq", "gemini"], allow_fallbacks: false },
+    });
+    // Forced to the single top-preference provider → the router yields exactly
+    // one candidate and never fails over to gemini.
+    expect(get()?.provider).toBe("groq");
+    expect(get()?.providerWeights).toBeUndefined();
+  });
+
+  test("order (no sort) maps to descending per-request weights, no forced provider", async () => {
+    const { handler, get } = capturingHandler();
+    await post(handler, { messages, provider: { order: ["gemini", "groq"] } });
+    expect(get()?.provider).toBeUndefined();
+    expect(get()?.providerWeights).toEqual({ gemini: 2, groq: 1 });
+  });
+
+  test("legacy forced-provider STRING still forces that provider", async () => {
+    const { handler, get } = capturingHandler();
+    await post(handler, { messages, provider: "groq" });
+    expect(get()?.provider).toBe("groq");
   });
 });

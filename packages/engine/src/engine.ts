@@ -18,6 +18,7 @@ import {
   createRouter,
   type Router,
   type RouterConfig,
+  type ProviderStats,
 } from "@zintus/router";
 import type {
   ChatMessage,
@@ -211,6 +212,10 @@ export interface Engine {
    *  (daily budget ∧ rolling-minute incl. reservations). Feeds Tokzen's
    *  quota-aware compression dial in the gateway. */
   getQuotaRemaining(provider: ProviderId): number;
+  /** Honest measured router stats (p95 latency / throughput / uptime) for a
+   *  provider over a recent window — null fields until enough samples exist.
+   *  Feeds the OpenRouter-grade `/v1/models` stats block. */
+  getProviderStats(provider: ProviderId): ProviderStats | null;
   updatePolicy(policy: PolicyConfig): void;
   probeProviders(): Promise<Array<{ providerId: ProviderId; ok: boolean }>>;
   listThreads(): Thread[];
@@ -454,6 +459,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
 
     getQuotaRemaining(provider) {
       return router.getQuotaRemaining(provider);
+    },
+
+    getProviderStats(provider) {
+      return router.getProviderStats?.(provider) ?? null;
     },
 
     updatePolicy(policy) {

@@ -235,6 +235,73 @@ export class QuotaLedger {
   }
 
   /**
+   * Honest, MEASURED per-provider stats over a recent window, for the public
+   * `/v1/models` feed. Every metric is `null` when there are fewer than
+   * `minSamples` qualifying rows — never a fabricated 0 or guess:
+   *   • `latencyP95Ms` — p95 over successful, latency-bearing rows (reuses
+   *     {@link recentLatencyP95}); null when < minSamples such rows.
+   *   • `successRate`  — successes / total attempts in the window (0..1); null
+   *     when fewer than `minSamples` total attempts.
+   *   • `throughputTps` — MEDIAN output-tokens-per-second over successful rows
+   *     that recorded BOTH a positive latency and positive output tokens; null
+   *     when < minSamples such rows (a single noisy sample never sets it).
+   *   • `samples` — total attempts observed in the window (may be < minSamples,
+   *     in which case the three metrics above are null).
+   */
+  recentStats(
+    id: ProviderId,
+    opts: { windowMs?: number; minSamples?: number } = {},
+    now = Date.now(),
+  ): {
+    latencyP95Ms: number | null;
+    successRate: number | null;
+    throughputTps: number | null;
+    samples: number;
+  } {
+    const windowMs = opts.windowMs ?? 24 * 60 * 60_000;
+    const minSamples = opts.minSamples ?? 3;
+    const since = now - windowMs;
+
+    const totals = this.sqlite
+      .query(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS successes
+         FROM usage_log
+         WHERE provider_id = ? AND timestamp >= ?`,
+      )
+      .get(id, since) as { total: number; successes: number };
+
+    const successRate =
+      totals.total >= minSamples ? totals.successes / totals.total : null;
+
+    const latencyP95Ms = this.recentLatencyP95(id, { windowMs, minSamples }, now);
+
+    // Throughput: median tokens_out / (latency_ms / 1000) over successful rows
+    // that recorded both. Median (not mean) so one slow/fast outlier can't skew it.
+    const tps = this.sqlite
+      .query(
+        `SELECT tokens_out, latency_ms FROM usage_log
+         WHERE provider_id = ? AND status = 'success'
+           AND latency_ms IS NOT NULL AND latency_ms > 0
+           AND tokens_out > 0 AND timestamp >= ?`,
+      )
+      .all(id, since) as Array<{ tokens_out: number; latency_ms: number }>;
+    let throughputTps: number | null = null;
+    if (tps.length >= minSamples) {
+      const rates = tps
+        .map((r) => r.tokens_out / (r.latency_ms / 1000))
+        .sort((a, b) => a - b);
+      const mid = Math.floor(rates.length / 2);
+      throughputTps =
+        rates.length % 2 === 0
+          ? (rates[mid - 1]! + rates[mid]!) / 2
+          : rates[mid]!;
+    }
+
+    return { latencyP95Ms, successRate, throughputTps, samples: totals.total };
+  }
+
+  /**
    * Count of error/rate-limited attempts in the last `windowMs`. Used for
    * health-aware routing: a provider with a recent error streak is skipped even
    * if it never tripped a formal cooldown.

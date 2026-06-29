@@ -139,4 +139,72 @@ describe("QuotaLedger", () => {
     expect(ledger.isQuotaAvailable("gemini", now)).toBe(false);
     expect(ledger.isQuotaAvailable("gemini", now + 60_001)).toBe(true);
   });
+
+  it("recentStats: null metrics when there are too few samples (honest)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
+    dbPath = join(dir, "quota.db");
+    ledger = new QuotaLedger(dbPath);
+
+    const now = 1_700_000_000_000;
+    // Untouched provider: zero samples → every metric null, samples 0.
+    const empty = ledger.recentStats("groq", {}, now);
+    expect(empty).toEqual({
+      latencyP95Ms: null,
+      successRate: null,
+      throughputTps: null,
+      samples: 0,
+    });
+
+    // Two successes (default minSamples is 3) → still null, never a guess.
+    ledger.recordUsage(
+      "groq",
+      { status: "success", tokensOut: 100, latencyMs: 200 },
+      now,
+    );
+    ledger.recordUsage(
+      "groq",
+      { status: "success", tokensOut: 100, latencyMs: 200 },
+      now,
+    );
+    const two = ledger.recentStats("groq", {}, now);
+    expect(two.samples).toBe(2);
+    expect(two.latencyP95Ms).toBeNull();
+    expect(two.successRate).toBeNull();
+    expect(two.throughputTps).toBeNull();
+  });
+
+  it("recentStats: measured p95 / success-rate / throughput once enough samples", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zintus-test-"));
+    dbPath = join(dir, "quota.db");
+    ledger = new QuotaLedger(dbPath);
+
+    const now = 1_700_000_000_000;
+    // 3 successes (latency 100/200/300 ms, 100 output tokens each) + 1 error.
+    // tokens/sec per success: 1000, 500, 333.3 → median 500.
+    ledger.recordUsage(
+      "groq",
+      { status: "success", tokensOut: 100, latencyMs: 100 },
+      now,
+    );
+    ledger.recordUsage(
+      "groq",
+      { status: "success", tokensOut: 100, latencyMs: 200 },
+      now,
+    );
+    ledger.recordUsage(
+      "groq",
+      { status: "success", tokensOut: 100, latencyMs: 300 },
+      now,
+    );
+    ledger.recordUsage("groq", { status: "error", errorCode: 500 }, now);
+
+    const stats = ledger.recentStats("groq", {}, now);
+    expect(stats.samples).toBe(4);
+    // 3 successes / 4 total attempts.
+    expect(stats.successRate).toBeCloseTo(0.75, 5);
+    // p95 over [100,200,300] → top sample.
+    expect(stats.latencyP95Ms).toBe(300);
+    // median tokens/sec.
+    expect(stats.throughputTps).toBeCloseTo(500, 5);
+  });
 });

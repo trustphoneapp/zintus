@@ -96,4 +96,29 @@ describe("createRouter fastest = real latency", () => {
     await drain(chosen.stream);
     expect(chosen.providerId).toBe("groq");
   });
+
+  test("getProviderStats exposes the ledger's MEASURED stats (null until enough samples)", async () => {
+    const router = createTestRouter([stubProvider("groq", 1, 0)]);
+
+    // Fresh provider: honest-empty shape, never fabricated.
+    expect(router.getProviderStats?.("gemini")).toEqual({
+      latencyP95Ms: null,
+      successRate: null,
+      throughputTps: null,
+      samples: 0,
+    });
+
+    // Seed 3 successful samples (default minSamples = 3) by routing to groq.
+    for (let i = 0; i < 3; i++) {
+      const r = await router.routeAndStream({ messages, provider: "groq" });
+      await drain(r.stream);
+    }
+
+    const stats = router.getProviderStats?.("groq");
+    expect(stats?.samples).toBe(3);
+    // All 3 attempts succeeded → measured 100% success rate (not null now).
+    expect(stats?.successRate).toBe(1);
+    // p95 latency is now measured (a real number, not null).
+    expect(typeof stats?.latencyP95Ms).toBe("number");
+  });
 });

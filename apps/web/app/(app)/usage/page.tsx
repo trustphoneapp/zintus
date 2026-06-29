@@ -8,6 +8,11 @@ import { downloadFile } from "@/lib/download";
 import { PROVIDERS } from "@/lib/providers";
 import { getRemainingQuotaPercent } from "@/lib/quota";
 import { useProviderStatusStore } from "@/lib/store";
+import {
+  DEFAULT_RETENTION_DAYS,
+  fetchGatewayActivity,
+  type ActivityFeed,
+} from "./usage-activity";
 
 const pageStyle: CSSProperties = {
   maxWidth: 900,
@@ -28,6 +33,9 @@ export default function UsagePage() {
   const { gatewayConnected, gatewayProviders, gatewaySavings } = useAppStore();
   const { providers, passphrase, setPassphrase, unlock } = useProviderStatusStore();
   const [traces, setTraces] = useState<GatewayTrace[]>([]);
+  // Durable 30-day feed (GET /v1/activity). `null` feed = not yet loaded /
+  // offline; an empty `data` array = connected but nothing recorded yet.
+  const [activity, setActivity] = useState<ActivityFeed | null>(null);
 
   useEffect(() => {
     void unlock();
@@ -36,14 +44,19 @@ export default function UsagePage() {
   useEffect(() => {
     if (!gatewayConnected) {
       setTraces([]);
+      setActivity(null);
       return;
     }
     let active = true;
-    const load = () =>
-      fetchGatewayTraces(5).then((next) => {
+    const load = () => {
+      void fetchGatewayTraces(5).then((next) => {
         if (active) setTraces(next);
       });
-    void load();
+      void fetchGatewayActivity(50).then((next) => {
+        if (active) setActivity(next);
+      });
+    };
+    load();
     const interval = window.setInterval(load, 5000);
     return () => {
       active = false;
@@ -99,6 +112,9 @@ export default function UsagePage() {
         quotaPercent: r.quota,
       })),
       recentTraces: traces,
+      // Durable 30-day feed (omitted when offline / not yet loaded).
+      activity: activity?.data ?? [],
+      activityRetentionDays: activity?.retentionDays ?? null,
     };
     downloadFile(
       "zintus-usage.json",
@@ -264,9 +280,68 @@ export default function UsagePage() {
           </div>
         ) : null}
 
+        {gatewayConnected ? (
+          <div className="usage-card">
+            <h2>
+              Last {activity?.retentionDays ?? DEFAULT_RETENTION_DAYS} days
+              <span className="usage-stat-label" style={{ fontWeight: 400 }}>
+                {" "}
+                · durable history
+              </span>
+            </h2>
+            <p className="usage-stat-label">
+              Every completed route the gateway has recorded, kept on THIS machine
+              for {activity?.retentionDays ?? DEFAULT_RETENTION_DAYS} days. Free-core: cost is $0;
+              tokens and latency are the real recorded values.
+            </p>
+            {activity && activity.data.length > 0 ? (
+              <div className="usage-list">
+                {activity.data.map((entry) => (
+                  <div key={entry.id} className="usage-row">
+                    <span className="usage-row-name">
+                      {entry.provider ?? "—"}
+                      {entry.model ? ` · ${entry.model}` : ""}
+                    </span>
+                    <span className="usage-row-meta">
+                      {entry.cache_hit ? (
+                        <span className="provider-chip">cache</span>
+                      ) : null}
+                      {entry.tokens.total > 0
+                        ? `${entry.tokens.total.toLocaleString()} tok`
+                        : ""}
+                      {entry.latency_ms != null
+                        ? ` · ${entry.latency_ms}ms`
+                        : ""}
+                      {` · ${new Date(entry.created_at).toLocaleDateString()}`}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="usage-stat-label">
+                {activity
+                  ? "No requests recorded in the last 30 days yet."
+                  : "Gateway offline — durable history unavailable."}
+              </p>
+            )}
+            {activity?.hasMore ? (
+              <p className="usage-stat-label">
+                Showing the {activity.data.length} most recent — more in the
+                store.
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
         {gatewayConnected && traces.length > 0 ? (
           <div className="usage-card">
-            <h2>Recent requests</h2>
+            <h2>
+              This session
+              <span className="usage-stat-label" style={{ fontWeight: 400 }}>
+                {" "}
+                · live trace waterfall
+              </span>
+            </h2>
             <p className="usage-stat-label">
               Last {traces.length} routes — failover waterfall, winning provider,
               and latency.

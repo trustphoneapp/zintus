@@ -9,7 +9,7 @@ import {
   type CatalogModel,
 } from "@zintus/providers";
 import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
-import { redactSecrets } from "@zintus/router";
+import { redactSecrets, type ProviderStats } from "@zintus/router";
 import type { Engine } from "@zintus/engine";
 import {
   detectLocalRuntimes as defaultDetectLocalRuntimes,
@@ -26,6 +26,7 @@ import type {
   ProviderId,
   RequestTrace,
   RouteUsage,
+  RoutingStrategy,
 } from "@zintus/types";
 import {
   textOf,
@@ -44,7 +45,7 @@ import {
   executeMcpToolCall,
   isMcpToolCall,
 } from "./mcp-bridge.js";
-import type { ChatCompletionRequest } from "@zintus/schemas";
+import type { ChatCompletionRequest, ProviderRouting } from "@zintus/schemas";
 import {
   bearerAuthorized,
   resolveCorsOrigin,
@@ -83,8 +84,15 @@ import {
 
 /** Map a catalog model to the enriched, OpenAI-compatible `/v1/models` entry.
  *  The `{ id, object:"model", owned_by }` triple is preserved (OpenAI-compat
- *  contract); every other field is additive metadata. */
-function toModelEntry(m: CatalogModel) {
+ *  contract); every other field is additive metadata.
+ *
+ *  `stats` carries the model PROVIDER's honest, MEASURED performance over a
+ *  recent window (p95 latency, throughput, uptime/success-rate). It is `null`
+ *  when no stats accessor is wired; each individual metric is `null` when the
+ *  provider has too few samples to be truthful (never a fabricated 0 or guess).
+ *  `samples` is the raw attempt count behind the metrics (0 when none, and the
+ *  three metrics are null whenever it is below the accessor's min-sample floor). */
+function toModelEntry(m: CatalogModel, stats?: ProviderStats | null) {
   return {
     // OpenAI-compatible triple — DO NOT drop (contracts.test.ts pins these).
     id: m.id,
@@ -115,6 +123,17 @@ function toModelEntry(m: CatalogModel) {
       badge: dp?.badge ?? "unknown",
       policy_url: dp?.policyUrl ?? "",
     }))(DATA_POLICIES[m.provider]),
+    // ── honest, MEASURED provider performance (null when insufficient data) ──
+    // p95 latency (ms), throughput (output tokens/sec), and uptime (success
+    // rate 0..1) over a recent window for THIS model's provider. Each is null
+    // until the provider has enough recent samples to publish a truthful value;
+    // `samples` is the raw attempt count behind them. Never invented.
+    stats: {
+      latency_p95_ms: stats?.latencyP95Ms ?? null,
+      throughput_tps: stats?.throughputTps ?? null,
+      uptime: stats?.successRate ?? null,
+      samples: stats?.samples ?? 0,
+    },
   };
 }
 
@@ -201,6 +220,69 @@ function toActivityEntry(trace: RequestTrace) {
     // route_reason only when the trace genuinely recorded one.
     ...(extras.routeReason ? { route_reason: extras.routeReason } : {}),
   };
+}
+
+/**
+ * Resolve the chat body's provider-routing knobs into the values threaded to the
+ * engine. Supports BOTH shapes:
+ *   • Legacy Zintus: `provider` is a forced-provider STRING (pins one provider),
+ *     with top-level `strategy` / `provider_weights`.
+ *   • OpenRouter-style: `provider` is an OBJECT `{ order, sort, allow_fallbacks }`,
+ *     mapped onto the SAME strategy / weight / forced-provider machinery:
+ *       - `sort:"latency"` / `sort:"throughput"` → `fastest` (lowest measured p95;
+ *         Zintus's speed signal is p95 latency, and throughput correlates with it —
+ *         we never fabricate a tokens/sec ranking we don't measure per-candidate).
+ *       - `sort:"price"` → `economy` (cheapest paid-equivalent wins).
+ *       - `order` (no `sort`) → descending per-request provider WEIGHTS so the
+ *         router prefers the listed providers in that order.
+ *       - `allow_fallbacks:false` → pin to `order[0]` (a single forced provider →
+ *         exactly one candidate → no failover to other providers).
+ * Honest: an empty/unknown object resolves to plain auto-routing (no fabricated
+ * preference). Explicit top-level `provider_weights` is always preserved.
+ */
+function resolveChatRouting(body: ChatCompletionRequest): {
+  provider?: ProviderId;
+  strategy?: RoutingStrategy | "weighted";
+  providerWeights?: Record<string, number>;
+} {
+  const raw = body.provider;
+  const legacyWeights = body.provider_weights ?? body.providerWeights;
+  // Forced-provider string (or absent) → legacy behaviour, unchanged.
+  if (raw == null || typeof raw === "string") {
+    return {
+      provider: raw ?? undefined,
+      strategy: body.strategy,
+      providerWeights: legacyWeights,
+    };
+  }
+  // OpenRouter-style routing object.
+  const SORT_TO_STRATEGY = {
+    latency: "fastest",
+    throughput: "fastest",
+    price: "economy",
+  } as const satisfies Record<
+    NonNullable<ProviderRouting["sort"]>,
+    RoutingStrategy
+  >;
+  const strategy = raw.sort ? SORT_TO_STRATEGY[raw.sort] : body.strategy;
+  // allow_fallbacks:false pins the request to the top-preference provider so the
+  // router yields a single candidate and never fails over to another provider.
+  const provider =
+    raw.allow_fallbacks === false ? (raw.order?.[0] ?? undefined) : undefined;
+  // `order` without `sort` → descending per-request weights (first = highest).
+  // Skipped when a provider is already pinned (allow_fallbacks:false → single
+  // forced provider, weights moot), when `sort` is given (sort picks the
+  // strategy; a weight map would otherwise force the weighted branch and ignore
+  // the sort), or when the caller already supplied explicit weights.
+  let providerWeights = legacyWeights;
+  if (!provider && raw.order?.length && !raw.sort && !providerWeights) {
+    const weights: Record<string, number> = {};
+    raw.order.forEach((id, i) => {
+      weights[id] = raw.order!.length - i;
+    });
+    providerWeights = weights;
+  }
+  return { provider, strategy, providerWeights };
 }
 
 /**
@@ -478,6 +560,14 @@ export interface GatewayHandlerDeps {
   /** Optional quota-remaining getter for Tokzen dial (0.0–1.0). */
   getQuotaRemaining?: (provider: ProviderId) => number;
   /**
+   * Optional per-provider MEASURED stats accessor for the public `/v1/models`
+   * feed (p95 latency, throughput, uptime/success-rate). Mirrors the
+   * `getQuotaRemaining` injection: production wires it to the router/ledger
+   * (`engine`-side `getProviderStats`); when omitted, `/v1/models` honestly
+   * emits `null` stat fields rather than fabricating numbers.
+   */
+  getProviderStats?: (provider: ProviderId) => ProviderStats | null;
+  /**
    * Returns true once graceful shutdown has begun. While draining, /health
    * reports 503 so load balancers / clients stop routing new traffic here while
    * in-flight streams finish.
@@ -548,6 +638,7 @@ export function createGatewayHandler(
   const onError = deps.onError;
   const metrics = deps.metrics ?? createMetrics();
   const getQuotaRemaining = deps.getQuotaRemaining;
+  const getProviderStats = deps.getProviderStats;
   const getDraining = deps.getDraining;
   const rateLimiter = deps.rateLimiter;
   const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
@@ -940,6 +1031,9 @@ export function createGatewayHandler(
       ...merged.tools,
     ];
     const configsById = merged.configsById;
+    // Resolve forced-provider / OpenRouter-style `provider` object → strategy /
+    // weights / forced provider (see resolveChatRouting).
+    const routing = resolveChatRouting(body);
 
     // Per-request abort: client disconnect OR a connect/start timeout tears down
     // the in-flight upstream fetch (mirrors handleChatCompletions).
@@ -983,14 +1077,14 @@ export function createGatewayHandler(
                 },
                 messages: working,
                 model: body.model,
-                provider: body.provider,
+                provider: routing.provider,
                 mode: body.mode,
                 tools: mergedTools,
                 toolChoice: body.tool_choice,
                 stream: true,
                 virtualKey: body.virtual_key ?? body.virtualKey,
-                providerWeights: body.provider_weights ?? body.providerWeights,
-                strategy: body.strategy,
+                providerWeights: routing.providerWeights,
+                strategy: routing.strategy,
                 blockTrainingProviders: body.block_training,
                 allowTrainingProviders: body.allow_training,
                 keys: body.keys,
@@ -1151,7 +1245,7 @@ export function createGatewayHandler(
               chunkFrame({
                 ...buildUsageMetadata(
                   capturedUsage,
-                  body.strategy,
+                  routing.strategy,
                   lastResult.privacyHonored,
                   lastResult.routeReason,
                 ),
@@ -1235,6 +1329,12 @@ export function createGatewayHandler(
       );
     }
     const body = parsed.data;
+    // Resolve the legacy forced-provider STRING vs. the OpenRouter-style
+    // `provider: { order, sort, allow_fallbacks }` OBJECT into the forced
+    // provider / strategy / weights threaded below (see resolveChatRouting). All
+    // capability gates and the engine call use `routing.provider` (a real
+    // ProviderId or undefined), never the raw union.
+    const routing = resolveChatRouting(body);
 
     const messages = parseMessages(body);
     if (messages.length > maxMessages) {
@@ -1264,7 +1364,7 @@ export function createGatewayHandler(
     const mcpRequested = (body.mcp?.servers?.length ?? 0) > 0;
     // Explicit-provider gate: if the user PICKED a provider, never silently send
     // their image elsewhere — fail clearly if that provider/model can't see it.
-    if (hasImages && body.provider && !supportsVision(body.provider, body.model)) {
+    if (hasImages && routing.provider && !supportsVision(routing.provider, body.model)) {
       return json(request, UNSUPPORTED_VISION_ERROR, 422);
     }
     // Same explicit-provider gate for tools: a tools-bearing request against a
@@ -1272,8 +1372,8 @@ export function createGatewayHandler(
     // dropping the tools and returning a text-only answer.
     if (
       (wantsTools || mcpRequested) &&
-      body.provider &&
-      !supportsTools(body.provider, body.model)
+      routing.provider &&
+      !supportsTools(routing.provider, body.model)
     ) {
       return json(request, UNSUPPORTED_TOOLS_ERROR, 422);
     }
@@ -1294,8 +1394,8 @@ export function createGatewayHandler(
       body.response_format.strict === true;
     if (
       wantsStrictSchema &&
-      body.provider &&
-      structuredOutputLevel(body.provider, body.model) !== "json_schema"
+      routing.provider &&
+      structuredOutputLevel(routing.provider, body.model) !== "json_schema"
     ) {
       return json(request, UNSUPPORTED_STRUCTURED_ERROR, 422);
     }
@@ -1320,7 +1420,7 @@ export function createGatewayHandler(
     let nativeWebSearch = false;
     let effectiveModel = body.model;
     if (body.search?.enabled) {
-      const searchProvider = body.provider;
+      const searchProvider = routing.provider;
       const strategy = getSearchStrategy(searchProvider);
       const depth: SearchDepth = body.search.depth ?? "standard";
       if (strategy === "groq-compound") {
@@ -1363,7 +1463,7 @@ export function createGatewayHandler(
     // for image requests — image base64 never passes through compression, and no
     // (fake) compression savings are reported for image bytes. The original
     // messages (with image blocks intact) flow to the router instead.
-    const selectedProvider = body.provider;
+    const selectedProvider = routing.provider;
     let tokzenResult: Awaited<ReturnType<typeof compress>> | undefined;
     let compressedMessages: ChatMessage[] = [];
     // Tokzen flattens every message to text (textOf) and REPLACES the array —
@@ -1439,7 +1539,7 @@ export function createGatewayHandler(
                   }
                 : undefined,
           model: effectiveModel,
-          provider: body.provider,
+          provider: routing.provider,
           mode: body.mode,
           threadId: body.thread_id,
           webSearch: nativeWebSearch,
@@ -1448,8 +1548,8 @@ export function createGatewayHandler(
           responseFormat: body.response_format,
           stream: body.stream !== false,
           virtualKey: body.virtual_key ?? body.virtualKey,
-          providerWeights: body.provider_weights ?? body.providerWeights,
-          strategy: body.strategy,
+          providerWeights: routing.providerWeights,
+          strategy: routing.strategy,
           blockTrainingProviders: body.block_training,
           allowTrainingProviders: body.allow_training,
           keys: body.keys,
@@ -1663,7 +1763,7 @@ export function createGatewayHandler(
             ? {
                 metadata: buildUsageMetadata(
                   capturedUsage,
-                  body.strategy,
+                  routing.strategy,
                   result.privacyHonored,
                   result.routeReason,
                 ),
@@ -1817,7 +1917,7 @@ export function createGatewayHandler(
             const usagePayload = {
               ...buildUsageMetadata(
                 capturedUsage,
-                body.strategy,
+                routing.strategy,
                 result.privacyHonored,
               ),
               object: "chat.completion.chunk",
@@ -2361,7 +2461,11 @@ export function createGatewayHandler(
 
       return json(request, {
         object: "list",
-        data: models.map(toModelEntry),
+        // Enrich each entry with its provider's honest, MEASURED stats when an
+        // accessor is wired (null fields otherwise — never fabricated).
+        data: models.map((m) =>
+          toModelEntry(m, getProviderStats?.(m.provider) ?? null),
+        ),
       });
     }
 

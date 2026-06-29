@@ -139,6 +139,9 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       // Real, in-flight-aware free-tier quota signal for Tokzen's quota-aware
       // compression dial (was always the hardcoded 1.0 default before wiring).
       getQuotaRemaining: (provider) => engine.getQuotaRemaining(provider),
+      // Honest measured stats (p95 latency / throughput / uptime) behind the
+      // OpenRouter-grade `/v1/models` stats block; null fields until enough samples.
+      getProviderStats: (provider) => engine.getProviderStats(provider),
     }),
   });
 

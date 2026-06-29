@@ -112,6 +112,22 @@ export interface RouterConfig {
 const ERROR_STREAK_THRESHOLD = 3;
 const ERROR_STREAK_WINDOW_MS = 5 * 60_000;
 
+/**
+ * Honest, MEASURED per-provider stats for the public `/v1/models` feed. Every
+ * metric is `null` when there are too few samples to be truthful (see
+ * {@link QuotaLedger.recentStats}). Never a fabricated 0 or guess.
+ */
+export interface ProviderStats {
+  /** p95 latency (ms) over recent successes; null when < minSamples. */
+  latencyP95Ms: number | null;
+  /** successes / total attempts (0..1); null when < minSamples attempts. */
+  successRate: number | null;
+  /** median output tokens/sec; null when < minSamples rows recorded both. */
+  throughputTps: number | null;
+  /** total attempts observed in the recent window (0 when none). */
+  samples: number;
+}
+
 export interface SavingsReport {
   /** Estimated USD avoided per provider by serving free-tier tokens. */
   byProvider: Record<string, number>;
@@ -136,6 +152,12 @@ export interface Router {
    *  currently in-flight reservations. Feeds Tokzen's quota-aware compression
    *  dial (replaces the previously-hardcoded 1.0). */
   getQuotaRemaining(provider: ProviderId): number;
+  /** Honest, MEASURED per-provider stats (p95 latency, success-rate,
+   *  throughput) over a recent window, for the public `/v1/models` feed. Metrics
+   *  are null when there are too few samples to be truthful. Optional so
+   *  lightweight Router fakes (e.g. memory/test stubs) need not implement it; the
+   *  real `createRouter` always provides it. */
+  getProviderStats?(provider: ProviderId): ProviderStats;
 }
 
 const DEFAULT_DB_PATH = join(homedir(), ".zintus", "quota.db");
@@ -523,6 +545,10 @@ export function createRouter(config: RouterConfig = {}): Router {
         );
       }
       return Math.max(0, Math.min(base, minuteRatio));
+    },
+
+    getProviderStats(provider) {
+      return ledger.recentStats(provider);
     },
 
     updatePolicy(policy) {
