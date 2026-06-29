@@ -1,7 +1,12 @@
 import type { Metadata } from "next";
 import { LegalPage, LegalSection } from "@/app/_components/LegalPage";
 
-export const metadata: Metadata = { title: "Terms of Service — Zintus" };
+// DRAFT pending legal review — noindex until counsel finalizes it (the page is
+// visibly labeled DRAFT). Remove `robots` once the terms are in force.
+export const metadata: Metadata = {
+  title: "Terms of Service — Zintus",
+  robots: { index: false, follow: false },
+};
 
 const ulStyle: React.CSSProperties = { margin: "0.5rem 0 0", paddingLeft: "1.25rem" };
 const liStyle: React.CSSProperties = { marginBottom: "0.4rem" };
