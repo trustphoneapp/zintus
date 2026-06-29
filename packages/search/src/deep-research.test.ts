@@ -336,6 +336,126 @@ describe("deepResearch verification pipeline", () => {
     expect(5).toBeLessThanOrEqual(MAX_SOURCES);
   });
 
+  test("falls back to structural extraction when extractClaims throws (fail-soft)", async () => {
+    const searched: string[] = [];
+    const events = await run(
+      "main question about a topic",
+      { depth: "standard" },
+      {
+        decompose: async (_q, n) => Array.from({ length: n }, (_, i) => `s${i}`),
+        search: async (q) => {
+          searched.push(q);
+          return [
+            { title: q, url: `https://u${searched.length}.com`, content: "c" },
+          ];
+        },
+        synthesize: async function* () {
+          yield "A specific factual claim that needs corroboration here.";
+        },
+        // Throws → must not crash research; verification still runs structurally.
+        extractClaims: async () => {
+          throw new Error("extractor unavailable");
+        },
+      },
+    );
+    // Research completed (no error event) and a verification pass still ran.
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.some((e) => e.type === "verifying")).toBe(true);
+    expect(searched.length).toBeGreaterThan(3);
+  });
+
+  // ── conflict detection ──────────────────────────────────────────────────────
+
+  const conflictDeps = (
+    detectConflict: DeepResearchDeps["detectConflict"],
+  ): DeepResearchDeps => ({
+    decompose: async () => ["x"],
+    // Two distinct domains so a [1][2] claim is structurally "corroborated".
+    search: async () => [
+      { title: "A says 10", url: "https://a.com", content: "X is 10", score: 0.9 },
+      { title: "B says 50", url: "https://b.com", content: "X is 50", score: 0.8 },
+    ],
+    synthesize: async function* () {
+      yield "The value of X is disputed [1][2].";
+    },
+    detectConflict,
+  });
+
+  test("contradicting sources → claim flagged conflicted + conflict event", async () => {
+    const detectConflict = mock(async () => true);
+    const events = await run("q", { depth: "quick" }, conflictDeps(detectConflict));
+
+    expect(detectConflict).toHaveBeenCalled();
+    // A conflict progress event was emitted for the disputed claim.
+    const conflict = events.find((e) => e.type === "conflict");
+    expect(conflict?.type).toBe("conflict");
+    if (conflict?.type === "conflict") {
+      expect(conflict.claim).toContain("disputed");
+      expect(conflict.sources.length).toBe(2);
+    }
+
+    const done = doneEvent(events);
+    const claim = done.citations[0];
+    // Conflict refines corroboration — it does NOT relabel it.
+    expect(claim?.corroboration).toBe("corroborated");
+    expect(claim?.conflict).toBe(true);
+    expect(done.verification.conflictedClaims).toBe(1);
+    expect(done.verification.corroboratedClaims).toBe(1);
+  });
+
+  test("agreeing sources → still corroborated, never conflicted", async () => {
+    const detectConflict = mock(async () => false);
+    const events = await run("q", { depth: "quick" }, conflictDeps(detectConflict));
+
+    expect(detectConflict).toHaveBeenCalled();
+    expect(events.some((e) => e.type === "conflict")).toBe(false);
+    const done = doneEvent(events);
+    expect(done.citations[0]?.corroboration).toBe("corroborated");
+    expect(done.citations[0]?.conflict).toBeFalsy();
+    expect(done.verification.conflictedClaims).toBe(0);
+  });
+
+  test("detector that throws defaults to no conflict (never fabricated)", async () => {
+    const events = await run(
+      "q",
+      { depth: "quick" },
+      conflictDeps(async () => {
+        throw new Error("judge unavailable");
+      }),
+    );
+    expect(events.some((e) => e.type === "error")).toBe(false);
+    expect(events.some((e) => e.type === "conflict")).toBe(false);
+    expect(doneEvent(events).verification.conflictedClaims).toBe(0);
+  });
+
+  test("no detectConflict dep → conflict detection is skipped entirely", async () => {
+    const events = await run("q", { depth: "quick" }, conflictDeps(undefined));
+    expect(events.some((e) => e.type === "conflict")).toBe(false);
+    expect(doneEvent(events).verification.conflictedClaims).toBe(0);
+  });
+
+  test("single-source claims are not checked for conflict", async () => {
+    const detectConflict = mock(async () => true);
+    const events = await run(
+      "q",
+      { depth: "quick" },
+      {
+        decompose: async () => ["x"],
+        search: async () => [
+          { title: "Only", url: "https://only.com", content: "c", score: 0.9 },
+        ],
+        synthesize: async function* () {
+          yield "A single-sourced claim [1].";
+        },
+        detectConflict,
+      },
+    );
+    // Only corroborated (≥2 distinct domains) claims are candidates.
+    expect(detectConflict).not.toHaveBeenCalled();
+    expect(events.some((e) => e.type === "conflict")).toBe(false);
+    expect(doneEvent(events).verification.conflictedClaims).toBe(0);
+  });
+
   test("uses extractClaims dep to drive corroboration when provided", async () => {
     const extractClaims = mock(async () => ["targeted corroboration query here"]);
     const searched: string[] = [];

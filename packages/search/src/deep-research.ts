@@ -87,6 +87,14 @@ export interface Citation {
   /** True when no real source backs the claim. */
   uncited: boolean;
   corroboration: Corroboration;
+  /**
+   * True when the corroborating sources CONTRADICT each other on this claim
+   * (detected conservatively, never fabricated). This is a *refinement* of a
+   * `corroborated` claim — corroboration counts the backing domains, conflict
+   * flags that they disagree — so it never relabels the `corroboration` field.
+   * Absent/false means "no conflict detected" (also the default when unsure).
+   */
+  conflict?: boolean;
 }
 
 export interface VerificationSummary {
@@ -95,6 +103,11 @@ export interface VerificationSummary {
   corroboratedClaims: number;
   singleSourceClaims: number;
   uncitedClaims: number;
+  /**
+   * Corroborated claims whose backing sources were found to disagree. A subset
+   * of `corroboratedClaims` (conflict refines corroboration, never relabels it).
+   */
+  conflictedClaims: number;
 }
 
 /**
@@ -116,6 +129,16 @@ export interface DeepResearchDeps {
    * (the existing gateway contract is unchanged).
    */
   extractClaims?: (answer: string) => Promise<string[]>;
+  /**
+   * Optional: judge whether the supplied sources CONTRADICT each other on the
+   * given claim. Returns true ONLY on a clear contradiction; absent, throwing,
+   * or any uncertain verdict means "no conflict" — a conflict is never
+   * fabricated. Calls are bounded by the orchestrator (see MAX_VERIFY_QUERIES).
+   */
+  detectConflict?: (
+    claim: string,
+    sources: ResearchSource[],
+  ) => Promise<boolean>;
 }
 
 export type DeepResearchEvent =
@@ -134,6 +157,9 @@ export type DeepResearchEvent =
       corroborated: number;
       uncorroborated: number;
     }
+  // New: a single claim whose corroborating sources were found to CONTRADICT
+  // each other. Additive — existing clients ignore unknown SSE event types.
+  | { type: "conflict"; claim: string; sources: ResearchSource[] }
   // `done` is enriched with structurally-bound citations + a verification
   // summary. The original `sources` field is preserved (ResearchSource extends
   // SearchResult), so existing consumers keep working.
@@ -283,12 +309,20 @@ function summarize(citations: Citation[], passes: number): VerificationSummary {
   let corroboratedClaims = 0;
   let singleSourceClaims = 0;
   let uncitedClaims = 0;
+  let conflictedClaims = 0;
   for (const c of citations) {
     if (c.corroboration === "corroborated") corroboratedClaims++;
     else if (c.corroboration === "single-source") singleSourceClaims++;
     else uncitedClaims++;
+    if (c.conflict) conflictedClaims++;
   }
-  return { passes, corroboratedClaims, singleSourceClaims, uncitedClaims };
+  return {
+    passes,
+    corroboratedClaims,
+    singleSourceClaims,
+    uncitedClaims,
+    conflictedClaims,
+  };
 }
 
 /**
@@ -302,10 +336,21 @@ async function deriveVerifyQueries(
   citations: Citation[],
   deps: DeepResearchDeps,
 ): Promise<string[]> {
-  let candidates: string[];
+  // Prefer the sharper LLM-based claim extraction when provided, but stay
+  // fail-soft: if it throws or yields nothing usable, fall back to the
+  // structural weakly-backed-claim path so verification never crashes research.
+  let candidates: string[] | null = null;
   if (deps.extractClaims) {
-    candidates = (await deps.extractClaims(answer)).map(stripMarkers);
-  } else {
+    try {
+      const extracted = (await deps.extractClaims(answer))
+        .map(stripMarkers)
+        .filter((s) => s.length > 0);
+      if (extracted.length > 0) candidates = extracted;
+    } catch {
+      candidates = null;
+    }
+  }
+  if (candidates === null) {
     candidates = citations
       .filter((c) => c.corroboration !== "corroborated")
       .map((c) => stripMarkers(c.claim));
@@ -443,6 +488,33 @@ export async function* deepResearch(
     }
 
     const citations = bindCitations(answer, sources);
+
+    // Conflict detection (depth refinement): for claims that ARE corroborated
+    // (≥2 distinct domains back them), check whether those sources actually
+    // AGREE. A claim whose backing sources contradict is flagged `conflict`
+    // (and a `conflict` event is emitted) so the UI can show "sources disagree".
+    // Conservative + bounded: only corroborated claims are checked, the number
+    // of checks is capped by MAX_VERIFY_QUERIES, and any error/uncertain verdict
+    // defaults to NO conflict — a conflict is never fabricated.
+    if (deps.detectConflict) {
+      let checks = 0;
+      for (const c of citations) {
+        if (checks >= MAX_VERIFY_QUERIES) break;
+        if (c.corroboration !== "corroborated") continue;
+        checks++;
+        let conflicted = false;
+        try {
+          conflicted = await deps.detectConflict(stripMarkers(c.claim), c.sources);
+        } catch {
+          conflicted = false;
+        }
+        if (conflicted) {
+          c.conflict = true;
+          yield { type: "conflict", claim: c.claim, sources: c.sources };
+        }
+      }
+    }
+
     yield {
       type: "done",
       sources,

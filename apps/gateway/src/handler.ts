@@ -2220,6 +2220,67 @@ export function createGatewayHandler(
           yield chunk;
         }
       },
+      // Sharper, LLM-based claim extraction that drives the corroboration round
+      // (mirrors decompose: one bounded model call via collectText, threaded
+      // through researchAbort). Bounded to a handful of claims and fail-soft —
+      // on parse/upstream failure it returns [], so deepResearch falls back to
+      // its structural weakly-backed-claim path and research never crashes.
+      extractClaims: async (answer) => {
+        try {
+          const text = await collectText([
+            {
+              role: "user",
+              content:
+                "Extract the check-worthy factual claims from the research answer below. " +
+                "Return ONLY a JSON array of short, self-contained claim strings " +
+                "(at most 6, the most important first), no prose.\n\n" +
+                `Answer:\n${answer}`,
+            },
+          ]);
+          const start = text.indexOf("[");
+          const end = text.lastIndexOf("]");
+          if (start !== -1 && end > start) {
+            const parsed = JSON.parse(text.slice(start, end + 1)) as unknown;
+            if (Array.isArray(parsed)) {
+              return parsed
+                .slice(0, 6)
+                .map((item) => String(item))
+                .filter((s) => s.trim().length > 0);
+            }
+          }
+        } catch {
+          // fail-soft: fall back to structural extraction inside deepResearch
+        }
+        return [];
+      },
+      // Conservative contradiction detector for the conflict-detection pass. One
+      // bounded model call judges whether the corroborating sources AGREE; only
+      // an explicit "CONTRADICT" verdict flags a conflict. Any error/uncertain
+      // verdict → false, so a conflict is never fabricated.
+      detectConflict: async (claim, sources) => {
+        try {
+          const evidence = sources
+            .map(
+              (source, index) =>
+                `[${index + 1}] ${source.title}\n${source.content}`,
+            )
+            .join("\n\n");
+          const text = await collectText([
+            {
+              role: "user",
+              content:
+                "Do the sources below CONTRADICT each other on this specific claim? " +
+                'Reply with exactly one word: "CONTRADICT" only if they clearly ' +
+                'disagree on a verifiable fact; otherwise "AGREE". When unsure, ' +
+                'reply "AGREE".\n\n' +
+                `Claim: ${claim}\n\nSources:\n${evidence}`,
+            },
+          ]);
+          return /\bCONTRADICT\b/i.test(text);
+        } catch {
+          return false; // never fabricate a conflict
+        }
+      },
     };
 
     metrics.recordSearch("deep-research");
