@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   MAX_IMAGES,
+  STRUCTURED_GUARANTEE_CAVEAT,
   buildChatContent,
+  buildResponseFormat,
   formatQuotaUsage,
+  formatStructuredOutput,
   formatTurnSummary,
   loadImages,
+  loadJsonSchema,
   normalizeChatError,
 } from "./chat-content.js";
 
@@ -251,5 +255,157 @@ describe("normalizeChatError", () => {
   it("passes any other error through verbatim", () => {
     expect(normalizeChatError(new Error("boom"))).toBe("boom");
     expect(normalizeChatError("plain string")).toBe("plain string");
+  });
+});
+
+describe("buildResponseFormat", () => {
+  it("returns undefined when no structured output is requested (unchanged text path)", () => {
+    expect(buildResponseFormat({})).toBeUndefined();
+    expect(buildResponseFormat({ json: false })).toBeUndefined();
+  });
+
+  it("maps --json to a json_object response_format request", () => {
+    expect(buildResponseFormat({ json: true })).toEqual({ type: "json_object" });
+  });
+
+  it("maps inline --json-schema to a json_schema request (strict defaults to false)", () => {
+    const rf = buildResponseFormat({
+      jsonSchema: '{"type":"object","properties":{"city":{"type":"string"}}}',
+    });
+    expect(rf).toEqual({
+      type: "json_schema",
+      schema: { type: "object", properties: { city: { type: "string" } } },
+      strict: false,
+    });
+  });
+
+  it("honors --strict (demand a guaranteeing provider) alongside --json-schema", () => {
+    const rf = buildResponseFormat({
+      jsonSchema: '{"type":"object"}',
+      strict: true,
+    });
+    expect(rf).toMatchObject({ type: "json_schema", strict: true });
+  });
+
+  it("prefers a schema over a bare --json when both are passed", () => {
+    const rf = buildResponseFormat({ json: true, jsonSchema: '{"type":"object"}' });
+    expect(rf?.type).toBe("json_schema");
+  });
+});
+
+describe("loadJsonSchema", () => {
+  it("parses an inline JSON object schema", () => {
+    expect(loadJsonSchema('{"type":"object","required":["x"]}')).toEqual({
+      type: "object",
+      required: ["x"],
+    });
+  });
+
+  it("reads a schema from a file path", async () => {
+    const schemaPath = join(dir, "schema.json");
+    await writeFile(
+      schemaPath,
+      JSON.stringify({ type: "object", properties: { n: { type: "number" } } }),
+    );
+    expect(loadJsonSchema(schemaPath)).toEqual({
+      type: "object",
+      properties: { n: { type: "number" } },
+    });
+  });
+
+  it("rejects a non-object schema (array / scalar) with a clear error", () => {
+    expect(() => loadJsonSchema("[1,2,3]")).toThrow(/JSON object/i);
+    expect(() => loadJsonSchema("42")).toThrow(/JSON object/i);
+  });
+
+  it("rejects malformed JSON with a clear, non-stack error", () => {
+    expect(() => loadJsonSchema("{not json")).toThrow(/JSON Schema file path or inline JSON/i);
+  });
+});
+
+describe("formatStructuredOutput", () => {
+  it("pretty-prints valid parsed JSON (2-space indent) to the body", () => {
+    const render = formatStructuredOutput({
+      verdict: {
+        requested: "json_object",
+        servedLevel: "json_object",
+        guaranteed: false,
+        valid: true,
+        repairAttempts: 0,
+      },
+      parsed: { city: "Paris", population: 2_100_000 },
+      raw: '{"city":"Paris","population":2100000}',
+    });
+    expect(render.body).toBe(
+      '{\n  "city": "Paris",\n  "population": 2100000\n}',
+    );
+    expect(render.warnings).toEqual([]);
+    // Transparency note reports requested vs served + guaranteed.
+    expect(render.notes.join("\n")).toContain(
+      "requested json_object · served json_object · guaranteed: false",
+    );
+  });
+
+  it("adds the Gemini-only honesty caveat whenever the level was not guaranteed", () => {
+    const render = formatStructuredOutput({
+      verdict: {
+        requested: "json_schema",
+        servedLevel: "json_object",
+        guaranteed: false,
+        valid: true,
+        repairAttempts: 0,
+      },
+      parsed: { ok: true },
+      raw: '{"ok":true}',
+    });
+    expect(render.notes).toContain(STRUCTURED_GUARANTEE_CAVEAT);
+    expect(STRUCTURED_GUARANTEE_CAVEAT).toMatch(/only Gemini/i);
+  });
+
+  it("omits the caveat when the provider GUARANTEED schema conformance", () => {
+    const render = formatStructuredOutput({
+      verdict: {
+        requested: "json_schema",
+        servedLevel: "json_schema",
+        guaranteed: true,
+        valid: true,
+        repairAttempts: 1,
+      },
+      parsed: { ok: true },
+      raw: '{"ok":true}',
+    });
+    expect(render.notes).not.toContain(STRUCTURED_GUARANTEE_CAVEAT);
+    expect(render.notes.join("\n")).toContain("guaranteed: true");
+  });
+
+  it("warns (NON-FATAL) and echoes the raw output when the result did not conform", () => {
+    const raw = '{"city":123}';
+    const render = formatStructuredOutput({
+      verdict: {
+        requested: "json_schema",
+        servedLevel: "prompt",
+        guaranteed: false,
+        valid: false,
+        repairAttempts: 2,
+        issues: [{ path: "/city", message: "must be string" }],
+      },
+      parsed: undefined,
+      raw,
+    });
+    // No throw: the body is the model's raw output, the failure is a warning.
+    expect(render.body).toBe(raw);
+    expect(render.warnings[0]).toMatch(/did not conform after 2 repair attempt/i);
+    expect(render.warnings.join("\n")).toContain("/city: must be string");
+  });
+
+  it("falls back to raw text (no crash) when there is no engine verdict", () => {
+    const render = formatStructuredOutput({
+      verdict: undefined,
+      parsed: undefined,
+      raw: "not json at all",
+    });
+    expect(render.body).toBe("not json at all");
+    expect(render.warnings).toEqual([]);
+    expect(render.notes).toEqual([]);
   });
 });

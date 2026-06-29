@@ -138,11 +138,21 @@ line below was true at audit time but is now stale; the corrected picture:
 - **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web ❌ (no request UI yet) · Desktop ✅ (JSON toggle, Phase 7) · Mobile ❌**. NOTE the inversion: desktop has a request toggle but web chat does not yet — a known consistency gap (10/10 verdict).
   Engine validate→repair + gateway strict-422 tested. Conservative: only Gemini is
   `json_schema` (close to guaranteed-shape); all others are `json_object` /
-  prompt-level, which is **best-effort, not guaranteed** JSON. **Web has no
-  structured-output UI (❌):** the shared `streamGatewayChat` lib *can* carry a
-  `response_format`, but no web chat surface requests one or renders parsed JSON
-  (verified: no `response_format` in `apps/web/app/**`), so there is nothing a
-  user can drive — library plumbing only. **Desktop/mobile have no JSON UI (❌)**.
+  prompt-level, which is **best-effort, not guaranteed** JSON. **CLI now sends a
+  real model `response_format` (✅):** `zintus chat --json` requests
+  `{ type: "json_object" }` and `--json-schema <file|inline>` (`--strict` to
+  demand a guaranteeing provider) requests `{ type: "json_schema", … }` — threaded
+  through `engine.routeAndStream`, with the validated JSON pretty-printed and a
+  non-conforming result reported as a **non-fatal warning** (never a crash). This
+  is a true model structured-output request, distinct from the older `--json`
+  *output-formatting* flags on other subcommands. Same honesty caveat: only
+  **Gemini** guarantees `json_schema`; other providers degrade to best-effort
+  `json_object`/prompt coercion, validated locally. Unit-tested in
+  `apps/cli/src/commands/chat-content.test.ts`. **Web has no structured-output UI
+  (❌):** the shared `streamGatewayChat` lib *can* carry a `response_format`, but
+  no web chat surface requests one or renders parsed JSON (verified: no
+  `response_format` in `apps/web/app/**`), so there is nothing a user can drive —
+  library plumbing only. **Mobile has no JSON UI (❌)**.
 - **Multimodal image input** — proven on **web + CLI + desktop** (Phase 7;
   EXIF-stripped image blocks to a vision-capable model, hard-error rather than silent
   text-only fallback), and now also **maps to OpenRouter vision models**. **Mobile
