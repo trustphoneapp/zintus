@@ -4216,9 +4216,12 @@ body:has(.dashboard-container) {
   justify-content: center;
   width: 36px;
   height: 36px;
-  border: 0.5px solid var(--c-border);
+  border: 0.5px solid var(--c-border-strong);
   background: var(--color-surface);
-  color: var(--color-text-sub);
+  /* Full-contrast icon: --color-text-sub is muted (and undefined in light mode),
+     which made the paperclip read as a faint dot next to the bold send button.
+     --color-text is defined in both themes and high-contrast. */
+  color: var(--color-text);
   cursor: pointer;
   border-radius: 9px;
 }
@@ -4236,9 +4239,11 @@ body:has(.dashboard-container) {
   justify-content: center;
   width: 36px;
   height: 36px;
-  border: 0.5px solid var(--c-border);
+  border: 0.5px solid var(--c-border-strong);
   background: var(--color-surface);
-  color: var(--color-text-sub);
+  /* Full-contrast icon (see .chat-attach): the muted --color-text-sub made the
+     mic read as a faint dot; --color-text is defined in both light + dark. */
+  color: var(--color-text);
   cursor: pointer;
   border-radius: 9px;
   transition:
