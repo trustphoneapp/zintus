@@ -4,9 +4,10 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { ArrowRight, Check, Copy, Zap } from "lucide-react";
 
-// The CLI runs on Bun (bun:sqlite), so install with Bun — `npm i -g` would put a
-// shim on PATH that can't run under Node. Keep this honest.
-const INSTALL_CMD = "bun install -g zintus";
+// The CLI is not yet published to a registry, so `npm i -g zintus` / `bun add -g`
+// would 404. The honest, working path today is build-from-source with Bun (the
+// CLI uses bun:sqlite). Keep this truthful until the package is actually live.
+const INSTALL_CMD = "bun install && bun run --filter zintus build";
 
 const TERMINAL_LINES = [
   { delay: 0,    type: "prompt", text: "zintus chat" },
@@ -96,7 +97,7 @@ export function Hero() {
                 <span className="t-cmd">{INSTALL_CMD}</span>
               </div>
               <div style={{ marginBottom: 8 }}>
-                <span className="t-ok">✓ zintus@0.2.0 installed</span>
+                <span className="t-ok">✓ built zintus@0.2.0 (beta)</span>
               </div>
               {/* Animated lines */}
               {TERMINAL_LINES.slice(0, visibleLines).map((line, i) => (
@@ -120,7 +121,7 @@ export function Hero() {
 
           {/* Copy install */}
           <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, color: "#4a3070" }}>or install via npm:</span>
+            <span style={{ fontSize: 12, color: "#4a3070" }}>build from source · npm publish coming soon:</span>
             <button
               type="button"
               onClick={() => void copyCmd()}

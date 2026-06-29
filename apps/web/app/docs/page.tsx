@@ -138,9 +138,11 @@ export default function DocsPage() {
         <div className="m-shell">
           <h2 className="m-title">Quickstart</h2>
           <p className="m-subtitle">
-            Install the CLI, run the first-run wizard to add a free provider key, then chat.
+            Build the CLI from source with Bun (npm publish coming soon), run the
+            first-run wizard to add a free provider key, then chat.
           </p>
-          <Terminal>{`$ npm install -g zintus
+          <Terminal>{`$ git clone https://github.com/trustphoneapp/zintus && cd zintus
+$ bun install && bun run --filter zintus build
 $ zintus setup                       # add + validate free provider keys
 $ zintus chat "Hello from Zintus"`}</Terminal>
 

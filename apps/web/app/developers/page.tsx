@@ -79,7 +79,7 @@ export default function DevelopersPage() {
           <div className="m-terminal" style={{ marginTop: "1.25rem" }}>
             <pre>
               <code>
-                {"$ npm install -g zintus\n"}
+                {"$ bun install && bun run --filter zintus build  # npm publish coming soon\n"}
                 {"$ zintus serve   # starts the gateway on :8788"}
               </code>
             </pre>
