@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { downloadFile } from "@/lib/download";
+import { PROVIDERS } from "@/lib/providers";
 import {
   artifactExtension,
   artifactMime,
@@ -14,17 +15,23 @@ import {
   type VersionedArtifact,
 } from "@/lib/artifacts";
 
-/** Curated re-bake targets (real catalog ids + input $/M). The router-native
- *  move: rebuild this artifact on a different provider, with the cost shown up
- *  front as an ESTIMATE (real charge only after the call). */
+/** The real, routable provider ids (the keychain/registry set). Re-bake must
+ *  never write a provider outside this — it's cast to ProviderId downstream and
+ *  poisons the selected-provider state otherwise. */
+const VALID_PROVIDER_IDS = new Set<string>(PROVIDERS.map((p) => p.id));
+
+/** Curated re-bake targets — rebuild this artifact on a different model, cost
+ *  shown up front as an ESTIMATE (real charge only after the call). Every entry
+ *  uses a REAL provider id; Claude/GPT are reached via OpenRouter (BYOK proxy),
+ *  not the non-existent `anthropic`/`openai` providers. The runtime filter is a
+ *  belt-and-braces guard so a stray invalid provider can never be selected. */
 const REBAKE_TARGETS: { id: string; provider: string; pricePerM: number }[] = [
-  { id: "claude-sonnet-4-6", provider: "anthropic", pricePerM: 3.0 },
-  { id: "claude-opus-4-8", provider: "anthropic", pricePerM: 5.0 },
-  { id: "gpt-5-5", provider: "openai", pricePerM: 5.0 },
+  { id: "anthropic/claude-sonnet-4.6", provider: "openrouter", pricePerM: 3.0 },
+  { id: "openai/gpt-5.5", provider: "openrouter", pricePerM: 5.0 },
   { id: "grok-4-3", provider: "xai", pricePerM: 1.25 },
   { id: "gemini-2-5-pro", provider: "gemini", pricePerM: 1.25 },
   { id: "deepseek-v4-flash", provider: "deepseek", pricePerM: 0.14 },
-];
+].filter((t) => VALID_PROVIDER_IDS.has(t.provider));
 import { CodeBlock, Markdown } from "./Markdown";
 import { Icon } from "./Icons";
 
