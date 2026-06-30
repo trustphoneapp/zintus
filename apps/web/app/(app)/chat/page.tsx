@@ -1,14 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useTheme } from "next-themes";
 import { useShallow } from "zustand/react/shallow";
+import type { ResearchDepth } from "@/lib/gateway";
 import { MessageBubble } from "@/app/_components/MessageBubble";
 import { ArtifactPanel } from "@/app/_components/ArtifactPanel";
 import {
-  extractArtifacts,
+  buildArtifactRefeed,
+  extractConversationArtifacts,
   foldArtifactVersions,
-  type Artifact,
+  type ArtifactVersion,
+  type ExtractCacheEntry,
 } from "@/lib/artifacts";
+import {
+  decideSpend,
+  denyReasonText,
+  newArtifactBudget,
+  NO_CONSENT,
+} from "@/lib/artifact-quota";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
 import { StructuredOutputControl } from "@/app/_components/StructuredOutputControl";
 import {
@@ -40,7 +51,7 @@ import {
 } from "@/lib/chat-client";
 import { activeMcpServersForChat, loadMcpServers } from "@/lib/mcp-config";
 import { processImage, MediaError } from "@zintus/media";
-import type { ContentBlock, ImageContentBlock } from "@zintus/types";
+import type { ContentBlock, ImageContentBlock, ProviderId } from "@zintus/types";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -61,9 +72,17 @@ import {
   grantProviderSendConsent,
   hasProviderSendConsent,
 } from "@/lib/consent";
-import { getActiveProject, setActiveProjectId } from "@/lib/projects";
+import {
+  getActiveProject,
+  setActiveProjectId,
+  listProjects,
+  createProject,
+  type Project,
+} from "@/lib/projects";
+import { captureScreenshotFile, screenshotSupported } from "@/lib/screenshot";
 import { loadPresets, type Preset } from "@/lib/presets";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
+import { useSidebarStore } from "@/lib/sidebar-store";
 import {
   useSpeechRecognition,
   appendDictation,
@@ -164,9 +183,27 @@ function searchTooltip(provider: string | null): string {
   }
 }
 
+/** Stable empty reference so the per-thread artifact-edits selector doesn't
+ *  return a fresh object each render (which would thrash zustand subscribers). */
+const EMPTY_ARTIFACT_EDITS: Record<string, ArtifactVersion[]> = {};
+
+/** Client opt-in for artifact mode (re-feed + tag-authoring). Off by default —
+ *  same posture as goal 1's per-request flag. Toggled in settings. */
+function artifactModeEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem("zintus:artifact-mode") === "true";
+  } catch {
+    return false;
+  }
+}
+
 export default function ChatPage() {
   const { settings, hydrate, update: updateSettings } = useSettingsStore();
   const { unlock } = useProviderStatusStore();
+  const router = useRouter();
+  const { theme, setTheme } = useTheme();
+  const toggleSidebar = useSidebarStore((s) => s.toggle);
   // Atomic value selectors — re-render only when these specific fields change
   // (not on unrelated store writes like terminal-line spam or savings updates).
   const threadId = useAppStore((s) => s.threadId);
@@ -185,6 +222,7 @@ export default function ChatPage() {
     dropLastAssistant,
     newChat,
     setSelectedProvider,
+    switchThread,
   } = useAppStore(
     useShallow((s) => ({
       appendMessage: s.appendMessage,
@@ -197,17 +235,27 @@ export default function ChatPage() {
       dropLastAssistant: s.dropLastAssistant,
       newChat: s.newChat,
       setSelectedProvider: s.setSelectedProvider,
+      switchThread: s.switchThread,
     })),
   );
   const messages = useAppStore(
     (state) =>
       state.threads.find((t) => t.id === state.activeThreadId)?.messages ?? [],
   );
+  const activeThreadTitle = useAppStore(
+    (state) =>
+      state.threads.find((t) => t.id === state.activeThreadId)?.title ?? "New chat",
+  );
   const incognito = useAppStore(
     (state) =>
       state.threads.find((t) => t.id === state.activeThreadId)?.incognito ??
       false,
   );
+  // Persisted per-artifact user edits for the active thread (survive reload).
+  const threadArtifactEdits = useAppStore(
+    (state) => state.artifactEdits[state.activeThreadId] ?? EMPTY_ARTIFACT_EDITS,
+  );
+  const addArtifactEdit = useAppStore((state) => state.addArtifactEdit);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [keyManagerOpen, setKeyManagerOpen] = useState(false);
@@ -226,9 +274,23 @@ export default function ChatPage() {
   // menu (which owns the incognito option). Both close on outside click.
   const [moreOpen, setMoreOpen] = useState(false);
   const [newChatMenuOpen, setNewChatMenuOpen] = useState(false);
+  // Composer "+" (Add) menu — screenshot / project / GitHub / skills, plus the
+  // existing file picker. `addProjectSubOpen` reveals the project picker inline.
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [addProjectSubOpen, setAddProjectSubOpen] = useState(false);
+  const [projectList, setProjectList] = useState<Project[]>([]);
+  // Resolved after mount (reads `navigator`) so the control's enabled/disabled
+  // state is stable between SSR and the client.
+  const [canScreenshot, setCanScreenshot] = useState(false);
+  // Gate theme-dependent UI until mount: next-themes returns `undefined` during
+  // SSR, so rendering the resolved theme immediately causes a hydration mismatch.
+  const [mounted, setMounted] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
   const newChatRef = useRef<HTMLDivElement>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Private mode remembers the chat you were in so turning it OFF restores it.
+  const prevThreadIdRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Image blocks of the most recent user turn — kept in memory (NOT persisted to
@@ -254,6 +316,15 @@ export default function ChatPage() {
     return false;
   });
 
+  // Canvas / artifact mode (persisted): adds artifact-authoring instructions to
+  // the prompt and re-feeds the current version on the next turn. Off by default.
+  const [artifactMode, setArtifactMode] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:artifact-mode") === "true";
+    }
+    return false;
+  });
+
   // Tools toggle (persisted): when on, the built-in browser-safe tools
   // (calculator, current_datetime, random_number) are offered to the model and
   // executed locally in a bounded loop. Requires a tool-capable provider.
@@ -262,6 +333,25 @@ export default function ChatPage() {
       return localStorage.getItem("zintus:tools") === "true";
     }
     return false;
+  });
+
+  // Research mode (persisted): when on, the composer routes the prompt to the
+  // real Deep Research surface (/research) at the chosen depth instead of a
+  // normal chat turn. No fake inline research — it runs where the backend lives.
+  const [researchMode, setResearchMode] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:research-mode") === "true";
+    }
+    return false;
+  });
+  const [researchDepth, setResearchDepth] = useState<ResearchDepth>(() => {
+    if (typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem("zintus:research-depth");
+      if (saved === "quick" || saved === "standard" || saved === "deep") {
+        return saved;
+      }
+    }
+    return "standard";
   });
 
   // Structured-output control (persisted): off / json_object / json_schema. In
@@ -312,23 +402,112 @@ export default function ChatPage() {
   // lib/artifacts.ts); ids are namespaced by message so two turns never collide.
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  // Per-message extraction cache: re-parse only the message whose content
+  // changed (a streamed token grows the LAST message; prior ones are cache hits).
+  const artifactCacheRef = useRef<Map<string, ExtractCacheEntry>>(new Map());
   const { artifactList, artifactsByMessage } = useMemo(() => {
-    const flat: Artifact[] = [];
-    const byMessage: Record<string, Artifact[]> = {};
-    for (const m of messages) {
-      if (m.role !== "assistant" || !m.content) continue;
-      const arts = extractArtifacts(m.content).map((a) => ({
-        ...a,
-        id: `${m.id}:${a.id}`,
-      }));
-      if (arts.length > 0) {
-        byMessage[m.id] = arts;
-        flat.push(...arts);
-      }
-    }
+    // While streaming, the last assistant message is mid-write — hold it back
+    // until its fences close so a half-open block doesn't thrash the panel.
+    const streamingId = loading
+      ? [...messages].reverse().find((m) => m.role === "assistant")?.id
+      : undefined;
+    const { flat, byMessage } = extractConversationArtifacts(
+      messages,
+      artifactCacheRef.current,
+      { streamingId },
+    );
     // Fold re-emitted bodies into version histories so one artifact ≠ many.
     return { artifactList: foldArtifactVersions(flat), artifactsByMessage: byMessage };
-  }, [messages]);
+  }, [messages, loading]);
+
+  // Live refs so the send handler can read the CURRENT artifact state without a
+  // stale closure (and without widening the big send useCallback's deps).
+  const artifactListRef = useRef(artifactList);
+  artifactListRef.current = artifactList;
+  const activeArtifactIdRef = useRef(activeArtifactId);
+  activeArtifactIdRef.current = activeArtifactId;
+  const threadArtifactEditsRef = useRef(threadArtifactEdits);
+  threadArtifactEditsRef.current = threadArtifactEdits;
+
+  /** The current artifact's latest version (user edit if any, else the model's),
+   *  serialised as a re-feed block — or null when there's nothing to re-feed. */
+  function currentArtifactRefeed(): string | null {
+    const list = artifactListRef.current;
+    if (list.length === 0) return null;
+    const activeId = activeArtifactIdRef.current;
+    const active =
+      list.find((a) => a.id === activeId) ??
+      list.find((a) => a.versions.some((v) => v.sourceId === activeId)) ??
+      list[list.length - 1];
+    if (!active) return null;
+    const edits = threadArtifactEditsRef.current[active.id] ?? [];
+    const latest =
+      edits.length > 0 ? edits[edits.length - 1] : active.versions[active.versions.length - 1];
+    if (!latest) return null;
+    const modelId = active.id.startsWith("decl:") ? active.id.slice("decl:".length) : active.id;
+    return buildArtifactRefeed({
+      kind: latest.kind,
+      title: latest.title,
+      content: latest.content,
+      language: latest.language,
+      declaredId: modelId,
+    });
+  }
+
+  /** Re-bake the current artifact on another model: pre-load the composer with
+   *  the target model forced + the current version + an instruction, and let the
+   *  user confirm with ⏎ (explicit consent before the spend — the cost is shown). */
+  const handleRebake = useCallback(
+    (targetModel: string, targetProvider: string, estUsd: number) => {
+      const refeed = currentArtifactRefeed();
+      if (!refeed) return;
+      // Resolve the artifact being re-baked (same pick as the re-feed).
+      const list = artifactListRef.current;
+      const activeId = activeArtifactIdRef.current;
+      const active =
+        list.find((a) => a.id === activeId) ??
+        list.find((a) => a.versions.some((v) => v.sourceId === activeId)) ??
+        list[list.length - 1];
+      if (!active) return;
+      // Quota gate: enforce the per-artifact cap + rate. The user clicking
+      // Re-bake (then confirming with ⏎) IS the consent, so consent isn't
+      // required here — but the spend cap still is.
+      const store = useAppStore.getState();
+      const budget = store.artifactBudgets[activeThreadId]?.[active.id] ?? newArtifactBudget();
+      const consent = store.artifactConsents[activeThreadId]?.[active.id] ?? NO_CONSENT;
+      const decision = decideSpend(budget, consent, estUsd, { requireConsent: false });
+      if (!decision.allow) {
+        setNotice({
+          tone: "warn",
+          text: `Re-bake blocked — ${denyReasonText(decision.reason)} (cap $${budget.capUsd.toFixed(2)}, spent $${budget.spentUsd.toFixed(4)}).`,
+        });
+        return;
+      }
+      // Account the estimate now (conservative); the real charge is reconciled
+      // by the normal per-response cost path when the turn runs.
+      store.recordArtifactSpend(activeThreadId, active.id, estUsd);
+      try {
+        localStorage.setItem(
+          "zintus:selected-model",
+          JSON.stringify({ id: targetModel, provider: targetProvider }),
+        );
+      } catch {
+        /* storage unavailable — provider is still forced below */
+      }
+      setSelectedProvider(targetProvider as ProviderId);
+      setInput(
+        `Re-bake this artifact on ${targetModel} — keep it functionally identical, ` +
+          `just regenerate it and re-emit it with the same artifact id.\n\n${refeed}`,
+      );
+      setArtifactPanelOpen(true);
+      setNotice({
+        tone: "ok",
+        text: `Loaded a re-bake on ${targetModel} (~$${estUsd.toFixed(5)} est.). Press ⏎ to run it.`,
+      });
+      inputRef.current?.focus();
+    },
+    [setSelectedProvider, activeThreadId],
+  );
 
   const openArtifact = useCallback((id: string) => {
     setActiveArtifactId(id);
@@ -350,6 +529,8 @@ export default function ChatPage() {
     setLocalMode(!document.cookie.includes("zintus_session="));
     setPresets(loadPresets());
     setActiveProjectName(getActiveProject()?.name ?? null);
+    setCanScreenshot(screenshotSupported());
+    setMounted(true);
   }, [hydrate, unlock]);
 
   // Keep the header's "🔧 N tools active" indicator in sync with the user's MCP
@@ -387,7 +568,7 @@ export default function ChatPage() {
 
   // Dismiss the More / New-chat popovers on an outside click (mirrors ProviderPicker).
   useEffect(() => {
-    if (!moreOpen && !newChatMenuOpen) return;
+    if (!moreOpen && !newChatMenuOpen && !addMenuOpen) return;
     function onClick(event: MouseEvent) {
       const target = event.target as Node;
       if (moreRef.current && !moreRef.current.contains(target)) {
@@ -396,10 +577,14 @@ export default function ChatPage() {
       if (newChatRef.current && !newChatRef.current.contains(target)) {
         setNewChatMenuOpen(false);
       }
+      if (addMenuRef.current && !addMenuRef.current.contains(target)) {
+        setAddMenuOpen(false);
+        setAddProjectSubOpen(false);
+      }
     }
     document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
-  }, [moreOpen, newChatMenuOpen]);
+  }, [moreOpen, newChatMenuOpen, addMenuOpen]);
 
   // Abort any in-flight stream when leaving the page (mirrors /compare, /research).
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -544,6 +729,38 @@ export default function ChatPage() {
     }
   }, []);
 
+  // "Take a screenshot": prompt the browser's screen picker, grab one frame,
+  // then run it through the SAME image pipeline as a file attachment (resize +
+  // EXIF strip + vision guard). Cancelling the picker is a quiet no-op.
+  const handleScreenshot = useCallback(async () => {
+    setAddMenuOpen(false);
+    try {
+      const file = await captureScreenshotFile();
+      await handleFiles([file]);
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : "Couldn't capture the screen.";
+      // A user-cancelled capture shouldn't read as an error.
+      if (!/cancelled/i.test(reason)) {
+        setNotice({ tone: "error", text: reason });
+      }
+    }
+  }, [handleFiles]);
+
+  // "Add to project": make `project` the active project so its instructions lead
+  // this (and the next) chat, and show the header chip. Real, local-first — same
+  // mechanism as the Projects page. No chat is lost; the project just scopes it.
+  const attachToProject = useCallback((project: Project) => {
+    setActiveProjectId(project.id);
+    setActiveProjectName(project.name);
+    setAddMenuOpen(false);
+    setAddProjectSubOpen(false);
+    setNotice({
+      tone: "ok",
+      text: `This chat is now in “${project.name}” — its instructions lead each new chat.`,
+    });
+  }, []);
+
   const streamAssistant = useCallback(
     async (
       assistantId: string,
@@ -622,6 +839,7 @@ export default function ChatPage() {
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
             responseFormat: structuredBuild.responseFormat,
             mcp,
+            artifactMode: artifactModeEnabled(),
             signal: controller.signal,
             onChunk: (text) => {
               streamedText = text;
@@ -792,6 +1010,16 @@ export default function ChatPage() {
     if ((!input.trim() && attachments.length === 0) || loading) {
       return;
     }
+    // Research mode: hand the prompt off to the real Deep Research surface at
+    // the chosen depth (it owns the research backend + consent). Honest — no
+    // fake inline research.
+    if (researchMode && input.trim()) {
+      router.push(
+        `/research?q=${encodeURIComponent(input.trim())}&depth=${researchDepth}`,
+      );
+      setInput("");
+      return;
+    }
     // No usable keys anywhere (browser vault locked/empty AND gateway unconfigured)
     // → guide the user to add one, then retry. Input is preserved.
     const haveBrowserKeys =
@@ -856,12 +1084,20 @@ export default function ChatPage() {
     }
     setNotice(null);
 
+    // Re-feed (goal 4, opt-in): when artifact mode is on, prepend the user's
+    // CURRENT artifact version (incl. local edits) as invisible context so a
+    // follow-up like "make the button bigger" edits the version they're looking
+    // at — not the model's original. Only affects the SENT content; the visible
+    // bubble stays the user's plain text.
+    const refeed = artifactModeEnabled() ? currentArtifactRefeed() : null;
+    const sentUserText = refeed ? `${refeed}\n\n---\n\nMy request: ${userText}` : userText;
+
     // The SENT user content: a block array (text first, then images) when images
     // are attached, else plain text. The gateway reads images from these blocks.
     const userMessageContent: string | ContentBlock[] =
       imageBlocks.length > 0
-        ? buildImageMessageContent(userText, imageBlocks)
-        : userText;
+        ? buildImageMessageContent(sentUserText, imageBlocks)
+        : sentUserText;
 
     // Sanitize the store-derived history before sending: the tools loop can
     // leave empty-content assistant bubbles and adjacent same-role turns that a
@@ -941,6 +1177,9 @@ export default function ChatPage() {
     streamAssistant,
     threadId,
     toolsEnabled,
+    researchMode,
+    researchDepth,
+    router,
   ]);
 
   const regenerate = useCallback(async () => {
@@ -1034,6 +1273,15 @@ export default function ChatPage() {
     .reverse()
     .find((message) => message.role === "assistant")?.id;
 
+  // Thread-header meta (design parity): "N messages · routed via X · saved ~$Y".
+  const routedVia = [...messages]
+    .reverse()
+    .find((m) => m.role === "assistant" && m.providerId)?.providerId;
+  const savedThisChat = messages.reduce(
+    (sum, m) => sum + (m.meta?.savedUsd ?? 0),
+    0,
+  );
+
   // The provider the next send will (likely) hit — used to surface an honest,
   // non-interactive "Vision" capability chip next to the attach control so it's
   // clear up front whether the selected route can actually read an image.
@@ -1042,6 +1290,26 @@ export default function ChatPage() {
   const visionReady = effectiveComposerProvider
     ? providerCanSeeImages(effectiveComposerProvider)
     : false;
+
+  // Private toggle: turning ON opens a fresh empty private chat (and remembers
+  // where you were); turning OFF restores that previous chat exactly as it was.
+  const togglePrivate = useCallback(() => {
+    if (!incognito) {
+      prevThreadIdRef.current = activeThreadId;
+      newChat(true);
+    } else {
+      const prev = prevThreadIdRef.current;
+      const exists =
+        prev != null &&
+        useAppStore.getState().threads.some((t) => t.id === prev);
+      if (exists) {
+        switchThread(prev!);
+      } else {
+        newChat(false);
+      }
+      prevThreadIdRef.current = null;
+    }
+  }, [incognito, activeThreadId, newChat, switchThread]);
 
   const exportThread = useCallback(() => {
     if (messages.length === 0) return;
@@ -1057,9 +1325,29 @@ export default function ChatPage() {
   return (
     <div className="chat-layout">
     <div className="screen chat-screen">
-      {incognito ? (
-        <div className="chat-local-banner chat-incognito-banner">
-          <span>🕶 Incognito — nothing is saved, and only non-training providers are used.</span>
+      {mounted && incognito ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            padding: "8px 16px",
+            background: "var(--c-accent-light)",
+            borderBottom: "0.5px solid var(--c-border)",
+          }}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--c-accent)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--c-accent)",
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            Private · this chat won&apos;t be saved
+          </span>
         </div>
       ) : localMode ? (
         <div className="chat-local-banner">
@@ -1109,7 +1397,23 @@ export default function ChatPage() {
             color: "var(--color-text)",
           }}
         >
-          <span>{incognito ? "Incognito chat" : "Chat"}</span>
+          {/* Hamburger toggles the sidebar (collapse to rail / expand). */}
+          <button
+            type="button"
+            className="chat-header-icon"
+            onClick={toggleSidebar}
+            aria-label="Toggle sidebar"
+            title="Toggle sidebar"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
+          </button>
+          {/* Model/route pill lives in the header (design parity). */}
+          <ProviderPicker />
+          {mounted && incognito ? (
+            <span className="chat-privacy-chip" title="Incognito — nothing saved">
+              🕶 Incognito
+            </span>
+          ) : null}
           {activeProjectName ? (
             <span
               className="chat-privacy-chip"
@@ -1137,79 +1441,26 @@ export default function ChatPage() {
             </span>
           ) : null}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          {/* MCP indicator: shown only when the user has enabled servers with
-              tools. The gateway runs these tools server-side; this links to the
-              settings page to manage them. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* MCP indicator (contextual): only when servers with tools are on. */}
           {mcpToolCount > 0 ? (
             <a
               href="/settings/mcp"
               className="chat-tool-toggle"
               title="MCP tools available to the model this chat — manage in settings"
-              style={{
-                textDecoration: "none",
-                color: "var(--color-purple-light, #7C3AED)",
-              }}
+              style={{ textDecoration: "none", color: "var(--color-purple-light, #7C3AED)" }}
             >
               🔧 {mcpToolCount} tool{mcpToolCount === 1 ? "" : "s"} active
             </a>
           ) : null}
-          {/* New-chat affordance with an incognito option in its menu. */}
-          <div className="composer-picker" ref={newChatRef}>
-            <button
-              type="button"
-              className="chat-tool-toggle"
-              aria-haspopup="menu"
-              aria-expanded={newChatMenuOpen}
-              onClick={() => setNewChatMenuOpen((v) => !v)}
-              title="Start a new chat"
-            >
-              <Icon name="plus" size={13} />
-              New chat
-              <Icon name="chevron-down" size={11} />
-            </button>
-            {newChatMenuOpen ? (
-              <div
-                className="composer-picker-menu"
-                role="menu"
-                style={{ bottom: "auto", top: "calc(100% + 6px)", left: "auto", right: 0 }}
-              >
-                <button
-                  type="button"
-                  className="composer-picker-option"
-                  onClick={() => {
-                    newChat(false);
-                    setNewChatMenuOpen(false);
-                  }}
-                >
-                  <Icon name="plus" size={13} />
-                  <span>New chat</span>
-                </button>
-                <button
-                  type="button"
-                  className={`composer-picker-option${incognito ? " active" : ""}`}
-                  onClick={() => {
-                    newChat(true);
-                    setNewChatMenuOpen(false);
-                  }}
-                  title="Nothing saved, non-training providers only"
-                >
-                  <span aria-hidden>🕶</span>
-                  <span>New incognito chat</span>
-                </button>
-              </div>
-            ) : null}
-          </div>
+          {/* Artifacts toggle (contextual): only when artifacts exist. */}
           {artifactList.length > 0 ? (
             <button
               type="button"
               className={`chat-tool-toggle${artifactPanelOpen ? " active" : ""}`}
               onClick={() => {
-                if (artifactPanelOpen) {
-                  setArtifactPanelOpen(false);
-                } else {
-                  openArtifact(activeArtifactId ?? artifactList[0]!.id);
-                }
+                if (artifactPanelOpen) setArtifactPanelOpen(false);
+                else openArtifact(activeArtifactId ?? artifactList[0]!.id);
               }}
               aria-pressed={artifactPanelOpen}
               aria-label="Toggle the artifacts panel"
@@ -1219,22 +1470,92 @@ export default function ChatPage() {
               Artifacts ({artifactList.length})
             </button>
           ) : null}
-          {messages.length > 0 ? (
-            <button
-              type="button"
-              className="chat-tool-toggle"
-              onClick={exportThread}
-              aria-label="Export this chat as Markdown"
-              title="Export this chat as Markdown"
-            >
-              <Icon name="copy" size={13} />
-              Export
-            </button>
-          ) : null}
+
+          {/* Search ⌘K — opens the global command palette. */}
+          <button
+            type="button"
+            className="chat-header-search"
+            onClick={() =>
+              document.dispatchEvent(
+                new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }),
+              )
+            }
+            title="Search (⌘K)"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+            <span>Search</span>
+            <kbd>⌘K</kbd>
+          </button>
+
+          {/* Share — export this chat as Markdown. */}
+          <button
+            type="button"
+            className="chat-header-icon"
+            onClick={exportThread}
+            disabled={messages.length === 0}
+            aria-label="Export this chat as Markdown"
+            title="Export this chat as Markdown"
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" /><polyline points="16 6 12 2 8 6" /><line x1="12" y1="2" x2="12" y2="15" /></svg>
+          </button>
+
+          {/* Theme toggle (next-themes). */}
+          <button
+            type="button"
+            className="chat-header-icon"
+            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+            aria-label="Toggle theme"
+            title="Toggle light / dark"
+          >
+            {mounted && theme === "light" ? (
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4" /><line x1="12" y1="2" x2="12" y2="4" /><line x1="12" y1="20" x2="12" y2="22" /><line x1="4.2" y1="4.2" x2="5.6" y2="5.6" /><line x1="18.4" y1="18.4" x2="19.8" y2="19.8" /><line x1="2" y1="12" x2="4" y2="12" /><line x1="20" y1="12" x2="22" y2="12" /><line x1="4.2" y1="19.8" x2="5.6" y2="18.4" /><line x1="18.4" y1="5.6" x2="19.8" y2="4.2" /></svg>
+            ) : (
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
+            )}
+          </button>
+
+          {/* Private / incognito — starts a fresh chat in the toggled privacy mode. */}
+          <button
+            type="button"
+            className={`chat-header-icon${mounted && incognito ? " active" : ""}`}
+            onClick={togglePrivate}
+            aria-pressed={incognito}
+            aria-label="Private mode"
+            title={
+              incognito
+                ? "Private mode on — this chat isn't saved. Click to start a normal chat."
+                : "Start a private chat that won't be saved"
+            }
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+          </button>
         </div>
       </div>
 
       <div className="chat-messages">
+        <div className="chat-thread">
+        {messages.length > 0 ? (
+          <div className="chat-thread-head">
+            <h1>{activeThreadTitle}</h1>
+            <div className="chat-thread-meta">
+              <span>{messages.length} message{messages.length === 1 ? "" : "s"}</span>
+              {routedVia ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>routed via {capitalize(routedVia)}</span>
+                </>
+              ) : null}
+              {savedThisChat > 0 ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span className="chat-thread-saved">
+                    saved ~${savedThisChat.toFixed(2)} this chat
+                  </span>
+                </>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
         {messages.length === 0 ? (
           <div className="chat-empty">
             <div className="chat-empty-mark">
@@ -1301,6 +1622,7 @@ export default function ChatPage() {
           ))
         )}
         <div ref={bottomRef} />
+        </div>
       </div>
 
       <div className="chat-composer-wrap">
@@ -1320,18 +1642,18 @@ export default function ChatPage() {
             className="chat-composer-top"
             style={{ gap: 8 }}
           >
-            <ProviderPicker />
-
             <div className="composer-picker" ref={moreRef}>
               <button
                 type="button"
                 className={`chat-tool-toggle${
-                  webSearchEnabled ||
-                  toolsEnabled ||
-                  jsonMode !== "off" ||
-                  activePreset ||
-                  activeProjectName ||
-                  settings.blockTrainingProviders
+                  mounted &&
+                  (webSearchEnabled ||
+                    toolsEnabled ||
+                    researchMode ||
+                    jsonMode !== "off" ||
+                    activePreset ||
+                    activeProjectName ||
+                    settings.blockTrainingProviders)
                     ? " active"
                     : ""
                 }`}
@@ -1397,7 +1719,81 @@ export default function ChatPage() {
                     >
                       🔧 Tools
                     </button>
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${artifactMode ? " active" : ""}`}
+                      aria-pressed={artifactMode}
+                      aria-label="Toggle canvas / artifact mode"
+                      onClick={() => {
+                        setArtifactMode((v) => {
+                          const next = !v;
+                          if (typeof localStorage !== "undefined") {
+                            localStorage.setItem("zintus:artifact-mode", String(next));
+                          }
+                          return next;
+                        });
+                      }}
+                      title="Canvas: the model marks substantial deliverables as editable artifacts, and your current version is fed back on the next turn so edits build on what you're looking at. Off by default."
+                    >
+                      <Icon name="layers" size={13} />
+                      Canvas
+                    </button>
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${researchMode ? " active" : ""}`}
+                      aria-pressed={researchMode}
+                      aria-label="Toggle research mode"
+                      onClick={() => {
+                        setResearchMode((v) => {
+                          const next = !v;
+                          if (typeof localStorage !== "undefined") {
+                            localStorage.setItem("zintus:research-mode", String(next));
+                          }
+                          return next;
+                        });
+                      }}
+                      title="Research: send this prompt to Deep Research — it searches multiple sources, synthesizes, and cites. Runs on the Research page at the depth below."
+                    >
+                      <Icon name="globe" size={13} />
+                      Research
+                    </button>
                   </div>
+
+                  {/* Depth selector — only meaningful when research mode is on. */}
+                  {researchMode ? (
+                    <div style={{ padding: "0 4px 6px" }}>
+                      <div
+                        role="radiogroup"
+                        aria-label="Research depth"
+                        style={{ display: "flex", gap: 6 }}
+                      >
+                        {(
+                          [
+                            { value: "quick", label: "Quick", hint: "1 search · ~10s" },
+                            { value: "standard", label: "Standard", hint: "3 searches · ~30s" },
+                            { value: "deep", label: "Deep", hint: "5 searches · ~60s" },
+                          ] as Array<{ value: ResearchDepth; label: string; hint: string }>
+                        ).map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            role="radio"
+                            aria-checked={researchDepth === option.value}
+                            className={`chat-tool-toggle${researchDepth === option.value ? " active" : ""}`}
+                            onClick={() => {
+                              setResearchDepth(option.value);
+                              if (typeof localStorage !== "undefined") {
+                                localStorage.setItem("zintus:research-depth", option.value);
+                              }
+                            }}
+                            title={option.hint}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
 
                   <StructuredOutputControl
                     mode={jsonMode}
@@ -1577,17 +1973,133 @@ export default function ChatPage() {
                 e.target.value = "";
               }}
             />
-            {/* Icons left: attach sits at the leading edge of the input row. */}
-            <Tooltip content="Attach an image (PNG/JPEG/WebP), a PDF, or a text file">
-              <button
-                type="button"
-                className="chat-attach"
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach an image, PDF, or text file"
-              >
-                <Icon name="paperclip" size={18} />
-              </button>
-            </Tooltip>
+            {/* Composer "+" (Add) menu — design parity. Files, screenshot, and
+                project are real; GitHub + Skills are honestly disabled until
+                those integrations exist (no dead buttons). */}
+            <div className="composer-picker" ref={addMenuRef}>
+              <Tooltip content="Add files, a screenshot, or attach to a project">
+                <button
+                  type="button"
+                  className={`chat-attach${addMenuOpen ? " active" : ""}`}
+                  aria-haspopup="menu"
+                  aria-expanded={addMenuOpen}
+                  aria-label="Add files, screenshot, or project"
+                  onClick={() => {
+                    setAddMenuOpen((v) => {
+                      const next = !v;
+                      if (next) setProjectList(listProjects());
+                      return next;
+                    });
+                    setAddProjectSubOpen(false);
+                  }}
+                >
+                  <Icon name="plus" size={18} />
+                </button>
+              </Tooltip>
+              {addMenuOpen ? (
+                <div
+                  className="composer-picker-menu"
+                  role="menu"
+                  style={{ minWidth: 230, left: 0, right: "auto" }}
+                >
+                  <button
+                    type="button"
+                    className="composer-picker-option"
+                    onClick={() => {
+                      setAddMenuOpen(false);
+                      fileInputRef.current?.click();
+                    }}
+                  >
+                    <Icon name="paperclip" size={14} />
+                    <span>Add files or photos</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="composer-picker-option"
+                    disabled={!canScreenshot}
+                    onClick={() => void handleScreenshot()}
+                    title={
+                      canScreenshot
+                        ? "Capture a screen, window, or tab and attach it (EXIF stripped)"
+                        : "Screen capture needs a Chromium or Firefox desktop browser"
+                    }
+                  >
+                    <Icon name="image" size={14} />
+                    <span>Take a screenshot</span>
+                    {!canScreenshot ? (
+                      <span className="composer-picker-hint">Unsupported</span>
+                    ) : null}
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`composer-picker-option${addProjectSubOpen ? " active" : ""}`}
+                    aria-expanded={addProjectSubOpen}
+                    onClick={() => setAddProjectSubOpen((v) => !v)}
+                  >
+                    <Icon name="layers" size={14} />
+                    <span>Add to project</span>
+                    <Icon name="chevron-down" size={11} />
+                  </button>
+                  {addProjectSubOpen ? (
+                    <div className="composer-project-sub">
+                      {projectList.length === 0 ? (
+                        <p className="composer-picker-empty">No projects yet.</p>
+                      ) : (
+                        projectList.map((project) => (
+                          <button
+                            key={project.id}
+                            type="button"
+                            className={`composer-picker-option${activeProjectName === project.name ? " active" : ""}`}
+                            onClick={() => attachToProject(project)}
+                          >
+                            <span aria-hidden>📁</span>
+                            <span>{project.name}</span>
+                          </button>
+                        ))
+                      )}
+                      <button
+                        type="button"
+                        className="composer-picker-option"
+                        onClick={() => {
+                          const name = window.prompt("New project name");
+                          if (!name?.trim()) return;
+                          const project = createProject({ name: name.trim() });
+                          setProjectList(listProjects());
+                          attachToProject(project);
+                        }}
+                      >
+                        <Icon name="plus" size={14} />
+                        <span>New project…</span>
+                      </button>
+                    </div>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    className="composer-picker-option"
+                    disabled
+                    title="GitHub import isn't connected yet — coming soon."
+                  >
+                    <Icon name="grid" size={14} />
+                    <span>Add from GitHub</span>
+                    <span className="composer-picker-hint">Soon</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    className="composer-picker-option"
+                    disabled
+                    title="Skills aren't available yet — coming soon."
+                  >
+                    <Icon name="zap" size={14} />
+                    <span>Skills</span>
+                    <span className="composer-picker-hint">Soon</span>
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <textarea
               ref={inputRef}
               rows={1}
@@ -1613,7 +2125,11 @@ export default function ChatPage() {
                   void handleFiles(e.clipboardData.files);
                 }
               }}
-              placeholder="Ask anything — routed automatically across your free providers"
+              placeholder={
+                mounted && researchMode
+                  ? `Research mode (${researchDepth}) — ⏎ runs Deep Research on this prompt`
+                  : "Message Zintus…"
+              }
             />
             {/* Voice input (dictation). Honest about support: the Web Speech
                 API is Chromium-only in practice, so when unsupported we show a
@@ -1670,7 +2186,10 @@ export default function ChatPage() {
                   onClick={() => void send()}
                   aria-label="Send message"
                 >
-                  <Icon name="send" size={15} />
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <line x1="12" y1="19" x2="12" y2="5" />
+                    <polyline points="5 12 12 5 19 12" />
+                  </svg>
                 </button>
               </Tooltip>
             )}
@@ -1699,6 +2218,11 @@ export default function ChatPage() {
       <ArtifactPanel
         artifacts={artifactList}
         activeId={activeArtifactId}
+        userVersions={threadArtifactEdits}
+        onSaveVersion={(artifactId, version) =>
+          addArtifactEdit(activeThreadId, artifactId, version)
+        }
+        onRebake={handleRebake}
         onSelect={setActiveArtifactId}
         onClose={() => setArtifactPanelOpen(false)}
       />

@@ -259,6 +259,9 @@ export const ChatCompletionRequestSchema = z.object({
   provider: z.union([ProviderIdSchema, ProviderRoutingSchema]).optional(),
   thread_id: z.string().optional(),
   mode: ContextModeSchema.optional(),
+  // Opt-in artifact/canvas mode: append artifact-authoring instructions to the
+  // system prompt so the model emits ```artifact``` blocks. Default off.
+  artifact_mode: z.boolean().optional(),
   virtual_key: z.string().optional(),
   virtualKey: z.string().optional(),
   provider_weights: z.record(z.string(), z.number()).optional(),

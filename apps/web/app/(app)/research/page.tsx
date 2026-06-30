@@ -59,10 +59,38 @@ export default function ResearchPage() {
   const [consentOpen, setConsentOpen] = useState(false);
 
   const controllerRef = useRef<AbortController | null>(null);
+  // Auto-run when arriving from the chat composer's Research control
+  // (/research?q=…&depth=…). Read straight off the URL (no useSearchParams, so
+  // no Suspense boundary needed); guarded so it only fires once.
+  const autoRanRef = useRef(false);
+  const pendingRunRef = useRef(false);
 
   useEffect(() => {
     return () => controllerRef.current?.abort();
   }, []);
+
+  useEffect(() => {
+    if (autoRanRef.current) return;
+    const sp = new URLSearchParams(window.location.search);
+    const q = sp.get("q");
+    if (!q) return;
+    autoRanRef.current = true;
+    const d = sp.get("depth");
+    if (d === "quick" || d === "standard" || d === "deep") setDepth(d);
+    pendingRunRef.current = true;
+    setQuery(q);
+    // Clean the query string so a refresh doesn't silently re-run + re-spend.
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
+
+  // Fire the run once the query state has been populated from the URL above.
+  useEffect(() => {
+    if (pendingRunRef.current && query.trim() && !running) {
+      pendingRunRef.current = false;
+      void run();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, running]);
 
   const run = useCallback(async () => {
     const trimmed = query.trim();

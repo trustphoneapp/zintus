@@ -8,7 +8,6 @@ import type { UiMessage, ToolCall } from "@/lib/app-store";
 import { formatImageBytes } from "@/lib/image-attachments";
 import { summarizeArtifactBody, type Artifact } from "@/lib/artifacts";
 import { Icon } from "./Icons";
-import { TransparencyStrip } from "./TransparencyStrip";
 import { CompressionBadge } from "./CompressionBadge";
 import { Markdown, CodeBlock } from "./Markdown";
 
@@ -17,6 +16,20 @@ export type { ToolCall };
 /** Strip a provider/owner suffix for a compact model label in the top line. */
 function shortModel(model: string): string {
   return model.replace(/\s*\(.*\)\s*$/, "").trim();
+}
+
+/** Compact USD cost label, e.g. 0.00012 → "$0.00012", 0 → "$0". */
+function fmtCost(usd: number): string {
+  if (usd <= 0) return "$0";
+  if (usd < 0.01) return `$${usd.toFixed(5)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+/** Savings as a % of what the Sonnet baseline would have cost (costUsd +
+ *  savedUsd), e.g. 95. Returns 0 when there's no priced baseline. */
+function savedPercent(costUsd: number, savedUsd: number): number {
+  const baseline = costUsd + savedUsd;
+  return baseline > 0 ? Math.round((savedUsd / baseline) * 100) : 0;
 }
 
 /** Pretty, single-line args for the compact call card; multi-line for the pre. */
@@ -188,6 +201,10 @@ export function MessageBubble({
     ? PROVIDER_BY_ID[message.providerId as ProviderId]
     : null;
   const [copied, setCopied] = useState(false);
+  // The route metadata (provider/model/latency + full transparency strip) is
+  // collapsed behind "details" by default, matching the design — the answer
+  // leads; the receipt is one click away.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const hasContent = Boolean(message.content);
   const hasToolCalls = !isUser && Array.isArray(toolCalls) && toolCalls.length > 0;
   const hasMcpEvents =
@@ -248,61 +265,6 @@ export function MessageBubble({
 
   return (
     <div className={`message-row${isUser ? " user" : ""}`}>
-      {!isUser && (provider || message.meta) ? (
-        <div className="message-meta" style={{ flexWrap: "wrap", rowGap: 4 }}>
-          {provider ? (
-            <span
-              className="message-provider-dot"
-              style={{ background: provider.color }}
-            />
-          ) : null}
-          <span>
-            {(provider?.name ?? message.providerId ?? "Assistant").toUpperCase()}
-            {message.model ? ` · ${shortModel(message.model)}` : ""}
-            {typeof message.compileTokens === "number"
-              ? ` · compile ~${message.compileTokens.toLocaleString()} tok`
-              : ""}
-          </span>
-          {message.meta?.routeReason ? (
-            // The headline "why this provider/model" — the prominent route reason
-            // (full strip with the rest of the trace stays expandable below).
-            <span
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "1px 7px",
-                borderRadius: 999,
-                fontWeight: 600,
-                color: "var(--color-purple-light, #7C3AED)",
-                background:
-                  "color-mix(in oklch, var(--color-purple-light, #7C3AED) 12%, transparent)",
-              }}
-              title="Why the router chose this provider and model for this turn"
-            >
-              {message.meta.routeReason}
-            </span>
-          ) : null}
-          {message.meta ? (
-            <span style={{ opacity: 0.85 }}>· {message.meta.latencyMs}ms</span>
-          ) : null}
-          {message.meta?.privacyHonored === true ? (
-            <span
-              style={{ color: "var(--color-green, #22c55e)", fontWeight: 600 }}
-              title="Private mode was on and served by a no-training provider."
-            >
-              · ✓ private
-            </span>
-          ) : message.meta?.privacyHonored === false ? (
-            <span
-              style={{ color: "var(--color-yellow, #f59e0b)", fontWeight: 600 }}
-              title="Private mode was on, but no no-training provider was available."
-            >
-              · ⚠ private not honored
-            </span>
-          ) : null}
-        </div>
-      ) : null}
       <div className={`message-bubble${isUser ? " user" : ""}`}>
         {message.content ? (
           <>
@@ -423,21 +385,17 @@ export function MessageBubble({
           </div>
         ) : null}
       </div>
-      {!isUser && message.compression ? (
-        <CompressionBadge stats={message.compression} />
-      ) : null}
-      {!isUser && message.meta ? (
-        <TransparencyStrip meta={message.meta} />
-      ) : null}
-      <div className="message-footer">
-        <span className={`message-time${isUser ? " user" : ""}`}>{message.time}</span>
-        {hasContent ? (
+      {/* Assistant footer: actions on the left, a "details" disclosure on the
+          right that reveals the route receipt (design parity). User turns have
+          no footer — just the bubble. */}
+      {!isUser && hasContent ? (
+        <div className="message-footer">
           <div className="message-actions">
             <button type="button" className="message-action" onClick={() => void copy()}>
               <Icon name="copy" size={13} />
               {copied ? "Copied" : "Copy"}
             </button>
-            {!isUser && onRegenerate ? (
+            {onRegenerate ? (
               <button
                 type="button"
                 className="message-action"
@@ -447,19 +405,88 @@ export function MessageBubble({
                 Regenerate
               </button>
             ) : null}
-            {!isUser ? (
-              <button
-                type="button"
-                className="message-action"
-                onClick={report}
-                title="Flag this AI response as offensive, unsafe, or inaccurate"
-              >
-                Report
-              </button>
-            ) : null}
+            <button
+              type="button"
+              className="message-action"
+              onClick={report}
+              title="Flag this AI response as offensive, unsafe, or inaccurate"
+            >
+              Report
+            </button>
           </div>
-        ) : null}
-      </div>
+          {provider || message.meta ? (
+            <button
+              type="button"
+              className="message-details-toggle"
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen((v) => !v)}
+            >
+              <span aria-hidden>{detailsOpen ? "▾" : "▸"}</span> details
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {!isUser && detailsOpen && message.meta ? (
+        (() => {
+          const m = message.meta!;
+          const pct = savedPercent(m.costUsd, m.savedUsd);
+          const modelLabel = shortModel(message.model ?? m.model);
+          return (
+            <div className="message-details">
+              {/* Metrics summary row — model · tokens · latency · cost · ↓saved. */}
+              <div className="message-metrics">
+                <span className="message-metrics-model">
+                  {provider ? (
+                    <span
+                      className="message-provider-dot"
+                      style={{ background: provider.color }}
+                    />
+                  ) : null}
+                  {modelLabel}
+                </span>
+                <span className="message-metrics-nums">
+                  <span>{m.inputTokens.toLocaleString()} tok</span>
+                  <span className="sep">·</span>
+                  <span>{m.latencyMs}ms</span>
+                  <span className="sep">·</span>
+                  <span>{fmtCost(m.costUsd)}</span>
+                </span>
+                {pct > 0 ? (
+                  <span className="message-saved-pill">↓ {pct}% saved</span>
+                ) : null}
+              </div>
+
+              {/* Receipt grid — the route metadata, one click away. */}
+              <div className="message-details-grid">
+                <span className="k">Provider</span>
+                <span className="v">{provider?.name ?? m.provider}</span>
+                <span className="k">Model</span>
+                <span className="v mono">{message.model ?? m.model}</span>
+                <span className="k">Input tokens</span>
+                <span className="v mono">{m.inputTokens.toLocaleString()}</span>
+                <span className="k">Output tokens</span>
+                <span className="v mono">{m.outputTokens.toLocaleString()}</span>
+                <span className="k">Latency</span>
+                <span className="v mono">{m.latencyMs}ms</span>
+                <span className="k">Cost</span>
+                <span className="v mono">{fmtCost(m.costUsd)}</span>
+                <span className="k">Saved vs Claude Sonnet</span>
+                <span className="v mono green">{pct > 0 ? `↓ ${pct}% saved` : "—"}</span>
+                <span className="k">Routing strategy</span>
+                <span className="v">{m.routingStrategy}</span>
+              </div>
+
+              {m.routeReason ? (
+                <p className="message-route-reason">{m.routeReason}</p>
+              ) : null}
+              {message.compression ? (
+                <CompressionBadge stats={message.compression} />
+              ) : null}
+            </div>
+          );
+        })()
+      ) : null}
     </div>
   );
 }

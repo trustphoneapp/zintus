@@ -42,6 +42,18 @@ const DEFAULT_COLUMNS: CompareColumn[] = [
 
 const EMPTY_RESULT: ColumnResult = { text: "", status: "idle" };
 
+/** Compact USD formatter — matches the TransparencyStrip idiom ($0 / 4-dp / 2-dp). */
+function fmtUsd(value: number): string {
+  if (value <= 0) return "$0";
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
+}
+
+/** Drop an owner/version parenthetical for a compact model label. */
+function shortModel(model: string): string {
+  return model.replace(/\s*\(.*\)\s*$/, "").trim();
+}
+
 export default function ComparePage() {
   const router = useRouter();
   const { settings, hydrate } = useSettingsStore();
@@ -231,9 +243,55 @@ export default function ComparePage() {
           : b,
       )
     : null;
+  // Router pick — derived HONESTLY from the real per-run cost the gateway
+  // reported (meta.costUsd). Cheapest wins; ties (e.g. every provider free at
+  // $0) break to the faster one, which is what an economy router would do. This
+  // is NOT a fabricated "winner": it falls straight out of the measured numbers.
+  const routerPick = allDone
+    ? done.reduce((a, b) => {
+        const ca = a.result.meta!.costUsd ?? Infinity;
+        const cb = b.result.meta!.costUsd ?? Infinity;
+        if (ca !== cb) return ca < cb ? a : b;
+        return (a.result.meta!.latencyMs ?? Infinity) <=
+          (b.result.meta!.latencyMs ?? Infinity)
+          ? a
+          : b;
+      })
+    : null;
+  // Did real costs actually differ? Decides whether the blurb says "cheapest at
+  // $X" or honestly admits everything ran free and the tie broke on speed.
+  const costsVary =
+    allDone && new Set(done.map((d) => d.result.meta!.costUsd ?? 0)).size > 1;
 
   return (
     <div className="screen compare-screen">
+      <div>
+        <h1
+          style={{
+            margin: 0,
+            fontSize: 22,
+            fontWeight: 700,
+            letterSpacing: "-0.01em",
+            color: "var(--color-text)",
+          }}
+        >
+          Compare models
+        </h1>
+        <p
+          style={{
+            margin: "8px 0 0",
+            fontSize: 14.5,
+            lineHeight: 1.6,
+            color: "var(--color-text-sub)",
+            maxWidth: 600,
+          }}
+        >
+          Side-by-side on the numbers that decide routing. Run one prompt across
+          providers — the router would pick the highlighted column for a general
+          prompt.
+        </p>
+      </div>
+
       <div className="compare-composer" style={{ position: "sticky", top: 0, zIndex: 2 }}>
         <textarea
           rows={2}
@@ -332,12 +390,51 @@ export default function ComparePage() {
         {columns.map((column) => {
           const result = results[column.id] ?? EMPTY_RESULT;
           const provider = PROVIDER_BY_ID[column.provider];
-          const isWinner = allDone && fastest?.column.id === column.id;
+          const isRouterPick = allDone && routerPick?.column.id === column.id;
           return (
             <div
               key={column.id}
-              className={`compare-column${isWinner ? " winner" : ""}`}
+              className={`compare-column${isRouterPick ? " winner" : ""}`}
+              style={
+                isRouterPick
+                  ? {
+                      background:
+                        "color-mix(in oklch, var(--c-accent) 7%, var(--color-surface))",
+                    }
+                  : undefined
+              }
             >
+              {isRouterPick ? (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "2px 9px",
+                      borderRadius: 999,
+                      background: "var(--c-accent)",
+                      color: "#fff",
+                      fontSize: 10.5,
+                      fontWeight: 700,
+                      letterSpacing: "0.01em",
+                    }}
+                  >
+                    Router pick
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--color-text-muted)" }}>
+                    {costsVary
+                      ? `cheapest · ${fmtUsd(result.meta!.costUsd)}`
+                      : `all free · fastest at ${result.meta!.latencyMs}ms`}
+                  </span>
+                </div>
+              ) : null}
               <div className="compare-column-head">
                 <span
                   className="message-provider-dot"
@@ -452,6 +549,47 @@ export default function ComparePage() {
           );
         })}
       </div>
+
+      {routerPick ? (
+        <p
+          style={{
+            margin: "4px 2px 0",
+            fontSize: 12.5,
+            lineHeight: 1.6,
+            color: "var(--color-text-muted)",
+          }}
+        >
+          For this prompt the router would pick{" "}
+          <span
+            style={{
+              color: "var(--color-text-sub)",
+              fontFamily: "var(--font-mono, ui-monospace, monospace)",
+            }}
+          >
+            {shortModel(routerPick.result.meta!.model)}
+          </span>{" "}
+          on {PROVIDER_BY_ID[routerPick.column.provider].name} —{" "}
+          {costsVary ? (
+            <>
+              cheapest at{" "}
+              <strong style={{ color: "var(--color-green)", fontWeight: 700 }}>
+                {fmtUsd(routerPick.result.meta!.costUsd)}
+              </strong>{" "}
+              for this run, with no Zintus markup on any column.
+            </>
+          ) : (
+            <>
+              every provider ran free ($0 cost), so the router breaks the tie on
+              speed and takes the fastest at{" "}
+              <strong style={{ color: "var(--color-green)", fontWeight: 700 }}>
+                {routerPick.result.meta!.latencyMs}ms
+              </strong>
+              .
+            </>
+          )}
+        </p>
+      ) : null}
+
       <ConsentDialog
         open={consentOpen}
         onCancel={() => setConsentOpen(false)}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { useAppStore } from "@/lib/app-store";
 import {
@@ -8,10 +8,10 @@ import {
   type CatalogModelDto,
 } from "@/lib/gateway";
 import { Icon } from "@/app/_components/Icons";
-import { ModelCard } from "./ModelCard";
 import { ModelDetailPanel } from "./ModelDetailPanel";
 import { CompareTable } from "./CompareTable";
 import {
+  formatContext,
   priceSortKey,
   resolveProviderId,
   SELECTED_MODEL_KEY,
@@ -20,7 +20,118 @@ import {
 } from "./format";
 
 type SortKey = "name" | "price" | "context";
+type TierTab = "all" | "T0" | "T1";
+type Tier = "T0" | "T1" | null;
 const MAX_COMPARE = 3;
+
+// ── Tier derivation ──────────────────────────────────────────────────────────
+// The catalog DTO carries no explicit T0/T1 field, so we derive the router's
+// "default vs escalate" split from a REAL, defensible price signal:
+// `pricing.input_per_1m` (USD per 1M input tokens). Free/local models cost ~$0 at
+// the margin → they're the cheap default tier the router reaches for first (T0).
+// Priced models at or below the threshold are still cheap-default (T0); above it
+// they're the capable models the router only escalates to (T1). An unknown price
+// (`null`) yields NO tier — we never invent one to fill the badge.
+const T0_MAX_INPUT_PER_1M = 1.0;
+
+function modelTier(m: CatalogModelDto): Tier {
+  if (m.free || m.local) return "T0";
+  const input = m.pricing.input_per_1m;
+  if (input == null) return null;
+  return input <= T0_MAX_INPUT_PER_1M ? "T0" : "T1";
+}
+
+// USD-per-1M figure → "$0.30" / "$15" (local mirror of format.ts's private `usd`).
+function usd(value: number): string {
+  if (value === 0) return "$0";
+  if (value < 1) return `$${value.toFixed(2)}`;
+  return `$${Number.isInteger(value) ? value : value.toFixed(2)}`;
+}
+
+// Real price in/out from the catalog. "Free"/"Local"/"—" are honest fallbacks —
+// a null on either side never collapses to $0.
+function priceInOut(m: CatalogModelDto): string {
+  if (m.free) return "Free";
+  if (m.local) return "Local";
+  const { input_per_1m, output_per_1m } = m.pricing;
+  if (input_per_1m == null || output_per_1m == null) return "—";
+  return `${usd(input_per_1m)} / ${usd(output_per_1m)}`;
+}
+
+// "Best for" — a FACTUAL one-liner derived purely from real catalog fields
+// (local/free flags, context window, tier, vision capability). Not a fabricated
+// marketing claim; every branch is grounded in a value the catalog reports.
+function bestFor(m: CatalogModelDto, tier: Tier): string {
+  if (m.local) return "Private, on-device";
+  if (m.free) return "Free everyday use";
+  if (m.context_window >= 1_000_000) return "Long-context work";
+  if (tier === "T1") return "Harder reasoning";
+  if (m.capabilities.vision) return "Multimodal turns";
+  return "Fast, low-cost turns";
+}
+
+// Decorative, deterministic dot hue per provider (purely cosmetic — no data).
+function providerDot(owner: string): string {
+  let h = 0;
+  for (let i = 0; i < owner.length; i += 1) h = (h * 31 + owner.charCodeAt(i)) % 360;
+  return `oklch(68% 0.17 ${h})`;
+}
+
+const TABLE_COLS = "2.2fr 1.1fr 0.7fr 1.3fr 1fr 1.6fr";
+
+function tierBadgeStyle(tier: Tier): CSSProperties {
+  const base: CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minWidth: 30,
+    padding: "2px 6px",
+    borderRadius: 6,
+    fontSize: 11,
+    fontWeight: 700,
+  };
+  if (tier === "T0") {
+    return {
+      ...base,
+      background: "color-mix(in oklch, var(--color-green) 14%, transparent)",
+      color: "var(--color-green)",
+    };
+  }
+  if (tier === "T1") {
+    return { ...base, background: "var(--c-accent-light)", color: "var(--c-accent)" };
+  }
+  return { ...base, background: "transparent", color: "var(--color-text-muted)" };
+}
+
+function TierTabButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      style={{
+        padding: "6px 14px",
+        borderRadius: 999,
+        border: active ? "none" : "0.5px solid var(--c-border)",
+        background: active ? "var(--c-accent)" : "var(--color-elevated)",
+        color: active ? "#fff" : "var(--color-text-sub)",
+        fontSize: 12.5,
+        fontWeight: 600,
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
 
 interface Filters {
   provider: string;
@@ -71,10 +182,12 @@ export default function ModelsPage() {
   const [models, setModels] = useState<CatalogModelDto[] | null>(null);
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [tierTab, setTierTab] = useState<TierTab>("all");
   const [sort, setSort] = useState<SortKey>("name");
   const [detail, setDetail] = useState<CatalogModelDto | null>(null);
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [showCompare, setShowCompare] = useState(false);
+  const [hoverId, setHoverId] = useState<string | null>(null);
 
   // Fetch the full catalog once the gateway is reachable. We pull the whole list
   // and filter client-side for instant chip toggles; an offline/erroring gateway
@@ -104,6 +217,7 @@ export default function ModelsPage() {
     if (!models) return [];
     const q = search.trim().toLowerCase();
     const filtered = models.filter((m) => {
+      if (tierTab !== "all" && modelTier(m) !== tierTab) return false;
       if (filters.provider !== "all" && m.owned_by !== filters.provider) return false;
       if (filters.vision && !m.capabilities.vision) return false;
       if (filters.tools && !m.capabilities.tools) return false;
@@ -123,7 +237,7 @@ export default function ModelsPage() {
       sorted.sort((a, b) => b.context_window - a.context_window);
     }
     return sorted;
-  }, [models, search, filters, sort]);
+  }, [models, search, filters, tierTab, sort]);
 
   const compareModels = useMemo(
     () => (models ?? []).filter((m) => compareIds.includes(m.id)),
@@ -164,14 +278,34 @@ export default function ModelsPage() {
   return (
     <div className="screen providers-screen">
       <div>
-        <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Models</h1>
-        <p style={{ fontSize: 13, color: "var(--color-text-muted)", margin: "4px 0 0" }}>
-          Browse every model your gateway can route to — capabilities, pricing,
-          and data policy. Free core; no paywall.
+        <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em", margin: 0 }}>
+          Models
+        </h1>
+        <p
+          style={{
+            fontSize: 14.5,
+            lineHeight: 1.6,
+            color: "var(--color-text-sub)",
+            margin: "8px 0 0",
+            maxWidth: 600,
+          }}
+        >
+          Every model the router can reach.{" "}
+          <strong style={{ color: "var(--color-text)" }}>T0</strong> handles most turns
+          cheaply; the router escalates to{" "}
+          <strong style={{ color: "var(--color-text)" }}>T1</strong> only when a prompt needs
+          it — that&apos;s where your savings come from.
         </p>
       </div>
 
-      {/* Controls */}
+      {/* Tier tabs */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <TierTabButton label="All models" active={tierTab === "all"} onClick={() => setTierTab("all")} />
+        <TierTabButton label="T0 · Default" active={tierTab === "T0"} onClick={() => setTierTab("T0")} />
+        <TierTabButton label="T1 · Capable" active={tierTab === "T1"} onClick={() => setTierTab("T1")} />
+      </div>
+
+      {/* Controls — real catalog search / provider / sort wiring */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
         <input
           type="search"
@@ -202,6 +336,7 @@ export default function ModelsPage() {
         </label>
       </div>
 
+      {/* Capability filter chips — real vision/tools/structured/free/local wiring */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
         <FilterChip label="Vision" active={filters.vision} onClick={() => setFilters((f) => ({ ...f, vision: !f.vision }))} />
         <FilterChip label="Tools" active={filters.tools} onClick={() => setFilters((f) => ({ ...f, tools: !f.tools }))} />
@@ -242,7 +377,7 @@ export default function ModelsPage() {
           <p style={{ fontSize: 13, color: "var(--color-text-muted)", margin: "8px 0 0" }}>
             {(models ?? []).length === 0
               ? "Your gateway returned an empty catalog."
-              : "Try clearing search or filter chips."}
+              : "Try clearing search, filter chips, or a different tier."}
           </p>
         </div>
       ) : (
@@ -250,16 +385,107 @@ export default function ModelsPage() {
           <div style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
             {visible.length} model{visible.length === 1 ? "" : "s"}
           </div>
-          <div className="providers-grid">
-            {visible.map((m) => (
-              <ModelCard
-                key={m.id}
-                model={m}
-                selectedForCompare={compareIds.includes(m.id)}
-                onOpen={() => setDetail(m)}
-                onToggleCompare={() => toggleCompare(m.id)}
-              />
-            ))}
+
+          {/* Catalog table */}
+          <div
+            style={{
+              border: "0.5px solid var(--c-border)",
+              borderRadius: 14,
+              overflow: "hidden",
+              background: "var(--color-surface)",
+            }}
+          >
+            {/* Header row */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: TABLE_COLS,
+                gap: 12,
+                padding: "11px 18px",
+                background: "var(--color-elevated)",
+                borderBottom: "0.5px solid var(--c-border)",
+                fontSize: 10.5,
+                letterSpacing: "0.07em",
+                textTransform: "uppercase",
+                color: "var(--color-text-muted)",
+                fontWeight: 700,
+              }}
+            >
+              <span>Model</span>
+              <span>Provider</span>
+              <span>Tier</span>
+              <span>Price in / out</span>
+              <span>Context</span>
+              <span>Best for</span>
+            </div>
+
+            {/* Data rows — clicking opens the detail panel (Use / Compare actions). */}
+            {visible.map((m, i) => {
+              const tier = modelTier(m);
+              return (
+                <div
+                  key={m.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setDetail(m)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      setDetail(m);
+                    }
+                  }}
+                  onMouseEnter={() => setHoverId(m.id)}
+                  onMouseLeave={() => setHoverId((id) => (id === m.id ? null : id))}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: TABLE_COLS,
+                    gap: 12,
+                    padding: "14px 18px",
+                    borderBottom: i === visible.length - 1 ? "none" : "0.5px solid var(--c-border)",
+                    alignItems: "center",
+                    cursor: "pointer",
+                    background: hoverId === m.id ? "var(--color-elevated)" : "transparent",
+                  }}
+                >
+                  <span style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+                    <span
+                      aria-hidden
+                      style={{
+                        width: 9,
+                        height: 9,
+                        borderRadius: "50%",
+                        background: providerDot(m.owned_by),
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span
+                      title={m.id}
+                      style={{
+                        fontSize: 13,
+                        color: "var(--color-text)",
+                        fontWeight: 500,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {m.display_name}
+                    </span>
+                  </span>
+                  <span style={{ fontSize: 13, color: "var(--color-text-sub)" }}>{m.owned_by}</span>
+                  <span style={tierBadgeStyle(tier)}>{tier ?? "—"}</span>
+                  <span style={{ fontSize: 12.5, color: "var(--color-text-sub)" }}>
+                    {priceInOut(m)}
+                  </span>
+                  <span style={{ fontSize: 12.5, color: "var(--color-text-sub)" }}>
+                    {formatContext(m.context_window)}
+                  </span>
+                  <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>
+                    {bestFor(m, tier)}
+                  </span>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
