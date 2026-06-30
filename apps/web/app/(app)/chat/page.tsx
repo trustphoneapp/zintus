@@ -5,10 +5,18 @@ import { useShallow } from "zustand/react/shallow";
 import { MessageBubble } from "@/app/_components/MessageBubble";
 import { ArtifactPanel } from "@/app/_components/ArtifactPanel";
 import {
-  extractArtifacts,
+  buildArtifactRefeed,
+  extractConversationArtifacts,
   foldArtifactVersions,
-  type Artifact,
+  type ArtifactVersion,
+  type ExtractCacheEntry,
 } from "@/lib/artifacts";
+import {
+  decideSpend,
+  denyReasonText,
+  newArtifactBudget,
+  NO_CONSENT,
+} from "@/lib/artifact-quota";
 import { ProviderPicker } from "@/app/_components/ProviderPicker";
 import { StructuredOutputControl } from "@/app/_components/StructuredOutputControl";
 import {
@@ -40,7 +48,7 @@ import {
 } from "@/lib/chat-client";
 import { activeMcpServersForChat, loadMcpServers } from "@/lib/mcp-config";
 import { processImage, MediaError } from "@zintus/media";
-import type { ContentBlock, ImageContentBlock } from "@zintus/types";
+import type { ContentBlock, ImageContentBlock, ProviderId } from "@zintus/types";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -164,6 +172,21 @@ function searchTooltip(provider: string | null): string {
   }
 }
 
+/** Stable empty reference so the per-thread artifact-edits selector doesn't
+ *  return a fresh object each render (which would thrash zustand subscribers). */
+const EMPTY_ARTIFACT_EDITS: Record<string, ArtifactVersion[]> = {};
+
+/** Client opt-in for artifact mode (re-feed + tag-authoring). Off by default —
+ *  same posture as goal 1's per-request flag. Toggled in settings. */
+function artifactModeEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem("zintus:artifact-mode") === "true";
+  } catch {
+    return false;
+  }
+}
+
 export default function ChatPage() {
   const { settings, hydrate, update: updateSettings } = useSettingsStore();
   const { unlock } = useProviderStatusStore();
@@ -208,6 +231,11 @@ export default function ChatPage() {
       state.threads.find((t) => t.id === state.activeThreadId)?.incognito ??
       false,
   );
+  // Persisted per-artifact user edits for the active thread (survive reload).
+  const threadArtifactEdits = useAppStore(
+    (state) => state.artifactEdits[state.activeThreadId] ?? EMPTY_ARTIFACT_EDITS,
+  );
+  const addArtifactEdit = useAppStore((state) => state.addArtifactEdit);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [keyManagerOpen, setKeyManagerOpen] = useState(false);
@@ -250,6 +278,15 @@ export default function ChatPage() {
   const [webSearchEnabled, setWebSearchEnabled] = useState(() => {
     if (typeof localStorage !== "undefined") {
       return localStorage.getItem("zintus:web-search") === "true";
+    }
+    return false;
+  });
+
+  // Canvas / artifact mode (persisted): adds artifact-authoring instructions to
+  // the prompt and re-feeds the current version on the next turn. Off by default.
+  const [artifactMode, setArtifactMode] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:artifact-mode") === "true";
     }
     return false;
   });
@@ -312,23 +349,112 @@ export default function ChatPage() {
   // lib/artifacts.ts); ids are namespaced by message so two turns never collide.
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
   const [activeArtifactId, setActiveArtifactId] = useState<string | null>(null);
+  // Per-message extraction cache: re-parse only the message whose content
+  // changed (a streamed token grows the LAST message; prior ones are cache hits).
+  const artifactCacheRef = useRef<Map<string, ExtractCacheEntry>>(new Map());
   const { artifactList, artifactsByMessage } = useMemo(() => {
-    const flat: Artifact[] = [];
-    const byMessage: Record<string, Artifact[]> = {};
-    for (const m of messages) {
-      if (m.role !== "assistant" || !m.content) continue;
-      const arts = extractArtifacts(m.content).map((a) => ({
-        ...a,
-        id: `${m.id}:${a.id}`,
-      }));
-      if (arts.length > 0) {
-        byMessage[m.id] = arts;
-        flat.push(...arts);
-      }
-    }
+    // While streaming, the last assistant message is mid-write — hold it back
+    // until its fences close so a half-open block doesn't thrash the panel.
+    const streamingId = loading
+      ? [...messages].reverse().find((m) => m.role === "assistant")?.id
+      : undefined;
+    const { flat, byMessage } = extractConversationArtifacts(
+      messages,
+      artifactCacheRef.current,
+      { streamingId },
+    );
     // Fold re-emitted bodies into version histories so one artifact ≠ many.
     return { artifactList: foldArtifactVersions(flat), artifactsByMessage: byMessage };
-  }, [messages]);
+  }, [messages, loading]);
+
+  // Live refs so the send handler can read the CURRENT artifact state without a
+  // stale closure (and without widening the big send useCallback's deps).
+  const artifactListRef = useRef(artifactList);
+  artifactListRef.current = artifactList;
+  const activeArtifactIdRef = useRef(activeArtifactId);
+  activeArtifactIdRef.current = activeArtifactId;
+  const threadArtifactEditsRef = useRef(threadArtifactEdits);
+  threadArtifactEditsRef.current = threadArtifactEdits;
+
+  /** The current artifact's latest version (user edit if any, else the model's),
+   *  serialised as a re-feed block — or null when there's nothing to re-feed. */
+  function currentArtifactRefeed(): string | null {
+    const list = artifactListRef.current;
+    if (list.length === 0) return null;
+    const activeId = activeArtifactIdRef.current;
+    const active =
+      list.find((a) => a.id === activeId) ??
+      list.find((a) => a.versions.some((v) => v.sourceId === activeId)) ??
+      list[list.length - 1];
+    if (!active) return null;
+    const edits = threadArtifactEditsRef.current[active.id] ?? [];
+    const latest =
+      edits.length > 0 ? edits[edits.length - 1] : active.versions[active.versions.length - 1];
+    if (!latest) return null;
+    const modelId = active.id.startsWith("decl:") ? active.id.slice("decl:".length) : active.id;
+    return buildArtifactRefeed({
+      kind: latest.kind,
+      title: latest.title,
+      content: latest.content,
+      language: latest.language,
+      declaredId: modelId,
+    });
+  }
+
+  /** Re-bake the current artifact on another model: pre-load the composer with
+   *  the target model forced + the current version + an instruction, and let the
+   *  user confirm with ⏎ (explicit consent before the spend — the cost is shown). */
+  const handleRebake = useCallback(
+    (targetModel: string, targetProvider: string, estUsd: number) => {
+      const refeed = currentArtifactRefeed();
+      if (!refeed) return;
+      // Resolve the artifact being re-baked (same pick as the re-feed).
+      const list = artifactListRef.current;
+      const activeId = activeArtifactIdRef.current;
+      const active =
+        list.find((a) => a.id === activeId) ??
+        list.find((a) => a.versions.some((v) => v.sourceId === activeId)) ??
+        list[list.length - 1];
+      if (!active) return;
+      // Quota gate: enforce the per-artifact cap + rate. The user clicking
+      // Re-bake (then confirming with ⏎) IS the consent, so consent isn't
+      // required here — but the spend cap still is.
+      const store = useAppStore.getState();
+      const budget = store.artifactBudgets[activeThreadId]?.[active.id] ?? newArtifactBudget();
+      const consent = store.artifactConsents[activeThreadId]?.[active.id] ?? NO_CONSENT;
+      const decision = decideSpend(budget, consent, estUsd, { requireConsent: false });
+      if (!decision.allow) {
+        setNotice({
+          tone: "warn",
+          text: `Re-bake blocked — ${denyReasonText(decision.reason)} (cap $${budget.capUsd.toFixed(2)}, spent $${budget.spentUsd.toFixed(4)}).`,
+        });
+        return;
+      }
+      // Account the estimate now (conservative); the real charge is reconciled
+      // by the normal per-response cost path when the turn runs.
+      store.recordArtifactSpend(activeThreadId, active.id, estUsd);
+      try {
+        localStorage.setItem(
+          "zintus:selected-model",
+          JSON.stringify({ id: targetModel, provider: targetProvider }),
+        );
+      } catch {
+        /* storage unavailable — provider is still forced below */
+      }
+      setSelectedProvider(targetProvider as ProviderId);
+      setInput(
+        `Re-bake this artifact on ${targetModel} — keep it functionally identical, ` +
+          `just regenerate it and re-emit it with the same artifact id.\n\n${refeed}`,
+      );
+      setArtifactPanelOpen(true);
+      setNotice({
+        tone: "ok",
+        text: `Loaded a re-bake on ${targetModel} (~$${estUsd.toFixed(5)} est.). Press ⏎ to run it.`,
+      });
+      inputRef.current?.focus();
+    },
+    [setSelectedProvider, activeThreadId],
+  );
 
   const openArtifact = useCallback((id: string) => {
     setActiveArtifactId(id);
@@ -622,6 +748,7 @@ export default function ChatPage() {
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
             responseFormat: structuredBuild.responseFormat,
             mcp,
+            artifactMode: artifactModeEnabled(),
             signal: controller.signal,
             onChunk: (text) => {
               streamedText = text;
@@ -856,12 +983,20 @@ export default function ChatPage() {
     }
     setNotice(null);
 
+    // Re-feed (goal 4, opt-in): when artifact mode is on, prepend the user's
+    // CURRENT artifact version (incl. local edits) as invisible context so a
+    // follow-up like "make the button bigger" edits the version they're looking
+    // at — not the model's original. Only affects the SENT content; the visible
+    // bubble stays the user's plain text.
+    const refeed = artifactModeEnabled() ? currentArtifactRefeed() : null;
+    const sentUserText = refeed ? `${refeed}\n\n---\n\nMy request: ${userText}` : userText;
+
     // The SENT user content: a block array (text first, then images) when images
     // are attached, else plain text. The gateway reads images from these blocks.
     const userMessageContent: string | ContentBlock[] =
       imageBlocks.length > 0
-        ? buildImageMessageContent(userText, imageBlocks)
-        : userText;
+        ? buildImageMessageContent(sentUserText, imageBlocks)
+        : sentUserText;
 
     // Sanitize the store-derived history before sending: the tools loop can
     // leave empty-content assistant bubbles and adjacent same-role turns that a
@@ -1397,6 +1532,25 @@ export default function ChatPage() {
                     >
                       🔧 Tools
                     </button>
+                    <button
+                      type="button"
+                      className={`chat-tool-toggle${artifactMode ? " active" : ""}`}
+                      aria-pressed={artifactMode}
+                      aria-label="Toggle canvas / artifact mode"
+                      onClick={() => {
+                        setArtifactMode((v) => {
+                          const next = !v;
+                          if (typeof localStorage !== "undefined") {
+                            localStorage.setItem("zintus:artifact-mode", String(next));
+                          }
+                          return next;
+                        });
+                      }}
+                      title="Canvas: the model marks substantial deliverables as editable artifacts, and your current version is fed back on the next turn so edits build on what you're looking at. Off by default."
+                    >
+                      <Icon name="layers" size={13} />
+                      Canvas
+                    </button>
                   </div>
 
                   <StructuredOutputControl
@@ -1699,6 +1853,11 @@ export default function ChatPage() {
       <ArtifactPanel
         artifacts={artifactList}
         activeId={activeArtifactId}
+        userVersions={threadArtifactEdits}
+        onSaveVersion={(artifactId, version) =>
+          addArtifactEdit(activeThreadId, artifactId, version)
+        }
+        onRebake={handleRebake}
         onSelect={setActiveArtifactId}
         onClose={() => setArtifactPanelOpen(false)}
       />

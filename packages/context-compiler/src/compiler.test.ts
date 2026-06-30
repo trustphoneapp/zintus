@@ -138,4 +138,25 @@ describe("compileContext", () => {
     expect(result.bundle.targetModel).toBe("gpt-5");
     expect(result.bundle.retrievedChunks).toHaveLength(1);
   });
+
+  test("artifactMode is opt-in: instructions absent by default, present when set", async () => {
+    const memory = new StubMemoryStore(null, []);
+    const base = {
+      threadId: "thread-1",
+      newUserMessage: "Build me a landing page",
+      mode: "fast" as const,
+      memory,
+      episodicMessages: [],
+      contextWindow: 8000,
+    };
+
+    const off = await compileContext(base);
+    const offSystem = textOf(off.messages.at(0)?.content ?? "");
+    expect(offSystem).not.toContain("```artifact");
+
+    const on = await compileContext({ ...base, artifactMode: true });
+    const onSystem = textOf(on.messages.at(0)?.content ?? "");
+    expect(onSystem).toContain("```artifact");
+    expect(onSystem).toContain("Reuse the SAME id");
+  });
 });

@@ -5,10 +5,26 @@ import { downloadFile } from "@/lib/download";
 import {
   artifactExtension,
   artifactMime,
+  artifactTotalCost,
+  estimateRebakeCostUsd,
+  lineDiff,
+  diffStats,
   type Artifact,
   type ArtifactVersion,
   type VersionedArtifact,
 } from "@/lib/artifacts";
+
+/** Curated re-bake targets (real catalog ids + input $/M). The router-native
+ *  move: rebuild this artifact on a different provider, with the cost shown up
+ *  front as an ESTIMATE (real charge only after the call). */
+const REBAKE_TARGETS: { id: string; provider: string; pricePerM: number }[] = [
+  { id: "claude-sonnet-4-6", provider: "anthropic", pricePerM: 3.0 },
+  { id: "claude-opus-4-8", provider: "anthropic", pricePerM: 5.0 },
+  { id: "gpt-5-5", provider: "openai", pricePerM: 5.0 },
+  { id: "grok-4-3", provider: "xai", pricePerM: 1.25 },
+  { id: "gemini-2-5-pro", provider: "gemini", pricePerM: 1.25 },
+  { id: "deepseek-v4-flash", provider: "deepseek", pricePerM: 0.14 },
+];
 import { CodeBlock, Markdown } from "./Markdown";
 import { Icon } from "./Icons";
 
@@ -38,6 +54,12 @@ function kindLabel(a: { kind: Artifact["kind"]; language?: string }): string {
   return a.language ? a.language.toUpperCase() : "Code";
 }
 
+/** Compact dollar formatting — sub-cent costs keep 5 decimals so $0.00012 reads true. */
+function fmtCost(usd: number): string {
+  if (usd <= 0) return "$0";
+  return usd < 0.01 ? `$${usd.toFixed(5)}` : `$${usd.toFixed(2)}`;
+}
+
 /** Every version of an artifact: the model's, then any local user edits. */
 function allVersionsOf(
   a: VersionedArtifact,
@@ -63,11 +85,20 @@ function allVersionsOf(
 export function ArtifactPanel({
   artifacts,
   activeId,
+  userVersions,
+  onSaveVersion,
+  onRebake,
   onSelect,
   onClose,
 }: {
   artifacts: VersionedArtifact[];
   activeId: string | null;
+  /** Persisted per-artifact user edits (from the conversation store, per thread). */
+  userVersions: Record<string, ArtifactVersion[]>;
+  /** Persist a new user-edit version for an artifact (lifts edits out of local state). */
+  onSaveVersion: (artifactId: string, version: ArtifactVersion) => void;
+  /** Re-bake this artifact on another model (pre-loads the composer; user confirms). */
+  onRebake?: (targetModel: string, targetProvider: string, estUsd: number) => void;
   onSelect: (id: string) => void;
   onClose: () => void;
 }) {
@@ -82,12 +113,12 @@ export function ArtifactPanel({
   const [tab, setTab] = useState<"preview" | "code">("code");
   const [copied, setCopied] = useState(false);
   const [previewBlocked, setPreviewBlocked] = useState(false);
-  // Local, in-memory edit history per artifact — no server needed.
-  const [userVersions, setUserVersions] = useState<Record<string, ArtifactVersion[]>>({});
   // Which version is shown, per artifact id (defaults to the latest).
   const [selected, setSelected] = useState<Record<string, number>>({});
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [showDiff, setShowDiff] = useState(false);
+  const [rebakeIdx, setRebakeIdx] = useState(0);
 
   const versions = useMemo(
     () => (active ? allVersionsOf(active, userVersions) : []),
@@ -97,6 +128,10 @@ export function ArtifactPanel({
   const sel = active
     ? Math.min(selected[active.id] ?? lastIndex, lastIndex)
     : 0;
+  // Router-native provenance: total $ across this artifact's MODEL versions
+  // (user edits are free), and how many model turns built it.
+  const totalCost = active ? artifactTotalCost(active) : 0;
+  const modelVersionCount = active ? active.versions.length : 0;
   const shownVersion = versions[sel] ?? null;
   const shown: Artifact | null =
     active && shownVersion
@@ -113,8 +148,12 @@ export function ArtifactPanel({
   useEffect(() => {
     setPreviewBlocked(false);
     setEditing(false);
+    setShowDiff(false);
     setTab(active && canPreview(active) ? "preview" : "code");
   }, [active?.id]);
+
+  // The previous version's body, for the "Changes" diff (null when on v1).
+  const prevContent = sel > 0 ? (versions[sel - 1]?.content ?? null) : null;
 
   async function copy() {
     if (!shown) return;
@@ -157,7 +196,7 @@ export function ArtifactPanel({
       createdAt: Date.now(),
     };
     const newIndex = versions.length; // appended at the end
-    setUserVersions((prev) => ({ ...prev, [active.id]: [...(prev[active.id] ?? []), v] }));
+    onSaveVersion(active.id, v); // persisted in the conversation store (per thread)
     setSelected((prev) => ({ ...prev, [active.id]: newIndex }));
     setEditing(false);
     setPreviewBlocked(false);
@@ -231,23 +270,56 @@ export function ArtifactPanel({
         </div>
       ) : null}
 
+      {shownVersion.model || totalCost > 0 || shownVersion.source === "user-edit" ? (
+        <div className="artifact-provenance">
+          {shownVersion.model ? (
+            <span
+              className="artifact-prov-model"
+              title={`This version was produced by ${shownVersion.provider ?? "the model"}`}
+            >
+              <Icon name="zap" size={11} /> {shownVersion.model}
+              {typeof shownVersion.costUsd === "number"
+                ? ` · ${fmtCost(shownVersion.costUsd)}`
+                : ""}
+            </span>
+          ) : shownVersion.source === "user-edit" ? (
+            <span className="artifact-prov-model artifact-prov-edit">your edit · $0</span>
+          ) : null}
+          {totalCost > 0 ? (
+            <span
+              className="artifact-prov-total"
+              title="Total cost across every model version of this artifact"
+            >
+              total {fmtCost(totalCost)}
+              {modelVersionCount > 1 ? ` · ${modelVersionCount} model versions` : ""}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className="artifact-toolbar">
         <div className="artifact-tabs">
           {canPreview(shown) && !editing ? (
             <>
               <button
                 type="button"
-                className={`artifact-tab${tab === "preview" ? " active" : ""}`}
-                onClick={() => setTab("preview")}
-                aria-pressed={tab === "preview"}
+                className={`artifact-tab${tab === "preview" && !showDiff ? " active" : ""}`}
+                onClick={() => {
+                  setTab("preview");
+                  setShowDiff(false);
+                }}
+                aria-pressed={tab === "preview" && !showDiff}
               >
                 Preview
               </button>
               <button
                 type="button"
-                className={`artifact-tab${tab === "code" ? " active" : ""}`}
-                onClick={() => setTab("code")}
-                aria-pressed={tab === "code"}
+                className={`artifact-tab${tab === "code" && !showDiff ? " active" : ""}`}
+                onClick={() => {
+                  setTab("code");
+                  setShowDiff(false);
+                }}
+                aria-pressed={tab === "code" && !showDiff}
               >
                 Code
               </button>
@@ -273,6 +345,17 @@ export function ArtifactPanel({
             </>
           ) : (
             <>
+              {prevContent !== null ? (
+                <button
+                  type="button"
+                  className={`artifact-action${showDiff ? " active" : ""}`}
+                  onClick={() => setShowDiff((v) => !v)}
+                  aria-pressed={showDiff}
+                >
+                  <Icon name="compare" size={12} />
+                  {showDiff ? "Hide changes" : "Changes"}
+                </button>
+              ) : null}
               <button type="button" className="artifact-action" onClick={startEditing}>
                 <Icon name="pencil" size={12} />
                 Edit
@@ -311,6 +394,32 @@ export function ArtifactPanel({
               to the history. Nothing leaves your browser.
             </p>
           </div>
+        ) : showDiff && prevContent !== null ? (
+          (() => {
+            const ops = lineDiff(prevContent, shown.content);
+            const { added, removed } = diffStats(ops);
+            return (
+              <div className="artifact-diff-wrap">
+                <div className="artifact-diff-head">
+                  <span className="artifact-diff-stat-add">+{added}</span>
+                  <span className="artifact-diff-stat-del">−{removed}</span>
+                  <span className="artifact-diff-vs">
+                    v{sel + 1} vs {versions[sel - 1]?.label ?? "previous"}
+                  </span>
+                </div>
+                <div className="artifact-diff" role="figure" aria-label="Changes from previous version">
+                  {ops.map((op, i) => (
+                    <div key={i} className={`artifact-diff-line artifact-diff-${op.type}`}>
+                      <span className="artifact-diff-gutter">
+                        {op.type === "add" ? "+" : op.type === "del" ? "−" : " "}
+                      </span>
+                      <span className="artifact-diff-text">{op.text || " "}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()
         ) : showPreview ? (
           <div className="artifact-preview">
             <iframe
@@ -345,6 +454,41 @@ export function ArtifactPanel({
           </>
         )}
       </div>
+
+      {onRebake && !editing ? (
+        (() => {
+          const target = REBAKE_TARGETS[rebakeIdx] ?? REBAKE_TARGETS[0]!;
+          const est = estimateRebakeCostUsd(shown.content, target.pricePerM);
+          return (
+            <div className="artifact-rebake">
+              <span className="artifact-rebake-label">Re-bake on</span>
+              <select
+                className="artifact-rebake-select"
+                value={rebakeIdx}
+                onChange={(e) => setRebakeIdx(Number(e.target.value))}
+                aria-label="Re-bake target model"
+              >
+                {REBAKE_TARGETS.map((t, i) => (
+                  <option key={t.id} value={i}>
+                    {t.id} · ${t.pricePerM.toFixed(2)}/M
+                  </option>
+                ))}
+              </select>
+              <span className="artifact-rebake-est" title="Estimate from token count × this model's input rate — real cost is known only after it runs">
+                → +{fmtCost(est)} est.
+              </span>
+              <button
+                type="button"
+                className="artifact-rebake-go"
+                onClick={() => onRebake(target.id, target.provider, est)}
+              >
+                <Icon name="refresh" size={12} />
+                Re-bake
+              </button>
+            </div>
+          );
+        })()
+      ) : null}
     </aside>
   );
 }

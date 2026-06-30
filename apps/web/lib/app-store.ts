@@ -1,6 +1,13 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { ProviderId } from "@zintus/types";
+import type { ArtifactVersion } from "./artifacts";
+import {
+  applySpend,
+  newArtifactBudget,
+  type ArtifactBudget,
+  type ArtifactConsent,
+} from "./artifact-quota";
 import type {
   ChatMeta,
   CompressionStats,
@@ -70,9 +77,31 @@ export interface Thread {
   updatedAt: number;
 }
 
+/**
+ * Local user edits to artifacts, keyed by thread id then by the artifact's
+ * STABLE id (see lib/artifacts foldArtifactVersions). Persisted with the threads
+ * so a hand-tweaked artifact survives reload and thread switches. Model versions
+ * are re-derived from message text on load; only the user's edits live here.
+ */
+export type ArtifactEdits = Record<string, Record<string, ArtifactVersion[]>>;
+
+/** Per-thread, per-artifact spend budgets + consent (see lib/artifact-quota). */
+export type ArtifactBudgets = Record<string, Record<string, ArtifactBudget>>;
+export type ArtifactConsents = Record<string, Record<string, ArtifactConsent>>;
+
 interface AppState {
   threads: Thread[];
   activeThreadId: string;
+  /** Per-thread, per-artifact user-edit history. */
+  artifactEdits: ArtifactEdits;
+  addArtifactEdit: (threadId: string, artifactId: string, version: ArtifactVersion) => void;
+  /** Per-thread, per-artifact spend ledgers + consent (canvas quota gate). */
+  artifactBudgets: ArtifactBudgets;
+  artifactConsents: ArtifactConsents;
+  /** Record an ACTUAL spend against an artifact (creates the budget if absent). */
+  recordArtifactSpend: (threadId: string, artifactId: string, actualUsd: number) => void;
+  /** Grant/revoke an artifact's consent to spend. */
+  setArtifactConsent: (threadId: string, artifactId: string, consent: ArtifactConsent) => void;
   /** @deprecated mirrors the active thread's gatewayThreadId; kept for chat-client compat */
   threadId?: string;
   activeProvider: ProviderId | null;
@@ -153,6 +182,9 @@ export const useAppStore = create<AppState>()(
     (set) => ({
       threads: [initialThread],
       activeThreadId: initialThread.id,
+      artifactEdits: {},
+      artifactBudgets: {},
+      artifactConsents: {},
       threadId: undefined,
       activeProvider: null,
       selectedProvider: null,
@@ -213,6 +245,38 @@ export const useAppStore = create<AppState>()(
             activeProvider,
           })),
         })),
+      addArtifactEdit: (threadId, artifactId, version) =>
+        set((state) => {
+          const forThread = state.artifactEdits[threadId] ?? {};
+          const forArtifact = forThread[artifactId] ?? [];
+          return {
+            artifactEdits: {
+              ...state.artifactEdits,
+              [threadId]: { ...forThread, [artifactId]: [...forArtifact, version] },
+            },
+          };
+        }),
+      recordArtifactSpend: (threadId, artifactId, actualUsd) =>
+        set((state) => {
+          const forThread = state.artifactBudgets[threadId] ?? {};
+          const current = forThread[artifactId] ?? newArtifactBudget();
+          return {
+            artifactBudgets: {
+              ...state.artifactBudgets,
+              [threadId]: { ...forThread, [artifactId]: applySpend(current, actualUsd) },
+            },
+          };
+        }),
+      setArtifactConsent: (threadId, artifactId, consent) =>
+        set((state) => {
+          const forThread = state.artifactConsents[threadId] ?? {};
+          return {
+            artifactConsents: {
+              ...state.artifactConsents,
+              [threadId]: { ...forThread, [artifactId]: consent },
+            },
+          };
+        }),
       setSelectedProvider: (selectedProvider) => set({ selectedProvider }),
       setGatewayStatus: (gatewayConnected, gatewayProviders, gatewaySavings) =>
         set({
@@ -354,10 +418,17 @@ export const useAppStore = create<AppState>()(
       // fall back to the newest persisted thread so reload lands somewhere valid.
       partialize: (state) => {
         const threads = state.threads.filter((t) => !t.incognito);
+        const keep = new Set(threads.map((t) => t.id));
+        // Only persist per-thread artifact state that survives (drops incognito + orphans).
+        const keepThreaded = <V,>(rec: Record<string, V>): Record<string, V> =>
+          Object.fromEntries(Object.entries(rec).filter(([threadId]) => keep.has(threadId)));
+        const artifactEdits = keepThreaded(state.artifactEdits);
+        const artifactBudgets = keepThreaded(state.artifactBudgets);
+        const artifactConsents = keepThreaded(state.artifactConsents);
         const activeThreadId = threads.some((t) => t.id === state.activeThreadId)
           ? state.activeThreadId
           : (threads[0]?.id ?? state.activeThreadId);
-        return { threads, activeThreadId };
+        return { threads, activeThreadId, artifactEdits, artifactBudgets, artifactConsents };
       },
     },
   ),

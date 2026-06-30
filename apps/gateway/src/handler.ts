@@ -1089,6 +1089,7 @@ export function createGatewayHandler(
                 allowTrainingProviders: body.allow_training,
                 keys: body.keys,
                 diffText: body.diff,
+                artifactMode: body.artifact_mode,
                 temperature: body.temperature,
                 maxTokens: body.max_tokens,
               }),
@@ -1554,6 +1555,7 @@ export function createGatewayHandler(
           allowTrainingProviders: body.allow_training,
           keys: body.keys,
           diffText: body.diff,
+          artifactMode: body.artifact_mode,
           temperature: body.temperature,
           maxTokens: body.max_tokens,
           // Honor `Cache-Control: no-cache` (or no-store) to bypass the cache.

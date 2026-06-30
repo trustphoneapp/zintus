@@ -5000,6 +5000,139 @@ body:has(.dashboard-container) {
   background: var(--color-purple-faint, color-mix(in oklch, #7C3AED 12%, transparent));
 }
 
+/* Router-native provenance: which model built this version + cost. */
+.artifact-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--color-text-muted);
+}
+.artifact-prov-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--color-text-sub);
+}
+.artifact-prov-edit {
+  color: var(--color-purple-light, #7C3AED);
+}
+.artifact-prov-total {
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--color-green, #22c55e);
+}
+
+/* Inline "Changes" diff between versions (feature #3). */
+.artifact-diff-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.artifact-diff-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+.artifact-diff-stat-add {
+  color: var(--color-green, #22c55e);
+  font-weight: 700;
+}
+.artifact-diff-stat-del {
+  color: var(--color-red, #ef4444);
+  font-weight: 700;
+}
+.artifact-diff-vs {
+  margin-left: auto;
+  color: var(--color-text-muted);
+}
+.artifact-diff {
+  flex: 1;
+  overflow: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+  padding: 6px 0;
+}
+.artifact-diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.artifact-diff-gutter {
+  width: 1ch;
+  flex-shrink: 0;
+  user-select: none;
+  opacity: 0.6;
+}
+.artifact-diff-text {
+  flex: 1;
+}
+.artifact-diff-add {
+  background: color-mix(in oklch, #22c55e 13%, transparent);
+}
+.artifact-diff-del {
+  background: color-mix(in oklch, #ef4444 13%, transparent);
+}
+.artifact-diff-same {
+  color: var(--color-text-sub);
+}
+
+/* Re-bake bar (feature #2): rebuild the artifact on another model, cost shown. */
+.artifact-rebake {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--color-border);
+  font-size: 12px;
+  background: var(--color-bg);
+}
+.artifact-rebake-label {
+  color: var(--color-text-muted);
+}
+.artifact-rebake-select {
+  background: var(--color-elevated, #1a1a1e);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+}
+.artifact-rebake-est {
+  font-family: var(--font-mono, monospace);
+  color: var(--color-text-muted);
+}
+.artifact-rebake-go {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--color-accent, #2563eb);
+  color: #fff;
+  padding: 6px 12px;
+  border-radius: 7px;
+  font-weight: 500;
+  font-size: 12px;
+}
+.artifact-rebake-go:hover {
+  filter: brightness(1.08);
+}
+
 /* In-panel editor for "Save as new version". */
 .artifact-editor {
   display: flex;

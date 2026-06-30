@@ -60,6 +60,13 @@ export interface CompileRequest {
   codeSearch?: (query: string, topK: number) => Promise<CodeContextHit[]>;
   /** Raw unified git diff for this turn (CLI/desktop coding flows). Compressed before inclusion. */
   diffText?: string;
+  /**
+   * Opt-in: when true, append artifact-authoring instructions to the system
+   * prompt so the model wraps substantial deliverables in ```artifact …```
+   * fenced blocks (parsed by apps/web/lib/artifacts.ts). Off by default — does
+   * not change behaviour for callers that don't request it.
+   */
+  artifactMode?: boolean;
 }
 
 export interface CompileTrace {
