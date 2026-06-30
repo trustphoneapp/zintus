@@ -126,6 +126,31 @@ interface ImageAttachment {
 
 type Attachment = TextAttachment | ImageAttachment;
 
+/**
+ * Build send-history turns from stored messages. A prior USER turn that carried
+ * image(s) keeps only its TEXT in history — we never persist base64 — so we
+ * append a one-line note. Without it the model conflates the assistant's earlier
+ * image description with a NEW image attached in a later turn and answers "the
+ * same screenshot as before" instead of actually reading the new one. The note
+ * tells the model that earlier turn had its own, now-omitted image.
+ */
+function imageAwareHistory(
+  messages: { role: "user" | "assistant"; content: string; images?: UiImageMeta[] }[],
+): ChatMessage[] {
+  return messages.map((m) => {
+    if (m.role === "user" && m.images && m.images.length > 0) {
+      const n = m.images.length;
+      return {
+        role: m.role,
+        content: `${m.content}\n\n[This earlier message had ${n} attached image${
+          n === 1 ? "" : "s"
+        }, not shown here — a different image from any attached later.]`,
+      };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
 /** Inline composer notice (rejections, vision warnings, success). */
 interface ComposerNotice {
   tone: "error" | "warn" | "ok";
@@ -1104,10 +1129,7 @@ export default function ChatPage() {
     // strict role-alternation provider (Gemini) would reject. Subsumes the old
     // `&& content` intent. The trailing user turn is preserved.
     const history: ChatMessage[] = sanitizeSendHistory([
-      ...messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
+      ...imageAwareHistory(messages),
       { role: "user", content: userMessageContent },
     ]);
 
@@ -1221,9 +1243,11 @@ export default function ChatPage() {
     // empty tool-round assistant bubbles, and merge adjacent same-role turns so
     // Regenerate never replays a malformed conversation.
     const priorMessages = sanitizeSendHistory(
-      (s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? [])
-        .filter((message) => message.id !== assistant.id && message.content)
-        .map((message) => ({ role: message.role, content: message.content })),
+      imageAwareHistory(
+        (s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? []).filter(
+          (message) => message.id !== assistant.id && message.content,
+        ),
+      ),
     );
 
     const lastUserContent: string | ContentBlock[] =
