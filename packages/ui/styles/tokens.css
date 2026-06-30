@@ -50,7 +50,7 @@
  */
 :root {
   --c-accent: #6366f1;
-  --c-accent-light: rgba(99, 102, 241, 0.1);
+  --c-accent-light: rgba(99, 102, 241, 0.16);
   --c-accent-mid: rgba(99, 102, 241, 0.25);
   --c-accent-contrast: #ffffff;
   /* Layered focus glow (not a flat outline) — reads at tier-1. */
@@ -122,6 +122,10 @@
   --shadow-lg: 0 0 0 0.5px var(--c-border), 0 8px 28px -6px rgba(0, 0, 0, 0.55);
   --shadow-float: 0 0 0 0.5px var(--c-border), 0 16px 64px rgba(0, 0, 0, 0.6);
   --c-inset: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+
+  /* User-message bubble (chat) — theme-aware so it isn't a dark block in light mode. */
+  --c-user-bubble: #27272b;
+  --c-user-bubble-border: #34343a;
 }
 
 .light {
@@ -147,4 +151,8 @@
   --color-text: oklch(22% 0.02 295);
   --color-text-sub: oklch(42% 0.025 295);
   --color-text-muted: oklch(58% 0.02 295);
+
+  /* User-message bubble (chat) — light, violet-tinted so dark text reads on it. */
+  --c-user-bubble: oklch(95% 0.012 295);
+  --c-user-bubble-border: oklch(89% 0.018 295);
 }

@@ -1,3 +1,4 @@
+import { Platform } from "react-native";
 import type { ProviderId } from "@zintus/types";
 import {
   deleteApiKey,
@@ -19,8 +20,11 @@ export { getApiKey, setApiKey, deleteApiKey, hasApiKey };
 
 const LEGACY_PREFIX = "key:";
 
-/** Migrate keys saved under the old `key:<provider>` namespace. */
+/** Migrate keys saved under the old `key:<provider>` namespace. No-op on web:
+ *  there are no legacy native SecureStore entries there, and web's SecureStore
+ *  rejects the legacy `key:` prefix (colon is not an allowed key character). */
 export async function migrateLegacyKeys(): Promise<void> {
+  if (Platform.OS === "web") return;
   const { listProviders } = await import("@zintus/providers");
   for (const provider of listProviders()) {
     const legacy = await import("expo-secure-store").then((mod) =>

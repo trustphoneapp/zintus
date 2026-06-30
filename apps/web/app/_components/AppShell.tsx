@@ -9,6 +9,7 @@ import { Tooltip } from "@/components/ui/Tooltip";
 import { Sidebar } from "./Sidebar";
 import { GatewayOfflineBanner } from "./GatewayOfflineBanner";
 import { CommandPalette } from "./CommandPalette";
+import { useSidebarStore } from "@/lib/sidebar-store";
 
 const TITLES: Record<string, string> = {
   "/chat": "Chat",
@@ -23,14 +24,16 @@ const TITLES: Record<string, string> = {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  // Default false on BOTH the server and the first client render so hydration
-  // matches; the persisted value is applied after mount (effect below). Reading
-  // localStorage in the initializer made the first client render disagree with
-  // the server HTML → "hydration failed" recoverable error.
-  const [collapsed, setCollapsed] = useState(false);
+  // Sidebar open/closed lives in a shared store so the header hamburger (here
+  // AND in the chat header, a different tree) and the <Sidebar> agree. `open`
+  // defaults true on the server + first client render; the persisted choice is
+  // applied after mount (no hydration mismatch).
+  const { open: sidebarOpen, toggle: toggleSidebar, hydrate: hydrateSidebar } =
+    useSidebarStore();
+  const collapsed = !sidebarOpen;
   useEffect(() => {
-    setCollapsed(localStorage.getItem("zintus:sidebar") === "collapsed");
-  }, []);
+    hydrateSidebar();
+  }, [hydrateSidebar]);
   const [checked, setChecked] = useState(false);
   const { gatewayConnected, setGatewayStatus } = useAppStore();
 
@@ -66,22 +69,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   };
 
+  // The chat page renders its OWN full header (model pill + Search/Share/Theme/
+  // Private), matching the design's single-bar layout — so suppress the global
+  // top bar there to avoid a stacked double header (and duplicate Search).
+  const hideTopbar = pathname === "/chat";
+
   return (
     <div className="app-root">
       <CommandPalette />
+      {!hideTopbar ? (
       <header className="app-topbar">
         <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
           <Tooltip content={collapsed ? "Expand sidebar" : "Collapse sidebar"} side="bottom">
             <button
               type="button"
               aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              onClick={() => {
-                setCollapsed((value) => {
-                  const next = !value;
-                  localStorage.setItem("zintus:sidebar", next ? "collapsed" : "open");
-                  return next;
-                });
-              }}
+              onClick={toggleSidebar}
               style={{ background: "none", border: "none", cursor: "pointer", padding: "4px 6px", color: "inherit", display: "flex", alignItems: "center" }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -120,6 +123,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <ThemeToggle />
         </div>
       </header>
+      ) : null}
 
       {checked && !gatewayConnected && (
         <GatewayOfflineBanner url={GATEWAY_URL} />
@@ -128,13 +132,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="app-body">
         <Sidebar
           collapsed={collapsed}
-          onToggle={() => {
-            setCollapsed((value) => {
-              const next = !value;
-              localStorage.setItem("zintus:sidebar", next ? "collapsed" : "open");
-              return next;
-            });
-          }}
+          onToggle={toggleSidebar}
           gatewayConnected={gatewayConnected}
         />
         <div className="app-content">
