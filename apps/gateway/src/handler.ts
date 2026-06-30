@@ -1089,7 +1089,6 @@ export function createGatewayHandler(
                 allowTrainingProviders: body.allow_training,
                 keys: body.keys,
                 diffText: body.diff,
-                artifactMode: body.artifact_mode,
                 temperature: body.temperature,
                 maxTokens: body.max_tokens,
               }),
@@ -1555,7 +1554,6 @@ export function createGatewayHandler(
           allowTrainingProviders: body.allow_training,
           keys: body.keys,
           diffText: body.diff,
-          artifactMode: body.artifact_mode,
           temperature: body.temperature,
           maxTokens: body.max_tokens,
           // Honor `Cache-Control: no-cache` (or no-store) to bypass the cache.
@@ -2439,22 +2437,11 @@ export function createGatewayHandler(
     if (url.pathname === "/v1/status" && request.method === "GET") {
       const statuses = await engine.getProviderStatus();
       const savings = engine.getSavings();
-      // Local runtimes have no key/quota, so the router's `available` flag is
-      // always true for them — even when the process is down. Override it with
-      // the real Ollama/LM-Studio probe (cached 30s) so "Running" is honest.
-      const runtimes = await detectLocal();
-      const localAvailable: Record<string, boolean> = {
-        ollama: runtimes.ollama.detected,
-        lmstudio: runtimes.lmstudio.detected,
-      };
       return json(request, {
         ok: true,
         providers: statuses.map((status) => ({
           id: status.id,
-          available:
-            status.id in localAvailable
-              ? localAvailable[status.id]!
-              : status.available,
+          available: status.available,
           hasKey: status.hasKey,
           inCooldown: status.inCooldown,
           quotaUsed: status.tokensToday,
@@ -2479,12 +2466,6 @@ export function createGatewayHandler(
     // and `quota_remaining_ratio` is null whenever the limit is unknown.
     if (url.pathname === "/v1/key" && request.method === "GET") {
       const statuses = await engine.getProviderStatus();
-      // Same honest local-runtime availability as /v1/status (see note there).
-      const runtimes = await detectLocal();
-      const localAvailable: Record<string, boolean> = {
-        ollama: runtimes.ollama.detected,
-        lmstudio: runtimes.lmstudio.detected,
-      };
       return json(request, {
         object: "key_status",
         label: "zintus-gateway",
@@ -2499,10 +2480,7 @@ export function createGatewayHandler(
           return {
             id: status.id,
             has_key: status.hasKey,
-            available:
-              status.id in localAvailable
-                ? localAvailable[status.id]!
-                : status.available,
+            available: status.available,
             in_cooldown: status.inCooldown,
             quota_used: quotaUsed,
             quota_limit: quotaLimit,

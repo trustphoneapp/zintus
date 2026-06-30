@@ -2,31 +2,25 @@
 
 :root {
   color-scheme: dark;
-  /* Canonical brand palette — violet (hue 295), unified with apps/web .dark. */
-  --color-bg: oklch(15% 0.03 295);
-  --color-surface: oklch(19% 0.035 295);
-  --color-elevated: oklch(23% 0.04 295);
-  --color-border: oklch(30% 0.045 295);
-  --color-text: oklch(96% 0.01 295);
-  --color-text-sub: oklch(80% 0.02 295);
-  --color-text-muted: oklch(62% 0.03 295);
-  /* Accent — canonical violet (hue 295). `--color-purple-*` names kept so
-     existing desktop components pick up the brand accent without a rename. */
-  --color-purple-bright: oklch(78% 0.14 295);
-  --color-purple-light: oklch(72% 0.17 295);
-  --color-purple-mid: oklch(58% 0.23 295);
-  --color-purple-faint: oklch(58% 0.23 295 / 0.16);
-  --color-purple-glow: oklch(58% 0.23 295 / 0.25);
-  --color-green: oklch(70% 0.15 162);
+  --color-bg: #0b0f14;
+  --color-surface: #111827;
+  --color-elevated: #1f2937;
+  --color-border: #374151;
+  --color-text: #e8eef5;
+  --color-text-sub: #9ca3af;
+  --color-text-muted: #6b7280;
+  /* Accent — indigo design system (2026). Legacy `--color-purple-*` names kept
+     so existing desktop components pick up the indigo accent without a rename. */
+  --color-purple-bright: #818cf8;
+  --color-purple-mid: #6366f1;
+  --color-purple-faint: rgba(99, 102, 241, 0.1);
+  --color-purple-glow: rgba(99, 102, 241, 0.25);
+  --color-green: #34d399;
   --color-red: #f87171;
-
-  /* User-message bubble (chat) — same tokens as web (desktop is dark-only). */
-  --c-user-bubble: #27272b;
-  --c-user-bubble-border: #34343a;
 
   /* Design-system layer (2026) — shared with apps/web (dark-mode values). */
   --c-accent: #6366f1;
-  --c-accent-light: rgba(99, 102, 241, 0.16);
+  --c-accent-light: rgba(99, 102, 241, 0.1);
   --c-accent-mid: rgba(99, 102, 241, 0.25);
   --c-accent-contrast: #ffffff;
   --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(99, 102, 241, 0.4);
@@ -395,10 +389,10 @@ button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
 .chat-bubble-user {
   align-self: flex-end;
   max-width: 80%;
-  background: var(--c-user-bubble);
-  border: 0.5px solid var(--c-user-bubble-border);
-  border-radius: 16px 16px 5px 16px;
-  padding: 11px 16px;
+  background: var(--color-purple-faint);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  padding: 0.6rem 0.85rem;
   white-space: pre-wrap;
 }
 

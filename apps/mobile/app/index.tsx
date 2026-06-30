@@ -748,7 +748,7 @@ export default function ChatScreen() {
           style={styles.input}
           value={input}
           onChangeText={setInput}
-          placeholder="Message Zintus…"
+          placeholder="Message..."
           placeholderTextColor={COLORS.muted}
           editable={!sending}
           onSubmitEditing={() => {
@@ -767,9 +767,9 @@ export default function ChatScreen() {
           disabled={sending || !input.trim()}
         >
           {sending ? (
-            <ActivityIndicator color={COLORS.onAccent} size="small" />
+            <ActivityIndicator color={COLORS.onAccent} />
           ) : (
-            <Text style={styles.sendArrow}>↑</Text>
+            <Text style={styles.sendText}>Send</Text>
           )}
         </Pressable>
       </View>
@@ -851,35 +851,15 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
   bubble: {
-    marginBottom: 14,
-    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 10,
+    maxWidth: "85%",
   },
-  // iOS design: user = #27272b bubble, asymmetric bottom-right corner.
-  userBubble: {
-    alignSelf: "flex-end",
-    maxWidth: "82%",
-    backgroundColor: COLORS.userBubble,
-    borderColor: COLORS.userBubbleBorder,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    borderBottomRightRadius: 4,
-    borderBottomLeftRadius: 16,
-    paddingVertical: 11,
-    paddingHorizontal: 14,
-  },
-  // Mobile exception (spec §3): assistant IS a card — narrow screens read
-  // poorly as plain full-width text. bg --color-elevated, 0.5px border, radius 14.
-  assistantBubble: {
-    alignSelf: "flex-start",
-    maxWidth: "90%",
-    backgroundColor: COLORS.elevated,
-    borderColor: COLORS.border,
-    borderRadius: 14,
-    paddingVertical: 12,
-    paddingHorizontal: 15,
-  },
-  bubbleText: { color: COLORS.ink, fontSize: 15, lineHeight: 24 },
-  userBubbleText: { color: COLORS.userText, lineHeight: 22 },
+  userBubble: { alignSelf: "flex-end", backgroundColor: COLORS.accent },
+  assistantBubble: { alignSelf: "flex-start", backgroundColor: COLORS.panel },
+  bubbleText: { color: COLORS.ink },
+  userBubbleText: { color: COLORS.onAccent },
   routeReason: {
     color: COLORS.accentBright,
     fontSize: 12,
@@ -973,31 +953,27 @@ const styles = StyleSheet.create({
   artifactText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "600" },
   composer: {
     flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-    paddingHorizontal: 14,
-    paddingVertical: 12,
+    gap: 8,
+    padding: 16,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
   input: {
     flex: 1,
-    backgroundColor: COLORS.elevated,
+    backgroundColor: COLORS.panel,
     color: COLORS.ink,
-    borderRadius: 22,
-    paddingHorizontal: 16,
-    paddingVertical: 11,
-    fontSize: 15,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
   },
-  // Circular brand-accent send button with a white up-arrow (iOS design).
   sendButton: {
     backgroundColor: COLORS.accent,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    borderRadius: 10,
     justifyContent: "center",
+    paddingHorizontal: 14,
+    minWidth: 56,
     alignItems: "center",
   },
-  sendButtonDisabled: { backgroundColor: COLORS.sendDisabled },
-  sendArrow: { color: COLORS.onAccent, fontSize: 20, fontWeight: "700", lineHeight: 22 },
+  sendButtonDisabled: { opacity: 0.5 },
+  sendText: { color: COLORS.onAccent, fontWeight: "700" },
 });
