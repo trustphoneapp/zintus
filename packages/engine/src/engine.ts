@@ -398,6 +398,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
     threadId: string,
     lastUser: ChatMessage | undefined,
     assistantContent: string,
+    sourceMessageId: string | undefined,
   ): void {
     if (assistantContent.trim().length === 0) {
       return;
@@ -438,6 +439,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
               key: safeKey,
               value: addition,
               source: "llm",
+              sourceMessageId,
             });
           }
           for (const update of changes.updates) {
@@ -458,6 +460,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
               key: fact.id,
               value: fact.content,
               source: fact.source,
+              sourceMessageId,
             });
           }
         }
@@ -560,6 +563,9 @@ export function createEngine(config: EngineConfig = {}): Engine {
       // Memory facts INCLUDED in the compiled context this turn — surfaced to the
       // client ("memory used this turn") and used to stamp lastUsedAt (curation).
       let memoryUsedThisTurn: Array<{ id: string; content: string }> = [];
+      // Id of THIS turn's persisted user message — provenance for any facts
+      // extracted from it (source_message_id). Set when the user turn is stored.
+      let userMessageId: string | undefined;
       const effectiveMode = request.mode ?? "smart";
       const latestUserInput = textOf(
         latestMessage?.content ?? initialMessages.at(-1)?.content ?? "",
@@ -650,7 +656,9 @@ export function createEngine(config: EngineConfig = {}): Engine {
         if (!threadId) {
           threadId = conversations.createThread(textOf(lastUser.content).slice(0, 48)).id;
         }
-        conversations.appendMessage(threadId, lastUser, { traceId });
+        userMessageId = conversations.appendMessage(threadId, lastUser, {
+          traceId,
+        }).id;
       }
 
       const targetProvider = request.provider ?? "auto";
@@ -806,7 +814,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
               traceId,
             },
           );
-          updateMemoryAfterTurn(threadId, lastUser, text);
+          updateMemoryAfterTurn(threadId, lastUser, text, userMessageId);
         }
 
         const completedAt = new Date();
@@ -1025,7 +1033,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
                 traceId,
               },
             );
-            updateMemoryAfterTurn(threadId, lastUser, assistantContent);
+            updateMemoryAfterTurn(threadId, lastUser, assistantContent, userMessageId);
           }
           // Never cache a tool-call turn: its text is empty/partial and the tool
           // calls (the real payload) aren't cached, so a cache hit would replay an

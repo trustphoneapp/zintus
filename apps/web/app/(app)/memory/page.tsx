@@ -285,6 +285,11 @@ export default function MemoryPage() {
                   {fact.lastUsedAt
                     ? ` · last used ${fmtDate(new Date(fact.lastUsedAt).toISOString())}`
                     : " · not yet used"}
+                  {fact.sourceMessageId ? (
+                    <span title={`Extracted from message ${fact.sourceMessageId}`}>
+                      {" · from a chat message"}
+                    </span>
+                  ) : null}
                 </div>
               </div>
               {editId === fact.id ? null : (

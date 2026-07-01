@@ -203,4 +203,29 @@ describe("persist:false — incognito writes no durable state", () => {
     // ...but incognito writes nothing durable, including the lastUsedAt stamp.
     expect(memory.listFacts(thread.id)[0]?.lastUsedAt).toBeUndefined();
   });
+
+  test("provenance: extracted facts record the source user message id", async () => {
+    const memory = new MemoryStore(join(dir, "memory.db"));
+    memory.init();
+    const engine = await makeEngine(memory);
+    const thread = engine.createThread("t");
+
+    const result = await engine.routeAndStream({
+      threadId: thread.id,
+      messages: [
+        { role: "user", content: "we decided to use bun for the backend" },
+      ],
+    });
+    await drain(result); // let the fire-and-forget memory microtask settle
+
+    const userMsg = engine
+      .getThreadMessages(thread.id)
+      .find((m) => m.role === "user");
+    expect(userMsg?.id).toBeTruthy();
+
+    const facts = memory.listFacts(thread.id);
+    expect(facts.length).toBeGreaterThan(0);
+    // Every extracted fact is attributed to the user message it came from.
+    expect(facts.every((f) => f.sourceMessageId === userMsg!.id)).toBe(true);
+  });
 });
