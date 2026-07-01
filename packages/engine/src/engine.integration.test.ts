@@ -4,6 +4,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Provider, ProviderId, StreamChunk } from "@zintus/types";
 import { ProviderHttpError, estimateUsage } from "@zintus/providers";
+// Snapshot the REAL module BY VALUE at load (before any runtime mock) so teardown
+// can un-leak the module mock — bun's mock.restore() does NOT undo mock.module(),
+// and a live `import *` namespace would reflect the current mock, not the real
+// module. This frozen copy is captured while the module is still real.
+import * as providersModuleLive from "@zintus/providers";
+const realProvidersModule = { ...providersModuleLive };
 
 /**
  * End-to-end integration test: drives the real engine → router → quota ledger →
@@ -40,6 +46,10 @@ describe("engine integration (stubbed provider)", () => {
 
   afterEach(() => {
     mock.restore();
+    // mock.restore() does NOT un-mock modules in bun. Without this, the stubbed
+    // `listProviders` (only "gemini") leaks into sibling files — e.g.
+    // engine.test.ts's provider-status test expects the real list incl. "groq".
+    mock.module("@zintus/providers", () => realProvidersModule);
     rmSync(dir, { recursive: true, force: true });
   });
 

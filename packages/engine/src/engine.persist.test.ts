@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Provider, ProviderId, StreamChunk } from "@zintus/types";
 import { ProviderHttpError, estimateUsage } from "@zintus/providers";
+// Snapshot the REAL module BY VALUE at load so teardown can un-leak the module
+// mock (bun's mock.restore() does NOT undo mock.module(); a live `import *`
+// namespace would reflect the current mock, not the real module).
+import * as providersModuleLive from "@zintus/providers";
+const realProvidersModule = { ...providersModuleLive };
 import { MemoryStore } from "@zintus/memory";
 
 /**
@@ -56,6 +61,8 @@ describe("persist:false — incognito writes no durable state", () => {
 
   afterEach(() => {
     mock.restore();
+    // Un-leak the module mock so a sibling file sees the real provider list.
+    mock.module("@zintus/providers", () => realProvidersModule);
     rmSync(dir, { recursive: true, force: true });
   });
 

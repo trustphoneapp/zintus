@@ -16,6 +16,11 @@ import {
   supportsTools,
   supportsVision,
 } from "@zintus/providers";
+// Snapshot the REAL module by value at load so teardown can un-leak the module
+// mock (bun's mock.restore() does NOT undo mock.module()); prevents the stubbed
+// listProviders from leaking into sibling files (e.g. engine.test.ts).
+import * as providersModuleLive from "@zintus/providers";
+const realProvidersModule = { ...providersModuleLive };
 
 /**
  * Structured-output (validate→repair) integration test: real engine → router →
@@ -81,6 +86,7 @@ describe("engine structured output (validate→repair)", () => {
 
   afterEach(() => {
     mock.restore();
+    mock.module("@zintus/providers", () => realProvidersModule);
     rmSync(dir, { recursive: true, force: true });
   });
 

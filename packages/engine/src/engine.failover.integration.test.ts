@@ -9,6 +9,11 @@ import type {
   StreamChatResult,
 } from "@zintus/types";
 import { ProviderHttpError, estimateUsage } from "@zintus/providers";
+// Snapshot the REAL module by value at load so teardown can un-leak the module
+// mock (bun's mock.restore() does NOT undo mock.module()); prevents the stubbed
+// listProviders from leaking into sibling files (e.g. engine.test.ts).
+import * as providersModuleLive from "@zintus/providers";
+const realProvidersModule = { ...providersModuleLive };
 
 /**
  * End-to-end FAILOVER integration test (criterion A1): real engine → router →
@@ -47,6 +52,7 @@ describe("engine failover integration (stubbed providers)", () => {
 
   afterEach(() => {
     mock.restore();
+    mock.module("@zintus/providers", () => realProvidersModule);
     rmSync(dir, { recursive: true, force: true });
   });
 

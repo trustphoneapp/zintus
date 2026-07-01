@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { Provider, ProviderId } from "@zintus/types";
 import { ProviderHttpError, estimateUsage } from "@zintus/providers";
+// Snapshot the REAL module by value at load so teardown can un-leak the module
+// mock (bun's mock.restore() does NOT undo mock.module()); prevents the stubbed
+// listProviders from leaking into sibling files (e.g. engine.test.ts).
+import * as providersModuleLive from "@zintus/providers";
+const realProvidersModule = { ...providersModuleLive };
 import type { GatewayConfig } from "./auth.js";
 
 /**
@@ -40,6 +45,7 @@ describe("gateway handler integration (real engine)", () => {
 
   afterEach(() => {
     mock.restore();
+    mock.module("@zintus/providers", () => realProvidersModule);
     rmSync(dir, { recursive: true, force: true });
   });
 
