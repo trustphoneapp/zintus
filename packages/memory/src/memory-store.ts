@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import { load as loadSqliteVec } from "sqlite-vec";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import type { MemoryFact, MemoryThreadState } from "@zintus/types";
 import * as schema from "./schema.js";
@@ -20,12 +20,23 @@ export type ThreadStateRow = {
   updatedAt: Date;
 };
 
+/** Where a fact applies. `thread` facts belong to one conversation; `project`
+ *  facts to a project (any thread in it); `global` facts to the whole user. */
+export type MemoryScope = "thread" | "project" | "global";
+
 export type MemoryFactRow = {
   id: string;
-  threadId: string;
+  /** Null for `project`/`global` facts (they have no owning thread). */
+  threadId: string | null;
   key: string;
   value: string;
   source?: string;
+  scope: MemoryScope;
+  projectId?: string;
+  pinned: boolean;
+  /** Epoch ms this fact was last included in a compiled context. */
+  lastUsedAt?: number;
+  sourceMessageId?: string;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -105,10 +116,15 @@ export class MemoryStore {
       );
       CREATE TABLE IF NOT EXISTS memory_facts (
         id TEXT PRIMARY KEY,
-        thread_id TEXT NOT NULL,
+        thread_id TEXT,
         key TEXT NOT NULL,
         value TEXT NOT NULL,
         source TEXT,
+        scope TEXT NOT NULL DEFAULT 'thread',
+        project_id TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        last_used_at INTEGER,
+        source_message_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -152,7 +168,69 @@ export class MemoryStore {
         throw error;
       }
     }
+    this.migrateMemoryFactsGovernance();
+    // Governance indexes are created AFTER the migration guarantees the columns
+    // exist (a pre-governance DB lacks scope/project_id until migrated above).
+    this.db.$client.exec(`
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_scope
+        ON memory_facts (scope);
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_project
+        ON memory_facts (project_id);
+    `);
     this.restoreVectorTable();
+  }
+
+  /**
+   * Bring a pre-governance `memory_facts` up to the current schema. Older DBs
+   * have `thread_id NOT NULL` and lack the scope/pinned/last_used_at/
+   * source_message_id columns. SQLite can't drop a NOT NULL via ALTER, so we do
+   * the standard table-recreation (copy → drop → rename) inside a transaction,
+   * backfilling every existing row to `scope='thread'`. Guarded + idempotent:
+   * a no-op once the table already has `scope` AND a nullable `thread_id`, so
+   * repeated init() calls (and already-migrated DBs) do nothing.
+   */
+  private migrateMemoryFactsGovernance(): void {
+    const cols = this.db.$client
+      .prepare("PRAGMA table_info(memory_facts)")
+      .all() as Array<{ name: string; notnull: number }>;
+    const hasScope = cols.some((c) => c.name === "scope");
+    const threadIdNotNull =
+      cols.find((c) => c.name === "thread_id")?.notnull === 1;
+    if (hasScope && !threadIdNotNull) {
+      return; // already on the governance schema
+    }
+    this.db.$client.exec(`
+      BEGIN;
+      CREATE TABLE memory_facts__gov (
+        id TEXT PRIMARY KEY,
+        thread_id TEXT,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source TEXT,
+        scope TEXT NOT NULL DEFAULT 'thread',
+        project_id TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        last_used_at INTEGER,
+        source_message_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      INSERT INTO memory_facts__gov
+        (id, thread_id, key, value, source, scope, created_at, updated_at)
+        SELECT id, thread_id, key, value, source, 'thread', created_at, updated_at
+        FROM memory_facts;
+      DROP TABLE memory_facts;
+      ALTER TABLE memory_facts__gov RENAME TO memory_facts;
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_thread_id
+        ON memory_facts (thread_id);
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_thread_key
+        ON memory_facts (thread_id, key);
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_scope
+        ON memory_facts (scope);
+      CREATE INDEX IF NOT EXISTS idx_memory_facts_project
+        ON memory_facts (project_id);
+      COMMIT;
+    `);
   }
 
   getThreadState(threadId: string): ThreadStateRow | null {
@@ -195,6 +273,26 @@ export class MemoryStore {
     };
   }
 
+  private mapFactRow(
+    row: typeof schema.memoryFacts.$inferSelect,
+  ): MemoryFactRow {
+    return {
+      id: row.id,
+      threadId: row.threadId ?? null,
+      key: row.key,
+      value: row.value,
+      source: row.source ?? undefined,
+      scope: (row.scope as MemoryScope | null) ?? "thread",
+      projectId: row.projectId ?? undefined,
+      pinned: Boolean(row.pinned),
+      lastUsedAt: row.lastUsedAt ?? undefined,
+      sourceMessageId: row.sourceMessageId ?? undefined,
+      createdAt: new Date(row.createdAt),
+      updatedAt: new Date(row.updatedAt),
+    };
+  }
+
+  /** Facts owned by ONE thread (thread-scoped continuity path). */
   listFacts(threadId: string): MemoryFactRow[] {
     const rows = this.db
       .select()
@@ -202,23 +300,51 @@ export class MemoryStore {
       .where(eq(schema.memoryFacts.threadId, threadId))
       .orderBy(desc(schema.memoryFacts.updatedAt))
       .all();
-    return rows.map((row) => ({
-      id: row.id,
-      threadId: row.threadId,
-      key: row.key,
-      value: row.value,
-      source: row.source ?? undefined,
-      createdAt: new Date(row.createdAt),
-      updatedAt: new Date(row.updatedAt),
-    }));
+    return rows.map((row) => this.mapFactRow(row));
+  }
+
+  /**
+   * Governance list: facts by scope, optionally narrowed to a thread/project.
+   * Pinned facts sort first, then most-recently-updated. Powers GET /v1/memory
+   * and the Memory Manager UI.
+   */
+  listFactsByScope(filter: {
+    scope?: MemoryScope;
+    threadId?: string;
+    projectId?: string;
+  }): MemoryFactRow[] {
+    const conditions = [];
+    if (filter.scope) {
+      conditions.push(eq(schema.memoryFacts.scope, filter.scope));
+    }
+    if (filter.threadId) {
+      conditions.push(eq(schema.memoryFacts.threadId, filter.threadId));
+    }
+    if (filter.projectId) {
+      conditions.push(eq(schema.memoryFacts.projectId, filter.projectId));
+    }
+    const rows = this.db
+      .select()
+      .from(schema.memoryFacts)
+      .where(conditions.length ? and(...conditions) : undefined)
+      .orderBy(
+        desc(schema.memoryFacts.pinned),
+        desc(schema.memoryFacts.updatedAt),
+      )
+      .all();
+    return rows.map((row) => this.mapFactRow(row));
   }
 
   upsertFact(input: {
     id?: string;
-    threadId: string;
+    threadId?: string | null;
     key: string;
     value: string;
     source?: string;
+    scope?: MemoryScope;
+    projectId?: string;
+    pinned?: boolean;
+    sourceMessageId?: string;
   }): MemoryFactRow {
     const now = Date.now();
     const id = input.id ?? randomUUID();
@@ -230,41 +356,86 @@ export class MemoryStore {
       .get();
 
     const createdAt = existing?.createdAt ?? now;
+    // Preserve governance fields on an auto-upsert (the engine passes only
+    // thread/key/value/source) — never silently reset a user's pin/scope.
+    const scope: MemoryScope =
+      input.scope ?? (existing?.scope as MemoryScope | null) ?? "thread";
+    const threadId = input.threadId ?? existing?.threadId ?? null;
+    const projectId = input.projectId ?? existing?.projectId ?? null;
+    const pinned = input.pinned ?? (existing ? Boolean(existing.pinned) : false);
+    const sourceMessageId =
+      input.sourceMessageId ?? existing?.sourceMessageId ?? null;
 
+    const values = {
+      id,
+      threadId,
+      key: input.key,
+      value: input.value,
+      source: input.source ?? null,
+      scope,
+      projectId,
+      pinned,
+      sourceMessageId,
+      createdAt,
+      updatedAt: now,
+    };
     this.db
       .insert(schema.memoryFacts)
-      .values({
-        id,
-        threadId: input.threadId,
-        key: input.key,
-        value: input.value,
-        source: input.source ?? null,
-        createdAt,
-        updatedAt: now,
-      })
+      .values(values)
       .onConflictDoUpdate({
         target: schema.memoryFacts.id,
         set: {
-          threadId: input.threadId,
+          threadId,
           key: input.key,
           value: input.value,
           source: input.source ?? null,
+          scope,
+          projectId,
+          pinned,
+          sourceMessageId,
           updatedAt: now,
         },
       })
       .run();
 
-    return {
-      id,
-      threadId: input.threadId,
-      key: input.key,
-      value: input.value,
-      source: input.source,
-      createdAt: new Date(createdAt),
-      updatedAt: new Date(now),
-    };
+    return this.mapFactRow({
+      ...values,
+      lastUsedAt: existing?.lastUsedAt ?? null,
+    });
   }
 
+  /** Governance edit by id (scope-agnostic): update text and/or pin state. */
+  updateFactById(
+    id: string,
+    patch: { key?: string; value?: string; pinned?: boolean },
+  ): MemoryFactRow | null {
+    const existing = this.db
+      .select()
+      .from(schema.memoryFacts)
+      .where(eq(schema.memoryFacts.id, id))
+      .get();
+    if (!existing) {
+      return null;
+    }
+    this.db
+      .update(schema.memoryFacts)
+      .set({
+        ...(patch.key !== undefined ? { key: patch.key } : {}),
+        ...(patch.value !== undefined ? { value: patch.value } : {}),
+        ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}),
+        updatedAt: Date.now(),
+      })
+      .where(eq(schema.memoryFacts.id, id))
+      .run();
+    const row = this.db
+      .select()
+      .from(schema.memoryFacts)
+      .where(eq(schema.memoryFacts.id, id))
+      .get();
+    return row ? this.mapFactRow(row) : null;
+  }
+
+  /** Thread-scoped delete (existing continuity path — requires matching thread). */
   deleteFact(threadId: string, factId: string): boolean {
     const existing = this.db
       .select({ id: schema.memoryFacts.id })
@@ -289,6 +460,35 @@ export class MemoryStore {
       )
       .run();
     return true;
+  }
+
+  /** Governance delete by id (any scope). Returns false if the id doesn't exist. */
+  deleteFactById(id: string): boolean {
+    const existing = this.db
+      .select({ id: schema.memoryFacts.id })
+      .from(schema.memoryFacts)
+      .where(eq(schema.memoryFacts.id, id))
+      .get();
+    if (!existing) {
+      return false;
+    }
+    this.db
+      .delete(schema.memoryFacts)
+      .where(eq(schema.memoryFacts.id, id))
+      .run();
+    return true;
+  }
+
+  /** Stamp `lastUsedAt` on the facts the compiler included this turn (curation). */
+  touchFactsUsed(ids: string[]): void {
+    if (ids.length === 0) {
+      return;
+    }
+    this.db
+      .update(schema.memoryFacts)
+      .set({ lastUsedAt: Date.now() })
+      .where(inArray(schema.memoryFacts.id, ids))
+      .run();
   }
 
   appendChunk(input: {

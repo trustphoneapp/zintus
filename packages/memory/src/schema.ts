@@ -14,10 +14,19 @@ export const threadState = sqliteTable("thread_state", {
 
 export const memoryFacts = sqliteTable("memory_facts", {
   id: text("id").primaryKey(),
-  threadId: text("thread_id").notNull(),
+  // Nullable: global- and project-scoped facts have no owning thread.
+  threadId: text("thread_id"),
   key: text("key").notNull(),
   value: text("value").notNull(),
   source: text("source"),
+  // Governance (2026): where the fact applies + provenance + curation.
+  scope: text("scope").notNull().default("thread"),
+  projectId: text("project_id"),
+  pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
+  /** Epoch ms the fact was last INCLUDED in a compiled context (curation/eviction). */
+  lastUsedAt: integer("last_used_at"),
+  /** Id of the message this fact was extracted from (provenance). */
+  sourceMessageId: text("source_message_id"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
