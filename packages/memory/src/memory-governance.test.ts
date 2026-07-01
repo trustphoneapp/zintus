@@ -98,6 +98,33 @@ describe("MemoryStore governance", () => {
     expect(after.value).toBe("Alice B.");
   });
 
+  test("global facts influence getTopFacts for ANY thread (not just thread facts)", async () => {
+    const s = store();
+    s.upsertFact({ scope: "global", key: "name", value: "Alice" });
+    s.upsertFact({ scope: "thread", threadId: "t1", key: "goal", value: "ship" });
+
+    // A thread with NO facts of its own still sees the global fact.
+    const forOtherThread = await s.getTopFacts("t-other", "who am I", 6);
+    expect(forOtherThread.some((f) => f.content.includes("Alice"))).toBe(true);
+
+    // The owning thread sees both its own fact and the global one.
+    const forT1 = await s.getTopFacts("t1", "goal", 6);
+    expect(forT1.some((f) => f.content.includes("ship"))).toBe(true);
+    expect(forT1.some((f) => f.content.includes("Alice"))).toBe(true);
+  });
+
+  test("a pinned global fact floats to the top of getTopFacts", async () => {
+    const s = store();
+    // Many unpinned facts + one pinned — the pinned one must rank first even with
+    // no query match.
+    for (let i = 0; i < 8; i++) {
+      s.upsertFact({ scope: "global", key: `k${i}`, value: `v${i}` });
+    }
+    s.upsertFact({ scope: "global", key: "critical", value: "pinned fact", pinned: true });
+    const top = await s.getTopFacts("t", "", 3);
+    expect(top[0]?.content).toContain("pinned fact");
+  });
+
   test("migration is idempotent: init() twice is a no-op", () => {
     const s = store();
     s.upsertFact({ scope: "global", key: "k", value: "v" });

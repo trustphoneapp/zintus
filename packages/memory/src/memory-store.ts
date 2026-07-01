@@ -78,12 +78,27 @@ export class MemoryStore {
     limit: number,
   ): Promise<MemoryFact[]> {
     const normalizedQuery = query.trim().toLowerCase();
-    const rows = this.listFacts(threadId).slice(0, Math.max(limit * 2, limit));
+    // Both this thread's facts AND the user's GLOBAL facts inform a turn: global
+    // memory is user-wide (applies to every conversation), thread facts are local
+    // to this one. They are disjoint by construction (a fact is one scope), so no
+    // dedupe is needed. (Project-scoped facts need a project context and are
+    // compiled separately — not yet wired.)
+    const rows = [
+      ...this.listFacts(threadId),
+      ...this.listFactsByScope({ scope: "global" }),
+    ];
     const scored = rows.map((row) => {
       const haystack = `${row.key} ${row.value}`.toLowerCase();
-      const relevance = normalizedQuery
-        ? (haystack.includes(normalizedQuery) ? 1 : 0.35)
+      let relevance = normalizedQuery
+        ? haystack.includes(normalizedQuery)
+          ? 1
+          : 0.35
         : 0.5;
+      // Pinned facts are user-curated as important — always float them to the top
+      // so a pinned global memory reliably makes it into the compiled context.
+      if (row.pinned) {
+        relevance = Math.max(relevance, 0.9);
+      }
       return {
         id: row.id,
         content: `${row.key}: ${row.value}`,
