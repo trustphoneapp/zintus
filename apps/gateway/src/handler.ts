@@ -307,6 +307,7 @@ function buildUsageMetadata(
   strategy: string | undefined,
   privacyHonored?: boolean,
   routeReason?: string,
+  memoryUsed?: Array<{ id: string; content: string }>,
 ): Record<string, unknown> {
   return {
     type: "metadata",
@@ -322,6 +323,9 @@ function buildUsageMetadata(
     routing_strategy: strategy ?? "auto",
     // Human "why this provider/model" — surfaced on every platform (consistency).
     ...(routeReason ? { route_reason: routeReason } : {}),
+    // Which stored memory facts influenced this turn ("memory used this turn").
+    // Facts are background data — this is transparency, not authority.
+    ...(memoryUsed && memoryUsed.length ? { memory_used: memoryUsed } : {}),
     // Privacy-mode honesty signal — only present when private mode was requested
     // (block_training). false = the request could not avoid a may-train provider.
     ...(privacyHonored !== undefined
@@ -1253,6 +1257,7 @@ export function createGatewayHandler(
                   routing.strategy,
                   lastResult.privacyHonored,
                   lastResult.routeReason,
+                  lastResult.memoryUsed,
                 ),
                 object: "chat.completion.chunk",
                 model: lastResult.model,
@@ -1772,6 +1777,7 @@ export function createGatewayHandler(
                   routing.strategy,
                   result.privacyHonored,
                   result.routeReason,
+                  result.memoryUsed,
                 ),
               }
             : {}),
@@ -1925,6 +1931,8 @@ export function createGatewayHandler(
                 capturedUsage,
                 routing.strategy,
                 result.privacyHonored,
+                result.routeReason,
+                result.memoryUsed,
               ),
               object: "chat.completion.chunk",
               model: result.model,
@@ -2762,10 +2770,19 @@ export function createGatewayHandler(
         return json(request, { error: "key and value are required" }, 400);
       }
       const scopeRaw = body.scope;
-      const scope =
-        scopeRaw === "project" || scopeRaw === "global" || scopeRaw === "thread"
-          ? scopeRaw
-          : "thread";
+      if (
+        scopeRaw !== undefined &&
+        scopeRaw !== "thread" &&
+        scopeRaw !== "project" &&
+        scopeRaw !== "global"
+      ) {
+        return json(
+          request,
+          { error: "scope must be one of thread|project|global" },
+          400,
+        );
+      }
+      const scope = (scopeRaw ?? "thread") as "thread" | "project" | "global";
       const fact = engine.upsertMemory({
         scope,
         threadId: (body.thread_id ?? body.threadId) as string | undefined,

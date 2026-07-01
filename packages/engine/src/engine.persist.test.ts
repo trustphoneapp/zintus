@@ -156,4 +156,51 @@ describe("persist:false — incognito writes no durable state", () => {
     );
     expect(providerCalls).toBe(2);
   });
+
+  test("memory used: included facts surface on the result and stamp lastUsedAt", async () => {
+    const memory = new MemoryStore(join(dir, "memory.db"));
+    memory.init();
+    const engine = await makeEngine(memory);
+    const thread = engine.createThread("t");
+    const fact = memory.upsertFact({
+      scope: "thread",
+      threadId: thread.id,
+      key: "name",
+      value: "Alice",
+    });
+
+    const result = await engine.routeAndStream({
+      threadId: thread.id,
+      messages: [{ role: "user", content: "what is my name" }],
+    });
+    // Surfaced to the client ("memory used this turn").
+    expect(result.memoryUsed?.some((m) => m.id === fact.id)).toBe(true);
+    await drain(result);
+    // Curation: the included fact's lastUsedAt is stamped.
+    expect(memory.listFacts(thread.id)[0]?.lastUsedAt).toBeGreaterThan(0);
+  });
+
+  test("incognito still READS memory (surfaced) but never stamps lastUsedAt", async () => {
+    const memory = new MemoryStore(join(dir, "memory.db"));
+    memory.init();
+    const engine = await makeEngine(memory);
+    const thread = engine.createThread("t");
+    const fact = memory.upsertFact({
+      scope: "thread",
+      threadId: thread.id,
+      key: "pet",
+      value: "cat",
+    });
+
+    const result = await engine.routeAndStream({
+      threadId: thread.id,
+      messages: [{ role: "user", content: "what pet do I have" }],
+      persist: false,
+    });
+    // The fact still influenced the answer and is surfaced honestly...
+    expect(result.memoryUsed?.some((m) => m.id === fact.id)).toBe(true);
+    await drain(result);
+    // ...but incognito writes nothing durable, including the lastUsedAt stamp.
+    expect(memory.listFacts(thread.id)[0]?.lastUsedAt).toBeUndefined();
+  });
 });

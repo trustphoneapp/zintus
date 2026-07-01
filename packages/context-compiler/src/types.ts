@@ -85,4 +85,11 @@ export interface CompileResult {
   tokenEstimate: number;
   compileTrace: CompileTrace;
   bundle: ModelContextBundle;
+  /**
+   * The memory facts actually INCLUDED in the compiled context this turn (empty
+   * when the facts block was dropped/absent). Drives `touchFactsUsed` (curation)
+   * and the "memory used this turn" footer. Honest because the facts block is
+   * all-or-nothing per budget — there is no partial inclusion.
+   */
+  usedFacts: MemoryFact[];
 }

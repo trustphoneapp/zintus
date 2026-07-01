@@ -283,9 +283,14 @@ export async function compileContext(request: CompileRequest): Promise<CompileRe
     0,
   );
 
+  // The facts block is all-or-nothing (see mergeBlocks): if "top-facts" made it
+  // into a section, every selected fact was used; otherwise none were.
+  const usedFacts = includedSections.includes("top-facts") ? topFacts : [];
+
   return {
     messages: sections,
     tokenEstimate,
+    usedFacts,
     compileTrace: {
       mode: request.mode,
       selectedTurnCount: selectedHistory.filter((message) => message.role === "user")

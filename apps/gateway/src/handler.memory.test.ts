@@ -79,6 +79,22 @@ describe("/v1/memory governance routes", () => {
     expect(res.status).toBe(400);
   });
 
+  test("POST with an explicit invalid scope → 400 (not silently defaulted)", async () => {
+    const res = await handler(
+      req("POST", "/v1/memory", { scope: "bogus", key: "k", value: "v" }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test("POST without a scope defaults to thread", async () => {
+    const res = await handler(
+      req("POST", "/v1/memory", { key: "k", value: "v", thread_id: "t9" }),
+    );
+    expect(res.status).toBe(201);
+    const created = (await jsonOf(res)).memory as Record<string, unknown>;
+    expect(created.scope).toBe("thread");
+  });
+
   test("PATCH edits value + pin; unknown id → 404", async () => {
     const created = (
       await jsonOf(

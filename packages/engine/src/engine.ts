@@ -169,6 +169,10 @@ export interface EngineStreamResult extends RouteStreamResult {
   /** A short, human "why this provider/model" — strategy + failover + capability +
    *  privacy. Surfaced on every platform (the consistency rule). Always present. */
   routeReason?: string;
+  /** Memory facts INCLUDED in this turn's compiled context (id + display label).
+   *  Empty/absent when no stored facts influenced the answer. Powers the
+   *  "memory used this turn" footer. */
+  memoryUsed?: Array<{ id: string; content: string }>;
   /**
    * Structured-output verdict, present ONLY when the request asked for non-text
    * structured output (`responseFormat.type !== "text"`). The text `stream` for
@@ -553,6 +557,9 @@ export function createEngine(config: EngineConfig = {}): Engine {
       let effectiveMessages = initialMessages;
       let compileTraceId: string | undefined;
       let compileTokenEstimate: number | undefined;
+      // Memory facts INCLUDED in the compiled context this turn — surfaced to the
+      // client ("memory used this turn") and used to stamp lastUsedAt (curation).
+      let memoryUsedThisTurn: Array<{ id: string; content: string }> = [];
       const effectiveMode = request.mode ?? "smart";
       const latestUserInput = textOf(
         latestMessage?.content ?? initialMessages.at(-1)?.content ?? "",
@@ -597,6 +604,16 @@ export function createEngine(config: EngineConfig = {}): Engine {
         });
         effectiveMessages = compiled.messages;
         compileTokenEstimate = compiled.tokenEstimate;
+        memoryUsedThisTurn = compiled.usedFacts.map((fact) => ({
+          id: fact.id,
+          content: fact.content,
+        }));
+        // Curation: stamp lastUsedAt on the facts we actually included — a
+        // durable write, so honor the request's persistence gate (incognito
+        // must not touch memory).
+        if (persistThisRequest && compiled.usedFacts.length > 0) {
+          memory.touchFactsUsed(compiled.usedFacts.map((fact) => fact.id));
+        }
         try {
           if (persistTracesThisRequest) {
             const stored = memory.recordCompileTrace(
@@ -829,6 +846,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
           threadId,
           compileTraceId,
           compileTokenEstimate,
+          memoryUsed: memoryUsedThisTurn,
           cacheHit: "miss",
           failoverCount: attempts.filter((a) => a.status === "fail").length,
           privacyHonored: structuredResult.privacyHonored,
@@ -953,6 +971,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
             threadId,
             compileTraceId,
             compileTokenEstimate,
+            memoryUsed: memoryUsedThisTurn,
             cacheHit,
             failoverCount: 0,
             routeReason: buildRouteReason({
@@ -1072,6 +1091,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
         threadId,
         compileTraceId,
         compileTokenEstimate,
+        memoryUsed: memoryUsedThisTurn,
         cacheHit: "miss",
         failoverCount: attempts.filter((a) => a.status === "fail").length,
         privacyHonored: result.privacyHonored,
