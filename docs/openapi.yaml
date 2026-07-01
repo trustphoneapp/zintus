@@ -1066,6 +1066,16 @@ components:
           $ref: "#/components/schemas/ProviderId"
         thread_id:
           type: string
+        persist:
+          type: boolean
+          description: >
+            Local durability control (default true). Set `false` for
+            incognito/private turns: the gateway writes NO durable state for the
+            request — conversation history, memory facts, thread summary, memory
+            chunks, compile traces, response cache, and the activity log are all
+            skipped, and OTel trace export is suppressed. Orthogonal to
+            `block_training` (which only avoids providers that may train on the
+            prompt); this controls LOCAL persistence, not provider routing.
         mode:
           type: string
           enum: [fast, smart, deep]
