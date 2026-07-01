@@ -13,7 +13,7 @@ const SECTIONS: Array<{
   label: string;
   items: Array<{
     href: string;
-    icon: "chat" | "compare" | "globe" | "layers" | "grid" | "zap" | "activity" | "terminal" | "settings" | "plug";
+    icon: "chat" | "compare" | "globe" | "layers" | "grid" | "zap" | "activity" | "terminal" | "settings" | "plug" | "database";
     label: string;
   }>;
 }> = [
@@ -32,6 +32,7 @@ const SECTIONS: Array<{
     items: [
       { href: "/providers", icon: "zap", label: "Providers" },
       { href: "/settings/mcp", icon: "plug", label: "MCP servers" },
+      { href: "/memory", icon: "database", label: "Memory" },
       { href: "/usage", icon: "activity", label: "Usage" },
     ],
   },
