@@ -913,6 +913,9 @@ export async function streamGatewayChat(params: {
   searchDepth?: "basic" | "standard" | "deep";
   blockTraining?: boolean;
   allowTraining?: ProviderId[];
+  /** `false` = incognito/private: the gateway writes no durable state for this
+   *  turn (conversation, memory, traces, cache, activity). Default true. */
+  persist?: boolean;
   keys?: Partial<Record<ProviderId, string>>;
   temperature?: number;
   /** Tool/function definitions for this turn. Requires a tool-capable provider —
@@ -963,6 +966,7 @@ export async function streamGatewayChat(params: {
         : undefined,
       block_training: params.blockTraining,
       allow_training: params.allowTraining,
+      persist: params.persist,
       temperature: params.temperature,
       tools: params.tools,
       tool_choice: params.toolChoice,

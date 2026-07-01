@@ -24,3 +24,5 @@ coverage/
 .claude/
 # Local relay DR backups (scripts/relay-backup.sh)
 /backup/
+.idea/
+previews/

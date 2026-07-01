@@ -262,6 +262,15 @@ export interface RouteRequest {
   /** Providers the user explicitly allows even when blockTrainingProviders is on. */
   allowTrainingProviders?: ProviderId[];
   /**
+   * Local durability control. `false` = incognito/ephemeral: the engine writes
+   * NO durable state for this request (conversation history, memory facts,
+   * thread summary, memory chunks, compile traces, response cache) and skips
+   * OTel trace export; the gateway records no activity row. Orthogonal to
+   * `blockTrainingProviders`, which is provider-training privacy. Default
+   * (undefined/true) preserves current behavior.
+   */
+  persist?: boolean;
+  /**
    * Per-request BYOK keys (provider -> key), used in preference to the gateway's
    * configured keys for this request only. For the LOCAL gateway: lets a browser
    * client supply keys without server-side key storage. Never logged, never

@@ -660,8 +660,12 @@ export function createGatewayHandler(
       routeReason?: string;
     },
     usage: RouteUsage | undefined,
+    persist: boolean,
   ): void {
-    if (!activityStore || !result.traceId) {
+    // `persist:false` (incognito/ephemeral) must leave no durable activity row —
+    // this is a durable trail OUTSIDE memory_facts, so it needs the same gate as
+    // the engine's writes.
+    if (!persist || !activityStore || !result.traceId) {
       return;
     }
     try {
@@ -1087,6 +1091,7 @@ export function createGatewayHandler(
                 strategy: routing.strategy,
                 blockTrainingProviders: body.block_training,
                 allowTrainingProviders: body.allow_training,
+                persist: body.persist,
                 keys: body.keys,
                 diffText: body.diff,
                 temperature: body.temperature,
@@ -1257,7 +1262,7 @@ export function createGatewayHandler(
             );
           }
           if (lastResult) {
-            recordTurnActivity(lastResult, capturedUsage);
+            recordTurnActivity(lastResult, capturedUsage, body.persist !== false);
           }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
@@ -1551,6 +1556,7 @@ export function createGatewayHandler(
           providerWeights: routing.providerWeights,
           strategy: routing.strategy,
           blockTrainingProviders: body.block_training,
+          persist: body.persist,
           allowTrainingProviders: body.allow_training,
           keys: body.keys,
           diffText: body.diff,
@@ -1736,7 +1742,7 @@ export function createGatewayHandler(
         );
       }
       // Durable usage history: this turn completed and its usage is known.
-      recordTurnActivity(result, capturedUsage);
+      recordTurnActivity(result, capturedUsage, body.persist !== false);
       return json(
         request,
         {
@@ -1957,7 +1963,7 @@ export function createGatewayHandler(
           }
           // The stream drained without error → a real completed turn. Persist
           // it to the durable activity store (best-effort, never throws here).
-          recordTurnActivity(result, capturedUsage);
+          recordTurnActivity(result, capturedUsage, body.persist !== false);
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
           const message =
@@ -2668,6 +2674,7 @@ export function createGatewayHandler(
       const body = (await request.json().catch(() => ({}))) as {
         message?: { role?: string; content: string } | string;
         mode?: ContextMode;
+        persist?: boolean;
       };
       const message =
         typeof body.message === "string"
@@ -2682,6 +2689,7 @@ export function createGatewayHandler(
         threadId,
         message,
         mode: body.mode,
+        persist: body.persist,
       });
       return json(request, {
         thread_id: threadId,

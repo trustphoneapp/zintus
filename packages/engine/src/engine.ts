@@ -203,6 +203,8 @@ export interface Engine {
     threadId: string;
     message?: ThreadMessage["content"] | ChatMessage;
     mode?: ContextMode;
+    /** `false` = preview only (private/incognito): compile but record no trace. */
+    persist?: boolean;
   }): Promise<{ traceId: string; messages: RouteRequest["messages"] }>;
   getThreadState(threadId: string): Record<string, unknown> | null;
   getCompileTrace(traceId: string): CompileTraceRow | null;
@@ -276,8 +278,12 @@ function buildMemoryAdapter(memory: MemoryStore) {
 
 export function createEngine(config: EngineConfig = {}): Engine {
   const conversations = new ConversationStore(config.conversationsPath);
-  const persistConversations = config.persistConversations !== false;
-  const persistTraces = config.persistTraces !== false;
+  // Engine-wide defaults (construction-time). The per-REQUEST override lives in
+  // routeAndStream(request): `persist:false` (incognito/ephemeral) ANDs these to
+  // false for that one request so it writes no durable state. Must be computed
+  // inside routeAndStream — `request` does not exist here.
+  const globalPersistConversations = config.persistConversations !== false;
+  const globalPersistTraces = config.persistTraces !== false;
   // Memory store is injectable so separate engines/processes/tests don't
   // collide on a single hidden global DB. `ownsMemory` is false when the caller
   // injected an instance — in that case its lifecycle (and close) belongs to
@@ -505,6 +511,18 @@ export function createEngine(config: EngineConfig = {}): Engine {
         throw new Error("messages or message is required");
       }
 
+      // Per-request durability override (incognito/ephemeral). `persist:false`
+      // ANDs the engine defaults to false for THIS request so it writes NO
+      // durable state — conversation rows, memory facts/summary/chunks, compile
+      // traces, response cache, and OTel trace export are all skipped. Must live
+      // here (not at construction) because it depends on `request`. Orthogonal
+      // to blockTrainingProviders, which is provider-training privacy.
+      const persistThisRequest =
+        globalPersistConversations && request.persist !== false;
+      const persistTracesThisRequest =
+        globalPersistTraces && request.persist !== false;
+      const cacheThisRequest = request.persist !== false;
+
       let effectiveMessages = initialMessages;
       let compileTraceId: string | undefined;
       let compileTokenEstimate: number | undefined;
@@ -553,11 +571,13 @@ export function createEngine(config: EngineConfig = {}): Engine {
         effectiveMessages = compiled.messages;
         compileTokenEstimate = compiled.tokenEstimate;
         try {
-          const stored = memory.recordCompileTrace(
-            request.threadId,
-            compiled.compileTrace as unknown as Record<string, unknown>,
-          );
-          compileTraceId = String(stored.id);
+          if (persistTracesThisRequest) {
+            const stored = memory.recordCompileTrace(
+              request.threadId,
+              compiled.compileTrace as unknown as Record<string, unknown>,
+            );
+            compileTraceId = String(stored.id);
+          }
         } catch {
           compileTraceId = undefined;
         }
@@ -573,7 +593,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
       const otelStartMs = nowEpochMs();
       const attemptEndsMs: number[] = [];
 
-      if (persistTraces) {
+      if (persistTracesThisRequest) {
         conversations.startTrace(traceId);
       }
 
@@ -582,7 +602,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
         .reverse()
         .find((message) => message.role === "user");
 
-      if (persistConversations && lastUser) {
+      if (persistThisRequest && lastUser) {
         if (!threadId) {
           threadId = conversations.createThread(textOf(lastUser.content).slice(0, 48)).id;
         }
@@ -598,7 +618,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
       const onAttempt = (event: TraceAttempt) => {
         attempts.push(event);
         attemptEndsMs.push(nowEpochMs());
-        if (persistTraces) {
+        if (persistTracesThisRequest) {
           conversations.recordAttempt(traceId, event);
         }
         config.onAttempt?.(event);
@@ -732,7 +752,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
 
         // Persist the FINAL assistant text + trace, mirroring the normal path's
         // side-effects. Cache writes are intentionally skipped (see above).
-        if (persistConversations && threadId) {
+        if (persistThisRequest && threadId) {
           conversations.appendMessage(
             threadId,
             { role: "assistant", content: text },
@@ -755,10 +775,11 @@ export function createEngine(config: EngineConfig = {}): Engine {
           },
           totalLatencyMs: completedAt.getTime() - traceStartedAt,
         };
-        if (persistTraces) {
+        if (persistTracesThisRequest) {
           conversations.completeTrace(traceId, trace);
         }
-        exportRequestTrace({
+        if (persistTracesThisRequest)
+          exportRequestTrace({
           trace: { traceId, attempts: [...attempts], ...trace },
           cacheHit: "miss",
           compileTokens: compileTokenEstimate,
@@ -818,6 +839,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
       // `hasToolTurns(messages)`.
       if (
         cache &&
+        cacheThisRequest &&
         !request.bypassCache &&
         !requiresTools(request) &&
         !requiresStructuredOutput(request) &&
@@ -859,7 +881,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
             yield finalResponse;
           };
 
-          if (persistConversations && threadId) {
+          if (persistThisRequest && threadId) {
             conversations.appendMessage(
               threadId,
               { role: "assistant", content: finalResponse },
@@ -883,9 +905,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
             winner: { providerId: targetProvider as ProviderId, model: targetModel },
             totalLatencyMs: cacheCompletedAt.getTime() - traceStartedAt,
           };
-          if (persistTraces) {
+          if (persistTracesThisRequest) {
             conversations.completeTrace(traceId, cacheTrace);
           }
+          if (persistTracesThisRequest)
           exportRequestTrace({
             trace: { traceId, attempts: [], ...cacheTrace },
             cacheHit,
@@ -932,7 +955,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
           // observes attempts on completion). Kept parallel to `attempts` so
           // the exporter can place each attempt span on the real timeline.
           attemptEndsMs.push(nowEpochMs());
-          if (persistTraces) {
+          if (persistTracesThisRequest) {
             conversations.recordAttempt(traceId, event);
           }
           config.onAttempt?.(event);
@@ -946,7 +969,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
             assistantContent += chunk;
             yield chunk;
           }
-          if (persistConversations && threadId) {
+          if (persistThisRequest && threadId) {
             conversations.appendMessage(
               threadId,
               { role: "assistant", content: assistantContent },
@@ -967,6 +990,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
           // embeds the empty-string body of a pure tool_result turn.
           if (
             cache &&
+            cacheThisRequest &&
             !(result.toolCalls && result.toolCalls.length > 0) &&
             !hasToolTurns(effectiveMessages)
           ) {
@@ -993,9 +1017,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
             },
             totalLatencyMs: completedAt.getTime() - traceStartedAt,
           };
-          if (persistTraces) {
+          if (persistTracesThisRequest) {
             conversations.completeTrace(traceId, trace);
           }
+          if (persistTracesThisRequest)
           exportRequestTrace({
             trace: { traceId, attempts: [...attempts], ...trace },
             cacheHit: "miss",
@@ -1050,6 +1075,12 @@ export function createEngine(config: EngineConfig = {}): Engine {
         memory: memoryAdapter,
         episodicMessages: conversations.getThreadMessages(input.threadId),
       });
+      // Preview-only compile (used by /v1/threads/:id/compile). `persist:false`
+      // (private/incognito) must not leave a durable compile trace — return the
+      // compiled preview with a sentinel traceId and write nothing.
+      if (input.persist === false) {
+        return { traceId: "0", messages: compiled.messages };
+      }
       try {
         const stored = memory.recordCompileTrace(
           input.threadId,

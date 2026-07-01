@@ -610,6 +610,9 @@ export default function ChatPage() {
             model: catalogModel,
             mode: settings.contextMode,
             threadId: useThread ? threadId : undefined,
+            // Incognito/private: tell the gateway to persist NOTHING durable for
+            // this turn (conversation, memory, traces, cache, activity).
+            persist: incognito ? false : undefined,
             // Read fresh: the LocalKeyManager may have just populated the vault and
             // re-invoked send() before this component re-rendered with new keys.
             apiKeys: useProviderStatusStore.getState().keys,
