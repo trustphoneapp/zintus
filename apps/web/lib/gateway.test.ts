@@ -389,4 +389,35 @@ describe("streamGatewayChat — mcp body wiring + frame parsing (synthetic SSE)"
     expect("mcp" in sentBody).toBe(false);
     expect(result.toolEvents).toBeUndefined();
   });
+
+  test("parses memory_used from the metadata frame into meta.memoryUsed", async () => {
+    globalThis.fetch = (async () =>
+      sseResponse([
+        {
+          id: "trace1",
+          provider: "groq",
+          model: "m",
+          choices: [{ delta: { content: "Hi" }, finish_reason: null }],
+        },
+        {
+          type: "metadata",
+          provider: "groq",
+          model: "m",
+          tokens: { input: 5, output: 2 },
+          latency_ms: 10,
+          route_reason: "cheapest healthy provider",
+          memory_used: [{ id: "f1", content: "name: Alice" }],
+        },
+      ])) as unknown as typeof fetch;
+
+    const result = await streamGatewayChat({
+      messages: [{ role: "user", content: "hi" }],
+      onChunk: () => {},
+    });
+    expect(result.meta?.memoryUsed).toEqual([
+      { id: "f1", content: "name: Alice" },
+    ]);
+    // The rest of the metadata still parses (no regression).
+    expect(result.meta?.routeReason).toBe("cheapest healthy provider");
+  });
 });
