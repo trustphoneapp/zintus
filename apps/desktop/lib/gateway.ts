@@ -378,6 +378,12 @@ export interface ResponseMeta {
    * header as a fallback (known before the stream even starts).
    */
   privacyHonored?: boolean;
+  /**
+   * Stored memory facts that INFLUENCED this turn (id + display label), read from
+   * the metadata frame's `memory_used`. Empty/absent when no facts were included.
+   * Surfaced as the "memory used this turn" footer — transparency, not authority.
+   */
+  memoryUsed?: Array<{ id: string; content: string }>;
 }
 
 interface GatewayChunk {
@@ -406,6 +412,7 @@ interface GatewayChunk {
   routing_strategy?: string;
   route_reason?: string;
   private_mode_honored?: boolean;
+  memory_used?: Array<{ id: string; content: string }>;
   // server-side MCP tool-loop event fields (type === "mcp_tool_call" |
   // "mcp_tool_result"). A result frame carries the call id + outcome at the top
   // level (its `choices` is empty); a call frame reuses the tool-call delta shape.
@@ -823,6 +830,9 @@ export async function streamGatewayChat(params: {
         }
         if (chunk.private_mode_honored != null) {
           meta.privacyHonored = chunk.private_mode_honored;
+        }
+        if (chunk.memory_used != null) {
+          meta.memoryUsed = chunk.memory_used;
         }
         continue;
       }

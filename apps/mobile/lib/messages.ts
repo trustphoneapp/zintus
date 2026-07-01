@@ -40,6 +40,12 @@ export interface ChatMeta {
    * honored, `false` when the gateway had to use a may-train provider anyway.
    */
   privacyHonored?: boolean;
+  /**
+   * Stored memory facts that INFLUENCED this turn (id + display label), from the
+   * gateway's `memory_used`. Empty/absent when none were included. Surfaced as
+   * the "memory used this turn" footer — transparency, not authority.
+   */
+  memoryUsed?: Array<{ id: string; content: string }>;
 }
 
 export interface UiMessage extends ChatMessage {
@@ -106,6 +112,7 @@ export interface GatewayChunk {
   routing_strategy?: string;
   route_reason?: string;
   private_mode_honored?: boolean;
+  memory_used?: Array<{ id: string; content: string }>;
   // Server-side MCP tool-loop event fields (type === "mcp_tool_call" |
   // "mcp_tool_result"). A result frame carries the call id + outcome at the top
   // level (its `choices` is empty); a call frame reuses the tool-call delta shape.
@@ -135,6 +142,7 @@ export function parseChatMeta(chunk: GatewayChunk): ChatMeta | undefined {
     routingStrategy: chunk.routing_strategy ?? "auto",
     routeReason: chunk.route_reason,
     privacyHonored: chunk.private_mode_honored,
+    memoryUsed: chunk.memory_used,
   };
 }
 

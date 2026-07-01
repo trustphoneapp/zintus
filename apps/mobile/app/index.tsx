@@ -732,6 +732,18 @@ export default function ChatScreen() {
                   </Text>
                 </View>
               ) : null}
+
+              {/* "Memory used this turn" — stored facts that influenced the
+                  answer (background data, not instructions). */}
+              {!isUser &&
+              !item.streaming &&
+              item.meta?.memoryUsed &&
+              item.meta.memoryUsed.length > 0 ? (
+                <Text style={styles.memoryUsed}>
+                  {item.meta.memoryUsed.length}{" "}
+                  {item.meta.memoryUsed.length === 1 ? "memory" : "memories"} used
+                </Text>
+              ) : null}
             </View>
           );
         }}
@@ -865,6 +877,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "600",
     marginBottom: 6,
+  },
+  memoryUsed: {
+    color: COLORS.muted,
+    fontSize: 11.5,
+    marginTop: 4,
   },
   privacyBadge: {
     alignSelf: "flex-start",

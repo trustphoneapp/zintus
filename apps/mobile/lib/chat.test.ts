@@ -32,6 +32,15 @@ describe("parseChatMeta", () => {
     });
   });
 
+  it("parses memory_used into meta.memoryUsed", () => {
+    const meta = parseChatMeta({
+      type: "metadata",
+      provider: "groq",
+      memory_used: [{ id: "f1", content: "name: Alice" }],
+    });
+    expect(meta?.memoryUsed).toEqual([{ id: "f1", content: "name: Alice" }]);
+  });
+
   it("returns undefined for a non-metadata content frame", () => {
     expect(
       parseChatMeta({
