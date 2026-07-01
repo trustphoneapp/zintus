@@ -844,6 +844,163 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/threads/{id}/memory:
+    get:
+      tags: [Operations]
+      operationId: listThreadMemory
+      summary: List a thread's memory facts (auth-gated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The thread's memory facts (pinned first).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [memory]
+                properties:
+                  memory:
+                    type: array
+                    items: { $ref: "#/components/schemas/MemoryFact" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/memory:
+    get:
+      tags: [Operations]
+      operationId: listMemory
+      summary: List memory facts by scope (auth-gated)
+      description: >
+        User-owned memory governance. Facts are background data, never
+        instructions. Filter by scope, optionally narrowed to a thread/project.
+      parameters:
+        - name: scope
+          in: query
+          schema: { type: string, enum: [thread, project, global] }
+        - name: thread_id
+          in: query
+          schema: { type: string }
+        - name: project_id
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Matching facts (pinned first, then most-recently-updated).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [memory]
+                properties:
+                  memory:
+                    type: array
+                    items: { $ref: "#/components/schemas/MemoryFact" }
+        "400":
+          description: scope must be one of thread|project|global.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Operations]
+      operationId: createMemory
+      summary: Create or replace a memory fact (auth-gated)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                scope:
+                  type: string
+                  enum: [thread, project, global]
+                  default: thread
+                thread_id: { type: string }
+                project_id: { type: string }
+                key: { type: string }
+                value: { type: string }
+                source: { type: string }
+                source_message_id: { type: string }
+                pinned: { type: boolean }
+      responses:
+        "201":
+          description: The created fact.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [memory]
+                properties:
+                  memory: { $ref: "#/components/schemas/MemoryFact" }
+        "400":
+          description: key and value are required.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/memory/{id}:
+    patch:
+      tags: [Operations]
+      operationId: updateMemory
+      summary: Edit a fact's text and/or pin state (auth-gated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key: { type: string }
+                value: { type: string }
+                pinned: { type: boolean }
+      responses:
+        "200":
+          description: The updated fact.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [memory]
+                properties:
+                  memory: { $ref: "#/components/schemas/MemoryFact" }
+        "400":
+          description: No editable fields provided (key|value|pinned).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Fact not found.
+    delete:
+      tags: [Operations]
+      operationId: deleteMemory
+      summary: Delete a fact by id (auth-gated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Fact not found.
+
   /v1/compile/traces/{id}:
     get:
       tags: [Operations]
@@ -1812,6 +1969,33 @@ components:
         createdAt:
           type: string
           format: date-time
+
+    MemoryFact:
+      type: object
+      description: >
+        A user-owned memory fact. Facts are BACKGROUND DATA used to personalize
+        context — never instructions and never granted system authority.
+      required: [id, key, value, scope, pinned, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        threadId:
+          type: string
+          nullable: true
+          description: Null for project- and global-scoped facts.
+        key: { type: string }
+        value: { type: string }
+        source: { type: string }
+        scope:
+          type: string
+          enum: [thread, project, global]
+        projectId: { type: string }
+        pinned: { type: boolean }
+        lastUsedAt:
+          type: integer
+          description: Epoch ms the fact was last included in a compiled context.
+        sourceMessageId: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
 
     CompileTrace:
       type: object

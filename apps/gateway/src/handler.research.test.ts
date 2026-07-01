@@ -84,6 +84,21 @@ function fakeEngine(overrides: Partial<Engine> = {}): Engine {
     listTraces: () => [],
     getThreadState: () => null,
     getCompileTrace: () => null,
+    listMemory: () => [],
+    upsertMemory: (input) => ({
+      id: "m1",
+      threadId: input.threadId ?? null,
+      key: input.key,
+      value: input.value,
+      source: input.source,
+      scope: input.scope ?? "thread",
+      projectId: input.projectId,
+      pinned: input.pinned ?? false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    }),
+    updateMemory: () => null,
+    deleteMemory: () => false,
     async compileThreadContext() {
       return { traceId: "0", messages: [] };
     },

@@ -13,6 +13,8 @@ import {
   summarizeWithLlm,
   consolidateFactsWithLlm,
   type CompileTraceRow,
+  type MemoryFactRow,
+  type MemoryScope,
 } from "@zintus/memory";
 import {
   createRouter,
@@ -208,6 +210,31 @@ export interface Engine {
   }): Promise<{ traceId: string; messages: RouteRequest["messages"] }>;
   getThreadState(threadId: string): Record<string, unknown> | null;
   getCompileTrace(traceId: string): CompileTraceRow | null;
+  /** List governance facts by scope (optionally narrowed to a thread/project). */
+  listMemory(filter: {
+    scope?: MemoryScope;
+    threadId?: string;
+    projectId?: string;
+  }): MemoryFactRow[];
+  /** Create or replace a governance fact (Memory Manager "Save as memory"). */
+  upsertMemory(input: {
+    id?: string;
+    scope?: MemoryScope;
+    threadId?: string | null;
+    projectId?: string;
+    key: string;
+    value: string;
+    source?: string;
+    sourceMessageId?: string;
+    pinned?: boolean;
+  }): MemoryFactRow;
+  /** Edit a fact's text and/or pin state by id. Null if the id doesn't exist. */
+  updateMemory(
+    id: string,
+    patch: { key?: string; value?: string; pinned?: boolean },
+  ): MemoryFactRow | null;
+  /** Delete a fact by id (any scope). False if it didn't exist. */
+  deleteMemory(id: string): boolean;
   getProviderStatus(): Promise<ProviderStatus[]>;
   getSavings(): { byProvider: Record<string, number>; total: number };
   /** Remaining free-tier quota ratio (0..1) for a provider — in-flight-aware
@@ -1102,6 +1129,22 @@ export function createEngine(config: EngineConfig = {}): Engine {
         return null;
       }
       return memory.getCompileTrace(parsed);
+    },
+
+    listMemory(filter) {
+      return memory.listFactsByScope(filter);
+    },
+
+    upsertMemory(input) {
+      return memory.upsertFact(input);
+    },
+
+    updateMemory(id, patch) {
+      return memory.updateFactById(id, patch);
+    },
+
+    deleteMemory(id) {
+      return memory.deleteFactById(id);
     },
 
     close() {

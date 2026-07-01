@@ -2710,6 +2710,123 @@ export function createGatewayHandler(
       return json(request, { messages: engine.getThreadMessages(threadId) });
     }
 
+    // A thread's own governance facts.
+    if (
+      url.pathname.startsWith("/v1/threads/") &&
+      url.pathname.endsWith("/memory") &&
+      request.method === "GET"
+    ) {
+      const threadId = url.pathname.split("/")[3];
+      if (!threadId) {
+        return json(request, { error: "thread id required" }, 400);
+      }
+      return json(request, {
+        memory: engine.listMemory({ scope: "thread", threadId }),
+      });
+    }
+
+    // Memory governance CRUD (Memory Manager). Facts are user-owned: visible,
+    // editable, deletable. Never treated as authority — they are background data.
+    if (url.pathname === "/v1/memory" && request.method === "GET") {
+      const scopeParam = url.searchParams.get("scope") ?? undefined;
+      const scope =
+        scopeParam === "thread" ||
+        scopeParam === "project" ||
+        scopeParam === "global"
+          ? scopeParam
+          : undefined;
+      if (scopeParam && !scope) {
+        return json(
+          request,
+          { error: "scope must be one of thread|project|global" },
+          400,
+        );
+      }
+      return json(request, {
+        memory: engine.listMemory({
+          scope,
+          threadId: url.searchParams.get("thread_id") ?? undefined,
+          projectId: url.searchParams.get("project_id") ?? undefined,
+        }),
+      });
+    }
+
+    if (url.pathname === "/v1/memory" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      const key = typeof body.key === "string" ? body.key.trim() : "";
+      const value = typeof body.value === "string" ? body.value.trim() : "";
+      if (!key || !value) {
+        return json(request, { error: "key and value are required" }, 400);
+      }
+      const scopeRaw = body.scope;
+      const scope =
+        scopeRaw === "project" || scopeRaw === "global" || scopeRaw === "thread"
+          ? scopeRaw
+          : "thread";
+      const fact = engine.upsertMemory({
+        scope,
+        threadId: (body.thread_id ?? body.threadId) as string | undefined,
+        projectId: (body.project_id ?? body.projectId) as string | undefined,
+        key,
+        value,
+        source: typeof body.source === "string" ? body.source : undefined,
+        sourceMessageId:
+          typeof body.source_message_id === "string"
+            ? body.source_message_id
+            : undefined,
+        pinned: typeof body.pinned === "boolean" ? body.pinned : undefined,
+      });
+      return json(request, { memory: fact }, 201);
+    }
+
+    if (
+      url.pathname.startsWith("/v1/memory/") &&
+      request.method === "PATCH"
+    ) {
+      const id = url.pathname.split("/")[3];
+      if (!id) {
+        return json(request, { error: "memory id required" }, 400);
+      }
+      const body = (await request.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      const patch: { key?: string; value?: string; pinned?: boolean } = {};
+      if (typeof body.key === "string") patch.key = body.key;
+      if (typeof body.value === "string") patch.value = body.value;
+      if (typeof body.pinned === "boolean") patch.pinned = body.pinned;
+      if (Object.keys(patch).length === 0) {
+        return json(
+          request,
+          { error: "no editable fields provided (key|value|pinned)" },
+          400,
+        );
+      }
+      const updated = engine.updateMemory(id, patch);
+      if (!updated) {
+        return json(request, { error: "memory not found" }, 404);
+      }
+      return json(request, { memory: updated });
+    }
+
+    if (
+      url.pathname.startsWith("/v1/memory/") &&
+      request.method === "DELETE"
+    ) {
+      const id = url.pathname.split("/")[3];
+      if (!id) {
+        return json(request, { error: "memory id required" }, 400);
+      }
+      const deleted = engine.deleteMemory(id);
+      if (!deleted) {
+        return json(request, { error: "memory not found" }, 404);
+      }
+      return json(request, { deleted: true });
+    }
+
     if (
       url.pathname.startsWith("/v1/compile/traces/") &&
       request.method === "GET"
