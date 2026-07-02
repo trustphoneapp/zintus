@@ -106,6 +106,8 @@ export async function streamChat(params: {
   /** Configured MCP servers for this turn — the gateway runs them server-side
    *  and streams tool-loop events; the web only displays them. */
   mcp?: ChatMcpConfig;
+  /** Opt-in artifact/canvas mode: adds the artifact-authoring system instruction. */
+  artifactMode?: boolean;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
   /** Live callback for each server-side MCP tool-loop event (call/result). */
@@ -137,6 +139,7 @@ export async function streamChat(params: {
     toolChoice: params.toolChoice,
     responseFormat: params.responseFormat,
     mcp: params.mcp,
+    artifactMode: params.artifactMode,
     signal: params.signal,
     onChunk: params.onChunk,
     onMcpToolEvent: params.onMcpToolEvent,

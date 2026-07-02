@@ -115,6 +115,21 @@ function selectLastTurns(
   return selected;
 }
 
+/**
+ * Appended to the system prompt only when `request.artifactMode` is set. Tells
+ * the model to wrap substantial, reusable deliverables in an `artifact` fenced
+ * block so the web client surfaces them in the editable canvas panel, and to
+ * reuse a stable id across revisions so edits version instead of duplicating.
+ */
+const ARTIFACT_INSTRUCTIONS =
+  "\n\nArtifacts: when you produce a substantial, self-contained, reusable deliverable " +
+  "(a full code file, an HTML page, an SVG, or a long document), wrap ONLY that deliverable " +
+  "in a fenced block tagged as an artifact so the user receives it in a dedicated, editable panel:\n" +
+  '```artifact id="stable-kebab-id" title="Human title" type="code|html|svg|markdown" lang="ts"\n' +
+  "…the full content…\n```\n" +
+  "Reuse the SAME id when you revise an existing artifact, so it versions instead of duplicating. " +
+  "Keep incidental snippets and short inline examples as ordinary fenced code — tag only true artifacts.";
+
 export async function compileContext(request: CompileRequest): Promise<CompileResult> {
   const contextWindow = request.contextWindow ?? 128_000;
   const budget = allocateTokenBudget(request.mode, contextWindow);
@@ -127,7 +142,8 @@ export async function compileContext(request: CompileRequest): Promise<CompileRe
   const minimalSystem: ChatMessage = {
     role: "system",
     content:
-      "You are a helpful assistant. Respect prior constraints and continue the conversation consistently.",
+      "You are a helpful assistant. Respect prior constraints and continue the conversation consistently." +
+      (request.artifactMode ? ARTIFACT_INSTRUCTIONS : ""),
   };
   sections.push(minimalSystem);
   includedSections.push("minimal-system");

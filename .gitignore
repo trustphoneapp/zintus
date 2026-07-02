@@ -10,6 +10,10 @@ target/
 .env
 .env.*
 !.env.example
+# IDE noise (JetBrains/Android Studio).
+.idea/
+# Local static UI previews (not part of the app build).
+previews/
 *.log
 .wrangler/
 .dev.vars

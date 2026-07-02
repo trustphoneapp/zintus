@@ -8,11 +8,24 @@ import { useSettingsStore } from "@/lib/store";
 import {
   createProject,
   deleteProject,
+  getActiveProjectId,
   listProjects,
   setActiveProjectId,
   updateProject,
   type Project,
 } from "@/lib/projects";
+
+function formatDate(ms: number): string {
+  try {
+    return new Date(ms).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  } catch {
+    return "recently";
+  }
+}
 
 interface FormState {
   id: string | null;
@@ -39,9 +52,13 @@ export default function ProjectsPage() {
   const updateSettings = useSettingsStore((s) => s.update);
 
   const [projects, setProjects] = useState<Project[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState | null>(null);
 
-  const refresh = useCallback(() => setProjects(listProjects()), []);
+  const refresh = useCallback(() => {
+    setProjects(listProjects());
+    setActiveId(getActiveProjectId());
+  }, []);
   useEffect(() => refresh(), [refresh]);
 
   function save() {
@@ -71,74 +88,282 @@ export default function ProjectsPage() {
   }
 
   return (
-    <div className="screen" style={{ padding: 24, overflow: "auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-        <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Projects</h1>
-        <button type="button" className="chat-tool-toggle" onClick={() => setForm({ ...EMPTY })}>
-          ＋ New project
-        </button>
-      </div>
-      <p style={{ color: "#94a3b8", fontSize: 13, marginBottom: 16, maxWidth: 640 }}>
-        Workspaces with shared instructions and routing defaults. A project&apos;s
-        instructions are sent as a system message for every chat started from it.
-      </p>
-
-      {projects.length === 0 ? (
-        <p style={{ color: "#94a3b8", fontSize: 14 }}>No projects yet.</p>
-      ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, maxWidth: 720 }}>
-          {projects.map((p) => (
-            <div
-              key={p.id}
-              style={{ border: "1px solid #232a36", borderRadius: 12, padding: 16, background: "#0e1118" }}
+    <div className="screen" style={{ padding: 0, overflow: "auto" }}>
+      <div style={{ maxWidth: 940, margin: "0 auto", padding: "28px 24px 48px" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-start",
+            gap: 16,
+          }}
+        >
+          <div>
+            <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em" }}>
+              Projects
+            </h1>
+            <p
+              style={{
+                margin: "8px 0 0",
+                fontSize: 14.5,
+                lineHeight: 1.6,
+                color: "var(--color-text-sub)",
+                maxWidth: 600,
+              }}
             >
-              <div style={{ fontSize: 16, fontWeight: 700, color: "#e8eef5" }}>{p.name}</div>
-              {p.instructions ? (
-                <div style={{ fontSize: 13, color: "#94a3b8", marginTop: 4 }}>
-                  {p.instructions.slice(0, 160)}
-                </div>
-              ) : null}
-              <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 8 }}>
-                {p.defaultProvider ?? "Auto routing"}
-                {p.privateDefault ? " · 🛡 Private" : ""}
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                <button type="button" className="chat-send" style={{ width: "auto", padding: "6px 14px" }} onClick={() => openInChat(p)}>
-                  New chat
-                </button>
-                <button
-                  type="button"
-                  className="chat-tool-toggle"
-                  onClick={() =>
-                    setForm({
-                      id: p.id,
-                      name: p.name,
-                      instructions: p.instructions,
-                      defaultProvider: p.defaultProvider ?? "auto",
-                      strategy: p.strategy ?? "default",
-                      privateDefault: p.privateDefault,
-                    })
-                  }
-                >
-                  Edit
-                </button>
-                <button
-                  type="button"
-                  className="chat-tool-toggle"
-                  onClick={() => {
-                    if (window.confirm(`Delete "${p.name}"? Chats are kept.`)) {
-                      deleteProject(p.id);
-                      refresh();
-                    }
+              Group related chats with shared context and files. Every chat in a project
+              sees the project&apos;s knowledge.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setForm({ ...EMPTY })}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              height: 34,
+              padding: "0 13px",
+              borderRadius: 9,
+              border: "none",
+              background: "var(--c-accent)",
+              color: "#fff",
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: "pointer",
+              flexShrink: 0,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" style={{ strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" }}>
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            New project
+          </button>
+        </div>
+
+        <p style={{ margin: "12px 0 0", fontSize: 12, color: "var(--color-text-muted)" }}>
+          Local-only — projects live in this browser; no cloud sync yet.
+        </p>
+
+        {projects.length === 0 ? (
+          <div
+            style={{
+              marginTop: 24,
+              padding: "36px 24px",
+              borderRadius: 14,
+              border: "0.5px solid var(--c-border)",
+              background: "var(--color-surface)",
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 44,
+                height: 44,
+                borderRadius: 12,
+                background: "var(--c-accent-light)",
+                color: "var(--c-accent)",
+                marginBottom: 12,
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" style={{ strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" }}>
+                <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                <polyline points="2 17 12 22 22 17" />
+                <polyline points="2 12 12 17 22 12" />
+              </svg>
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: "var(--color-text)" }}>
+              No projects yet
+            </div>
+            <p style={{ margin: "6px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
+              Create one to group related chats.
+            </p>
+          </div>
+        ) : (
+          <div
+            style={{
+              marginTop: 24,
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+              gap: 14,
+            }}
+          >
+            {projects.map((p) => {
+              const isActive = p.id === activeId;
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    padding: 18,
+                    borderRadius: 14,
+                    background: "var(--color-surface)",
+                    border: `0.5px solid ${isActive ? "var(--c-accent)" : "var(--c-border)"}`,
                   }}
                 >
-                  Delete
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+                  <div style={{ display: "flex", alignItems: "center", gap: 11 }}>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: 36,
+                        height: 36,
+                        borderRadius: 10,
+                        flexShrink: 0,
+                        background: "var(--c-accent-light)",
+                        color: "var(--c-accent)",
+                      }}
+                    >
+                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" style={{ strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" }}>
+                        <polygon points="12 2 2 7 12 12 22 7 12 2" />
+                        <polyline points="2 17 12 22 22 17" />
+                        <polyline points="2 12 12 17 22 12" />
+                      </svg>
+                    </span>
+                    <span style={{ fontSize: 15, fontWeight: 700, color: "var(--color-text)", flex: 1, minWidth: 0 }}>
+                      {p.name}
+                    </span>
+                    {isActive ? (
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 5,
+                          fontSize: 11,
+                          fontWeight: 600,
+                          color: "var(--color-green)",
+                          flexShrink: 0,
+                        }}
+                      >
+                        <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--color-green)" }} />
+                        Active
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <p
+                    style={{
+                      margin: "11px 0 0",
+                      fontSize: 13,
+                      lineHeight: 1.55,
+                      color: "var(--color-text-muted)",
+                      minHeight: 38,
+                    }}
+                  >
+                    {p.instructions
+                      ? p.instructions.slice(0, 160)
+                      : "No instructions yet."}
+                  </p>
+
+                  <div
+                    style={{
+                      marginTop: 14,
+                      display: "flex",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      fontSize: 12,
+                      color: "var(--color-text-muted)",
+                    }}
+                  >
+                    <span>{p.defaultProvider ?? "Auto routing"}</span>
+                    {p.privateDefault ? (
+                      <>
+                        <span style={{ opacity: 0.5 }}>·</span>
+                        <span>🛡 Private</span>
+                      </>
+                    ) : null}
+                    <span style={{ opacity: 0.5 }}>·</span>
+                    <span>{formatDate(p.createdAt)}</span>
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+                    <button
+                      type="button"
+                      onClick={() => openInChat(p)}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        height: 32,
+                        padding: "0 13px",
+                        borderRadius: 8,
+                        border: "none",
+                        background: "var(--c-accent)",
+                        color: "#fff",
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                      }}
+                    >
+                      New chat
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setForm({
+                          id: p.id,
+                          name: p.name,
+                          instructions: p.instructions,
+                          defaultProvider: p.defaultProvider ?? "auto",
+                          strategy: p.strategy ?? "default",
+                          privateDefault: p.privateDefault,
+                        })
+                      }
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        height: 32,
+                        padding: "0 13px",
+                        borderRadius: 8,
+                        border: "0.5px solid var(--c-border)",
+                        background: "transparent",
+                        color: "var(--color-text-sub)",
+                        fontSize: 12.5,
+                        fontWeight: 500,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm(`Delete "${p.name}"? Chats are kept.`)) {
+                          deleteProject(p.id);
+                          refresh();
+                        }
+                      }}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        height: 32,
+                        padding: "0 13px",
+                        borderRadius: 8,
+                        border: "0.5px solid var(--c-border)",
+                        background: "transparent",
+                        color: "var(--color-text-muted)",
+                        fontSize: 12.5,
+                        fontWeight: 500,
+                        cursor: "pointer",
+                        marginLeft: "auto",
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {form ? (
         <div className="consent-backdrop" role="dialog" aria-modal="true" onClick={() => setForm(null)}>

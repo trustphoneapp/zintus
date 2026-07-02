@@ -936,6 +936,9 @@ export async function streamGatewayChat(params: {
    *  SERVER-SIDE tool loop and streams `mcp_tool_call`/`mcp_tool_result` events;
    *  the web only displays them (it never executes these tools). */
   mcp?: ChatMcpConfig;
+  /** Opt-in: ask the engine to add artifact-authoring instructions to the system
+   *  prompt (the canvas tag syntax). Off by default. */
+  artifactMode?: boolean;
   signal?: AbortSignal;
   onChunk: (text: string) => void;
   /** Live callback for each server-side MCP tool-loop event (call/result), in
@@ -967,6 +970,7 @@ export async function streamGatewayChat(params: {
       strategy: params.strategy,
       mode: params.mode,
       thread_id: params.threadId,
+      artifact_mode: params.artifactMode,
       // Matches the gateway's body.search contract (@zintus/search strategies).
       search: params.webSearch
         ? { enabled: true, depth: params.searchDepth ?? "standard" }

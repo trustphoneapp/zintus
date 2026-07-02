@@ -7,7 +7,11 @@ import {
   type ReactNode,
 } from "react";
 import type { MCPServerConfig } from "@zintus/mcp";
-import { discoverMcpServer, disconnectMcpServer } from "@/lib/gateway";
+import {
+  discoverMcpServer,
+  disconnectMcpServer,
+  getGatewayUrl,
+} from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
 import {
   addMcpServer,
@@ -233,6 +237,38 @@ export default function McpSettingsPage() {
       <div
         style={{ ...pageStyle, display: "flex", flexDirection: "column", gap: 24 }}
       >
+        {/* Gateway status banner (design parity): MCP servers run on the local
+            gateway, so its reachability is the first thing to surface. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 14px",
+            borderRadius: 10,
+            border: `0.5px solid color-mix(in oklch, ${gatewayConnected ? "var(--color-green)" : "var(--c-warn, #f59e0b)"} 35%, transparent)`,
+            background: `color-mix(in oklch, ${gatewayConnected ? "var(--color-green)" : "var(--c-warn, #f59e0b)"} 10%, transparent)`,
+            fontSize: 13,
+          }}
+        >
+          <span className={`status-dot${gatewayConnected ? " online" : ""}`} />
+          <span style={{ color: "var(--color-text-sub)" }}>
+            {gatewayConnected
+              ? "Gateway connected. Servers run locally on your machine — your data never leaves it."
+              : "Gateway offline. Start it with zintus serve, then reload — configs still save here."}
+          </span>
+          <code
+            style={{
+              marginLeft: "auto",
+              fontSize: 12,
+              color: gatewayConnected ? "var(--color-green)" : "var(--c-warn, #f59e0b)",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {gatewayConnected ? getGatewayUrl() : "zintus serve"}
+          </code>
+        </div>
+
         <Section
           title="MCP servers"
           description="Connect tool servers (Model Context Protocol) so models can use their tools in chat. Configs are stored only in this browser — never on a server."
@@ -386,46 +422,77 @@ export default function McpSettingsPage() {
               />
             </label>
 
-            <div className="strategy-list">
-              <label className="strategy-option" style={{ cursor: "pointer" }}>
-                <input
-                  type="radio"
-                  name="mcp-transport"
-                  checked={transport === "stdio"}
-                  onChange={() => setTransport("stdio")}
-                />
-                <span>
-                  <strong>stdio (local process)</strong>
-                  <small>
-                    Your gateway runs a local program on your machine and talks to
-                    it over its input/output.
-                  </small>
-                </span>
-              </label>
-              <label className="strategy-option" style={{ cursor: "pointer" }}>
-                <input
-                  type="radio"
-                  name="mcp-transport"
-                  checked={transport === "http"}
-                  onChange={() => setTransport("http")}
-                />
-                <span>
-                  <strong>http (streamable)</strong>
-                  <small>Connect to a server at a URL over HTTP.</small>
-                </span>
-              </label>
-              <label className="strategy-option" style={{ cursor: "pointer" }}>
-                <input
-                  type="radio"
-                  name="mcp-transport"
-                  checked={transport === "sse"}
-                  onChange={() => setTransport("sse")}
-                />
-                <span>
-                  <strong>sse</strong>
-                  <small>Connect to a server at a URL over server-sent events.</small>
-                </span>
-              </label>
+            {/* Transport chooser as selectable cards (design parity). */}
+            <div
+              role="radiogroup"
+              aria-label="How does your gateway reach it?"
+              style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}
+            >
+              {(
+                [
+                  {
+                    value: "stdio",
+                    title: "Local process",
+                    code: "stdio",
+                    desc: "Runs a program on your machine. Best for local files & tools.",
+                  },
+                  {
+                    value: "http",
+                    title: "Remote HTTP",
+                    code: "http",
+                    desc: "Connect to a hosted server at a URL. The modern transport.",
+                  },
+                  {
+                    value: "sse",
+                    title: "Remote SSE",
+                    code: "sse",
+                    desc: "Connect to a hosted server over server-sent events.",
+                  },
+                ] as Array<{ value: Transport; title: string; code: string; desc: string }>
+              ).map((opt) => {
+                const active = transport === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    onClick={() => setTransport(opt.value)}
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 4,
+                      padding: "12px 12px",
+                      textAlign: "left",
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      border: `0.5px solid ${active ? VIOLET : "var(--c-border)"}`,
+                      background: active
+                        ? "color-mix(in oklch, #7C3AED 12%, transparent)"
+                        : "var(--color-surface)",
+                      transition: "border-color .12s, background .12s",
+                    }}
+                  >
+                    <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <strong style={{ fontSize: 13 }}>{opt.title}</strong>
+                      <code
+                        style={{
+                          fontSize: 10.5,
+                          padding: "1px 5px",
+                          borderRadius: 999,
+                          border: "0.5px solid var(--c-border)",
+                          color: "var(--color-text-muted)",
+                        }}
+                      >
+                        {opt.code}
+                      </code>
+                    </span>
+                    <small style={{ color: "var(--color-text-muted)", lineHeight: 1.35 }}>
+                      {opt.desc}
+                    </small>
+                  </button>
+                );
+              })}
             </div>
 
             {transport === "stdio" ? (

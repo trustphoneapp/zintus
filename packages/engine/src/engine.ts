@@ -155,6 +155,9 @@ export interface EngineRouteRequest extends Omit<RouteRequest, "messages"> {
   bypassCache?: boolean;
   /** Raw unified git diff for this turn (compressed into context). */
   diffText?: string;
+  /** Opt-in: append artifact-authoring instructions to the system prompt so the
+   *  model emits ```artifact …``` blocks for substantial deliverables. */
+  artifactMode?: boolean;
 }
 
 export interface EngineStreamResult extends RouteStreamResult {
@@ -635,6 +638,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
           contextWindow,
           codeSearch,
           diffText: request.diffText,
+          artifactMode: request.artifactMode,
         });
         effectiveMessages = compiled.messages;
         compileTokenEstimate = compiled.tokenEstimate;

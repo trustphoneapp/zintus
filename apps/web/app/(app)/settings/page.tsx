@@ -5,6 +5,7 @@ import { useTheme } from "next-themes";
 import { loadMemory, saveMemory } from "@/lib/memory";
 import { loadPresets, savePresets, type Preset } from "@/lib/presets";
 import { useSettingsStore } from "@/lib/store";
+import { useAppStore } from "@/lib/app-store";
 import { ROUTING_STRATEGIES } from "@/lib/settings";
 import { PROVIDER_BY_ID, PROVIDERS } from "@/lib/providers";
 import { getMe, signOut } from "@/lib/cloud";
@@ -87,6 +88,8 @@ export default function SettingsPage() {
   const [pSystem, setPSystem] = useState("");
   const [pTemp, setPTemp] = useState("");
   const [accountEmail, setAccountEmail] = useState<string | null>(null);
+  const [cleared, setCleared] = useState(false);
+  const threadCount = useAppStore((state) => state.threads.length);
 
   useEffect(() => {
     setMounted(true);
@@ -121,6 +124,22 @@ export default function SettingsPage() {
     const next = presets.filter((p) => p.id !== id);
     setPresets(next);
     savePresets(next);
+  }
+
+  function clearAllConversations() {
+    // Snapshot the live store and delete only what it actually holds.
+    const { threads, deleteThread } = useAppStore.getState();
+    if (threads.length === 0) return;
+    const confirmed = window.confirm(
+      `Delete all ${threads.length} conversation${threads.length === 1 ? "" : "s"} ` +
+        "stored in this browser? This cannot be undone.",
+    );
+    if (!confirmed) return;
+    for (const thread of [...threads]) {
+      deleteThread(thread.id);
+    }
+    setCleared(true);
+    window.setTimeout(() => setCleared(false), 2000);
   }
 
   function removeMemory(index: number) {
@@ -451,6 +470,29 @@ export default function SettingsPage() {
             <p className="muted">
               Run gateway: <code>zintus serve</code>
             </p>
+          </div>
+
+          <div className="settings-card">
+            <h2>Conversations</h2>
+            <p className="muted">
+              Chat history is stored only in this browser.
+              {mounted
+                ? ` ${threadCount} thread${threadCount === 1 ? "" : "s"} saved locally.`
+                : ""}
+            </p>
+            <button
+              type="button"
+              className="auth-submit-btn"
+              style={{ background: "var(--color-red)" }}
+              onClick={clearAllConversations}
+            >
+              Clear all conversations
+            </button>
+            {cleared ? (
+              <p className="muted" style={{ marginTop: 8 }}>
+                Conversations cleared.
+              </p>
+            ) : null}
           </div>
 
           <div className="settings-card">
