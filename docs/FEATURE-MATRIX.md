@@ -41,7 +41,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 13 | quota remaining | ✅ | ✅ | ✅ | ✅ | `QuotaBar` / `status` |
 | 14 | route-options actions | ✅ | ✅ | ✅ | ❌ | `RouteOptionsPanel` on web+desktop; not in CLI |
 | 15 | Deep Research | ✅ | ✅ | ✅ | 🟡 | CLI `zintus research <q>` rebuilds the engine deps in-process (`--depth`,`--json`); a brutal audit confirmed the deps are line-by-line faithful to the gateway (+ bundle), but it's **never been executed** (key-gated) — 🟡 until one keyed run. No idle watchdog yet (stalled upstream → Ctrl-C) |
-| 16 | history | ✅ | ✅ | 🟡 | ✅ | web threads/sidebar; desktop weak; CLI `history` |
+| 16 | history | ✅ | ✅ | ✅ | ✅ | web threads/sidebar; **desktop now full (2026-07-02)** — persisted threads + sidebar History list with switch/**rename** (inline)/​**delete** (confirm); CLI `history` |
 | 17 | projects / workspaces | ✅ | ✅ | ✅ | ✅ | all 4; CLI `projects list/create/use/clear/delete` (CRUD live-verified) + `chat` injects the active project's instructions + default provider |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
 | 19 | provider key management | ✅ | ✅ | ✅ | ✅ | web `LocalKeyManager`, CLI `keys`, and desktop all work. **RESOLVED on `feat/zintus-10-10`**: desktop frontend (`lib/tauri.ts:38,52,61`) now calls the shipped Rust `keyring_*` cmds via `invoke()` (registered in `src-tauri/src/lib.rs:68-71`), and the Rust service name is unified to `"zintus"` (`lib.rs:12`) matching the gateway/CLI (`packages/keychain/src/storage.ts`), so desktop-entered keys are visible to the chat path. Covered by `apps/desktop/lib/tauri.test.ts`. See Audit corrections. |
@@ -54,7 +54,7 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
 | 27 | report AI response | ✅ | ✅ | ✅ | ❌ | web + desktop have the Gen-AI flag control (web `MessageBubble` "Report" → on-device `zintus:reported-responses.v1`, parity with desktop); CLI n/a |
 | 28 | account / session / cloud remote | ✅ | ✅ | 🟡 | ✅ | web login/session; CLI `cloud`+`remote` |
-| 29 | export / share | ✅ | ✅ | 🟡 | ❌ | web works; desktop uses Blob+`a.download` — **unverified in the Tauri webview** (may need an fs/dialog plugin), test on a packaged build; CLI none |
+| 29 | export / share | ✅ | ✅ | 🟡 | ❌ | web works; **desktop now uses the NATIVE Tauri save dialog** (`@tauri-apps/plugin-dialog` + `-fs`, wired in `lib.rs`/capabilities, 2026-07-02) with a Blob fallback outside Tauri — replaces the broken anchor path; 🟡 only because the Rust side needs a real `tauri build` to verify; CLI none |
 
 ## ⚠️ Audit corrections (2026-06-26 war-room re-audit + human cross-check)
 
@@ -117,6 +117,15 @@ Verified green at audit time: `bun run typecheck` exit 0; full `bun run test` ex
 
 **Capability status — updated post-audit (2026-06-28).** The "absent stack-wide"
 line below was true at audit time but is now stale; the corrected picture:
+
+> **2026-07-02 refresh (verified against code):** the per-surface lines below
+> are themselves now stale for **mobile** — the merged serious-app added a
+> **Tools toggle + built-in tool loop** and a **JSON mode** (`response_format`)
+> to mobile, so mobile is **✅ for tool calling AND structured/JSON output**, not
+> ❌. Also new since 2026-06-28: **Agent mode** (gateway `/v1/agents` runtime) is
+> now on **Web ✅ · Desktop ✅ · Mobile ✅** (CLI has `zintus agent`), each with a
+> live SSE event log + write/run approval gate + sandbox/browser toggles.
+> **Image input** is now on **mobile ✅** too (camera + library, EXIF-stripped).
 
 - **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ✅ (built-in tools) · Mobile ❌**.
   Provider streaming (`packages/providers/src/utils.ts`), Gemini round-trip, and
