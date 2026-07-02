@@ -120,6 +120,19 @@ export function formatQuotaUsage(
   return `quota ${used.toLocaleString()}/${limit.toLocaleString()} tok`;
 }
 
+/**
+ * Per-turn saved-vs-Claude-Sonnet estimate — the SAME fixed public-list anchor
+ * ($3 in / $15 out per MTok) the gateway's `saved_vs_claude_sonnet` metadata
+ * frame uses, duplicated here because the CLI runs the engine in-process and
+ * never sees that frame. An estimate, not a promise.
+ */
+export function savedVsClaudeSonnetUsd(
+  inputTokens: number,
+  outputTokens: number,
+): number {
+  return (inputTokens * 3) / 1_000_000 + (outputTokens * 15) / 1_000_000;
+}
+
 /** Per-turn transparency facts, mirroring the gateway's `metadata` frame. Every
  *  numeric field is optional: the engine only reports what it actually measured,
  *  and the renderer omits anything absent rather than inventing a value. */
@@ -134,6 +147,10 @@ export interface TurnFacts {
   outputTokens?: number;
   /** Estimate-only USD this turn would cost on a paid API (0 on free tiers). */
   costUsd?: number;
+  /** Estimate-only USD this turn would have cost on the Claude Sonnet baseline
+   *  (matrix #12) — same fixed 3/15-per-MTok anchor as the gateway's metadata
+   *  frame, so all four surfaces report the same number. */
+  savedVsBaselineUsd?: number;
   /** Tokens spent against this provider's free tier today. */
   quotaUsed?: number;
   /** Provider's daily token cap — `null`/`undefined` when not reported. */
@@ -179,6 +196,9 @@ export function formatTurnSummary(facts: TurnFacts): string {
     parts.push(
       facts.costUsd > 0 ? `~$${facts.costUsd.toFixed(4)} est` : "$0 (free tier)",
     );
+  }
+  if (facts.savedVsBaselineUsd != null && facts.savedVsBaselineUsd > 0) {
+    parts.push(`≈ $${facts.savedVsBaselineUsd.toFixed(4)} vs Claude Sonnet (est.)`);
   }
   const quota = formatQuotaUsage(facts.quotaUsed, facts.quotaLimit);
   if (quota) parts.push(quota);

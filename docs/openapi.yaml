@@ -658,6 +658,62 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/keys/validate:
+    post:
+      tags: [Operations]
+      operationId: validateProviderKey
+      summary: Test a provider API key (auth-gated)
+      description: |
+        Explicit key test for GUI surfaces (feature matrix #20). The key travels
+        ONLY from the caller to this local gateway and then to the provider's own
+        auth-check endpoint — it is never logged, stored, or sent to the relay.
+        Local runtimes (ollama, lmstudio) have no key and return 400. A 502 means
+        the provider was unreachable — reachability failure is never conflated
+        with key rejection.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [providerId, key]
+              properties:
+                providerId:
+                  type: string
+                  description: Provider id (e.g. groq).
+                key:
+                  type: string
+                  description: The API key to test. Never persisted.
+      responses:
+        "200":
+          description: Validation verdict from the provider's auth endpoint.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    enum: [key_validation]
+                  provider:
+                    type: string
+                  valid:
+                    type: boolean
+        "400":
+          description: Unknown provider, local runtime, missing key, or bad JSON.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          description: Provider unreachable — could not test (NOT a rejection).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/traces:
     get:
       tags: [Operations]

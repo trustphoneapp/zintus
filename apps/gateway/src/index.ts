@@ -5,6 +5,13 @@ export {
   type GatewayKeypair,
 } from "./crypto.js";
 export { detectLocalRuntimes, type LocalRuntimes } from "./local-runtimes.js";
+export {
+  computeRouteOptions,
+  LOW_QUOTA_THRESHOLD,
+  type RouteOption,
+  type RouteOptionsInputs,
+  type RouteOptionsResult,
+} from "./route-options.js";
 export { MCPRegistry, type MCPRegistryOptions } from "./mcp-registry.js";
 // Re-exported so integration tests (and @zintus/test-utils) can build a handler
 // against a custom engine without reaching into ./handler.js internals.

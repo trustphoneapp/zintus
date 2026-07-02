@@ -25,6 +25,7 @@ import {
   formatTurnSummary,
   loadImages,
   normalizeChatError,
+  savedVsClaudeSonnetUsd,
 } from "./chat-content.js";
 import {
   buildChatMcpConfig,
@@ -526,6 +527,9 @@ export async function runChat(
       inputTokens: usage?.inputTokens,
       outputTokens: usage?.outputTokens,
       costUsd,
+      savedVsBaselineUsd: usage
+        ? savedVsClaudeSonnetUsd(usage.inputTokens, usage.outputTokens)
+        : undefined,
       quotaUsed: provider?.tokensToday,
       // tokensLimit is undefined when the engine has no reported daily cap — pass
       // it through as null so the renderer prints "limit unknown", not a guess.

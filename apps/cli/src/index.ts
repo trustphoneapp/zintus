@@ -304,11 +304,12 @@ program
 program
   .command("status")
   .description("Live dashboard of providers and quota usage")
-  .action(async () => {
+  .option("--json", "Print one JSON snapshot (no live dashboard) for automation")
+  .action(async (options: { json?: boolean }) => {
     // Source is status.tsx; TS/bundler emits status.js, so the ESM
     // specifier must use the .js extension (not .tsx) to resolve at runtime.
     const { runStatus } = await import("./commands/status.js");
-    runStatus();
+    runStatus({ json: options.json });
   });
 
 const keys = program
@@ -572,11 +573,22 @@ cloud
   });
 
 program
+  .command("route-options")
+  .argument("<provider>", "Provider id to evaluate (e.g. groq)")
+  .description("BYOK quota-decision: best fallback action for a provider (same logic as web/desktop)")
+  .option("--json", "Print the decision as JSON for automation")
+  .action(async (provider: string, options: { json?: boolean }) => {
+    const { runRouteOptions } = await import("./commands/route-options.js");
+    await runRouteOptions(provider, options);
+  });
+
+program
   .command("doctor")
   .description("Check system health: keychain, quota DB, provider keys, Ollama, relay")
-  .action(async () => {
+  .option("--json", "Emit { ok, checks } JSON for automation")
+  .action(async (options: { json?: boolean }) => {
     const { runDoctor } = await import("./commands/doctor.js");
-    await runDoctor();
+    await runDoctor({ json: options.json });
   });
 
 program

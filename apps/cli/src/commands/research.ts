@@ -9,6 +9,10 @@ import {
 import type { ChatMessage } from "@zintus/types";
 import { createAppEngine } from "../lib/router.js";
 import { loadConfig } from "../lib/config.js";
+import { IdleTimeoutError, withIdleTimeout } from "../lib/idle-timeout.js";
+
+/** Abort when NO research event arrives for this long (stalled upstream). */
+const RESEARCH_IDLE_MS = 120_000;
 
 export interface ResearchOptions {
   depth?: ResearchDepth;
@@ -110,7 +114,12 @@ export async function runResearch(
   }
 
   try {
-    for await (const event of deepResearch(query, { depth }, deps)) {
+    // Idle watchdog: a stalled search/LLM upstream used to hang here until
+    // Ctrl-C; now any 2-minute silence aborts with an honest error.
+    for await (const event of withIdleTimeout(
+      deepResearch(query, { depth }, deps),
+      RESEARCH_IDLE_MS,
+    )) {
       switch (event.type) {
         case "queries":
           if (!json) {
@@ -147,9 +156,10 @@ export async function runResearch(
       }
     }
   } catch (error) {
+    const label = error instanceof IdleTimeoutError ? "Research stalled" : "Research failed";
     console.error(
       chalk.red(
-        `\nResearch failed: ${error instanceof Error ? error.message : String(error)}`,
+        `\n${label}: ${error instanceof Error ? error.message : String(error)}`,
       ),
     );
     process.exit(1);

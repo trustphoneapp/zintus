@@ -13,6 +13,7 @@ import {
   loadImages,
   loadJsonSchema,
   normalizeChatError,
+  savedVsClaudeSonnetUsd,
 } from "./chat-content.js";
 
 // Build a minimal but structurally valid 1x1 PNG (signature + IHDR + IDAT +
@@ -212,6 +213,27 @@ describe("formatTurnSummary", () => {
     expect(out).toContain("100 in / 42 out tok");
     expect(out).toContain("$0 (free tier)");
     expect(out).toContain("quota 5,000/200,000 tok");
+  });
+
+  it("prints the saved-vs-Claude-Sonnet estimate with the gateway's exact anchor (matrix #12)", () => {
+    // Same fixed $3/$15-per-MTok math as the gateway metadata frame.
+    expect(savedVsClaudeSonnetUsd(1_000_000, 1_000_000)).toBe(18);
+    const out = formatTurnSummary({
+      providerLabel: "Groq",
+      model: "llama-3.3-70b",
+      inputTokens: 100_000,
+      outputTokens: 10_000,
+      costUsd: 0,
+      savedVsBaselineUsd: savedVsClaudeSonnetUsd(100_000, 10_000),
+    });
+    expect(out).toContain("≈ $0.4500 vs Claude Sonnet (est.)");
+    // Zero savings (e.g. empty usage) prints nothing rather than "$0 saved".
+    const zero = formatTurnSummary({
+      providerLabel: "Groq",
+      model: "m",
+      savedVsBaselineUsd: 0,
+    });
+    expect(zero).not.toContain("vs Claude Sonnet");
   });
 
   it("omits the route-reason line when the engine recorded none", () => {
