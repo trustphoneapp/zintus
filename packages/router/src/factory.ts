@@ -106,6 +106,18 @@ export interface RouterConfig {
    * explicit `maxTokens` is always honored EXACTLY and is unaffected by this.
    */
   outputReserveTokens?: number;
+  /**
+   * Liveness check for the keyless LOCAL runtimes (ollama/lmstudio). When
+   * supplied, a local provider is only eligible while this reports true — a
+   * not-running runtime is skipped at candidate selection instead of being
+   * dispatched to and connection-refused (which costs an attempt and, before
+   * the Bun network-error fix, aborted the whole route). When absent, local
+   * providers stay always-eligible (back-compat for embedded callers that have
+   * no prober). Callers should cache internally; this is invoked per request.
+   */
+  localRuntimeAlive?: (
+    providerId: "ollama" | "lmstudio",
+  ) => Promise<boolean> | boolean;
 }
 
 /** A provider with a recent error streak this large is treated as unhealthy. */
@@ -400,11 +412,20 @@ export function createRouter(config: RouterConfig = {}): Router {
     now: number,
     request: RouteRequest,
   ): Promise<boolean> {
-    const hasKey =
-      provider.id === "ollama" || provider.id === "lmstudio"
-        ? true
-        : Boolean(await keyFor(provider.id, request));
-    if (!hasKey) {
+    if (provider.id === "ollama" || provider.id === "lmstudio") {
+      // Keyless local runtimes: eligible only while actually running (when the
+      // caller provides a prober). Fail closed on a prober error — a runtime we
+      // cannot confirm alive must not be routed to.
+      if (config.localRuntimeAlive) {
+        try {
+          if (!(await config.localRuntimeAlive(provider.id))) {
+            return false;
+          }
+        } catch {
+          return false;
+        }
+      }
+    } else if (!(await keyFor(provider.id, request))) {
       return false;
     }
     if (!ledger.isQuotaAvailable(provider.id, now)) {
@@ -991,11 +1012,24 @@ export function createRouter(config: RouterConfig = {}): Router {
             const is5xx = status != null && status >= 500;
             // Treat network-level errors (TypeError: fetch failed, connection refused, etc.)
             // as transient 503s — they should trigger failover to the next provider.
+            // Node's fetch throws `TypeError: fetch failed` with an ECONNREFUSED
+            // cause; Bun's fetch throws a plain Error named "Error" with
+            // `code: "ConnectionRefused"` (or ConnectionClosed / FailedToOpenSocket /
+            // Timeout / DNSResolveFailed) and the message "Unable to connect. Is the
+            // computer able to access the url?" — match on `code` too, or a dead
+            // localhost provider (e.g. Ollama not running) aborts the whole route
+            // instead of failing over.
+            const errCode = (error as { code?: unknown }).code;
             const isNetworkError =
               !(error instanceof ProviderHttpError) &&
               error instanceof Error &&
               (error.name === "TypeError" ||
+                (typeof errCode === "string" &&
+                  /connection|socket|dns|timeout|econn|enotfound|epipe/i.test(
+                    errCode,
+                  )) ||
                 error.message.includes("fetch failed") ||
+                error.message.includes("Unable to connect") ||
                 error.message.includes("ECONNREFUSED") ||
                 error.message.includes("ENOTFOUND") ||
                 error.message.includes("network"));
