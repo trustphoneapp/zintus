@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useRouter } from "next/navigation";
 import { Icon } from "@/app/_components/Icons";
+import { useAppStore } from "@/lib/app-store";
 import {
   createMemory,
   deleteMemory,
@@ -54,10 +56,27 @@ function fmtDate(iso: string): string {
 }
 
 export default function MemoryPage() {
+  const router = useRouter();
   const [scope, setScope] = useState<MemoryScope>("global");
   const [facts, setFacts] = useState<MemoryFact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  /** Open the conversation a fact was extracted from. The fact's threadId is the
+   *  GATEWAY thread id; map it to the local thread (by gatewayThreadId) and switch
+   *  to it. (Message-level scroll isn't possible — client and gateway message ids
+   *  differ.) */
+  function openSource(fact: MemoryFact) {
+    if (!fact.threadId) return;
+    const { threads, switchThread } = useAppStore.getState();
+    const local = threads.find((t) => t.gatewayThreadId === fact.threadId);
+    if (!local) {
+      setError("That conversation isn't on this device.");
+      return;
+    }
+    switchThread(local.id);
+    router.push("/chat");
+  }
 
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
@@ -368,9 +387,31 @@ export default function MemoryPage() {
                     ? ` · last used ${fmtDate(new Date(fact.lastUsedAt).toISOString())}`
                     : " · not yet used"}
                   {fact.sourceMessageId ? (
-                    <span title={`Extracted from message ${fact.sourceMessageId}`}>
-                      {" · from a chat message"}
-                    </span>
+                    fact.threadId ? (
+                      <>
+                        {" · "}
+                        <button
+                          type="button"
+                          onClick={() => openSource(fact)}
+                          title="Open the conversation this was extracted from"
+                          style={{
+                            background: "none",
+                            border: "none",
+                            padding: 0,
+                            font: "inherit",
+                            color: "var(--c-accent, #6366f1)",
+                            cursor: "pointer",
+                            textDecoration: "underline",
+                          }}
+                        >
+                          from a chat message
+                        </button>
+                      </>
+                    ) : (
+                      <span title={`Extracted from message ${fact.sourceMessageId}`}>
+                        {" · from a chat message"}
+                      </span>
+                    )
                   ) : null}
                 </div>
               </div>
