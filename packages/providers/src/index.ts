@@ -1,5 +1,13 @@
 export { createProvider, listProviders } from "./factory.js";
 export {
+  EXTENDED_PROVIDERS,
+  EXTENDED_PROVIDER_IDS,
+  extendedLimits,
+  extendedPaidEquivalents,
+  type ExtendedProviderEntry,
+  type ManifestLimits,
+} from "./manifest.js";
+export {
   cerebrasProvider,
   groqProvider,
   geminiProvider,

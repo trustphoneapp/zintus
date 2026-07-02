@@ -1,4 +1,8 @@
 import type { PolicyLimits, ProviderId } from "@zintus/types";
+import {
+  extendedLimits,
+  extendedPaidEquivalents,
+} from "@zintus/providers";
 
 export interface ProviderLimits {
   requestsPerDay?: number;
@@ -20,6 +24,9 @@ export const GROQ_TIER_LIMITS = {
 } as const;
 
 export const DEFAULT_PROVIDER_LIMITS: Record<ProviderId, ProviderLimits> = {
+  // Providers added after 2026-07-02 declare quota defaults in the provider
+  // manifest (packages/providers/src/manifest.ts).
+  ...(extendedLimits() as Record<ProviderId, ProviderLimits>),
   // Cerebras promotional tier generally offers generous token budgets.
   cerebras: { tokensPerDay: 1_000_000 },
   groq: {
@@ -60,6 +67,8 @@ export const PROVIDER_LIMITS = DEFAULT_PROVIDER_LIMITS;
  * anchors (2025/2026), not promises — savings are an estimate, labelled as such.
  */
 export const PAID_EQUIVALENT_USD_PER_MTOK: Record<ProviderId, number> = {
+  // Providers added after 2026-07-02 declare their anchor in the manifest.
+  ...(extendedPaidEquivalents() as Record<ProviderId, number>),
   // ~Llama-3.3-70B / GPT-4o-mini class
   cerebras: 0.6,
   groq: 0.6,

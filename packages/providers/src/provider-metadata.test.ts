@@ -6,14 +6,14 @@ import { listProviders, createProvider } from "./factory.js";
 // Drift guard: PROVIDER_METADATA (UI-facing) must stay consistent with the
 // runtime provider registry. TypeScript enforces the Record<ProviderId,...>
 // keying at compile time; these tests catch RUNTIME drift (a renamed color, a
-// keyPrefix that no longer matches the validation regex, an accidental
-// anthropic entry, a local runtime mislabeled as training on data).
+// keyPrefix that no longer matches the validation regex, a local runtime
+// mislabeled as training on data). Since 2026-07-02 (P1) the set includes
+// paid-BYOK anchors — openai/anthropic/perplexity — declared in manifest.ts.
 
 describe("PROVIDER_METADATA covers exactly the provider set", () => {
-  test("keys equal PROVIDER_IDS, with no anthropic", () => {
+  test("keys equal PROVIDER_IDS", () => {
     const metaKeys = Object.keys(PROVIDER_METADATA).sort();
     expect(metaKeys).toEqual([...PROVIDER_IDS].sort());
-    expect(metaKeys).not.toContain("anthropic");
   });
 });
 
@@ -80,10 +80,9 @@ describe("provider factory invariants", () => {
     }
   });
 
-  test("createProvider throws for an unknown id (no Anthropic provider)", () => {
-    // Zintus intentionally ships no Anthropic provider; asking for one (or any
-    // unknown id) must fail loudly rather than return undefined.
-    expect(() => createProvider("anthropic" as never)).toThrow(/Unknown provider/);
-    expect(() => createProvider("openai" as never)).toThrow(/Unknown provider/);
+  test("createProvider throws for an unknown id", () => {
+    // Asking for an id outside the provider set must fail loudly rather than
+    // return undefined. (openai/anthropic ARE providers since 2026-07-02.)
+    expect(() => createProvider("not-a-provider" as never)).toThrow(/Unknown provider/);
   });
 });

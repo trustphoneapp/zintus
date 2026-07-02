@@ -138,7 +138,8 @@ describe("GET /v1/route/options", () => {
 
   test("400 on unknown provider", async () => {
     const handler = makeHandler();
-    const res = await handler(new Request(`${URLBASE}?provider=anthropic`));
+    // (anthropic became a real provider on 2026-07-02 — use a genuinely unknown id.)
+    const res = await handler(new Request(`${URLBASE}?provider=not-a-provider`));
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { message: string } };
     expect(body.error.message).toContain("Unknown provider");

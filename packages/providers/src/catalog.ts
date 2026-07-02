@@ -5,6 +5,7 @@ import {
 } from "./capabilities.js";
 import { DATA_POLICIES } from "./data-policies.js";
 import { getModelPricing } from "./pricing.js";
+import { extendedCatalogSeeds } from "./manifest.js";
 
 /**
  * ENUMERABLE per-model catalog — the foundation for an OpenRouter-grade
@@ -195,6 +196,10 @@ const SEEDS: ReadonlyArray<readonly [ProviderId, CatalogSeed]> = [
   // ── Local runtimes (no per-token price; flags fail closed for specific ids) ──
   ["lmstudio", { id: "local-model", displayName: "Local Model (LM Studio)", contextWindow: 32_000, vision: false, tools: false, structuredOutput: "none", free: true }],
   ["ollama", { id: "llama3.3", displayName: "Llama 3.3", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "json_object", free: true }],
+
+  // Providers added after 2026-07-02 declare seeds in manifest.ts; the same
+  // conservative-flag contract applies and catalog.test.ts enforces it.
+  ...extendedCatalogSeeds(),
 ];
 
 /** The full enumerable catalog (frozen so callers can't mutate the source). */
