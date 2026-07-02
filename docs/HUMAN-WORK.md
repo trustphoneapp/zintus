@@ -75,7 +75,19 @@ added (the workflow lists the exact names) or it just skips every provider.
 - **Browser tool**: `npm i -D playwright && npx playwright install chromium`
   on the gateway host, then start an agent task with `browse: true`. Without
   Playwright the tool is honestly absent (by design) — no action needed if you
-  don't want it.
+  don't want it. **SSRF-hardened** (2026-07-02): the tool blocks
+  private/loopback/link-local/cloud-metadata hosts by default; set
+  `browseAllowPrivate: true` per task to reach internal targets. Residual: DNS
+  rebinding (a public name resolving to a private IP) needs resolve-then-pin in
+  the driver — noted in `browser-tool.ts`, add before exposing browse publicly.
+- **Web Agent toggles** (2026-07-02): the `/agent` page now exposes Docker
+  sandbox + browser-tool toggles (sandbox gated on "allow verify commands").
+  They only take effect if Docker/Playwright are installed on the host.
+- **Resume after restart** (2026-07-02): a gateway that dies mid-task now
+  recovers the run as `interrupted` on startup (per-round checkpoints in
+  `~/.zintus/agents`) and `POST /v1/agents/:id/resume` continues it from the
+  last checkpoint. No human action — noted so you know the "no in-flight
+  resume" gap in the audit is now closed.
 - **Scheduler** (`docs/SCHEDULER-DESIGN.md`): the D1 schedules table +
   `scheduled()` cron handler + `cloud.ts` run_agent handler are unbuilt; they
   ride the relay deploy. Decide cadence UI (cron string vs presets).

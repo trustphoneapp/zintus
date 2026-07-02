@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { ToolDefinition } from "@zintus/types";
 import type { ToolExecutionResult } from "./builtin-tools.js";
 
@@ -14,6 +15,13 @@ import type { ToolExecutionResult } from "./builtin-tools.js";
  * and appending `browserToolDefinition` + routing `browse` calls to
  * `executeBrowseCall`. Same trust posture as run_command: off by default,
  * surfaced to the user, and (recommended) confirm-gated by the host.
+ *
+ * SSRF: `executeBrowseCall` blocks private/loopback/link-local/metadata hosts
+ * by default (`blockedHostReason`); `allowPrivate` opts into internal targets.
+ * RESIDUAL (not yet closed): DNS rebinding — a public hostname that resolves to
+ * a private IP passes the hostname check. Fully closing it needs resolve-then-
+ * pin (resolve the host, re-check the IP, and force the connection to that IP)
+ * inside the driver; do that before exposing `browse` on a public gateway.
  */
 
 /** One page action the model can request via the `browse` tool. */
@@ -79,6 +87,75 @@ function err(message: string): string {
 }
 
 /**
+ * SSRF guard. The browser runs ON THE USER'S GATEWAY HOST, so an unchecked URL
+ * lets the model read the host's own loopback services, LAN devices (router
+ * admin panels), and cloud metadata endpoints (169.254.169.254 / fd00:ec2::254).
+ * We block those by DEFAULT and require an explicit opt-in to reach them.
+ *
+ * Returns a human-readable reason string when the host is blocked, or `null`
+ * when it is allowed. Blocks by literal-IP class AND by obvious hostname
+ * (localhost, *.local, *.internal, metadata.google.internal). DNS-rebinding
+ * (a public name that resolves to a private IP) is NOT fully closed here — that
+ * needs resolve-then-pin at fetch time in the driver; documented as a residual.
+ */
+export function blockedHostReason(hostname: string): string | null {
+  const host = hostname.trim().toLowerCase().replace(/\.$/, "");
+  if (!host) return "empty host";
+
+  // Obvious internal hostnames (covers the common non-IP cases).
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host === "metadata.google.internal"
+  ) {
+    return `internal hostname "${host}"`;
+  }
+
+  const stripped = host.startsWith("[") && host.endsWith("]")
+    ? host.slice(1, -1)
+    : host;
+  const kind = isIP(stripped);
+  if (kind === 4) {
+    const parts = stripped.split(".").map((p) => Number(p));
+    if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
+      return `malformed IPv4 "${stripped}"`;
+    }
+    const [a, b] = parts as [number, number, number, number];
+    if (
+      a === 0 || // "this" network
+      a === 127 || // loopback
+      a === 10 || // private
+      (a === 172 && b >= 16 && b <= 31) || // private
+      (a === 192 && b === 168) || // private
+      a === 169 && b === 254 || // link-local incl. cloud metadata 169.254.169.254
+      a >= 224 // multicast / reserved
+    ) {
+      return `private/loopback/link-local IPv4 "${stripped}"`;
+    }
+    return null;
+  }
+  if (kind === 6) {
+    const v6 = stripped.toLowerCase();
+    if (
+      v6 === "::1" || // loopback
+      v6 === "::" || // unspecified
+      v6.startsWith("fe80:") || // link-local
+      v6.startsWith("fc") || // unique-local fc00::/7
+      v6.startsWith("fd") ||
+      v6.startsWith("::ffff:") || // IPv4-mapped — could embed a private v4
+      v6.startsWith("fd00:ec2:") // AWS IMDSv6 metadata
+    ) {
+      return `private/loopback/link-local IPv6 "${stripped}"`;
+    }
+    return null;
+  }
+  // A public DNS name — allowed (see DNS-rebinding caveat above).
+  return null;
+}
+
+/**
  * Execute one `browse` tool call against the wired driver. Returns an honest
  * `isError` result (never throws) when the driver is absent, the URL is not
  * http(s), or the driver fails — so the model can recover.
@@ -86,6 +163,11 @@ function err(message: string): string {
 export async function executeBrowseCall(
   call: { id: string; arguments: Record<string, unknown> },
   driver: BrowserDriver | undefined,
+  opts?: {
+    /** Explicitly permit private/loopback/link-local hosts (default false).
+     *  Only set when the host operator has opted into internal browsing. */
+    allowPrivate?: boolean;
+  },
 ): Promise<ToolExecutionResult> {
   if (!driver) {
     return {
@@ -104,6 +186,32 @@ export async function executeBrowseCall(
       content: err("url must be an absolute http(s) URL."),
       isError: true,
     };
+  }
+  // SSRF guard: reject internal targets unless explicitly allowed. The browser
+  // runs on the gateway host, so an unchecked URL could read its loopback
+  // services, LAN admin panels, or cloud metadata.
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return {
+      toolCallId: call.id,
+      content: err("url is not parseable."),
+      isError: true,
+    };
+  }
+  if (!opts?.allowPrivate) {
+    const blocked = blockedHostReason(hostname);
+    if (blocked) {
+      return {
+        toolCallId: call.id,
+        content: err(
+          `refusing to browse ${blocked}: internal/private network targets are blocked to prevent SSRF. ` +
+            "The host operator can enable internal browsing explicitly.",
+        ),
+        isError: true,
+      };
+    }
   }
   const extractRaw = call.arguments.extract;
   const extract =

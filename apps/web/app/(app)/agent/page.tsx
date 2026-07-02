@@ -20,6 +20,8 @@ export default function AgentPage() {
   const [root, setRoot] = useState("");
   const [allowRun, setAllowRun] = useState(false);
   const [autoApprove, setAutoApprove] = useState(false);
+  const [sandbox, setSandbox] = useState(false);
+  const [browse, setBrowse] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [running, setRunning] = useState(false);
@@ -42,6 +44,9 @@ export default function AgentPage() {
         root: root.trim() || undefined,
         allowRun,
         autoApprove,
+        // Docker sandbox is only meaningful with allowRun (it isolates run_command).
+        sandbox: allowRun ? sandbox : false,
+        browse,
       });
       setAgentId(id);
       const controller = new AbortController();
@@ -59,7 +64,7 @@ export default function AgentPage() {
       setRunning(false);
       abortRef.current = null;
     }
-  }, [task, root, allowRun, autoApprove, running]);
+  }, [task, root, allowRun, autoApprove, sandbox, browse, running]);
 
   const stop = useCallback(() => {
     if (agentId) void stopAgent(agentId);
@@ -107,7 +112,7 @@ export default function AgentPage() {
           onChange={(e) => setRoot(e.target.value)}
           disabled={running}
         />
-        <div className="flex items-center gap-4 text-sm text-neutral-300">
+        <div className="flex flex-wrap items-center gap-4 text-sm text-neutral-300">
           <label className="flex items-center gap-2">
             <input
               type="checkbox"
@@ -116,6 +121,27 @@ export default function AgentPage() {
               disabled={running}
             />
             Allow verify commands (bun test/typecheck…)
+          </label>
+          <label
+            className={`flex items-center gap-2 ${allowRun ? "" : "opacity-40"}`}
+            title={allowRun ? "" : "Requires Allow verify commands"}
+          >
+            <input
+              type="checkbox"
+              checked={sandbox}
+              onChange={(e) => setSandbox(e.target.checked)}
+              disabled={running || !allowRun}
+            />
+            Docker sandbox
+          </label>
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={browse}
+              onChange={(e) => setBrowse(e.target.checked)}
+              disabled={running}
+            />
+            Browser tool
           </label>
           <label className="flex items-center gap-2">
             <input
@@ -145,6 +171,12 @@ export default function AgentPage() {
             )}
           </div>
         </div>
+        <p className="text-xs text-neutral-500">
+          Docker sandbox and the browser tool run on the gateway host and need
+          Docker / Playwright installed there — if absent, the agent proceeds
+          without them (no silent failure). Browsing blocks private/internal
+          hosts by default.
+        </p>
       </div>
 
       {error ? <p className="text-sm text-red-400">{error}</p> : null}

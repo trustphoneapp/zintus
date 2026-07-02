@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { ChatMessage, RoutingStrategy, ContextMode } from "@zintus/types";
@@ -81,7 +87,10 @@ export type AgentTaskStatus =
   | "awaiting_approval"
   | "done"
   | "error"
-  | "stopped";
+  | "stopped"
+  // A run whose process died mid-flight (found non-terminal in the records dir
+  // on startup). Resumable via POST /v1/agents/:id/resume.
+  | "interrupted";
 
 interface AgentTask {
   id: string;
@@ -97,6 +106,12 @@ interface AgentTask {
   >;
   stopRequested: boolean;
   rounds: number;
+  /** The create body — persisted so an interrupted run can be resumed with the
+   *  same sandbox/allowRun/strategy after a gateway restart. */
+  body: CreateAgentTaskBody;
+  /** Latest replay-safe conversation (updated each round boundary); the resume
+   *  seed. Undefined until the first round completes. */
+  checkpoint?: ChatMessage[];
 }
 
 /** How long an un-answered approval waits before it is DECLINED (fail closed). */
@@ -121,6 +136,9 @@ export interface CreateAgentTaskBody {
   /** Offer the read-only `browse` tool (needs Playwright on the gateway host;
    *  silently unavailable to the model if the driver can't load). */
   browse?: boolean;
+  /** Permit the browse tool to reach private/loopback/link-local hosts. OFF by
+   *  default (SSRF guard) — only enable for trusted internal browsing. */
+  browseAllowPrivate?: boolean;
   strategy?: RoutingStrategy | "weighted";
   mode?: ContextMode;
 }
@@ -141,7 +159,56 @@ function recordsDir(): string {
 
 export class AgentTaskManager {
   private readonly tasks = new Map<string, AgentTask>();
-  constructor(private readonly engine: AgentEngine) {}
+  constructor(private readonly engine: AgentEngine) {
+    this.recoverInterrupted();
+  }
+
+  /**
+   * On startup, scan the records dir for runs that never reached a terminal
+   * status (the process died mid-flight) and re-register them as `interrupted`
+   * so they show up in the list and can be resumed. Best-effort: a malformed
+   * record is skipped, never fatal.
+   */
+  private recoverInterrupted(): void {
+    let files: string[];
+    try {
+      files = readdirSync(recordsDir()).filter((f) => f.endsWith(".json"));
+    } catch {
+      return; // no records dir yet
+    }
+    for (const f of files) {
+      try {
+        const raw = JSON.parse(
+          readFileSync(path.join(recordsDir(), f), "utf8"),
+        ) as Partial<AgentTask> & { status?: AgentTaskStatus };
+        if (!raw.id) continue;
+        // Already terminal → nothing to resume; leave it on disk as a record.
+        if (
+          raw.status === "done" ||
+          raw.status === "error" ||
+          raw.status === "stopped"
+        ) {
+          continue;
+        }
+        this.tasks.set(raw.id, {
+          id: raw.id,
+          task: raw.task ?? "",
+          root: raw.root ?? "",
+          status: "interrupted",
+          createdAt: raw.createdAt ?? Date.now(),
+          events: Array.isArray(raw.events) ? raw.events : [],
+          listeners: new Set(),
+          pendingApprovals: new Map(),
+          stopRequested: false,
+          rounds: raw.rounds ?? 0,
+          body: raw.body ?? { task: raw.task ?? "" },
+          checkpoint: raw.checkpoint,
+        });
+      } catch {
+        // skip a malformed record
+      }
+    }
+  }
 
   list(): Array<Record<string, unknown>> {
     return [...this.tasks.values()].map((t) => this.summary(t));
@@ -257,6 +324,7 @@ export class AgentTaskManager {
       pendingApprovals: new Map(),
       stopRequested: false,
       rounds: 0,
+      body,
     };
     this.tasks.set(t.id, t);
     void this.run(t, sandbox, body).catch((error) => {
@@ -267,6 +335,43 @@ export class AgentTaskManager {
       });
     });
     return { id: t.id };
+  }
+
+  /**
+   * Resume an `interrupted` run from its last round-boundary checkpoint. Re-runs
+   * the SAME loop with the checkpointed conversation as the seed, so the model
+   * continues from where it left off. Refuses when the task is not interrupted
+   * or has no checkpoint (nothing safe to resume from).
+   */
+  resume(id: string): { ok: true } | { ok: false; reason: string } {
+    const t = this.tasks.get(id);
+    if (!t) return { ok: false, reason: "agent not found" };
+    if (t.status !== "interrupted") {
+      return { ok: false, reason: `task is ${t.status}, not interrupted` };
+    }
+    if (!t.checkpoint || t.checkpoint.length === 0) {
+      return { ok: false, reason: "no resumable checkpoint (run never completed a round)" };
+    }
+    let sandbox: ReturnType<typeof createSandbox>;
+    try {
+      sandbox = createSandbox(t.root);
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    t.status = "running";
+    t.stopRequested = false;
+    this.emit(t, { type: "started", resumed: true, root: t.root });
+    void this.run(t, sandbox, t.body, t.checkpoint).catch((error) => {
+      t.status = "error";
+      this.emit(t, {
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return { ok: true };
   }
 
   private confirmGate(t: AgentTask, autoApprove: boolean): ConfirmWrite {
@@ -314,6 +419,9 @@ export class AgentTaskManager {
     t: AgentTask,
     sandbox: ReturnType<typeof createSandbox>,
     body: CreateAgentTaskBody,
+    /** Resume seed: the checkpointed conversation to continue from (undefined =
+     *  a fresh run built from the preamble + task). */
+    resumeConvo?: ChatMessage[],
   ): Promise<void> {
     const maxRounds = Math.min(
       Math.max(1, body.maxRounds ?? DEFAULT_AGENT_ROUNDS),
@@ -363,20 +471,26 @@ export class AgentTaskManager {
     } catch {
       repoMap = "";
     }
-    const initialMessages: ChatMessage[] = [
-      {
-        role: "user",
-        content: `${buildAgentSystemPreamble(sandbox.root, 0, allowRun, repoMap)}\n\n---\n\nTask:\n${t.task}`,
-      },
-    ];
+    // Resume from the checkpointed conversation when present, else start fresh.
+    const initialMessages: ChatMessage[] =
+      resumeConvo && resumeConvo.length > 0
+        ? resumeConvo
+        : [
+            {
+              role: "user",
+              content: `${buildAgentSystemPreamble(sandbox.root, 0, allowRun, repoMap)}\n\n---\n\nTask:\n${t.task}`,
+            },
+          ];
 
-    this.emit(t, {
-      type: "started",
-      root: sandbox.root,
-      max_rounds: maxRounds,
-      allow_run: allowRun,
-      auto_approve: body.autoApprove ?? false,
-    });
+    if (!resumeConvo) {
+      this.emit(t, {
+        type: "started",
+        root: sandbox.root,
+        max_rounds: maxRounds,
+        allow_run: allowRun,
+        auto_approve: body.autoApprove ?? false,
+      });
+    }
 
     const handlers: AgentLoopHandlers<ToolLoopTurn> = {
       maxRounds,
@@ -396,6 +510,7 @@ export class AgentTaskManager {
           ? executeBrowseCall(
               { id: call.id, arguments: call.arguments },
               browser ?? undefined,
+              { allowPrivate: body.browseAllowPrivate ?? false },
             )
           : executeAgentToolCall(
               { id: call.id, name: call.name, arguments: call.arguments },
@@ -437,6 +552,17 @@ export class AgentTaskManager {
           plan: ctx.plan?.steps,
         });
       },
+      // Durable round-boundary checkpoint: capture the replay-safe conversation
+      // so a gateway restart can resume this run (recoverInterrupted + resume()).
+      onRoundComplete: (convo, round) => {
+        t.checkpoint = convo;
+        t.rounds = round + 1;
+        this.persist(t);
+      },
+      context: {
+        store: ccrStore,
+        sessionId: `agents-${t.id.slice(0, 8)}`,
+      },
     };
 
     try {
@@ -470,7 +596,9 @@ export class AgentTaskManager {
     }
   }
 
-  /** Best-effort durable record of a finished run (reviewable after restart). */
+  /** Best-effort durable record. Written each round (for resume) AND on
+   *  terminal state (for review). Includes `body` + `checkpoint` so an
+   *  interrupted run can be reconstructed and resumed after a restart. */
   private persist(t: AgentTask): void {
     try {
       const dir = recordsDir();
@@ -483,9 +611,11 @@ export class AgentTaskManager {
             task: t.task,
             root: t.root,
             status: t.status,
-            created_at: t.createdAt,
+            createdAt: t.createdAt,
             rounds: t.rounds,
             events: t.events,
+            body: t.body,
+            checkpoint: t.checkpoint,
           },
           null,
           2,

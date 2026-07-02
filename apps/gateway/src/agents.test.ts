@@ -199,4 +199,51 @@ describe("gateway agent runtime", () => {
     expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
     expect(mgr.subscribe("nope")).toBeNull();
   });
+
+  test("interrupted run is recovered on startup and resumes to completion", async () => {
+    const root = tmpRoot();
+    const records = path.join(root, ".records");
+    process.env.ZINTUS_AGENT_RECORDS = records;
+
+    // Manager 1: round 0 asks for a tool (→ a round-boundary checkpoint is
+    // written), then the engine HANGS forever on the next route call —
+    // simulating a process that died mid-flight while the record still says
+    // "running".
+    let routeCall = 0;
+    const hangingEngine: AgentEngine = {
+      async routeAndStream() {
+        routeCall += 1;
+        if (routeCall === 1) {
+          return turn("looking…", [
+            { type: "tool_call", id: "c1", name: "read_file", arguments: { path: "x.txt" } },
+          ]) as ToolLoopTurn & { threadId?: string };
+        }
+        // Never resolves — the "dead process" mid-round.
+        return new Promise(() => {}) as Promise<ToolLoopTurn & { threadId?: string }>;
+      },
+    };
+    const mgr1 = new AgentTaskManager(hangingEngine);
+    const { id } = mgr1.create({ task: "explore", root, autoApprove: true });
+    // Wait until at least one round boundary has been checkpointed to disk.
+    await waitFor(() => existsSync(path.join(records, `${id}.json`)));
+    await waitFor(() => {
+      const rec = JSON.parse(readFileSync(path.join(records, `${id}.json`), "utf8"));
+      return Array.isArray(rec.checkpoint) && rec.checkpoint.length > 0;
+    });
+
+    // Manager 2 = a fresh process. It must recover the non-terminal run as
+    // "interrupted", then resume it to completion with a finishing engine.
+    const mgr2 = new AgentTaskManager(scriptedEngine([() => turn("done exploring")]));
+    expect((mgr2.get(id) as { status: string }).status).toBe("interrupted");
+
+    const res = mgr2.resume(id);
+    expect(res.ok).toBe(true);
+    await waitFor(() => (mgr2.get(id) as { status: string }).status === "done");
+
+    // Resuming a non-interrupted task is refused.
+    const again = mgr2.resume(id);
+    expect(again.ok).toBe(false);
+    // Resuming an unknown id is refused.
+    expect(mgr2.resume("nope").ok).toBe(false);
+  });
 });

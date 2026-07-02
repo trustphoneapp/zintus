@@ -217,6 +217,9 @@ paths:
                 browse:
                   type: boolean
                   description: Offer the read-only browser tool (needs Playwright on the host; silently unavailable otherwise).
+                browseAllowPrivate:
+                  type: boolean
+                  description: Permit the browser tool to reach private/loopback/link-local hosts (default false — SSRF guard).
                 strategy: { type: string }
                 mode: { type: string }
       responses:
@@ -292,6 +295,21 @@ paths:
       responses:
         "200": { description: Stop requested. }
         "404": { description: Unknown task id. }
+  /v1/agents/{id}/resume:
+    post:
+      tags: [Agents]
+      operationId: resumeAgentTask
+      summary: Resume an interrupted task from its last round-boundary checkpoint
+      description: |
+        A run whose gateway process died mid-flight is recovered as
+        `interrupted` on restart. This re-runs the same loop from the
+        checkpointed conversation. 409 if the task is not interrupted or has no
+        checkpoint.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Resume started. }
+        "409": { description: Not interrupted / nothing to resume from. }
 
   /v1/research:
     post:

@@ -30,6 +30,11 @@ export interface CreateAgentTask {
   maxRounds?: number;
   autoApprove?: boolean;
   allowRun?: boolean;
+  /** Run allowlisted commands in a hardened Docker container (needs allowRun +
+   *  Docker on the gateway host). */
+  sandbox?: boolean;
+  /** Offer the read-only browser tool (needs Playwright on the gateway host). */
+  browse?: boolean;
 }
 
 export async function createAgentTask(body: CreateAgentTask): Promise<string> {

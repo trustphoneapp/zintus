@@ -6,7 +6,11 @@ serious cross-platform (Android + iOS) AI app. Updated as the loop progresses.
 ## Verification gates (run before calling anything done)
 - root `bun run typecheck` (all packages + web/desktop/mobile) — **EXIT 0**
 - `bun test apps/mobile/lib/gateway-url-resolve.test.ts` — **6/6**
-- `bun run doctor:mobile` (`npx expo-doctor`) — **20/21 passed, EXIT 1**. The one
+- `bun run doctor:mobile` (`npx expo-doctor`) — **20/21 passed, EXIT 1**.
+  (2026-07-02: the "patch version mismatches" check — expo/expo-constants/
+  expo-notifications/expo-router/expo-splash-screen — is now GREEN after
+  aligning those 5 to the SDK-56-expected patch ranges in package.json; that
+  was a genuine fix, 2 failing checks → 1.) The one remaining
   failure is "no duplicate dependencies": bun's workspace symlink layout exposes
   multiple links to the SAME versions of expo / expo-font / expo-linking /
   expo-constants / expo-modules-core / @expo/dom-webview / @expo/log-box /

@@ -2733,6 +2733,12 @@ export function createGatewayHandler(
           ? json(request, { stopping: true })
           : json(request, { error: { message: "agent not found" } }, 404);
       }
+      if (parts[4] === "resume") {
+        const res = agents.resume(agentId);
+        return res.ok
+          ? json(request, { resuming: true })
+          : json(request, { error: { message: res.reason } }, 409);
+      }
       return json(request, { error: { message: "unknown agent action" } }, 404);
     }
 

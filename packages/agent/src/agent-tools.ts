@@ -2167,6 +2167,10 @@ export interface AgentLoopHandlers<R extends ToolLoopTurn> {
   context?: AgentContextConfig;
   /** Fired only when a compaction pass actually evicted something (for a dim log). */
   onCompact?: (result: CompactionResult) => void;
+  /** Fired at each round boundary with the full, replay-safe conversation, so a
+   *  host can durably checkpoint it (resume after restart). ABSENT => no
+   *  checkpointing (back-compat). */
+  onRoundComplete?: (convo: ChatMessage[], round: number) => void | Promise<void>;
 }
 
 /**
@@ -2242,6 +2246,11 @@ export async function runAgentToolLoop<R extends ToolLoopTurn>(
       const compaction = maybeCompactConvo(convo, handlers.context);
       if (compaction.compacted) handlers.onCompact?.(compaction);
     }
+
+    // Round boundary: hand the caller the full conversation so it can durably
+    // checkpoint (enables resume after a host restart). Fired only between
+    // rounds, when `convo` is in a clean, replay-safe state.
+    await handlers.onRoundComplete?.(convo, round);
   }
 
   return { finalResult, rounds: maxRounds + 1, convo };
