@@ -204,6 +204,23 @@ describe("persist:false — incognito writes no durable state", () => {
     expect(memory.listFacts(thread.id)[0]?.lastUsedAt).toBeUndefined();
   });
 
+  test("global memory applies to a thread-LESS turn (first turn / stateless)", async () => {
+    const memory = new MemoryStore(join(dir, "memory.db"));
+    memory.init();
+    const engine = await makeEngine(memory);
+    memory.upsertFact({ scope: "global", key: "name", value: "Alice" });
+
+    // No threadId → the compiler's fact path doesn't run, but the injected
+    // global-memory system message must still surface the fact.
+    const result = await engine.routeAndStream({
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(result.memoryUsed?.some((m) => m.content.includes("Alice"))).toBe(
+      true,
+    );
+    await drain(result);
+  });
+
   test("provenance: extracted facts record the source user message id", async () => {
     const memory = new MemoryStore(join(dir, "memory.db"));
     memory.init();
