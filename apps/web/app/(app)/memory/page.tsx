@@ -13,6 +13,11 @@ import {
   type MemoryScope,
 } from "@/lib/memory-api";
 import { loadMemory, saveMemory } from "@/lib/memory";
+import {
+  listProjects,
+  getActiveProjectId,
+  type Project,
+} from "@/lib/projects";
 
 /** Legacy on-device memories are freeform strings; derive a readable, stable-ish
  *  key so they render sensibly in the Manager (mirrors the "llm.<slug>" style). */
@@ -90,38 +95,91 @@ export default function MemoryPage() {
   const [legacyEntries, setLegacyEntries] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
 
+  // Project picker (Project tab): scopes listing + creation to one project, so
+  // project facts are created against a REAL project id (what the compiler filters
+  // on) rather than an unscoped null.
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+
+  // Thread picker (Thread tab): pick a conversation to view its extracted facts.
+  // value = the GATEWAY thread id (what facts are keyed by), label = the title.
+  const [chatThreads, setChatThreads] = useState<
+    { gatewayThreadId: string; title: string }[]
+  >([]);
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+
   useEffect(() => {
     setLegacyEntries(loadMemory());
+    const list = listProjects();
+    setProjects(list);
+    setSelectedProjectId(getActiveProjectId() ?? list[0]?.id ?? null);
+    const threads = useAppStore
+      .getState()
+      .threads.filter((t) => t.gatewayThreadId)
+      .map((t) => ({ gatewayThreadId: t.gatewayThreadId as string, title: t.title }));
+    setChatThreads(threads);
+    setSelectedThreadId(threads[0]?.gatewayThreadId ?? null);
   }, []);
 
-  const load = useCallback(async (s: MemoryScope) => {
-    setLoading(true);
-    setError(null);
-    try {
-      setFacts(await listMemory({ scope: s }));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load memory.");
-      setFacts([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (s: MemoryScope, opts?: { projectId?: string; threadId?: string }) => {
+      setLoading(true);
+      setError(null);
+      try {
+        setFacts(
+          await listMemory({
+            scope: s,
+            projectId: opts?.projectId,
+            threadId: opts?.threadId,
+          }),
+        );
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load memory.");
+        setFacts([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
+
+  // Listing/creation opts for the active tab: project → the picked project, thread
+  // → the picked conversation, global → none.
+  const scopeOpts: { projectId?: string; threadId?: string } =
+    scope === "project"
+      ? { projectId: selectedProjectId ?? undefined }
+      : scope === "thread"
+        ? { threadId: selectedThreadId ?? undefined }
+        : {};
 
   useEffect(() => {
-    void load(scope);
-  }, [scope, load]);
+    void load(scope, {
+      projectId: scope === "project" ? selectedProjectId ?? undefined : undefined,
+      threadId: scope === "thread" ? selectedThreadId ?? undefined : undefined,
+    });
+  }, [scope, selectedProjectId, selectedThreadId, load]);
 
   async function onCreate() {
     const key = newKey.trim();
     const value = newValue.trim();
     if (!key || !value || saving) return;
+    // Project/thread facts need a real owner (what the compiler filters on) —
+    // otherwise they'd never be compiled.
+    if (scope === "project" && !selectedProjectId) {
+      setError("Create or select a project first.");
+      return;
+    }
+    if (scope === "thread" && !selectedThreadId) {
+      setError("Select a conversation first.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await createMemory({ scope, key, value });
+      await createMemory({ scope, key, value, ...scopeOpts });
       setNewKey("");
       setNewValue("");
-      await load(scope);
+      await load(scope, scopeOpts);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save memory.");
     } finally {
@@ -157,7 +215,7 @@ export default function MemoryPage() {
   async function onTogglePin(fact: MemoryFact) {
     try {
       await updateMemory(fact.id, { pinned: !fact.pinned });
-      await load(scope);
+      await load(scope, scopeOpts);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update memory.");
     }
@@ -169,7 +227,7 @@ export default function MemoryPage() {
     try {
       await updateMemory(id, { value });
       setEditId(null);
-      await load(scope);
+      await load(scope, scopeOpts);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update memory.");
     }
@@ -270,6 +328,75 @@ export default function MemoryPage() {
       <p style={{ margin: "-6px 0 0", color: "var(--color-text-sub)", fontSize: 12.5 }}>
         {activeHint}
       </p>
+
+      {/* Project picker — only on the Project tab. Scopes listing + creation to a
+          real project so project facts attach to the id the compiler filters on. */}
+      {scope === "project" ? (
+        projects.length > 0 ? (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <span style={{ color: "var(--color-text-sub)" }}>Project</span>
+            <select
+              value={selectedProjectId ?? ""}
+              onChange={(e) => setSelectedProjectId(e.target.value || null)}
+              style={{ ...inputStyle, flex: "0 1 260px" }}
+            >
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <p
+            style={{
+              ...cardStyle,
+              color: "var(--color-text-sub)",
+              fontSize: 13,
+              margin: 0,
+            }}
+          >
+            No projects yet. Create one from the{" "}
+            <a href="/projects" style={{ textDecoration: "underline" }}>
+              Projects
+            </a>{" "}
+            page, then add project memories here.
+          </p>
+        )
+      ) : null}
+
+      {/* Thread picker — only on the Thread tab. Pick a conversation to view its
+          extracted facts (value = gateway thread id, what facts are keyed by). */}
+      {scope === "thread" ? (
+        chatThreads.length > 0 ? (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <span style={{ color: "var(--color-text-sub)" }}>Conversation</span>
+            <select
+              value={selectedThreadId ?? ""}
+              onChange={(e) => setSelectedThreadId(e.target.value || null)}
+              style={{ ...inputStyle, flex: "1 1 260px" }}
+            >
+              {chatThreads.map((t) => (
+                <option key={t.gatewayThreadId} value={t.gatewayThreadId}>
+                  {t.title || "Untitled"}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <p
+            style={{
+              ...cardStyle,
+              color: "var(--color-text-sub)",
+              fontSize: 13,
+              margin: 0,
+            }}
+          >
+            No synced conversations yet — start a chat, and its extracted facts
+            will show here.
+          </p>
+        )
+      ) : null}
 
       {/* Create */}
       <div style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 8 }}>
