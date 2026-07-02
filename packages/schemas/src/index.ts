@@ -1,6 +1,7 @@
 import { z } from "zod";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import { PROVIDER_IDS, type ProviderId } from "@zintus/types";
 
 /**
  * Runtime-validated request schemas shared by the gateway and the cloud relay.
@@ -108,22 +109,15 @@ export const ChatMessageSchema = z
     { message: "message content is required unless tool_calls is present" },
   );
 
-// Exact ProviderId union (mirrors @zintus/types ProviderId) so an unknown
-// provider is rejected at the edge with a 400 rather than failing downstream.
-const ProviderIdSchema = z.enum([
-  "cerebras",
-  "groq",
-  "gemini",
-  "openrouter",
-  "cohere",
-  "mistral",
-  "deepseek",
-  "fireworks",
-  "xai",
-  "huggingface",
-  "lmstudio",
-  "ollama",
-]);
+// Exact ProviderId union, DERIVED from @zintus/types PROVIDER_IDS so an
+// unknown provider is rejected at the edge with a 400 rather than failing
+// downstream — and so the enum can never again silently lag the real provider
+// set (it did when the set grew 12 → 22 on 2026-07-02). @zintus/types stays
+// dependency-free and PROVIDER_IDS is a plain const array, so this is
+// edge-safe for the relay.
+const ProviderIdSchema = z.enum(
+  PROVIDER_IDS as unknown as [ProviderId, ...ProviderId[]],
+);
 
 const ContextModeSchema = z.enum(["fast", "smart", "deep"]);
 const RoutingStrategySchema = z.enum([

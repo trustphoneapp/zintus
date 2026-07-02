@@ -93,6 +93,10 @@ export interface MockProviderOptions {
   rateLimit?: StreamChatResult["rateLimit"];
   /** validateKey return (default true). */
   validKey?: boolean;
+  /** Default model id (default "mock-model"). Set to the provider's REAL
+   *  registry default when a test exercises model-aware capability gating —
+   *  the gate fails closed on an unknown model id. */
+  defaultModel?: string;
 }
 
 export interface MockProvider extends Provider {
@@ -119,7 +123,7 @@ export function createMockProvider(options: MockProviderOptions = {}): MockProvi
     color: "#000000",
     priority: options.priority ?? 1,
     keyRegex: /^.+$/,
-    defaultModel: "mock-model",
+    defaultModel: options.defaultModel ?? "mock-model",
     async streamChat(): Promise<StreamChatResult> {
       callCount++;
       if (options.latencyMs && options.latencyMs > 0) {

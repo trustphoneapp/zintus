@@ -1,0 +1,50 @@
+# Nightly model-catalog drift check (P1). Runs `bun run catalog:drift` with
+# whatever provider keys exist in repo secrets; providers without a secret are
+# skipped honestly by the script. Exit 1 (a curated model id no longer served)
+# fails the job so drift shows up as a red nightly run, not silent rot.
+#
+# [HUMAN] one-time setup: add repo secrets for the providers you want checked —
+#   CEREBRAS_API_KEY GROQ_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY
+#   COHERE_API_KEY MISTRAL_API_KEY DEEPSEEK_API_KEY FIREWORKS_API_KEY
+#   XAI_API_KEY HUGGINGFACE_API_KEY TOGETHER_API_KEY SAMBANOVA_API_KEY
+#   NVIDIA_API_KEY NOVITA_API_KEY MOONSHOT_API_KEY OPENAI_API_KEY
+# (zai/qwen/anthropic/perplexity have no /models surface; locals are skipped.)
+name: catalog-drift
+on:
+  schedule:
+    - cron: "17 6 * * *" # nightly 06:17 UTC (odd minute avoids cron spikes)
+  workflow_dispatch: {}
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # Same retry stance as ci.yml: a flaky platform-binary download must not
+      # fail the nightly.
+      - name: bun install (3x retry)
+        run: |
+          for i in 1 2 3; do bun install --frozen-lockfile && break || sleep 10; done
+      - name: catalog drift check
+        env:
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          HUGGINGFACE_API_KEY: ${{ secrets.HUGGINGFACE_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NOVITA_API_KEY: ${{ secrets.NOVITA_API_KEY }}
+          MOONSHOT_API_KEY: ${{ secrets.MOONSHOT_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: bun run catalog:drift
