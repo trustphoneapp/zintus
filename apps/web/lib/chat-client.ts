@@ -91,6 +91,8 @@ export async function streamChat(params: {
   model?: string;
   mode?: ContextMode;
   threadId?: string;
+  /** `false` = incognito/private: the gateway persists nothing for this turn. */
+  persist?: boolean;
   apiKeys?: Partial<Record<ProviderId, string>>;
   settings?: AppConfig;
   webSearch?: boolean;
@@ -127,6 +129,7 @@ export async function streamChat(params: {
     strategy: params.settings?.routingStrategy,
     mode: params.mode ?? params.settings?.contextMode,
     threadId: params.threadId,
+    persist: params.persist,
     webSearch: params.webSearch,
     blockTraining: params.settings?.blockTrainingProviders,
     allowTraining: params.settings?.allowTrainingProviders,

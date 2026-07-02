@@ -274,6 +274,12 @@ export const ChatCompletionRequestSchema = z.object({
   // of providers the user explicitly permits even so.
   block_training: z.boolean().optional(),
   allow_training: z.array(ProviderIdSchema).optional(),
+  // Local durability control (orthogonal to block_training, which is provider-
+  // training privacy). false = incognito/ephemeral: the engine writes NO durable
+  // state (conversation, memory facts, summary, chunks, compile traces, response
+  // cache), skips OTel trace export, and the gateway records no activity row.
+  // Default true.
+  persist: z.boolean().optional(),
   // Per-request BYOK keys (provider -> key) for the LOCAL gateway only. Never
   // logged, never persisted, never forwarded to the relay.
   keys: z.record(ProviderIdSchema, z.string()).optional(),

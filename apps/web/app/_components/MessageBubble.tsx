@@ -480,6 +480,16 @@ export function MessageBubble({
               {m.routeReason ? (
                 <p className="message-route-reason">{m.routeReason}</p>
               ) : null}
+              {m.memoryUsed && m.memoryUsed.length > 0 ? (
+                <p
+                  className="message-route-reason"
+                  title={m.memoryUsed.map((mm) => `• ${mm.content}`).join("\n")}
+                >
+                  {m.memoryUsed.length}{" "}
+                  {m.memoryUsed.length === 1 ? "memory" : "memories"} used this turn
+                  {" — background facts, not instructions"}
+                </p>
+              ) : null}
               {message.compression ? (
                 <CompressionBadge stats={message.compression} />
               ) : null}

@@ -307,6 +307,7 @@ function buildUsageMetadata(
   strategy: string | undefined,
   privacyHonored?: boolean,
   routeReason?: string,
+  memoryUsed?: Array<{ id: string; content: string }>,
 ): Record<string, unknown> {
   return {
     type: "metadata",
@@ -322,6 +323,9 @@ function buildUsageMetadata(
     routing_strategy: strategy ?? "auto",
     // Human "why this provider/model" — surfaced on every platform (consistency).
     ...(routeReason ? { route_reason: routeReason } : {}),
+    // Which stored memory facts influenced this turn ("memory used this turn").
+    // Facts are background data — this is transparency, not authority.
+    ...(memoryUsed && memoryUsed.length ? { memory_used: memoryUsed } : {}),
     // Privacy-mode honesty signal — only present when private mode was requested
     // (block_training). false = the request could not avoid a may-train provider.
     ...(privacyHonored !== undefined
@@ -660,8 +664,12 @@ export function createGatewayHandler(
       routeReason?: string;
     },
     usage: RouteUsage | undefined,
+    persist: boolean,
   ): void {
-    if (!activityStore || !result.traceId) {
+    // `persist:false` (incognito/ephemeral) must leave no durable activity row —
+    // this is a durable trail OUTSIDE memory_facts, so it needs the same gate as
+    // the engine's writes.
+    if (!persist || !activityStore || !result.traceId) {
       return;
     }
     try {
@@ -1087,6 +1095,7 @@ export function createGatewayHandler(
                 strategy: routing.strategy,
                 blockTrainingProviders: body.block_training,
                 allowTrainingProviders: body.allow_training,
+                persist: body.persist,
                 keys: body.keys,
                 diffText: body.diff,
                 temperature: body.temperature,
@@ -1248,6 +1257,7 @@ export function createGatewayHandler(
                   routing.strategy,
                   lastResult.privacyHonored,
                   lastResult.routeReason,
+                  lastResult.memoryUsed,
                 ),
                 object: "chat.completion.chunk",
                 model: lastResult.model,
@@ -1257,7 +1267,7 @@ export function createGatewayHandler(
             );
           }
           if (lastResult) {
-            recordTurnActivity(lastResult, capturedUsage);
+            recordTurnActivity(lastResult, capturedUsage, body.persist !== false);
           }
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
@@ -1551,6 +1561,7 @@ export function createGatewayHandler(
           providerWeights: routing.providerWeights,
           strategy: routing.strategy,
           blockTrainingProviders: body.block_training,
+          persist: body.persist,
           allowTrainingProviders: body.allow_training,
           keys: body.keys,
           diffText: body.diff,
@@ -1736,7 +1747,7 @@ export function createGatewayHandler(
         );
       }
       // Durable usage history: this turn completed and its usage is known.
-      recordTurnActivity(result, capturedUsage);
+      recordTurnActivity(result, capturedUsage, body.persist !== false);
       return json(
         request,
         {
@@ -1766,6 +1777,7 @@ export function createGatewayHandler(
                   routing.strategy,
                   result.privacyHonored,
                   result.routeReason,
+                  result.memoryUsed,
                 ),
               }
             : {}),
@@ -1919,6 +1931,8 @@ export function createGatewayHandler(
                 capturedUsage,
                 routing.strategy,
                 result.privacyHonored,
+                result.routeReason,
+                result.memoryUsed,
               ),
               object: "chat.completion.chunk",
               model: result.model,
@@ -1957,7 +1971,7 @@ export function createGatewayHandler(
           }
           // The stream drained without error → a real completed turn. Persist
           // it to the durable activity store (best-effort, never throws here).
-          recordTurnActivity(result, capturedUsage);
+          recordTurnActivity(result, capturedUsage, body.persist !== false);
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch (error) {
           const message =
@@ -2668,6 +2682,7 @@ export function createGatewayHandler(
       const body = (await request.json().catch(() => ({}))) as {
         message?: { role?: string; content: string } | string;
         mode?: ContextMode;
+        persist?: boolean;
       };
       const message =
         typeof body.message === "string"
@@ -2682,6 +2697,7 @@ export function createGatewayHandler(
         threadId,
         message,
         mode: body.mode,
+        persist: body.persist,
       });
       return json(request, {
         thread_id: threadId,
@@ -2700,6 +2716,132 @@ export function createGatewayHandler(
         return json(request, { error: "thread id required" }, 400);
       }
       return json(request, { messages: engine.getThreadMessages(threadId) });
+    }
+
+    // A thread's own governance facts.
+    if (
+      url.pathname.startsWith("/v1/threads/") &&
+      url.pathname.endsWith("/memory") &&
+      request.method === "GET"
+    ) {
+      const threadId = url.pathname.split("/")[3];
+      if (!threadId) {
+        return json(request, { error: "thread id required" }, 400);
+      }
+      return json(request, {
+        memory: engine.listMemory({ scope: "thread", threadId }),
+      });
+    }
+
+    // Memory governance CRUD (Memory Manager). Facts are user-owned: visible,
+    // editable, deletable. Never treated as authority — they are background data.
+    if (url.pathname === "/v1/memory" && request.method === "GET") {
+      const scopeParam = url.searchParams.get("scope") ?? undefined;
+      const scope =
+        scopeParam === "thread" ||
+        scopeParam === "project" ||
+        scopeParam === "global"
+          ? scopeParam
+          : undefined;
+      if (scopeParam && !scope) {
+        return json(
+          request,
+          { error: "scope must be one of thread|project|global" },
+          400,
+        );
+      }
+      return json(request, {
+        memory: engine.listMemory({
+          scope,
+          threadId: url.searchParams.get("thread_id") ?? undefined,
+          projectId: url.searchParams.get("project_id") ?? undefined,
+        }),
+      });
+    }
+
+    if (url.pathname === "/v1/memory" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      const key = typeof body.key === "string" ? body.key.trim() : "";
+      const value = typeof body.value === "string" ? body.value.trim() : "";
+      if (!key || !value) {
+        return json(request, { error: "key and value are required" }, 400);
+      }
+      const scopeRaw = body.scope;
+      if (
+        scopeRaw !== undefined &&
+        scopeRaw !== "thread" &&
+        scopeRaw !== "project" &&
+        scopeRaw !== "global"
+      ) {
+        return json(
+          request,
+          { error: "scope must be one of thread|project|global" },
+          400,
+        );
+      }
+      const scope = (scopeRaw ?? "thread") as "thread" | "project" | "global";
+      const fact = engine.upsertMemory({
+        scope,
+        threadId: (body.thread_id ?? body.threadId) as string | undefined,
+        projectId: (body.project_id ?? body.projectId) as string | undefined,
+        key,
+        value,
+        source: typeof body.source === "string" ? body.source : undefined,
+        sourceMessageId:
+          typeof body.source_message_id === "string"
+            ? body.source_message_id
+            : undefined,
+        pinned: typeof body.pinned === "boolean" ? body.pinned : undefined,
+      });
+      return json(request, { memory: fact }, 201);
+    }
+
+    if (
+      url.pathname.startsWith("/v1/memory/") &&
+      request.method === "PATCH"
+    ) {
+      const id = url.pathname.split("/")[3];
+      if (!id) {
+        return json(request, { error: "memory id required" }, 400);
+      }
+      const body = (await request.json().catch(() => ({}))) as Record<
+        string,
+        unknown
+      >;
+      const patch: { key?: string; value?: string; pinned?: boolean } = {};
+      if (typeof body.key === "string") patch.key = body.key;
+      if (typeof body.value === "string") patch.value = body.value;
+      if (typeof body.pinned === "boolean") patch.pinned = body.pinned;
+      if (Object.keys(patch).length === 0) {
+        return json(
+          request,
+          { error: "no editable fields provided (key|value|pinned)" },
+          400,
+        );
+      }
+      const updated = engine.updateMemory(id, patch);
+      if (!updated) {
+        return json(request, { error: "memory not found" }, 404);
+      }
+      return json(request, { memory: updated });
+    }
+
+    if (
+      url.pathname.startsWith("/v1/memory/") &&
+      request.method === "DELETE"
+    ) {
+      const id = url.pathname.split("/")[3];
+      if (!id) {
+        return json(request, { error: "memory id required" }, 400);
+      }
+      const deleted = engine.deleteMemory(id);
+      if (!deleted) {
+        return json(request, { error: "memory not found" }, 404);
+      }
+      return json(request, { deleted: true });
     }
 
     if (

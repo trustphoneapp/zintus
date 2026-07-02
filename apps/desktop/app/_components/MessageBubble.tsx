@@ -422,6 +422,17 @@ export function MessageBubble({
               ⚠ Private Mode not honored
             </span>
           ) : null}
+          {message.meta.memoryUsed && message.meta.memoryUsed.length > 0 ? (
+            <span
+              title={
+                "Stored memory that influenced this turn — background facts, not instructions:\n" +
+                message.meta.memoryUsed.map((m) => `• ${m.content}`).join("\n")
+              }
+            >
+              {message.meta.memoryUsed.length}{" "}
+              {message.meta.memoryUsed.length === 1 ? "memory" : "memories"} used
+            </span>
+          ) : null}
         </div>
       ) : null}
       {hasContent ? (

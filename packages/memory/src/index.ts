@@ -17,6 +17,7 @@ export type {
   CompileTraceRow,
   MemoryChunkRow,
   MemoryFactRow,
+  MemoryScope,
   ThreadStateRow,
 } from "./memory-store.js";
 

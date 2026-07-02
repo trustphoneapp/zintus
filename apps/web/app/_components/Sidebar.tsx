@@ -13,7 +13,7 @@ import { Icon } from "./Icons";
 
 type NavIcon =
   | "chat" | "compare" | "globe" | "layers" | "grid" | "zap"
-  | "activity" | "terminal" | "settings" | "plug";
+  | "activity" | "terminal" | "settings" | "plug" | "database";
 
 // Matches the design's sidebar: a single "Workspace" group. Management
 // destinations (Providers, MCP, Usage, Settings, Help) live in the account
@@ -41,6 +41,7 @@ const ACCOUNT_LINKS: Array<{ href: string; icon: NavIcon; label: string }> = [
   { href: "/providers", icon: "zap", label: "Providers & keys" },
   { href: "/settings/mcp", icon: "plug", label: "MCP servers" },
   { href: "/usage", icon: "activity", label: "Usage" },
+  { href: "/memory", icon: "database", label: "Memory" },
   { href: "/help", icon: "globe", label: "Help & docs" },
 ];
 

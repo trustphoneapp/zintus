@@ -81,7 +81,6 @@ export default function SettingsPage() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [memory, setMemory] = useState<string[]>([]);
-  const [memDraft, setMemDraft] = useState("");
   const [presets, setPresets] = useState<Preset[]>([]);
   const [pName, setPName] = useState("");
   const [pProvider, setPProvider] = useState<ProviderId | "">("");
@@ -125,15 +124,6 @@ export default function SettingsPage() {
     const next = presets.filter((p) => p.id !== id);
     setPresets(next);
     savePresets(next);
-  }
-
-  function addMemory() {
-    const entry = memDraft.trim();
-    if (!entry) return;
-    const next = [...memory, entry];
-    setMemory(next);
-    saveMemory(next);
-    setMemDraft("");
   }
 
   function clearAllConversations() {
@@ -395,29 +385,20 @@ export default function SettingsPage() {
           <div className="settings-card">
             <h2>Memory</h2>
             <p className="muted">
-              Stored only in this browser. Injected as background context at the
-              start of new chats.
+              Memory has moved to the{" "}
+              <a href="/memory" style={{ textDecoration: "underline" }}>
+                Memory Manager
+              </a>
+              , where it&apos;s synced (not just this browser), scoped, editable,
+              and pinnable.{" "}
+              {memory.length > 0
+                ? `You still have ${memory.length} on-device ${
+                    memory.length === 1 ? "memory" : "memories"
+                  } below — open the Manager to import ${
+                    memory.length === 1 ? "it" : "them"
+                  } into Global memory.`
+                : "Add and manage memories there."}
             </p>
-            <div className="memory-add">
-              <input
-                value={memDraft}
-                onChange={(event) => setMemDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    addMemory();
-                  }
-                }}
-                placeholder="e.g. I prefer concise answers in TypeScript"
-              />
-              <button
-                type="button"
-                onClick={addMemory}
-                disabled={!memDraft.trim()}
-              >
-                Add
-              </button>
-            </div>
             {memory.length > 0 ? (
               <ul className="memory-list">
                 {memory.map((entry, index) => (
