@@ -159,9 +159,39 @@ export function AppShell({ children }: { children: ReactNode }) {
               </svg>
             </button>
           </Tooltip>
-          <span style={{ fontSize: 20, fontWeight: 700, color: "var(--color-purple-light)" }}>
+          <span style={{ fontSize: 20, fontWeight: 700, color: "var(--color-purple-bright)" }}>
             Zintus
           </span>
+          {/* Gateway heartbeat — status visible in both states, not just offline. */}
+          {checked && (
+            <Tooltip content={`Gateway at ${getGatewayUrl()}`} side="bottom">
+              <span
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  marginLeft: 8,
+                  padding: "3px 8px",
+                  borderRadius: 999,
+                  border: "1px solid var(--color-border)",
+                  fontSize: 11,
+                  fontFamily: "var(--font-mono, ui-monospace, monospace)",
+                  color: online ? "var(--color-green)" : "var(--color-red)",
+                }}
+              >
+                <span
+                  aria-hidden
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: online ? "var(--color-green)" : "var(--color-red)",
+                  }}
+                />
+                {online ? "gateway" : "offline"}
+              </span>
+            </Tooltip>
+          )}
         </div>
         <nav style={{ display: "flex", gap: 4 }}>
           {NAV.map((item) => {
@@ -242,7 +272,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           }}
         >
           {/* New chat button */}
-          <Tooltip content="New chat" side={collapsed ? "right" : "bottom"}>
+          <Tooltip content="New chat (Ctrl/⌘ N)" side={collapsed ? "right" : "bottom"}>
             <button
               type="button"
               onClick={newChat}
@@ -380,7 +410,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                           }}
                           style={threadActionStyle}
                         >
-                          ✎
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                          </svg>
                         </button>
                         <button
                           type="button"
@@ -390,7 +422,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                           onClick={() => confirmDelete(thread.id, thread.title)}
                           style={threadActionStyle}
                         >
-                          🗑
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
                         </button>
                       </>
                     )}

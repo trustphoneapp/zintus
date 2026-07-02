@@ -44,6 +44,18 @@
   --c-ok: #22c55e;
   --c-warn: #f59e0b;
   --c-danger: #ef4444;
+
+  /* Font roles. next/font (layout.tsx) provides --font-inter / --font-jetbrains-mono;
+     these map them to the role names the components consume. Without this mapping
+     every `var(--font-mono)` without an inline fallback silently rendered sans. */
+  --font-sans: var(--font-inter, system-ui, -apple-system, sans-serif);
+  --font-mono: var(
+    --font-jetbrains-mono,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace
+  );
 }
 
 * {
@@ -52,7 +64,7 @@
 
 body {
   margin: 0;
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
 }
