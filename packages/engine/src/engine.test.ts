@@ -5,11 +5,39 @@ import { tmpdir } from "node:os";
 import { MemoryStore } from "@zintus/memory";
 import { ResponseCache } from "@zintus/cache";
 import type { ChatMessage } from "@zintus/types";
-import { createEngine, type EngineConfig } from "./engine.js";
+import { createEngine, envApiKey, type EngineConfig } from "./engine.js";
 
 // Always inject a key resolver so tests never touch the real OS keychain
 // (which is slow/blocking and non-deterministic in CI).
 const NO_KEYS: EngineConfig["getApiKey"] = async () => null;
+
+describe("envApiKey", () => {
+  // The default key resolvers fall back to <PROVIDER>_API_KEY env vars when the
+  // keychain has no key — this is what lets a gateway launched with
+  // GEMINI_API_KEY route server-originated requests (agent runs) that carry no
+  // per-request BYOK keys. Regression: without the fallback, gemini was
+  // ineligible for agent runs and routing collapsed onto (dead) ollama.
+  const original = process.env.GEMINI_API_KEY;
+  afterEach(() => {
+    if (original === undefined) {
+      delete process.env.GEMINI_API_KEY;
+    } else {
+      process.env.GEMINI_API_KEY = original;
+    }
+  });
+
+  test("reads <PROVIDER>_API_KEY from the environment", () => {
+    process.env.GEMINI_API_KEY = "env-test-key";
+    expect(envApiKey("gemini")).toBe("env-test-key");
+  });
+
+  test("returns null when the env var is unset or empty", () => {
+    delete process.env.GEMINI_API_KEY;
+    expect(envApiKey("gemini")).toBeNull();
+    process.env.GEMINI_API_KEY = "";
+    expect(envApiKey("gemini")).toBeNull();
+  });
+});
 
 describe("createEngine", () => {
   let dir: string;

@@ -125,6 +125,21 @@ function buildRouteReason(opts: {
   return reason + ".";
 }
 
+/**
+ * Env-var fallback for SERVER-SIDE key resolution (GEMINI_API_KEY,
+ * GROQ_API_KEY, …). The keychain stays the primary store, but a gateway
+ * deployed with keys in its environment (the standard server convention) must
+ * be routable WITHOUT a browser session: web chat sends BYOK keys per-request
+ * (request.keys), but server-originated requests — agent runs, background
+ * jobs — carry none, and without this fallback every keyless provider is
+ * silently ineligible for them. Local-only: the env key never leaves the
+ * process, same custody as the keychain.
+ */
+export function envApiKey(providerId: ProviderId): string | null {
+  const key = process.env[`${providerId.toUpperCase()}_API_KEY`];
+  return key && key.length > 0 ? key : null;
+}
+
 export interface EngineConfig extends RouterConfig {
   conversationsPath?: string;
   persistConversations?: boolean;
@@ -396,7 +411,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
       if (providerId === "ollama" || providerId === "lmstudio") {
         return null;
       }
-      return getKey(providerId);
+      return (await getKey(providerId)) ?? envApiKey(providerId);
     });
 
   // BYOK PRIORITY + FALLBACK: the ordered keychain list (primary + fallbacks).
@@ -416,7 +431,11 @@ export function createEngine(config: EngineConfig = {}): Engine {
           if (providerId === "ollama" || providerId === "lmstudio") {
             return [];
           }
-          return getKeys(providerId);
+          const keys = await getKeys(providerId);
+          // Same env fallback as resolveApiKey, appended as the last-resort
+          // credential (deduped so a key present in both is not retried twice).
+          const envKey = envApiKey(providerId);
+          return envKey && !keys.includes(envKey) ? [...keys, envKey] : keys;
         });
 
   const router: Router = createRouter({
