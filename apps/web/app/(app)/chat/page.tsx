@@ -44,6 +44,7 @@ import {
 import {
   streamChat,
   sanitizeSendHistory,
+  imageAwareHistory,
   UnsupportedCapabilityError,
   type ChatMcpConfig,
   type ChatMessage,
@@ -1110,10 +1111,7 @@ export default function ChatPage() {
     // strict role-alternation provider (Gemini) would reject. Subsumes the old
     // `&& content` intent. The trailing user turn is preserved.
     const history: ChatMessage[] = sanitizeSendHistory([
-      ...messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
+      ...imageAwareHistory(messages),
       { role: "user", content: userMessageContent },
     ]);
 
@@ -1227,9 +1225,11 @@ export default function ChatPage() {
     // empty tool-round assistant bubbles, and merge adjacent same-role turns so
     // Regenerate never replays a malformed conversation.
     const priorMessages = sanitizeSendHistory(
-      (s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? [])
-        .filter((message) => message.id !== assistant.id && message.content)
-        .map((message) => ({ role: message.role, content: message.content })),
+      imageAwareHistory(
+        (s.threads.find((t) => t.id === s.activeThreadId)?.messages ?? []).filter(
+          (message) => message.id !== assistant.id && message.content,
+        ),
+      ),
     );
 
     const lastUserContent: string | ContentBlock[] =
