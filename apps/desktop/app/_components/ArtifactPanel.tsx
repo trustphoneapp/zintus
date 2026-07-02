@@ -264,9 +264,13 @@ export function ArtifactPanel({
                 <button
                   type="button"
                   className="artifact-action"
-                  onClick={() =>
-                    saveTextFile(downloadName(shown), shown.content, artifactMime(shown))
-                  }
+                  onClick={() => {
+                    void saveTextFile(
+                      downloadName(shown),
+                      shown.content,
+                      artifactMime(shown),
+                    );
+                  }}
                 >
                   <Download size={12} />
                   Download

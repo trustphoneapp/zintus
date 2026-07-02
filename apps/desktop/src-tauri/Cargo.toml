@@ -19,3 +19,5 @@ serde = { version = "1", features = ["derive"] }
 tauri = { version = "2.10", features = [] }
 tauri-plugin-pty = "0.3"
 tauri-plugin-updater = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"

@@ -215,6 +215,21 @@ button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
   background: var(--color-purple-bright);
 }
 
+/* History thread rows: rename/delete actions appear only on row hover/focus so
+   the sidebar stays calm. Keyboard-focus within the row also reveals them. */
+.ds-thread-action {
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.ds-thread-row:hover .ds-thread-action,
+.ds-thread-row:focus-within .ds-thread-action {
+  opacity: 1;
+}
+.ds-thread-action:hover {
+  background: var(--color-bg) !important;
+  color: var(--color-text) !important;
+}
+
 /* Transparent icon/nav chrome: hover lifts to the elevated surface. */
 .app-icon-btn {
   background: transparent;

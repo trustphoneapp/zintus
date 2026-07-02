@@ -21,6 +21,7 @@ import {
   type McpToolEvent,
 } from "@/lib/chat-client";
 import { activeMcpServersForChat, loadMcpServers } from "@/lib/mcp-config";
+import { saveTextFile } from "@/lib/download";
 import {
   acceptImageFile,
   buildImageMessageContent,
@@ -604,13 +605,9 @@ export function ChatPanel() {
           `**${m.role === "user" ? "You" : (m.providerId ?? "Assistant")}:**\n\n${m.content}`,
       )
       .join("\n\n---\n\n");
-    const blob = new Blob([md], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "zintus-chat.md";
-    a.click();
-    URL.revokeObjectURL(url);
+    // Route through saveTextFile so the export uses the native OS save dialog in
+    // a Tauri build (the raw anchor path silently failed in the packaged app).
+    void saveTextFile("zintus-chat.md", md, "text/markdown");
   }, [messages]);
 
   const lastAssistantId = [...messages]

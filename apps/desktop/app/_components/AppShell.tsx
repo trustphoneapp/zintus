@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
 import { useChatStore } from "@/lib/store";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
@@ -19,6 +19,19 @@ const NAV = [
   { href: "/settings", label: "Settings" },
 ];
 
+/** Per-thread hover action button (rename / delete). Shown on row hover via CSS. */
+const threadActionStyle: CSSProperties = {
+  flexShrink: 0,
+  border: "none",
+  background: "transparent",
+  color: "var(--color-text-sub)",
+  cursor: "pointer",
+  fontSize: 12,
+  padding: "4px 6px",
+  borderRadius: 4,
+  lineHeight: 1,
+};
+
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -31,7 +44,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     return false;
   });
 
-  const { threads, activeThreadId, switchThread, newChat } = useChatStore();
+  const { threads, activeThreadId, switchThread, newChat, deleteThread, renameThread } =
+    useChatStore();
+  // Which thread row is being renamed inline, and the draft title.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   // Loaded after mount (localStorage is client-only) to avoid an SSR flash.
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -41,7 +58,19 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const recentThreads = [...threads]
     .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, 10);
+    .slice(0, 40);
+
+  function commitRename(id: string) {
+    if (renameDraft.trim()) renameThread(id, renameDraft);
+    setRenamingId(null);
+    setRenameDraft("");
+  }
+
+  function confirmDelete(id: string, title: string) {
+    if (window.confirm(`Delete "${title}"? This can't be undone.`)) {
+      deleteThread(id);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -253,32 +282,118 @@ export function AppShell({ children }: { children: ReactNode }) {
                 gap: 2,
               }}
             >
+              <div
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  color: "var(--color-text-sub)",
+                  padding: "6px 8px 2px",
+                }}
+              >
+                History
+              </div>
+              {recentThreads.length === 0 ? (
+                <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--color-text-sub)" }}>
+                  No conversations yet.
+                </div>
+              ) : null}
               {recentThreads.map((thread) => {
                 const isActive = thread.id === activeThreadId;
+                const isRenaming = renamingId === thread.id;
                 return (
-                  <button
+                  <div
                     key={thread.id}
-                    type="button"
-                    onClick={() => switchThread(thread.id)}
-                    title={thread.title}
+                    className="ds-thread-row"
                     style={{
-                      display: "block",
-                      width: "100%",
-                      textAlign: "left",
-                      padding: "6px 8px",
-                      border: "none",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
                       borderRadius: 6,
                       background: isActive ? "var(--color-purple-faint)" : "transparent",
-                      color: isActive ? "var(--color-text)" : "var(--color-text-sub)",
-                      fontSize: 12,
-                      cursor: "pointer",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
                     }}
                   >
-                    {thread.title.length > 36 ? thread.title.slice(0, 36) + "…" : thread.title}
-                  </button>
+                    {isRenaming ? (
+                      <input
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onBlur={() => commitRename(thread.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitRename(thread.id);
+                          if (e.key === "Escape") {
+                            setRenamingId(null);
+                            setRenameDraft("");
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          padding: "5px 8px",
+                          border: "1px solid var(--color-border)",
+                          borderRadius: 6,
+                          background: "var(--color-bg)",
+                          color: "var(--color-text)",
+                          fontSize: 12,
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => switchThread(thread.id)}
+                          onDoubleClick={() => {
+                            setRenamingId(thread.id);
+                            setRenameDraft(thread.title);
+                          }}
+                          title={thread.title}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            textAlign: "left",
+                            padding: "6px 8px",
+                            border: "none",
+                            borderRadius: 6,
+                            background: "transparent",
+                            color: isActive ? "var(--color-text)" : "var(--color-text-sub)",
+                            fontSize: 12,
+                            cursor: "pointer",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {thread.title.length > 30
+                            ? thread.title.slice(0, 30) + "…"
+                            : thread.title}
+                        </button>
+                        <button
+                          type="button"
+                          className="ds-thread-action"
+                          aria-label={`Rename ${thread.title}`}
+                          title="Rename"
+                          onClick={() => {
+                            setRenamingId(thread.id);
+                            setRenameDraft(thread.title);
+                          }}
+                          style={threadActionStyle}
+                        >
+                          ✎
+                        </button>
+                        <button
+                          type="button"
+                          className="ds-thread-action"
+                          aria-label={`Delete ${thread.title}`}
+                          title="Delete"
+                          onClick={() => confirmDelete(thread.id, thread.title)}
+                          style={threadActionStyle}
+                        >
+                          🗑
+                        </button>
+                      </>
+                    )}
+                  </div>
                 );
               })}
             </div>

@@ -93,6 +93,7 @@ interface ChatState {
   newChat: () => void;
   switchThread: (id: string) => void;
   deleteThread: (id: string) => void;
+  renameThread: (id: string, title: string) => void;
 }
 
 function createMessageId(): string {
@@ -214,6 +215,16 @@ export const useChatStore = create<ChatState>()(
         }));
       },
       switchThread: (id) => set({ activeThreadId: id }),
+      renameThread: (id, title) =>
+        set((state) => {
+          const clean = title.trim().slice(0, 80);
+          if (!clean) return state;
+          return {
+            threads: state.threads.map((thread) =>
+              thread.id === id ? { ...thread, title: clean } : thread,
+            ),
+          };
+        }),
       deleteThread: (id) => {
         const state = get();
         const remaining = state.threads.filter((t) => t.id !== id);
