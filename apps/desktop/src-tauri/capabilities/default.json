@@ -8,10 +8,15 @@
     "pty:default",
     "updater:default",
     "dialog:allow-save",
-    "fs:allow-write-text-file",
     {
       "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "**" }]
+      "comment": "Exports go to a user-chosen path from the native save dialog; scope it to the user's own save locations rather than the whole filesystem (no system paths).",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DESKTOP/**" }
+      ]
     }
   ]
 }

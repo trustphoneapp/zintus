@@ -119,13 +119,20 @@ Verified green at audit time: `bun run typecheck` exit 0; full `bun run test` ex
 line below was true at audit time but is now stale; the corrected picture:
 
 > **2026-07-02 refresh (verified against code):** the per-surface lines below
-> are themselves now stale for **mobile** — the merged serious-app added a
-> **Tools toggle + built-in tool loop** and a **JSON mode** (`response_format`)
-> to mobile, so mobile is **✅ for tool calling AND structured/JSON output**, not
-> ❌. Also new since 2026-06-28: **Agent mode** (gateway `/v1/agents` runtime) is
-> now on **Web ✅ · Desktop ✅ · Mobile ✅** (CLI has `zintus agent`), each with a
-> live SSE event log + write/run approval gate + sandbox/browser toggles.
-> **Image input** is now on **mobile ✅** too (camera + library, EXIF-stripped).
+> are themselves now stale — corrections:
+> - **Mobile tool calling AND structured/JSON output are ✅**, not ❌ (the merged
+>   serious-app added a Tools toggle + built-in tool loop and a JSON mode
+>   `response_format`).
+> - **Structured/JSON output is ✅ on Web too** — `StructuredOutputControl`
+>   (`apps/web/app/_components/StructuredOutputControl.tsx`) is wired into
+>   `chat/page.tsx`. (The older "Web ❌ (no request UI)" note is stale.)
+> - **Agent mode** (gateway `/v1/agents` runtime) is now on **Web ✅ · Desktop ✅
+>   · Mobile ✅** (CLI has `zintus agent`), each with a live SSE event log +
+>   write/run approval gate. **Toggle parity:** Web + Desktop + Mobile now all
+>   expose **Docker sandbox + browser-tool** toggles (mobile added 2026-07-02);
+>   CLI exposes `--sandbox`. (Earlier wording claimed all-surface toggle parity
+>   before mobile had them — corrected.)
+> - **Image input** is now on **mobile ✅** too (camera + library, EXIF-stripped).
 
 - **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ✅ (built-in tools) · Mobile ❌**.
   Provider streaming (`packages/providers/src/utils.ts`), Gemini round-trip, and

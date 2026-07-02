@@ -32,6 +32,8 @@ export default function AgentScreen() {
   const [task, setTask] = useState("");
   const [root, setRoot] = useState("");
   const [allowRun, setAllowRun] = useState(false);
+  const [sandbox, setSandbox] = useState(false);
+  const [browse, setBrowse] = useState(false);
   const [autoApprove, setAutoApprove] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
@@ -55,6 +57,9 @@ export default function AgentScreen() {
         root: root.trim() || undefined,
         allowRun,
         autoApprove,
+        // Docker sandbox is only meaningful with allowRun (it isolates run_command).
+        sandbox: allowRun ? sandbox : false,
+        browse,
       });
       setAgentId(id);
       const controller = new AbortController();
@@ -72,7 +77,7 @@ export default function AgentScreen() {
       setRunning(false);
       abortRef.current = null;
     }
-  }, [task, root, allowRun, autoApprove, running]);
+  }, [task, root, allowRun, sandbox, browse, autoApprove, running]);
 
   const stop = useCallback(() => {
     if (agentId) void stopAgent(agentId);
@@ -143,9 +148,28 @@ export default function AgentScreen() {
           <Switch value={allowRun} onValueChange={setAllowRun} disabled={running} />
         </View>
         <View style={styles.toggleRow}>
+          <Text style={[styles.toggleLabel, !allowRun && styles.toggleLabelOff]}>
+            Docker sandbox
+          </Text>
+          <Switch
+            value={sandbox}
+            onValueChange={setSandbox}
+            disabled={running || !allowRun}
+          />
+        </View>
+        <View style={styles.toggleRow}>
+          <Text style={styles.toggleLabel}>Browser tool</Text>
+          <Switch value={browse} onValueChange={setBrowse} disabled={running} />
+        </View>
+        <View style={styles.toggleRow}>
           <Text style={styles.toggleLabel}>Auto-approve writes</Text>
           <Switch value={autoApprove} onValueChange={setAutoApprove} disabled={running} />
         </View>
+        <Text style={styles.hostNote}>
+          Docker sandbox &amp; the browser tool need Docker / Playwright on the
+          gateway host; if absent, the agent proceeds without them. Browsing
+          blocks private/internal hosts by default.
+        </Text>
 
         {running ? (
           <Pressable style={styles.stopBtn} onPress={stop}>
@@ -297,6 +321,8 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   toggleLabel: { color: COLORS.ink, fontSize: 14 },
+  toggleLabelOff: { color: COLORS.muted },
+  hostNote: { color: COLORS.muted, fontSize: 11, lineHeight: 16 },
   runBtn: {
     backgroundColor: COLORS.accent,
     borderRadius: 10,
