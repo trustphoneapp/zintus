@@ -20,6 +20,7 @@ import { DEFAULT_CONFIG } from "@zintus/types";
 import { ActivityStore } from "./activity-store.js";
 import { buildGatewayConfig, type GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type LogFn } from "./handler.js";
+import { detectLocalRuntimes } from "./local-runtimes.js";
 import { createErrorSink } from "./observability.js";
 import { createRateLimiter, type RateLimiter } from "./rate-limit.js";
 import { MCPRegistry } from "./mcp-registry.js";
@@ -70,6 +71,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     strategy: DEFAULT_CONFIG.routingStrategy,
     providerPriority: DEFAULT_CONFIG.providerPriority,
     policy,
+    // Keyless local runtimes (ollama/lmstudio) are only routing-eligible while
+    // actually detected — reuses the 30s-cached /status probe, so a not-running
+    // runtime is skipped at candidate selection instead of connection-refused.
+    localRuntimeAlive: async (id) => (await detectLocalRuntimes())[id].detected,
   });
 
   // Durable, machine-local usage history (~/.zintus/activity.db, beside the

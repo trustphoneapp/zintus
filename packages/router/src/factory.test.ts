@@ -139,6 +139,124 @@ describe("createRouter failover", () => {
     expect(chunks.join("")).toBe("from groq");
   });
 
+  test("failsover from a Bun connection-refused error to the next provider", async () => {
+    // Bun's fetch throws a plain Error (name "Error", NOT TypeError) with
+    // code "ConnectionRefused" and this exact message when nothing is listening
+    // (e.g. Ollama not running on localhost:11434). Before the fix this matched
+    // none of the network-error patterns, so the whole route aborted with the
+    // raw Bun message instead of failing over to a healthy provider.
+    let cerebrasCalls = 0;
+    const router = createTestRouter([
+      stubProvider("cerebras", 1, async () => {
+        cerebrasCalls += 1;
+        const error = new Error(
+          "Unable to connect. Is the computer able to access the url?",
+        );
+        (error as Error & { code: string }).code = "ConnectionRefused";
+        throw error;
+      }),
+      stubProvider("groq", 2, async () => ({
+        stream: (async function* () {
+          yield { content: "from groq" };
+        })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({ messages });
+    expect(cerebrasCalls).toBe(1);
+    expect(result.providerId).toBe("groq");
+
+    const chunks: string[] = [];
+    for await (const chunk of result.stream) {
+      chunks.push(chunk);
+    }
+    expect(chunks.join("")).toBe("from groq");
+  });
+
+  test("failsover on a Bun network error code even with an unrecognized message", async () => {
+    // Guards the `code`-based match on its own: other Bun network failures
+    // (ConnectionClosed, FailedToOpenSocket, DNSResolveFailed, Timeout) carry
+    // different messages, so failover must not depend on message text.
+    const router = createTestRouter([
+      stubProvider("cerebras", 1, async () => {
+        const error = new Error("socket hang up mid-handshake");
+        (error as Error & { code: string }).code = "FailedToOpenSocket";
+        throw error;
+      }),
+      stubProvider("groq", 2, async () => ({
+        stream: (async function* () {
+          yield { content: "ok" };
+        })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({ messages });
+    expect(result.providerId).toBe("groq");
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+  });
+
+  test("localRuntimeAlive=false makes ollama ineligible (never dispatched)", async () => {
+    let ollamaCalls = 0;
+    const router = createTestRouter(
+      [
+        stubProvider("ollama", 1, async () => {
+          ollamaCalls += 1;
+          throw new Error("should never be dispatched");
+        }),
+        stubProvider("groq", 2, async () => ({
+          stream: (async function* () {
+            yield { content: "ok" };
+          })(),
+        })),
+      ],
+      { localRuntimeAlive: async () => false },
+    );
+
+    const result = await router.routeAndStream({ messages });
+    expect(ollamaCalls).toBe(0);
+    expect(result.providerId).toBe("groq");
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+  });
+
+  test("localRuntimeAlive=true keeps a local runtime routable", async () => {
+    const router = createTestRouter(
+      [
+        stubProvider("ollama", 1, async () => ({
+          stream: (async function* () {
+            yield { content: "local" };
+          })(),
+        })),
+      ],
+      { localRuntimeAlive: async () => true },
+    );
+
+    const result = await router.routeAndStream({ messages });
+    expect(result.providerId).toBe("ollama");
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+  });
+
+  test("without a localRuntimeAlive prober, local runtimes stay eligible (back-compat)", async () => {
+    const router = createTestRouter([
+      stubProvider("ollama", 1, async () => ({
+        stream: (async function* () {
+          yield { content: "local" };
+        })(),
+      })),
+    ]);
+
+    const result = await router.routeAndStream({ messages });
+    expect(result.providerId).toBe("ollama");
+    for await (const _chunk of result.stream) {
+      // drain
+    }
+  });
+
   test("blockTrainingProviders drops training providers from candidates", async () => {
     const calls: string[] = [];
     const router = createTestRouter([
