@@ -236,6 +236,9 @@ export interface RouteRequest {
   mode?: ContextMode;
   stream?: boolean;
   threadId?: string;
+  /** When the turn belongs to a project, its project-scoped memory facts are
+   *  compiled alongside thread + global facts. */
+  projectId?: string;
   /** Gemini cached-content resource name, when the caller manages one. */
   cachedContentHandle?: string;
   stickySessionKey?: string;

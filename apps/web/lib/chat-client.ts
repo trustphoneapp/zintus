@@ -91,6 +91,8 @@ export async function streamChat(params: {
   model?: string;
   mode?: ContextMode;
   threadId?: string;
+  /** Active project id — compiles the project's memory facts into context. */
+  projectId?: string;
   /** `false` = incognito/private: the gateway persists nothing for this turn. */
   persist?: boolean;
   apiKeys?: Partial<Record<ProviderId, string>>;
@@ -130,6 +132,7 @@ export async function streamChat(params: {
     mode: params.mode ?? params.settings?.contextMode,
     threadId: params.threadId,
     persist: params.persist,
+    projectId: params.projectId,
     webSearch: params.webSearch,
     blockTraining: params.settings?.blockTrainingProviders,
     allowTraining: params.settings?.allowTrainingProviders,

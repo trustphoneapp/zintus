@@ -204,6 +204,46 @@ describe("persist:false — incognito writes no durable state", () => {
     expect(memory.listFacts(thread.id)[0]?.lastUsedAt).toBeUndefined();
   });
 
+  test("global memory reaches the compiler on a THREADED turn (adapter delegates to getTopFacts)", async () => {
+    const memory = new MemoryStore(join(dir, "memory.db"));
+    memory.init();
+    const engine = await makeEngine(memory);
+    const thread = engine.createThread("t");
+    memory.upsertFact({ scope: "global", key: "name", value: "Alice" });
+
+    // Threaded → compileContext → memory adapter → memory.getTopFacts (merges
+    // global). Previously the adapter used listFacts and dropped global facts.
+    const result = await engine.routeAndStream({
+      threadId: thread.id,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(result.memoryUsed?.some((m) => m.content.includes("Alice"))).toBe(
+      true,
+    );
+    await drain(result);
+  });
+
+  test("project memory reaches the compiler on a threaded turn when projectId is set", async () => {
+    const memory = new MemoryStore(join(dir, "memory.db"));
+    memory.init();
+    const engine = await makeEngine(memory);
+    const thread = engine.createThread("t");
+    memory.upsertFact({
+      scope: "project",
+      projectId: "p1",
+      key: "stack",
+      value: "bun",
+    });
+
+    const result = await engine.routeAndStream({
+      threadId: thread.id,
+      messages: [{ role: "user", content: "hi" }],
+      projectId: "p1",
+    });
+    expect(result.memoryUsed?.some((m) => m.content.includes("bun"))).toBe(true);
+    await drain(result);
+  });
+
   test("global memory applies to a thread-LESS turn (first turn / stateless)", async () => {
     const memory = new MemoryStore(join(dir, "memory.db"));
     memory.init();

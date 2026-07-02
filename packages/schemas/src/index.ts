@@ -258,6 +258,10 @@ export const ChatCompletionRequestSchema = z.object({
   // ProviderRoutingSchema.
   provider: z.union([ProviderIdSchema, ProviderRoutingSchema]).optional(),
   thread_id: z.string().optional(),
+  // When the turn belongs to a project, its project-scoped memory facts are
+  // compiled alongside thread + global facts.
+  project_id: z.string().optional(),
+  projectId: z.string().optional(),
   mode: ContextModeSchema.optional(),
   // Opt-in artifact/canvas mode: append artifact-authoring instructions to the
   // system prompt so the model emits ```artifact``` blocks. Default off.

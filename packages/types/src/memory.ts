@@ -28,6 +28,8 @@ export interface MemoryStore {
     threadId: string,
     query: string,
     limit: number,
+    /** When set, the project's facts are compiled alongside thread + global. */
+    projectId?: string,
   ): MaybePromise<MemoryFact[]>;
   searchChunks?(
     threadId: string,

@@ -153,6 +153,7 @@ export async function compileContext(request: CompileRequest): Promise<CompileRe
     request.threadId,
     request.newUserMessage,
     request.mode === "deep" ? 12 : 6,
+    request.projectId,
   );
   const retrievedChunks =
     request.mode !== "fast" && request.memory.searchChunks

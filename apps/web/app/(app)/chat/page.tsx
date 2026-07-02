@@ -827,6 +827,9 @@ export default function ChatPage() {
             model: catalogModel,
             mode: settings.contextMode,
             threadId: useThread ? threadId : undefined,
+            // Active project (if any) — compiles the project's memory facts into
+            // this turn's context alongside thread + global facts.
+            projectId: getActiveProject()?.id,
             // Incognito/private: tell the gateway to persist NOTHING durable for
             // this turn (conversation, memory, traces, cache, activity).
             persist: incognito ? false : undefined,
