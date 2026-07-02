@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   KeyboardAvoidingView,
   Platform,
@@ -22,11 +22,28 @@ import {
 import { COLORS } from "@/lib/theme";
 
 /**
- * Agent mode (mobile) — kick off a sandboxed coding task that runs on your
- * gateway machine and watch it live from your phone (LAN or via the relay).
- * Every file write / command pauses for your approval unless auto-approve is on.
- * Mirrors the web/desktop `/agent` surfaces.
+ * Agent (mobile) — the operator console for the gateway-hosted coding agent,
+ * matching web/desktop: arm a task, watch the live instrument readout, and
+ * every write HALTS at an approval gate. On a phone the gateway is your home
+ * machine (LAN or via the relay) — the "run it on your Mac from your phone"
+ * surface. The status pill is the heartbeat; machine output is set in mono.
  */
+
+type RunState = "idle" | "running" | "awaiting" | "done" | "stopped" | "error";
+
+const STATE_LABEL: Record<RunState, string> = {
+  idle: "Ready",
+  running: "Running",
+  awaiting: "Awaiting approval",
+  done: "Done",
+  stopped: "Stopped",
+  error: "Error",
+};
+
+const AMBER = "#f59e0b";
+const BLUE = "#60a5fa";
+const MONO = Platform.select({ ios: "Menlo", android: "monospace" });
+
 export default function AgentScreen() {
   const router = useRouter();
   const [task, setTask] = useState("");
@@ -46,6 +63,43 @@ export default function AgentScreen() {
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [events]);
 
+  const resolved = useMemo(
+    () =>
+      new Set(
+        events
+          .filter((e) => e.type === "approval_resolved")
+          .map((e) => String(e.approval_id)),
+      ),
+    [events],
+  );
+  const pending = events.filter(
+    (e) => e.type === "approval_required" && !resolved.has(String(e.approval_id)),
+  );
+
+  const runState: RunState = useMemo(() => {
+    if (error) return "error";
+    const last = [...events].reverse().find((e) =>
+      ["done", "stopped", "error"].includes(e.type),
+    );
+    if (last?.type === "done") return "done";
+    if (last?.type === "stopped") return "stopped";
+    if (last?.type === "error") return "error";
+    if (pending.length > 0) return "awaiting";
+    if (running) return "running";
+    return "idle";
+  }, [events, running, error, pending.length]);
+
+  const stateColor =
+    runState === "running"
+      ? COLORS.accentBright
+      : runState === "awaiting"
+        ? AMBER
+        : runState === "done"
+          ? COLORS.good
+          : runState === "error" || runState === "stopped"
+            ? COLORS.error
+            : COLORS.muted;
+
   const start = useCallback(async () => {
     if (!task.trim() || running) return;
     setEvents([]);
@@ -57,7 +111,6 @@ export default function AgentScreen() {
         root: root.trim() || undefined,
         allowRun,
         autoApprove,
-        // Docker sandbox is only meaningful with allowRun (it isolates run_command).
         sandbox: allowRun ? sandbox : false,
         browse,
       });
@@ -90,14 +143,8 @@ export default function AgentScreen() {
     [agentId],
   );
 
-  const resolved = new Set(
-    events
-      .filter((e) => e.type === "approval_resolved")
-      .map((e) => String(e.approval_id)),
-  );
-  const pending = events.filter(
-    (e) => e.type === "approval_required" && !resolved.has(String(e.approval_id)),
-  );
+  const armed = task.trim().length > 0;
+  const launchOpen = runState === "idle" || runState === "error";
 
   return (
     <KeyboardAvoidingView
@@ -106,104 +153,113 @@ export default function AgentScreen() {
     >
       <View style={styles.header}>
         <Pressable hitSlop={8} onPress={() => router.back()}>
-          <Text style={styles.headerLink}>‹ Back</Text>
+          <Text style={styles.back}>‹ Back</Text>
         </Pressable>
         <Text style={styles.title}>Agent</Text>
         <View style={{ width: 44 }} />
       </View>
 
+      {/* Status strip — the console heartbeat. */}
+      <View style={styles.strip}>
+        <View style={[styles.stripDot, { backgroundColor: stateColor }]} />
+        <Text style={[styles.stripState, { color: stateColor }]}>
+          {STATE_LABEL[runState]}
+        </Text>
+        <View style={{ flex: 1 }} />
+        {running ? (
+          <Pressable style={styles.stripStop} onPress={stop}>
+            <Text style={styles.stripStopText}>Stop</Text>
+          </Pressable>
+        ) : null}
+      </View>
+
       <ScrollView
         ref={scrollRef}
         style={styles.scroll}
-        contentContainerStyle={{ padding: 16, gap: 12 }}
+        contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
       >
-        <Text style={styles.subtitle}>
-          Runs on your gateway machine, sandboxed to the root below. Writes and
-          commands pause for your approval.
-        </Text>
+        {launchOpen ? (
+          <>
+            <Text style={styles.fieldLabel}>Task</Text>
+            <TextInput
+              style={styles.taskInput}
+              placeholder="What should the agent do? e.g. add a --json flag to the export script"
+              placeholderTextColor={COLORS.muted}
+              value={task}
+              onChangeText={setTask}
+              multiline
+            />
+            <Text style={styles.fieldLabel}>Sandbox root</Text>
+            <TextInput
+              style={styles.rootInput}
+              placeholder="Path on the gateway host (default: workspace)"
+              placeholderTextColor={COLORS.muted}
+              value={root}
+              onChangeText={setRoot}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
 
-        <TextInput
-          style={styles.input}
-          placeholder="Task — e.g. “add a --json flag to the export script”"
-          placeholderTextColor={COLORS.muted}
-          value={task}
-          onChangeText={setTask}
-          editable={!running}
-          multiline
-        />
-        <TextInput
-          style={styles.inputSmall}
-          placeholder="Sandbox root (default: gateway workspace)"
-          placeholderTextColor={COLORS.muted}
-          value={root}
-          onChangeText={setRoot}
-          editable={!running}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+            <ToggleRow label="Run verify commands" hint="bun test / typecheck" value={allowRun} onChange={setAllowRun} />
+            <ToggleRow label="Docker sandbox" hint="isolate commands" value={sandbox} onChange={setSandbox} disabled={!allowRun} />
+            <ToggleRow label="Browser tool" hint="read web pages" value={browse} onChange={setBrowse} />
+            <ToggleRow label="Auto-approve" hint="skip the gate — careful" value={autoApprove} onChange={setAutoApprove} tone="warn" />
 
-        <View style={styles.toggleRow}>
-          <Text style={styles.toggleLabel}>Allow verify commands</Text>
-          <Switch value={allowRun} onValueChange={setAllowRun} disabled={running} />
-        </View>
-        <View style={styles.toggleRow}>
-          <Text style={[styles.toggleLabel, !allowRun && styles.toggleLabelOff]}>
-            Docker sandbox
-          </Text>
-          <Switch
-            value={sandbox}
-            onValueChange={setSandbox}
-            disabled={running || !allowRun}
-          />
-        </View>
-        <View style={styles.toggleRow}>
-          <Text style={styles.toggleLabel}>Browser tool</Text>
-          <Switch value={browse} onValueChange={setBrowse} disabled={running} />
-        </View>
-        <View style={styles.toggleRow}>
-          <Text style={styles.toggleLabel}>Auto-approve writes</Text>
-          <Switch value={autoApprove} onValueChange={setAutoApprove} disabled={running} />
-        </View>
-        <Text style={styles.hostNote}>
-          Docker sandbox &amp; the browser tool need Docker / Playwright on the
-          gateway host; if absent, the agent proceeds without them. Browsing
-          blocks private/internal hosts by default.
-        </Text>
-
-        {running ? (
-          <Pressable style={styles.stopBtn} onPress={stop}>
-            <Text style={styles.stopText}>Stop</Text>
-          </Pressable>
+            <Pressable
+              style={[styles.launch, !armed && styles.launchOff]}
+              onPress={() => void start()}
+              disabled={!armed}
+            >
+              <Text style={styles.launchText}>
+                {armed ? "Launch agent" : "Enter a task to launch"}
+              </Text>
+            </Pressable>
+            <Text style={styles.note}>
+              Runs on your gateway machine, sandboxed to the root above. Docker
+              &amp; the browser tool need those installed there; browsing blocks
+              internal hosts by default.
+            </Text>
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+          </>
         ) : (
-          <Pressable
-            style={[styles.runBtn, !task.trim() && styles.runBtnDisabled]}
-            onPress={() => void start()}
-            disabled={!task.trim()}
-          >
-            <Text style={styles.runText}>Run agent</Text>
-          </Pressable>
+          <View style={styles.runSummary}>
+            <Text style={styles.runTask} numberOfLines={1}>
+              {task}
+            </Text>
+            <Pressable
+              onPress={() => {
+                setEvents([]);
+                setError(null);
+              }}
+              disabled={running}
+            >
+              <Text style={[styles.newTask, running && { opacity: 0.4 }]}>New task</Text>
+            </Pressable>
+          </View>
         )}
 
-        {error ? <Text style={styles.error}>{error}</Text> : null}
-
+        {/* Approval gate — the interrupt. */}
         {pending.map((p) => (
-          <View key={String(p.approval_id)} style={styles.approvalCard}>
-            <Text style={styles.approvalTitle}>
+          <View key={String(p.approval_id)} style={styles.gate}>
+            <View style={styles.gateHead}>
+              <Text style={styles.gateBadge}>WAITING ON YOU</Text>
+            </View>
+            <Text style={styles.gateWhat}>
               {String(p.tool)} wants to touch {String(p.path)}
             </Text>
-            <Text style={styles.diff} numberOfLines={8}>
+            <Text style={styles.gateDiff} numberOfLines={10}>
               {String(p.diff)}
             </Text>
-            <View style={styles.approvalActions}>
+            <View style={styles.gateActions}>
               <Pressable
-                style={styles.approveBtn}
+                style={styles.approve}
                 onPress={() => approve(String(p.approval_id), true)}
               >
                 <Text style={styles.approveText}>Approve</Text>
               </Pressable>
               <Pressable
-                style={styles.declineBtn}
+                style={styles.decline}
                 onPress={() => approve(String(p.approval_id), false)}
               >
                 <Text style={styles.declineText}>Decline</Text>
@@ -212,14 +268,15 @@ export default function AgentScreen() {
           </View>
         ))}
 
+        {/* Live run log — mono instrument readout. */}
         <View style={styles.log}>
           {events.length === 0 ? (
             <Text style={styles.logEmpty}>
-              Events stream here — routing, the agent&apos;s text, tool calls and
-              results, approvals, and the final change summary.
+              The run appears here — routing, the agent&apos;s reasoning, each tool
+              call and result, approvals, and the final change summary.
             </Text>
           ) : (
-            events.map((e) => <EventLine key={e.seq} event={e} />)
+            events.map((e) => <LogLine key={e.seq} event={e} />)
           )}
         </View>
       </ScrollView>
@@ -227,14 +284,45 @@ export default function AgentScreen() {
   );
 }
 
-function EventLine({ event }: { event: AgentEvent }) {
+function ToggleRow({
+  label,
+  hint,
+  value,
+  onChange,
+  disabled,
+  tone,
+}: {
+  label: string;
+  hint: string;
+  value: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  tone?: "warn";
+}) {
+  return (
+    <View style={[styles.toggle, disabled && { opacity: 0.45 }]}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.toggleLabel}>{label}</Text>
+        <Text style={styles.toggleHint}>{hint}</Text>
+      </View>
+      <Switch
+        value={value}
+        onValueChange={onChange}
+        disabled={disabled}
+        trackColor={{ true: tone === "warn" ? AMBER : COLORS.accent, false: COLORS.border }}
+      />
+    </View>
+  );
+}
+
+function LogLine({ event }: { event: AgentEvent }) {
   switch (event.type) {
     case "started":
-      return <Text style={styles.evStarted}>▶ sandbox {String(event.root)}</Text>;
+      return <Text style={[styles.ev, { color: COLORS.accentBright }]}>▶ sandbox {String(event.root)}</Text>;
     case "routed":
       return (
-        <Text style={styles.evMuted}>
-          → routed to {String(event.provider ?? "?")}
+        <Text style={[styles.ev, styles.evMuted]}>
+          → {String(event.provider ?? "?")}
           {event.model ? ` · ${String(event.model)}` : ""}
         </Text>
       );
@@ -242,40 +330,40 @@ function EventLine({ event }: { event: AgentEvent }) {
       return <Text style={styles.evText}>{String(event.text)}</Text>;
     case "tool_call":
       return (
-        <Text style={styles.evTool}>
-          🔧 {String(event.tool)}({JSON.stringify(event.arguments)})
+        <Text style={[styles.ev, { color: BLUE }]}>
+          {String(event.tool)}({JSON.stringify(event.arguments)})
         </Text>
       );
     case "tool_result":
       return (
-        <Text style={event.is_error ? styles.evWarn : styles.evMuted}>
-          {event.is_error ? "⚠ " : "✓ "}
+        <Text style={[styles.ev, event.is_error ? { color: AMBER } : styles.evMuted]}>
+          {event.is_error ? "! " : "✓ "}
           {String(event.tool)} → {String(event.content).slice(0, 160)}
         </Text>
       );
     case "approval_required":
       return (
-        <Text style={styles.evWarn}>
-          ⏸ approval required: {String(event.tool)} → {String(event.path)}
+        <Text style={[styles.ev, { color: AMBER }]}>
+          ⏸ approval — {String(event.tool)} {String(event.path)}
         </Text>
       );
     case "approval_resolved":
       return (
-        <Text style={styles.evMuted}>
-          {event.approved ? "✔ approved" : "✖ declined"}
+        <Text style={[styles.ev, styles.evMuted]}>
+          {event.approved ? "✓ approved" : "✗ declined"}
           {event.auto ? " (auto)" : ""}
         </Text>
       );
     case "done":
       return (
-        <Text style={styles.evDone}>
-          ✅ done · {String(event.rounds)} round(s) · {String(event.mutations)} change(s)
+        <Text style={[styles.ev, { color: COLORS.good, fontWeight: "700" }]}>
+          ✓ done · {String(event.rounds)} round(s) · {String(event.mutations)} change(s)
         </Text>
       );
     case "stopped":
-      return <Text style={styles.evError}>⏹ stopped</Text>;
+      return <Text style={[styles.ev, { color: COLORS.error }]}>⏹ stopped</Text>;
     case "error":
-      return <Text style={styles.evError}>✗ {String(event.message)}</Text>;
+      return <Text style={[styles.ev, { color: COLORS.error }]}>✗ {String(event.message)}</Text>;
     default:
       return null;
   }
@@ -286,109 +374,154 @@ const styles = StyleSheet.create({
   header: {
     paddingTop: 56,
     paddingHorizontal: 16,
-    paddingBottom: 12,
+    paddingBottom: 10,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  headerLink: { color: COLORS.accentBright, fontSize: 15, fontWeight: "600", width: 44 },
+  back: { color: COLORS.accentBright, fontSize: 15, fontWeight: "600", width: 44 },
   title: { color: COLORS.ink, fontSize: 20, fontWeight: "700" },
+
+  strip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.panel,
+  },
+  stripDot: { width: 8, height: 8, borderRadius: 4 },
+  stripState: { fontSize: 13, fontWeight: "700" },
+  stripStop: {
+    borderWidth: 1,
+    borderColor: COLORS.error,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  stripStopText: { color: COLORS.error, fontSize: 12, fontWeight: "700" },
+
   scroll: { flex: 1 },
-  subtitle: { color: COLORS.muted, fontSize: 13, lineHeight: 18 },
-  input: {
+  scrollContent: { padding: 16, gap: 10 },
+
+  fieldLabel: {
+    color: COLORS.muted,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    marginTop: 4,
+  },
+  taskInput: {
     backgroundColor: COLORS.panel,
     color: COLORS.ink,
     borderRadius: 10,
-    padding: 12,
-    minHeight: 72,
     borderWidth: 1,
     borderColor: COLORS.border,
+    padding: 12,
+    minHeight: 72,
     fontSize: 14,
   },
-  inputSmall: {
+  rootInput: {
     backgroundColor: COLORS.panel,
     color: COLORS.ink,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 13,
+    fontFamily: MONO,
+  },
+
+  toggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: COLORS.panel,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  toggleLabel: { color: COLORS.ink, fontSize: 14, fontWeight: "600" },
+  toggleHint: { color: COLORS.muted, fontSize: 11, marginTop: 1 },
+
+  launch: {
+    backgroundColor: COLORS.accent,
+    borderRadius: 10,
+    paddingVertical: 13,
+    alignItems: "center",
+    marginTop: 6,
+  },
+  launchOff: { opacity: 0.4 },
+  launchText: { color: COLORS.onAccent, fontWeight: "700", fontSize: 15 },
+  note: { color: COLORS.muted, fontSize: 11, lineHeight: 16 },
+  error: { color: COLORS.error, fontSize: 13 },
+
+  runSummary: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: COLORS.panel,
+    borderWidth: 1,
+    borderColor: COLORS.border,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
+  },
+  runTask: { flex: 1, color: COLORS.ink, fontSize: 14 },
+  newTask: { color: COLORS.accentBright, fontSize: 12, fontWeight: "700" },
+
+  gate: {
     borderWidth: 1,
-    borderColor: COLORS.border,
-    fontSize: 13,
-  },
-  toggleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  toggleLabel: { color: COLORS.ink, fontSize: 14 },
-  toggleLabelOff: { color: COLORS.muted },
-  hostNote: { color: COLORS.muted, fontSize: 11, lineHeight: 16 },
-  runBtn: {
-    backgroundColor: COLORS.accent,
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: "center",
-  },
-  runBtnDisabled: { opacity: 0.4 },
-  runText: { color: COLORS.onAccent, fontWeight: "700", fontSize: 15 },
-  stopBtn: {
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.error,
-    paddingVertical: 12,
-    alignItems: "center",
-  },
-  stopText: { color: COLORS.error, fontWeight: "700", fontSize: 15 },
-  error: { color: COLORS.error, fontSize: 13 },
-  approvalCard: {
-    borderWidth: 1,
-    borderColor: COLORS.warn,
-    backgroundColor: "rgba(245,158,11,0.10)",
-    borderRadius: 10,
+    borderColor: AMBER,
+    backgroundColor: "rgba(245,158,11,0.08)",
+    borderRadius: 14,
     padding: 12,
     gap: 8,
   },
-  approvalTitle: { color: COLORS.warn, fontWeight: "700", fontSize: 13 },
-  diff: {
-    color: COLORS.muted,
-    fontSize: 11,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
+  gateHead: { flexDirection: "row" },
+  gateBadge: {
+    color: "#fff",
+    backgroundColor: AMBER,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+    overflow: "hidden",
   },
-  approvalActions: { flexDirection: "row", gap: 8 },
-  approveBtn: {
-    backgroundColor: COLORS.accent,
-    borderRadius: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  approveText: { color: COLORS.onAccent, fontWeight: "700" },
-  declineBtn: {
+  gateWhat: { color: COLORS.ink, fontSize: 13, fontWeight: "600" },
+  gateDiff: { color: COLORS.muted, fontSize: 11, fontFamily: MONO, lineHeight: 16 },
+  gateActions: { flexDirection: "row", gap: 8 },
+  approve: { backgroundColor: COLORS.good, borderRadius: 8, paddingHorizontal: 16, paddingVertical: 8 },
+  approveText: { color: "#04120b", fontWeight: "700" },
+  decline: {
     borderWidth: 1,
     borderColor: COLORS.border,
     borderRadius: 8,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 8,
   },
   declineText: { color: COLORS.ink, fontWeight: "600" },
+
   log: {
     borderWidth: 1,
     borderColor: COLORS.border,
     backgroundColor: COLORS.panel,
-    borderRadius: 10,
+    borderRadius: 14,
     padding: 12,
-    minHeight: 160,
+    minHeight: 180,
     gap: 2,
   },
-  logEmpty: { color: COLORS.muted, fontSize: 12, lineHeight: 18 },
-  evStarted: { color: COLORS.accentBright, fontSize: 12 },
-  evMuted: { color: COLORS.muted, fontSize: 12 },
-  evText: { color: COLORS.ink, fontSize: 13 },
-  evTool: {
-    color: "#60a5fa",
-    fontSize: 12,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
-  },
-  evWarn: { color: COLORS.warn, fontSize: 12 },
-  evDone: { color: COLORS.good, fontSize: 13, fontWeight: "700" },
-  evError: { color: COLORS.error, fontSize: 13 },
+  logEmpty: { color: COLORS.muted, fontSize: 13, lineHeight: 18 },
+  ev: { fontFamily: MONO, fontSize: 12, color: COLORS.ink, lineHeight: 17 },
+  evMuted: { color: COLORS.muted },
+  evText: { color: COLORS.ink, fontSize: 13.5, lineHeight: 19, marginTop: 2 },
 });
