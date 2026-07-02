@@ -13,6 +13,11 @@ import {
   type MemoryScope,
 } from "@/lib/memory-api";
 import { loadMemory, saveMemory } from "@/lib/memory";
+import {
+  listProjects,
+  getActiveProjectId,
+  type Project,
+} from "@/lib/projects";
 
 /** Legacy on-device memories are freeform strings; derive a readable, stable-ish
  *  key so they render sensibly in the Manager (mirrors the "llm.<slug>" style). */
@@ -90,15 +95,24 @@ export default function MemoryPage() {
   const [legacyEntries, setLegacyEntries] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
 
+  // Project picker (Project tab): scopes listing + creation to one project, so
+  // project facts are created against a REAL project id (what the compiler filters
+  // on) rather than an unscoped null.
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+
   useEffect(() => {
     setLegacyEntries(loadMemory());
+    const list = listProjects();
+    setProjects(list);
+    setSelectedProjectId(getActiveProjectId() ?? list[0]?.id ?? null);
   }, []);
 
-  const load = useCallback(async (s: MemoryScope) => {
+  const load = useCallback(async (s: MemoryScope, projectId?: string) => {
     setLoading(true);
     setError(null);
     try {
-      setFacts(await listMemory({ scope: s }));
+      setFacts(await listMemory({ scope: s, projectId }));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load memory.");
       setFacts([]);
@@ -108,20 +122,38 @@ export default function MemoryPage() {
   }, []);
 
   useEffect(() => {
-    void load(scope);
-  }, [scope, load]);
+    // On the Project tab, scope the listing to the picked project.
+    void load(
+      scope,
+      scope === "project" ? selectedProjectId ?? undefined : undefined,
+    );
+  }, [scope, selectedProjectId, load]);
 
   async function onCreate() {
     const key = newKey.trim();
     const value = newValue.trim();
     if (!key || !value || saving) return;
+    // A project fact needs a real project to attach to (what the compiler filters
+    // on) — otherwise it would never be compiled.
+    if (scope === "project" && !selectedProjectId) {
+      setError("Create or select a project first.");
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      await createMemory({ scope, key, value });
+      await createMemory({
+        scope,
+        key,
+        value,
+        projectId: scope === "project" ? selectedProjectId ?? undefined : undefined,
+      });
       setNewKey("");
       setNewValue("");
-      await load(scope);
+      await load(
+        scope,
+        scope === "project" ? selectedProjectId ?? undefined : undefined,
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to save memory.");
     } finally {
@@ -270,6 +302,42 @@ export default function MemoryPage() {
       <p style={{ margin: "-6px 0 0", color: "var(--color-text-sub)", fontSize: 12.5 }}>
         {activeHint}
       </p>
+
+      {/* Project picker — only on the Project tab. Scopes listing + creation to a
+          real project so project facts attach to the id the compiler filters on. */}
+      {scope === "project" ? (
+        projects.length > 0 ? (
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+            <span style={{ color: "var(--color-text-sub)" }}>Project</span>
+            <select
+              value={selectedProjectId ?? ""}
+              onChange={(e) => setSelectedProjectId(e.target.value || null)}
+              style={{ ...inputStyle, flex: "0 1 260px" }}
+            >
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <p
+            style={{
+              ...cardStyle,
+              color: "var(--color-text-sub)",
+              fontSize: 13,
+              margin: 0,
+            }}
+          >
+            No projects yet. Create one from the{" "}
+            <a href="/projects" style={{ textDecoration: "underline" }}>
+              Projects
+            </a>{" "}
+            page, then add project memories here.
+          </p>
+        )
+      ) : null}
 
       {/* Create */}
       <div style={{ ...cardStyle, display: "flex", flexDirection: "column", gap: 8 }}>
