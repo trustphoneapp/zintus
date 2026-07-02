@@ -4,6 +4,7 @@ import { listProviders } from "@zintus/providers";
 import type { ProviderId } from "@zintus/types";
 import { QUOTA_WARNING_THRESHOLD } from "./limits";
 import { remainingRatio } from "./quota";
+import { loadNotificationsEnabled } from "./config";
 
 const warnedProviders = new Set<ProviderId>();
 
@@ -17,25 +18,41 @@ Notifications.setNotificationHandler({
   }),
 });
 
-export async function ensureNotificationPermissions(): Promise<boolean> {
+/**
+ * Request the OS notification permission — call ONLY from an explicit user
+ * action (the Settings toggle), never on launch. Sets up the Android channel
+ * and returns whether permission is granted.
+ */
+export async function requestNotificationOptIn(): Promise<boolean> {
   if (Platform.OS === "android") {
     await Notifications.setNotificationChannelAsync("quota", {
       name: "Quota alerts",
       importance: Notifications.AndroidImportance.DEFAULT,
     });
   }
-
   const current = await Notifications.getPermissionsAsync();
   if (current.granted) {
     return true;
   }
-
   const requested = await Notifications.requestPermissionsAsync();
   return requested.granted;
 }
 
+/**
+ * Gate for the notify paths: fire only when the user opted in (Settings) AND
+ * the OS permission is already granted. Never prompts here — a background quota
+ * check must not trigger a permission dialog. Returns false silently otherwise.
+ */
+async function canNotify(): Promise<boolean> {
+  if (!loadNotificationsEnabled()) {
+    return false;
+  }
+  const current = await Notifications.getPermissionsAsync();
+  return current.granted;
+}
+
 export async function checkQuotaWarnings(now = Date.now()): Promise<void> {
-  const allowed = await ensureNotificationPermissions();
+  const allowed = await canNotify();
   if (!allowed) {
     return;
   }
@@ -67,7 +84,7 @@ export async function checkQuotaWarnings(now = Date.now()): Promise<void> {
 export async function notifyQuotaExhausted(
   providerId: ProviderId,
 ): Promise<void> {
-  const allowed = await ensureNotificationPermissions();
+  const allowed = await canNotify();
   if (!allowed) {
     return;
   }
@@ -83,7 +100,7 @@ export async function notifyQuotaExhausted(
 }
 
 export async function notifyStreamError(message: string): Promise<void> {
-  const allowed = await ensureNotificationPermissions();
+  const allowed = await canNotify();
   if (!allowed) {
     return;
   }

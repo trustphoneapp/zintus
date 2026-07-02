@@ -10,7 +10,6 @@ import { Tabs, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { Ionicons } from "@expo/vector-icons";
-import { ensureNotificationPermissions } from "@/lib/notifications";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { COLORS } from "@/lib/theme";
 import * as WebBrowser from "expo-web-browser";
@@ -43,7 +42,9 @@ export default function RootLayout() {
   }, [router]);
 
   useEffect(() => {
-    void ensureNotificationPermissions();
+    // NOTE: notification permission is intentionally NOT requested here — store
+    // guidelines want it requested in context (the Settings "Quota & error
+    // alerts" toggle), never on cold launch.
     // Complete any in-progress expo-web-browser auth sessions.
     void WebBrowser.warmUpAsync();
 

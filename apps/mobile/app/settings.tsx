@@ -11,9 +11,12 @@ import {
 import {
   ROUTING_STRATEGIES,
   loadConfig,
+  loadNotificationsEnabled,
   saveConfig,
+  saveNotificationsEnabled,
 } from "@/lib/config";
 import { fetchGatewayHealth, type GatewaySavings } from "@/lib/gateway";
+import { requestNotificationOptIn } from "@/lib/notifications";
 import { COLORS } from "@/lib/theme";
 
 function formatUsd(value: number): string {
@@ -26,12 +29,37 @@ export default function SettingsScreen() {
   const [savedNote, setSavedNote] = useState(false);
   const [strategy, setStrategy] = useState<RoutingStrategy>("fastest");
   const [savings, setSavings] = useState<GatewaySavings | null>(null);
+  const [notificationsOn, setNotificationsOn] = useState(false);
+  const [notifNote, setNotifNote] = useState<string | null>(null);
 
   useEffect(() => {
     setGatewayInput(getSavedGatewayUrl() ?? "");
     setEffectiveUrl(getGatewayUrl());
     setStrategy(loadConfig().routingStrategy);
+    setNotificationsOn(loadNotificationsEnabled());
   }, []);
+
+  async function toggleNotifications() {
+    if (notificationsOn) {
+      saveNotificationsEnabled(false);
+      setNotificationsOn(false);
+      setNotifNote("Alerts off.");
+      return;
+    }
+    // Turning ON: request the OS permission in-context (this user action).
+    const granted = await requestNotificationOptIn();
+    if (granted) {
+      saveNotificationsEnabled(true);
+      setNotificationsOn(true);
+      setNotifNote("Alerts on.");
+    } else {
+      saveNotificationsEnabled(false);
+      setNotificationsOn(false);
+      setNotifNote(
+        "Notification permission was denied. Enable it in your device Settings, then try again.",
+      );
+    }
+  }
 
   function saveGateway(value: string) {
     persistGatewayUrl(value);
@@ -186,6 +214,37 @@ export default function SettingsScreen() {
           <Text className="mt-3 text-xs text-muted">
             {savedNote ? "Saved. " : ""}Using: {effectiveUrl}
           </Text>
+        </View>
+
+        <View className="mt-4 rounded-xl border border-slate-800 bg-panel p-4">
+          <Text className="mb-1 text-lg font-semibold text-ink">
+            Notifications
+          </Text>
+          <Text className="mb-3 text-xs text-muted">
+            Local alerts when a provider&apos;s free-tier quota runs low or a
+            request fails. Off by default — turning this on asks for the OS
+            notification permission. Nothing is sent to any server.
+          </Text>
+          <Pressable
+            className={`flex-row items-center justify-between rounded-xl border px-3 py-3 ${
+              notificationsOn
+                ? "border-accent bg-accent/20"
+                : "border-slate-800 bg-surface"
+            }`}
+            onPress={toggleNotifications}
+          >
+            <Text className="font-semibold text-ink">Quota &amp; error alerts</Text>
+            <Text
+              className={`font-semibold ${
+                notificationsOn ? "text-accent-bright" : "text-muted"
+              }`}
+            >
+              {notificationsOn ? "On" : "Off"}
+            </Text>
+          </Pressable>
+          {notifNote ? (
+            <Text className="mt-3 text-xs text-muted">{notifNote}</Text>
+          ) : null}
         </View>
       </ScrollView>
     </View>

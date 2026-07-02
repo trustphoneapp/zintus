@@ -123,6 +123,23 @@ export function saveToolsMode(enabled: boolean): void {
   storage.set(TOOLS_MODE_KEY, enabled);
 }
 
+const NOTIFICATIONS_KEY = "notificationsEnabled";
+
+/**
+ * Whether the user has opted into local quota/error notifications. OFF by
+ * default: store guidelines (Apple HIG / Play) want notification permission
+ * requested IN CONTEXT via an explicit user action, never on cold launch. The
+ * Settings toggle requests the OS permission only when this is turned on, and
+ * every notify path checks this before scheduling.
+ */
+export function loadNotificationsEnabled(): boolean {
+  return storage.getBoolean(NOTIFICATIONS_KEY) ?? false;
+}
+
+export function saveNotificationsEnabled(enabled: boolean): void {
+  storage.set(NOTIFICATIONS_KEY, enabled);
+}
+
 /**
  * MMKV-backed storage for the MCP server list. The pure CRUD lives in
  * lib/mcp-config.ts (RN-free, unit-tested with an in-memory fake); these thin

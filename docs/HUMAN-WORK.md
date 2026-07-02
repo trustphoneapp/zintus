@@ -111,10 +111,17 @@ added (the workflow lists the exact names) or it just skips every provider.
 ## F. Store / distribution (pre-existing P0 debt)
 
 - Desktop signing + notarization (Apple Developer / Windows cert).
-- Real 1024²-sourced app icons (current ones are small placeholders).
-- Store listing assets (screenshots, descriptions) — see `docs/STORE-READINESS.md`.
-- Mobile: run the merged serious-app on a device once (union-merged, typechecks
-  + unit-tests pass, but hasn't been launched on a simulator/device).
+- Desktop app icons + store assets — see `docs/STORE-READINESS.md`.
+- **Mobile (Android + iOS) is now store-shaped** (2026-07-02): real branded
+  icon, minimal Android permissions + denylist, iOS privacy manifest,
+  contextual notification opt-in, `eas.json` submit block. The full runbook is
+  `apps/mobile/STORE-SUBMISSION.md`. Remaining human steps there:
+  `eas init` (set `extra.eas.projectId`), preview builds + **one real-device
+  smoke** (also proves the doctor "duplicate deps" artifact is harmless),
+  store metadata + privacy-policy URL (needs the web `/privacy` deployed),
+  production builds + `eas submit`, and the App Privacy / Data-safety
+  questionnaires (answer per the no-collection BYOK model the iOS privacy
+  manifest already encodes).
 
 ---
 

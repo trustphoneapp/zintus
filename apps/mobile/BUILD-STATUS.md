@@ -1,7 +1,21 @@
 # Zintus Mobile — "Serious AI App" build status
 
-Branch `feat/mobile-serious-app`. Tracks the upgrade from basic text chat to a
-serious cross-platform (Android + iOS) AI app. Updated as the loop progresses.
+Branch `feat/mobile-serious-app` (merged to main). Tracks the upgrade from basic
+text chat to a serious cross-platform (Android + iOS) AI app.
+
+## Store-readiness pass (2026-07-02) — see `STORE-SUBMISSION.md`
+- **Real branded app icon** (was a blank purple square → guaranteed rejection):
+  regenerated iOS `icon.png`/`adaptive-icon.png` as the purple-gradient +
+  chevron mark, 1024² opaque.
+- **Minimal Android permissions** (`POST_NOTIFICATIONS` only) + a
+  `blockedPermissions` denylist for camera/mic/location/media/contacts/overlay
+  (Play "unused permission" fix — the app genuinely uses none).
+- **iOS privacy manifest** (`NSPrivacyTracking:false`, no collected data,
+  required-reason API entries) — Apple-required since 2024.
+- **Contextual notification permission**: no cold-launch request; a
+  Settings → Notifications opt-in requests it on tap; notify paths gate on the
+  opt-in + granted state.
+- **eas.json** gains a `submit.production` block ([HUMAN] credentials).
 
 ## Verification gates (run before calling anything done)
 - root `bun run typecheck` (all packages + web/desktop/mobile) — **EXIT 0**
