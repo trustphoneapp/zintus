@@ -250,6 +250,39 @@ export async function fetchRouteOptions(
   }
 }
 
+/**
+ * Explicit key test (matrix #20) via the local gateway's POST /v1/keys/validate.
+ * The key travels renderer → loopback gateway → provider auth endpoint only.
+ * Three-state result: the caller must distinguish "invalid key" from "could
+ * not test" (gateway down / provider unreachable) — never conflate them.
+ */
+export async function validateProviderKey(
+  provider: ProviderId,
+  key: string,
+): Promise<{ ok: boolean; valid?: boolean; error?: string }> {
+  const gatewayUrl = await resolveGatewayUrl();
+  if (!gatewayUrl) {
+    return { ok: false, error: "Gateway offline — run `zintus serve` to test keys." };
+  }
+  try {
+    const response = await fetch(`${gatewayUrl}/v1/keys/validate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+      body: JSON.stringify({ providerId: provider, key }),
+    });
+    const payload = (await response.json()) as {
+      valid?: boolean;
+      error?: { message?: string };
+    };
+    if (!response.ok) {
+      return { ok: false, error: payload.error?.message ?? `HTTP ${response.status}` };
+    }
+    return { ok: true, valid: Boolean(payload.valid) };
+  } catch {
+    return { ok: false, error: "Could not reach the gateway to test the key." };
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MCP (Model Context Protocol) — the desktop renderer can't HOST MCP, so the
 // settings UI asks the user's local gateway to connect and report a server's

@@ -3,6 +3,7 @@ import {
   listProviders,
   getModelPricing,
   estimateCostUsd,
+  createProvider,
   DATA_POLICIES,
   PROVIDER_METADATA,
   listCatalogModels,
@@ -32,6 +33,7 @@ import {
   textOf,
   imageCount,
   isContentBlockArray,
+  isProviderId,
   hasToolTurns,
   type ContentBlock,
   type ToolResultContentBlock,
@@ -2519,6 +2521,49 @@ export function createGatewayHandler(
     // other /v1/* route (401 without the gateway token).
     if (url.pathname === "/v1/route/options" && request.method === "GET") {
       return handleRouteOptions(request);
+    }
+
+    // Explicit key test (matrix #20). The key travels ONLY from the caller to
+    // this local gateway and then to the provider's own auth-check endpoint —
+    // never logged, never stored, never to the relay. Lets GUI surfaces test a
+    // key without embedding provider HTTP quirks (or fighting webview CORS).
+    if (url.pathname === "/v1/keys/validate" && request.method === "POST") {
+      let body: { providerId?: string; key?: string };
+      try {
+        body = (await request.json()) as { providerId?: string; key?: string };
+      } catch {
+        return json(request, { error: { message: "invalid JSON body" } }, 400);
+      }
+      if (!body.providerId || !isProviderId(body.providerId)) {
+        return json(
+          request,
+          { error: { message: `unknown provider: ${String(body.providerId)}` } },
+          400,
+        );
+      }
+      if (body.providerId === "ollama" || body.providerId === "lmstudio") {
+        return json(
+          request,
+          { error: { message: `${body.providerId} is a local runtime — no key to test` } },
+          400,
+        );
+      }
+      if (!body.key || !body.key.trim()) {
+        return json(request, { error: { message: "key is required" } }, 400);
+      }
+      try {
+        const valid = await createProvider(body.providerId).validateKey(
+          body.key.trim(),
+        );
+        return json(request, { object: "key_validation", provider: body.providerId, valid });
+      } catch {
+        // Provider endpoint unreachable ≠ invalid key; say so honestly.
+        return json(
+          request,
+          { error: { message: "validation request failed (provider unreachable?)" } },
+          502,
+        );
+      }
     }
 
     // Rich, OpenRouter-grade model catalog. OpenAI-compatible envelope

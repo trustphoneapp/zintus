@@ -579,6 +579,39 @@ describe("gateway handler", () => {
     store.close();
   });
 
+  test("POST /v1/keys/validate guards its contract (no network in these paths)", async () => {
+    const handler = makeHandler({}, fakeEngine({}));
+    const post = (body: unknown) =>
+      handler(
+        new Request("http://x/v1/keys/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+
+    // Unknown provider, local runtimes (no key concept), and a missing key are
+    // all 400s with honest messages; auth applies like every /v1/* route.
+    expect((await post({ providerId: "not-a-provider", key: "x" })).status).toBe(400);
+    const local = await post({ providerId: "ollama", key: "x" });
+    expect(local.status).toBe(400);
+    expect(JSON.stringify(await local.json())).toContain("local runtime");
+    expect((await post({ providerId: "groq" })).status).toBe(400);
+    const badJson = await handler(
+      new Request("http://x/v1/keys/validate", { method: "POST", body: "{nope" }),
+    );
+    expect(badJson.status).toBe(400);
+
+    const guarded = makeHandler({ token: "secret" }, fakeEngine({}));
+    const denied = await guarded(
+      new Request("http://x/v1/keys/validate", {
+        method: "POST",
+        body: JSON.stringify({ providerId: "groq", key: "k" }),
+      }),
+    );
+    expect(denied.status).toBe(401);
+  });
+
   test("GET /v1/key returns per-provider quota status (null limit when unreported) and is auth-gated", async () => {
     const engine = fakeEngine({
       async getProviderStatus() {

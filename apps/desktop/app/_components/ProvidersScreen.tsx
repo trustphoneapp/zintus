@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
 import { deleteKey, getKey, isTauri, setKey } from "@/lib/tauri";
+import { validateProviderKey } from "@/lib/gateway";
 import { useProviderStatusStore } from "@/lib/store";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -15,6 +16,38 @@ export default function ProvidersScreen() {
   const { providers, statusMessage, refresh, setStatusMessage } = useProviderStatusStore();
   const [selected, setSelected] = useState<ProviderId>("groq");
   const [keyInput, setKeyInput] = useState("");
+  const [testing, setTesting] = useState<string | null>(null);
+
+  /** Report a three-state test result: valid / invalid / could-not-test. */
+  const reportTest = (id: ProviderId, r: { ok: boolean; valid?: boolean; error?: string }) => {
+    if (!r.ok) setStatusMessage(`Could not test ${id} key: ${r.error}`);
+    else if (r.valid) setStatusMessage(`✓ ${id} key is valid`);
+    else setStatusMessage(`✗ ${id} key was rejected by the provider`);
+  };
+
+  const testDraft = async () => {
+    if (!keyInput.trim()) return;
+    setTesting("draft");
+    try {
+      reportTest(selected, await validateProviderKey(selected, keyInput.trim()));
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  const testStored = async (id: ProviderId) => {
+    setTesting(id);
+    try {
+      const key = await getKey(id);
+      if (!key) {
+        setStatusMessage(`No key stored for ${id}.`);
+        return;
+      }
+      reportTest(id, await validateProviderKey(id, key));
+    } finally {
+      setTesting(null);
+    }
+  };
 
   useEffect(() => {
     void refresh();
@@ -83,6 +116,14 @@ export default function ProvidersScreen() {
             />
             <Button type="button" onClick={() => void saveKey()}>
               Save to keyring
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={testing === "draft" || !keyInput.trim()}
+              onClick={() => void testDraft()}
+            >
+              {testing === "draft" ? "Testing…" : "Test key"}
             </Button>
           </div>
           {statusMessage && (
@@ -161,7 +202,18 @@ export default function ProvidersScreen() {
                 <span>{provider.enabled ? "Ready" : "Unavailable"}</span>
               </div>
               {provider.id !== "ollama" && provider.id !== "lmstudio" && (
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {provider.hasKey && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={testing === provider.id}
+                      onClick={() => void testStored(provider.id)}
+                    >
+                      {testing === provider.id ? "Testing…" : "Test key"}
+                    </Button>
+                  )}
                   <Button
                     type="button"
                     variant="secondary"
