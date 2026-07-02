@@ -10,6 +10,13 @@ import {
   type MemoryFact,
   type MemoryScope,
 } from "@/lib/memory-api";
+import { loadMemory, saveMemory } from "@/lib/memory";
+
+/** Legacy on-device memories are freeform strings; derive a readable, stable-ish
+ *  key so they render sensibly in the Manager (mirrors the "llm.<slug>" style). */
+function legacyKey(entry: string): string {
+  return `imported.${entry.toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 32) || "note"}`;
+}
 
 const SCOPES: { id: MemoryScope; label: string; hint: string }[] = [
   { id: "global", label: "Global", hint: "Facts that apply across every chat." },
@@ -59,6 +66,15 @@ export default function MemoryPage() {
   const [editId, setEditId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
 
+  // Legacy on-device (localStorage) memories from the old settings-based system,
+  // offered for one-click import into gateway-backed global memory.
+  const [legacyEntries, setLegacyEntries] = useState<string[]>([]);
+  const [importing, setImporting] = useState(false);
+
+  useEffect(() => {
+    setLegacyEntries(loadMemory());
+  }, []);
+
   const load = useCallback(async (s: MemoryScope) => {
     setLoading(true);
     setError(null);
@@ -91,6 +107,31 @@ export default function MemoryPage() {
       setError(e instanceof Error ? e.message : "Failed to save memory.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function onImportLegacy() {
+    if (importing || legacyEntries.length === 0) return;
+    setImporting(true);
+    setError(null);
+    try {
+      for (const entry of legacyEntries) {
+        const value = entry.trim();
+        if (!value) continue;
+        await createMemory({ scope: "global", key: legacyKey(value), value, source: "imported" });
+      }
+      saveMemory([]); // clear the old on-device store so we don't offer it again
+      setLegacyEntries([]);
+      setScope("global");
+      await load("global");
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? `Import failed: ${e.message}`
+          : "Import failed. Your on-device memories were not cleared.",
+      );
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -137,6 +178,47 @@ export default function MemoryPage() {
           private/incognito chats.
         </p>
       </div>
+
+      {/* Legacy migration bridge: import old on-device (localStorage) memories. */}
+      {legacyEntries.length > 0 ? (
+        <div
+          style={{
+            ...cardStyle,
+            borderColor: "var(--c-accent, #6366f1)",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            flexWrap: "wrap",
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 220, fontSize: 13.5 }}>
+            You have <strong>{legacyEntries.length}</strong> on-device{" "}
+            {legacyEntries.length === 1 ? "memory" : "memories"} from the old
+            settings-based store. Import{" "}
+            {legacyEntries.length === 1 ? "it" : "them"} into <strong>Global</strong>{" "}
+            memory so they sync with the rest and actually influence chats.
+          </div>
+          <button
+            onClick={() => void onImportLegacy()}
+            disabled={importing}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "none",
+              background: "var(--c-accent, #6366f1)",
+              color: "#fff",
+              fontWeight: 600,
+              fontSize: 13.5,
+              cursor: importing ? "default" : "pointer",
+              opacity: importing ? 0.6 : 1,
+            }}
+          >
+            {importing
+              ? "Importing…"
+              : `Import ${legacyEntries.length} into Global`}
+          </button>
+        </div>
+      ) : null}
 
       {/* Scope tabs */}
       <div style={{ display: "flex", gap: 6 }} role="tablist">
