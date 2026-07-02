@@ -2,6 +2,7 @@ import { useState } from "react";
 import {
   ActivityIndicator,
   Linking,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -25,6 +26,13 @@ import {
 import { validateProviderKey } from "@/lib/validate";
 import { COLORS } from "@/lib/theme";
 
+/**
+ * Onboarding (mobile) — five steps that are a real sequence, so the progress
+ * instrument is a mono step rail (01–05 + lit segments), not "Step 1 of 5"
+ * prose. Checks (gateway health, key validation) read back as console status
+ * lines — dot + verdict — matching the Agent screen's heartbeat language.
+ */
+
 const FREE_PROVIDERS = PROVIDER_IDS.filter(
   (id) => PROVIDER_METADATA[id]?.freeTier,
 );
@@ -35,7 +43,10 @@ const SAMPLE_PROMPTS = [
   "Summarize the tradeoffs of local vs cloud LLM inference.",
 ];
 
-const TOTAL_STEPS = 5;
+const STEP_NAMES = ["Welcome", "Data path", "Gateway", "First key", "Launch"];
+const TOTAL_STEPS = STEP_NAMES.length;
+
+const MONO = Platform.select({ ios: "Menlo", android: "monospace" });
 
 export default function Onboarding() {
   const router = useRouter();
@@ -87,13 +98,28 @@ export default function Onboarding() {
 
   return (
     <View style={styles.container}>
-      <View style={styles.topBar}>
-        <Text style={styles.progress}>
-          Step {step + 1} of {TOTAL_STEPS}
+      {/* Step rail — the progress instrument. */}
+      <View style={styles.railHead}>
+        <Text style={styles.railIndex}>
+          {String(step + 1).padStart(2, "0")} / {String(TOTAL_STEPS).padStart(2, "0")}
         </Text>
+        <Text style={styles.railName}>{STEP_NAMES[step]}</Text>
+        <View style={{ flex: 1 }} />
         <Pressable hitSlop={8} onPress={() => finish()}>
           <Text style={styles.skip}>Skip</Text>
         </Pressable>
+      </View>
+      <View style={styles.rail}>
+        {STEP_NAMES.map((name, i) => (
+          <View
+            key={name}
+            style={[
+              styles.railSeg,
+              i < step && styles.railSegDone,
+              i === step && styles.railSegActive,
+            ]}
+          />
+        ))}
       </View>
 
       <ScrollView contentContainerStyle={styles.body}>
@@ -126,7 +152,7 @@ export default function Onboarding() {
             {describeFlow("standard").map((item, i) => (
               <View key={i} style={styles.flowItem}>
                 <Text style={styles.flowDest}>
-                  {DESTINATIONS[item.destination].label}
+                  {DESTINATIONS[item.destination].label.toUpperCase()}
                 </Text>
                 <Text style={styles.flowData}>{item.data}</Text>
                 <Text style={styles.flowDetail}>{item.detail}</Text>
@@ -147,7 +173,7 @@ export default function Onboarding() {
               your computer&apos;s LAN IP, not localhost, from a physical phone).
             </Text>
             <TextInput
-              style={styles.input}
+              style={[styles.input, styles.inputMono]}
               value={urlInput}
               onChangeText={setUrlInput}
               autoCapitalize="none"
@@ -166,16 +192,14 @@ export default function Onboarding() {
               )}
             </Pressable>
             {health !== "unknown" && (
-              <Text
-                style={[
-                  styles.status,
-                  { color: health === "online" ? COLORS.good : COLORS.error },
-                ]}
-              >
-                {health === "online"
-                  ? "Gateway reachable ✓"
-                  : "Gateway not reachable — you can still continue and set it later."}
-              </Text>
+              <StatusLine
+                ok={health === "online"}
+                text={
+                  health === "online"
+                    ? "Gateway reachable"
+                    : "Gateway not reachable — you can still continue and set it later."
+                }
+              />
             )}
           </View>
         )}
@@ -218,7 +242,7 @@ export default function Onboarding() {
               </Pressable>
             ) : null}
             <TextInput
-              style={styles.input}
+              style={[styles.input, styles.inputMono]}
               value={keyInput}
               onChangeText={(t) => {
                 setKeyInput(t);
@@ -240,15 +264,12 @@ export default function Onboarding() {
                 <Text style={styles.secondaryBtnText}>Test &amp; save key</Text>
               )}
             </Pressable>
-            {keyResult === "ok" && (
-              <Text style={[styles.status, { color: COLORS.good }]}>
-                Key valid and saved ✓
-              </Text>
-            )}
+            {keyResult === "ok" && <StatusLine ok text="Key valid and saved" />}
             {keyResult === "bad" && (
-              <Text style={[styles.status, { color: COLORS.error }]}>
-                Key didn&apos;t validate — check it, or continue and add one later.
-              </Text>
+              <StatusLine
+                ok={false}
+                text="Key didn't validate — check it, or continue and add one later."
+              />
             )}
           </View>
         )}
@@ -304,17 +325,50 @@ export default function Onboarding() {
   );
 }
 
+/** Console-style verdict: dot + plain sentence, green for pass, red for fail. */
+function StatusLine({ ok, text }: { ok: boolean; text: string }) {
+  const color = ok ? COLORS.good : COLORS.error;
+  return (
+    <View style={styles.statusLine}>
+      <View style={[styles.statusDot, { backgroundColor: color }]} />
+      <Text style={[styles.statusText, { color }]}>{text}</Text>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.surface, paddingTop: 56 },
-  topBar: {
+  railHead: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
+    gap: 10,
     paddingHorizontal: 20,
-    paddingBottom: 8,
+    paddingBottom: 10,
   },
-  progress: { color: COLORS.muted, fontSize: 12, fontWeight: "600" },
+  railIndex: { color: COLORS.accentBright, fontFamily: MONO, fontSize: 12 },
+  railName: {
+    color: COLORS.muted,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+  },
   skip: { color: COLORS.accentBright, fontSize: 14, fontWeight: "700" },
+  rail: {
+    flexDirection: "row",
+    gap: 6,
+    paddingHorizontal: 20,
+    paddingBottom: 14,
+  },
+  railSeg: {
+    flex: 1,
+    height: 3,
+    borderRadius: 2,
+    backgroundColor: COLORS.border,
+  },
+  railSegDone: { backgroundColor: COLORS.muted },
+  railSegActive: { backgroundColor: COLORS.accentBright },
+
   body: { paddingHorizontal: 20, paddingBottom: 24 },
   h1: { color: COLORS.ink, fontSize: 26, fontWeight: "800", marginBottom: 12 },
   lead: { color: COLORS.muted, fontSize: 15, lineHeight: 22, marginBottom: 16 },
@@ -332,7 +386,12 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
     paddingVertical: 10,
   },
-  flowDest: { color: COLORS.accentBright, fontSize: 12, fontWeight: "800" },
+  flowDest: {
+    color: COLORS.accentBright,
+    fontSize: 11,
+    fontFamily: MONO,
+    letterSpacing: 0.5,
+  },
   flowData: { color: COLORS.ink, fontSize: 14, fontWeight: "600", marginTop: 2 },
   flowDetail: { color: COLORS.muted, fontSize: 13, lineHeight: 18, marginTop: 2 },
   input: {
@@ -346,6 +405,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     marginBottom: 12,
   },
+  inputMono: { fontFamily: MONO, fontSize: 13 },
   secondaryBtn: {
     borderWidth: 1,
     borderColor: COLORS.accent,
@@ -354,7 +414,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   secondaryBtnText: { color: COLORS.accentBright, fontWeight: "700", fontSize: 15 },
-  status: { fontSize: 13, marginTop: 10, lineHeight: 18 },
+  statusLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 12,
+  },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  statusText: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: "600" },
   providerRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 12 },
   providerChip: {
     paddingHorizontal: 14,

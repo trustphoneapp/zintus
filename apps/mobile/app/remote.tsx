@@ -3,11 +3,11 @@ import {
   View,
   Text,
   FlatList,
-  TouchableOpacity,
+  Platform,
+  Pressable,
   StyleSheet,
   Linking,
   ScrollView,
-  TextInput,
   Alert,
   ActivityIndicator,
 } from "react-native";
@@ -28,7 +28,17 @@ import {
 
 WebBrowser.maybeCompleteAuthSession();
 
+/**
+ * Remote (mobile) — your gateway fleet from your phone. This is the most
+ * operator-shaped screen in the app, so it borrows the Agent console language
+ * wholesale: the session detail opens with a status-strip heartbeat
+ * (Online/Offline), controls are quiet bordered buttons, and machine facts
+ * (last-seen, quota %, savings) are set in mono.
+ */
+
 type Screen = "sessions" | "detail";
+
+const MONO = Platform.select({ ios: "Menlo", android: "monospace" });
 
 export default function RemoteScreen() {
   const [authed, setAuthed] = useState(false);
@@ -175,13 +185,18 @@ export default function RemoteScreen() {
   if (!authed) {
     return (
       <View style={styles.center}>
-        <Text style={styles.heading}>Zintus Cloud</Text>
+        <Text style={styles.eyebrow}>ZINTUS CLOUD</Text>
+        <Text style={styles.heading}>Your gateway, from anywhere</Text>
         <Text style={styles.sub}>
-          Sign in to manage your home gateway from anywhere — no inbound ports, keys stay home.
+          Sign in to manage your home gateway from anywhere — no inbound ports,
+          keys stay home.
         </Text>
-        <TouchableOpacity style={styles.primaryBtn} onPress={handleSignIn}>
+        <Pressable
+          style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed]}
+          onPress={handleSignIn}
+        >
           <Text style={styles.primaryBtnText}>Sign in to Zintus Cloud</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
@@ -191,36 +206,43 @@ export default function RemoteScreen() {
     const providers = sessionStatus?.providers ?? [];
     const strategy = sessionStatus?.strategy ?? "fastest";
     const STRATEGIES = ["fastest", "economy", "capability"];
+    const stateColor = statusOffline ? COLORS.error : COLORS.good;
 
     return (
       <ScrollView style={styles.container} contentContainerStyle={styles.contentPad}>
-        <TouchableOpacity onPress={() => { setScreen("sessions"); setSelectedId(null); }}>
-          <Text style={styles.back}>← Sessions</Text>
-        </TouchableOpacity>
+        <Pressable
+          hitSlop={8}
+          onPress={() => { setScreen("sessions"); setSelectedId(null); }}
+        >
+          <Text style={styles.back}>‹ Gateways</Text>
+        </Pressable>
 
         <Text style={styles.heading}>{selected?.name ?? "Gateway"}</Text>
 
+        {/* Status strip — same heartbeat as the Agent console. */}
+        <View style={styles.strip}>
+          <View style={[styles.stripDot, { backgroundColor: stateColor }]} />
+          <Text style={[styles.stripState, { color: stateColor }]}>
+            {statusOffline ? "Offline" : "Online"}
+          </Text>
+        </View>
         {statusOffline && (
-          <View style={styles.offlineBanner}>
-            <Text style={styles.offlineBannerText}>
-              Gateway offline — open zintus.app/dashboard for help
-            </Text>
-          </View>
-        )}
-
-        {!statusOffline && (
-          <View style={styles.onlineBadge}>
-            <Text style={styles.onlineBadgeText}>● Online</Text>
-          </View>
+          <Text style={styles.offlineHelp}>
+            Gateway offline — open zintus.app/dashboard for help
+          </Text>
         )}
 
         {/* Strategy */}
         <Text style={styles.sectionTitle}>Routing strategy</Text>
         <View style={styles.strategyRow}>
           {STRATEGIES.map((s) => (
-            <TouchableOpacity
+            <Pressable
               key={s}
-              style={[styles.strategyChip, strategy === s && styles.strategyChipActive]}
+              style={({ pressed }) => [
+                styles.strategyChip,
+                strategy === s && styles.strategyChipActive,
+                pressed && styles.pressed,
+              ]}
               onPress={() => control("set_strategy", s)}
               disabled={controlling || statusOffline}
             >
@@ -229,53 +251,66 @@ export default function RemoteScreen() {
               >
                 {s}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
           ))}
         </View>
 
         {/* Controls */}
         <View style={styles.controlRow}>
-          <TouchableOpacity
-            style={[styles.controlBtn, styles.controlBtnSecondary]}
+          <Pressable
+            style={({ pressed }) => [
+              styles.controlBtn,
+              sessionStatus?.paused ? styles.controlBtnResume : styles.controlBtnPause,
+              pressed && styles.pressed,
+            ]}
             onPress={() => control(sessionStatus?.paused ? "resume" : "pause")}
             disabled={controlling || statusOffline}
           >
-            <Text style={styles.controlBtnText}>
+            <Text
+              style={[
+                styles.controlBtnText,
+                sessionStatus?.paused ? { color: COLORS.good } : { color: COLORS.error },
+              ]}
+            >
               {sessionStatus?.paused ? "Resume" : "Pause"}
             </Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.controlBtn}
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [styles.controlBtn, pressed && styles.pressed]}
             onPress={() => control("reload_keys")}
             disabled={controlling || statusOffline}
           >
             <Text style={styles.controlBtnText}>Reload keys</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {/* Providers */}
         {providers.length > 0 && (
           <>
             <Text style={styles.sectionTitle}>Providers</Text>
-            {providers.map((p) => {
-              const pct = Math.round((p.remainingRatio ?? 0) * 100);
-              return (
-                <View key={p.id} style={styles.providerRow}>
-                  <Text style={styles.providerName}>{p.name}</Text>
-                  <View style={styles.quotaTrack}>
-                    <View style={[styles.quotaFill, { width: `${pct}%` as `${number}%` }]} />
+            <View style={styles.providerCard}>
+              {providers.map((p) => {
+                const pct = Math.round((p.remainingRatio ?? 0) * 100);
+                return (
+                  <View key={p.id} style={styles.providerRow}>
+                    <Text style={styles.providerName} numberOfLines={1}>
+                      {p.name}
+                    </Text>
+                    <View style={styles.quotaTrack}>
+                      <View style={[styles.quotaFill, { width: `${pct}%` as `${number}%` }]} />
+                    </View>
+                    <Text style={styles.providerPct}>{pct}%</Text>
                   </View>
-                  <Text style={styles.providerPct}>{pct}%</Text>
-                </View>
-              );
-            })}
+                );
+              })}
+            </View>
           </>
         )}
 
         {/* Savings */}
         {sessionStatus?.savings?.estimatedUsdSaved != null && (
           <View style={styles.savingsCard}>
-            <Text style={styles.savingsLabel}>Estimated saved</Text>
+            <Text style={styles.savingsLabel}>ESTIMATED SAVED</Text>
             <Text style={styles.savingsValue}>
               ${sessionStatus.savings.estimatedUsdSaved.toFixed(2)}
             </Text>
@@ -289,10 +324,12 @@ export default function RemoteScreen() {
   return (
     <View style={styles.container}>
       <View style={styles.listHeader}>
-        <Text style={styles.heading}>Gateways</Text>
-        <TouchableOpacity onPress={handleSignOut}>
+        <Text style={styles.fleetLine}>
+          {sessions.length} {sessions.length === 1 ? "gateway" : "gateways"}
+        </Text>
+        <Pressable hitSlop={8} onPress={handleSignOut}>
           <Text style={styles.signOutBtn}>Sign out</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
 
       {sessions.length === 0 ? (
@@ -308,30 +345,32 @@ export default function RemoteScreen() {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.listPad}
           renderItem={({ item }) => (
-            <TouchableOpacity
-              style={styles.sessionCard}
+            <Pressable
+              style={({ pressed }) => [styles.sessionCard, pressed && styles.pressed]}
               onPress={() => openSession(item.id)}
             >
               <View style={styles.sessionCardLeft}>
                 <View
                   style={[
                     styles.dot,
-                    item.online ? styles.dotOnline : styles.dotOffline,
+                    { backgroundColor: item.online ? COLORS.good : COLORS.muted },
                   ]}
                 />
-                <View>
-                  <Text style={styles.sessionName}>{item.name}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.sessionName} numberOfLines={1}>
+                    {item.name}
+                  </Text>
                   <Text style={styles.sessionMeta}>
                     {item.online
-                      ? "Online"
+                      ? "online"
                       : item.last_seen
-                        ? `Last seen ${new Date(item.last_seen).toLocaleDateString()}`
-                        : "Never seen"}
+                        ? `last seen ${new Date(item.last_seen).toLocaleDateString()}`
+                        : "never seen"}
                   </Text>
                 </View>
               </View>
               <Text style={styles.chevron}>›</Text>
-            </TouchableOpacity>
+            </Pressable>
           )}
         />
       )}
@@ -342,45 +381,166 @@ export default function RemoteScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.surface },
   contentPad: { padding: 20, paddingBottom: 40 },
-  center: { flex: 1, backgroundColor: COLORS.surface, alignItems: "center", justifyContent: "center", padding: 32 },
-  listPad: { padding: 16 },
-  listHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", padding: 16, paddingBottom: 4 },
+  center: {
+    flex: 1,
+    backgroundColor: COLORS.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 32,
+  },
+  listPad: { padding: 16, paddingTop: 4 },
+  listHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 18,
+    paddingTop: 14,
+    paddingBottom: 6,
+  },
+  eyebrow: {
+    color: COLORS.muted,
+    fontFamily: MONO,
+    fontSize: 11,
+    letterSpacing: 1.5,
+    marginBottom: 10,
+  },
   heading: { fontSize: 22, fontWeight: "700", color: COLORS.ink, marginBottom: 8 },
-  sub: { fontSize: 14, color: COLORS.muted, textAlign: "center", marginBottom: 24, lineHeight: 20 },
+  sub: {
+    fontSize: 14,
+    color: COLORS.muted,
+    textAlign: "center",
+    marginBottom: 24,
+    lineHeight: 20,
+  },
   hint: { fontSize: 13, color: COLORS.muted, textAlign: "center" },
-  code: { fontFamily: "monospace", color: COLORS.ink },
-  back: { fontSize: 14, color: COLORS.muted, marginBottom: 16 },
-  signOutBtn: { fontSize: 14, color: COLORS.muted },
-  primaryBtn: { backgroundColor: COLORS.accentBright, borderRadius: 10, paddingVertical: 14, paddingHorizontal: 32, marginTop: 8 },
-  primaryBtnText: { color: COLORS.surface, fontWeight: "700", fontSize: 15, textAlign: "center" },
-  sessionCard: { backgroundColor: COLORS.surface, borderRadius: 12, padding: 16, marginBottom: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  sessionCardLeft: { flexDirection: "row", alignItems: "center", gap: 12 },
+  code: { fontFamily: MONO, color: COLORS.ink },
+  back: { fontSize: 15, color: COLORS.accentBright, fontWeight: "600", marginBottom: 16 },
+  fleetLine: { color: COLORS.muted, fontFamily: MONO, fontSize: 11 },
+  signOutBtn: { fontSize: 13, color: COLORS.muted, fontWeight: "600" },
+  primaryBtn: {
+    backgroundColor: COLORS.accent,
+    borderRadius: 10,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    marginTop: 8,
+  },
+  primaryBtnText: {
+    color: COLORS.onAccent,
+    fontWeight: "700",
+    fontSize: 15,
+    textAlign: "center",
+  },
+  pressed: { opacity: 0.7 },
+
+  sessionCard: {
+    backgroundColor: COLORS.panel,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  sessionCardLeft: { flex: 1, flexDirection: "row", alignItems: "center", gap: 12 },
   sessionName: { fontSize: 15, fontWeight: "600", color: COLORS.ink },
-  sessionMeta: { fontSize: 12, color: COLORS.muted, marginTop: 2 },
+  sessionMeta: { fontSize: 11, color: COLORS.muted, marginTop: 2, fontFamily: MONO },
   dot: { width: 10, height: 10, borderRadius: 5 },
-  dotOnline: { backgroundColor: "#22c55e" },
-  dotOffline: { backgroundColor: COLORS.muted },
   chevron: { fontSize: 20, color: COLORS.muted },
-  offlineBanner: { backgroundColor: COLORS.surface, borderRadius: 10, padding: 14, marginBottom: 16, borderLeftWidth: 3, borderLeftColor: "#f04438" },
-  offlineBannerText: { color: "#f04438", fontSize: 13 },
-  onlineBadge: { alignSelf: "flex-start", backgroundColor: "rgba(34,197,94,0.12)", borderRadius: 6, paddingHorizontal: 10, paddingVertical: 4, marginBottom: 16 },
-  onlineBadgeText: { color: "#22c55e", fontSize: 12, fontWeight: "600" },
-  sectionTitle: { fontSize: 13, fontWeight: "600", color: COLORS.muted, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 20, marginBottom: 10 },
+
+  strip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    backgroundColor: COLORS.panel,
+    marginBottom: 8,
+  },
+  stripDot: { width: 8, height: 8, borderRadius: 4 },
+  stripState: { fontSize: 13, fontWeight: "700" },
+  offlineHelp: { color: COLORS.error, fontSize: 12, lineHeight: 17, marginBottom: 4 },
+
+  sectionTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: COLORS.muted,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    marginTop: 20,
+    marginBottom: 10,
+  },
   strategyRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
-  strategyChip: { paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8, backgroundColor: COLORS.surface, borderWidth: 1, borderColor: COLORS.border },
-  strategyChipActive: { backgroundColor: COLORS.accentBright, borderColor: COLORS.accentBright },
-  strategyChipText: { fontSize: 13, color: COLORS.muted },
-  strategyChipTextActive: { color: COLORS.surface, fontWeight: "600" },
+  strategyChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 999,
+    backgroundColor: COLORS.panel,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  strategyChipActive: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
+  strategyChipText: { fontSize: 13, color: COLORS.muted, fontWeight: "600" },
+  strategyChipTextActive: { color: COLORS.onAccent, fontWeight: "800" },
   controlRow: { flexDirection: "row", gap: 10, marginTop: 12 },
-  controlBtn: { flex: 1, backgroundColor: COLORS.surface, borderRadius: 8, paddingVertical: 10, alignItems: "center", borderWidth: 1, borderColor: COLORS.border },
-  controlBtnSecondary: { borderColor: "#f04438" },
-  controlBtnText: { color: COLORS.ink, fontSize: 14, fontWeight: "500" },
-  providerRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 8 },
-  providerName: { fontSize: 13, color: COLORS.ink, width: 80 },
-  quotaTrack: { flex: 1, height: 6, backgroundColor: COLORS.border, borderRadius: 3 },
-  quotaFill: { height: 6, backgroundColor: COLORS.accentBright, borderRadius: 3 },
-  providerPct: { fontSize: 12, color: COLORS.muted, width: 36, textAlign: "right" },
-  savingsCard: { marginTop: 20, backgroundColor: COLORS.surface, borderRadius: 12, padding: 16 },
-  savingsLabel: { fontSize: 12, color: COLORS.muted, marginBottom: 4 },
-  savingsValue: { fontSize: 24, fontWeight: "700", color: COLORS.ink },
+  controlBtn: {
+    flex: 1,
+    backgroundColor: COLORS.panel,
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  controlBtnPause: { borderColor: COLORS.error },
+  controlBtnResume: { borderColor: COLORS.good },
+  controlBtnText: { color: COLORS.ink, fontSize: 14, fontWeight: "600" },
+
+  providerCard: {
+    backgroundColor: COLORS.panel,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 12,
+    gap: 10,
+  },
+  providerRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  providerName: { fontSize: 13, color: COLORS.ink, width: 84 },
+  quotaTrack: {
+    flex: 1,
+    height: 6,
+    backgroundColor: COLORS.border,
+    borderRadius: 3,
+    overflow: "hidden",
+  },
+  quotaFill: { height: 6, backgroundColor: COLORS.accent, borderRadius: 3 },
+  providerPct: {
+    fontSize: 11,
+    color: COLORS.muted,
+    width: 40,
+    textAlign: "right",
+    fontFamily: MONO,
+  },
+
+  savingsCard: {
+    marginTop: 20,
+    backgroundColor: COLORS.panel,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 12,
+    padding: 16,
+  },
+  savingsLabel: {
+    fontSize: 10,
+    color: COLORS.muted,
+    fontFamily: MONO,
+    letterSpacing: 1,
+    marginBottom: 4,
+  },
+  savingsValue: { fontSize: 24, fontWeight: "700", color: COLORS.ink, fontFamily: MONO },
 });

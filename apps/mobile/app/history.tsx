@@ -1,9 +1,10 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Alert,
-  FlatList,
   Modal,
+  Platform,
   Pressable,
+  SectionList,
   StyleSheet,
   Text,
   TextInput,
@@ -20,6 +21,18 @@ import {
 } from "@/lib/history";
 import { COLORS } from "@/lib/theme";
 
+/**
+ * History (mobile) — the routing ledger. Every thread is a record the router
+ * wrote: human title in the UI face, machine annotation (age · provider ·
+ * LOCAL) in mono underneath — the same human↔machine split as the Agent
+ * console. Records cluster by recency because that is how you actually hunt
+ * for an old chat. Storage is on-device sqlite, and the header says so.
+ */
+
+const MONO = Platform.select({ ios: "Menlo", android: "monospace" });
+
+const DAY = 86_400_000;
+
 function relativeTime(ts: number): string {
   const diff = Date.now() - ts;
   const m = Math.floor(diff / 60000);
@@ -29,6 +42,16 @@ function relativeTime(ts: number): string {
   if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
 }
+
+function bucketFor(ts: number, now: number): string {
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  if (ts >= startOfToday) return "Today";
+  if (ts >= startOfToday - DAY) return "Yesterday";
+  if (ts >= startOfToday - 7 * DAY) return "Previous 7 days";
+  return "Earlier";
+}
+
+const BUCKET_ORDER = ["Today", "Yesterday", "Previous 7 days", "Earlier"];
 
 export default function HistoryScreen() {
   const router = useRouter();
@@ -73,6 +96,14 @@ export default function HistoryScreen() {
     ]);
   }
 
+  function openActions(thread: Thread) {
+    Alert.alert(thread.title, undefined, [
+      { text: "Rename", onPress: () => openRename(thread) },
+      { text: "Delete", style: "destructive", onPress: () => confirmDelete(thread) },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }
+
   function openRename(thread: Thread) {
     setRenaming(thread);
     setRenameValue(thread.title);
@@ -86,6 +117,25 @@ export default function HistoryScreen() {
     }
   }
 
+  // Searching yields a flat result set; browsing clusters by recency.
+  const sections = useMemo(() => {
+    if (search.trim()) {
+      return threads.length > 0 ? [{ title: "Matches", data: threads }] : [];
+    }
+    const now = Date.now();
+    const byBucket = new Map<string, Thread[]>();
+    for (const t of threads) {
+      const bucket = bucketFor(t.updatedAt, now);
+      const list = byBucket.get(bucket);
+      if (list) list.push(t);
+      else byBucket.set(bucket, [t]);
+    }
+    return BUCKET_ORDER.filter((b) => byBucket.has(b)).map((b) => ({
+      title: b,
+      data: byBucket.get(b)!,
+    }));
+  }, [threads, search]);
+
   return (
     <View style={styles.container}>
       <TextInput
@@ -96,15 +146,25 @@ export default function HistoryScreen() {
         placeholderTextColor={COLORS.muted}
         autoCapitalize="none"
       />
-      <FlatList
-        data={threads}
+      <Text style={styles.ledgerLine}>
+        {threads.length} {threads.length === 1 ? "chat" : "chats"} · stored on this
+        phone
+      </Text>
+      <SectionList
+        sections={sections}
         keyExtractor={(t) => t.id}
-        contentContainerStyle={threads.length === 0 ? styles.emptyWrap : styles.list}
+        stickySectionHeadersEnabled={false}
+        contentContainerStyle={
+          sections.length === 0 ? styles.emptyWrap : styles.list
+        }
         ListEmptyComponent={
           <Text style={styles.empty}>
             {search ? "No chats match." : "No saved chats yet. Start one in Chat."}
           </Text>
         }
+        renderSectionHeader={({ section }) => (
+          <Text style={styles.sectionHeader}>{section.title}</Text>
+        )}
         renderItem={({ item }) => (
           <Pressable
             onPress={() => continueThread(item)}
@@ -114,27 +174,22 @@ export default function HistoryScreen() {
               <Text style={styles.rowTitle} numberOfLines={1}>
                 {item.title}
               </Text>
-              <Text style={styles.rowMeta}>
-                {relativeTime(item.updatedAt)}
-                {item.defaultProvider ? ` · ${item.defaultProvider}` : ""}
-                {item.privacyPosture === "local-only" ? " · 🔒 local" : ""}
-              </Text>
+              <View style={styles.rowMetaLine}>
+                <Text style={styles.rowMeta}>
+                  {relativeTime(item.updatedAt)}
+                  {item.defaultProvider ? ` · ${item.defaultProvider}` : ""}
+                </Text>
+                {item.privacyPosture === "local-only" ? (
+                  <Text style={styles.localBadge}>LOCAL</Text>
+                ) : null}
+              </View>
             </View>
             <Pressable
-              hitSlop={8}
-              onPress={() => openRename(item)}
+              hitSlop={10}
+              onPress={() => openActions(item)}
               style={({ pressed }) => [styles.rowAction, pressed && styles.pressed]}
             >
-              <Text style={styles.rowActionText}>Rename</Text>
-            </Pressable>
-            <Pressable
-              hitSlop={8}
-              onPress={() => confirmDelete(item)}
-              style={({ pressed }) => [styles.rowAction, pressed && styles.pressed]}
-            >
-              <Text style={[styles.rowActionText, { color: COLORS.error }]}>
-                Delete
-              </Text>
+              <Text style={styles.rowActionText}>⋯</Text>
             </Pressable>
           </Pressable>
         )}
@@ -171,7 +226,9 @@ export default function HistoryScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.surface },
   search: {
-    margin: 16,
+    marginHorizontal: 16,
+    marginTop: 16,
+    marginBottom: 6,
     backgroundColor: COLORS.panel,
     color: COLORS.ink,
     borderRadius: 10,
@@ -180,9 +237,25 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
+  ledgerLine: {
+    color: COLORS.muted,
+    fontFamily: MONO,
+    fontSize: 11,
+    marginHorizontal: 18,
+    marginBottom: 8,
+  },
   list: { paddingHorizontal: 16, paddingBottom: 24 },
   emptyWrap: { flexGrow: 1, alignItems: "center", justifyContent: "center" },
   empty: { color: COLORS.muted, fontSize: 14, textAlign: "center", padding: 24 },
+  sectionHeader: {
+    color: COLORS.muted,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    marginTop: 16,
+    marginBottom: 4,
+  },
   row: {
     flexDirection: "row",
     alignItems: "center",
@@ -193,9 +266,22 @@ const styles = StyleSheet.create({
   },
   rowBody: { flex: 1 },
   rowTitle: { color: COLORS.ink, fontSize: 15, fontWeight: "600" },
-  rowMeta: { color: COLORS.muted, fontSize: 12, marginTop: 2 },
-  rowAction: { paddingHorizontal: 4 },
-  rowActionText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "700" },
+  rowMetaLine: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 3 },
+  rowMeta: { color: COLORS.muted, fontSize: 11, fontFamily: MONO },
+  localBadge: {
+    color: COLORS.good,
+    borderColor: COLORS.good,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 4,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    fontSize: 9,
+    fontFamily: MONO,
+    letterSpacing: 0.5,
+    overflow: "hidden",
+  },
+  rowAction: { paddingHorizontal: 8, paddingVertical: 4 },
+  rowActionText: { color: COLORS.muted, fontSize: 18, fontWeight: "700" },
   pressed: { opacity: 0.6 },
   modalBackdrop: {
     flex: 1,
