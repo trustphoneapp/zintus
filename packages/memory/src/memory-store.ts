@@ -76,16 +76,19 @@ export class MemoryStore {
     threadId: string,
     query: string,
     limit: number,
+    projectId?: string,
   ): Promise<MemoryFact[]> {
     const normalizedQuery = query.trim().toLowerCase();
-    // Both this thread's facts AND the user's GLOBAL facts inform a turn: global
-    // memory is user-wide (applies to every conversation), thread facts are local
-    // to this one. They are disjoint by construction (a fact is one scope), so no
-    // dedupe is needed. (Project-scoped facts need a project context and are
-    // compiled separately — not yet wired.)
+    // Thread facts (local to this conversation), the user's GLOBAL facts (user-
+    // wide), and — when the turn belongs to a project — that PROJECT's facts all
+    // inform the turn. All three scopes are disjoint by construction, so no dedupe
+    // is needed.
     const rows = [
       ...this.listFacts(threadId),
       ...this.listFactsByScope({ scope: "global" }),
+      ...(projectId
+        ? this.listFactsByScope({ scope: "project", projectId })
+        : []),
     ];
     const scored = rows.map((row) => {
       const haystack = `${row.key} ${row.value}`.toLowerCase();

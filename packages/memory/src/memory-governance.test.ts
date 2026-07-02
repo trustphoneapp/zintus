@@ -113,6 +113,24 @@ describe("MemoryStore governance", () => {
     expect(forT1.some((f) => f.content.includes("Alice"))).toBe(true);
   });
 
+  test("project facts are compiled only when a matching projectId is supplied", async () => {
+    const s = store();
+    s.upsertFact({ scope: "project", projectId: "p1", key: "stack", value: "bun" });
+    s.upsertFact({ scope: "project", projectId: "p2", key: "stack", value: "deno" });
+    s.upsertFact({ scope: "global", key: "name", value: "Alice" });
+
+    // Without a projectId: only thread + global (no project facts).
+    const noProject = await s.getTopFacts("t", "stack", 6);
+    expect(noProject.some((f) => f.content.includes("bun"))).toBe(false);
+    expect(noProject.some((f) => f.content.includes("Alice"))).toBe(true);
+
+    // With p1: p1's project facts + global, but NOT p2's.
+    const withP1 = await s.getTopFacts("t", "stack", 6, "p1");
+    expect(withP1.some((f) => f.content.includes("bun"))).toBe(true);
+    expect(withP1.some((f) => f.content.includes("deno"))).toBe(false);
+    expect(withP1.some((f) => f.content.includes("Alice"))).toBe(true);
+  });
+
   test("a pinned global fact floats to the top of getTopFacts", async () => {
     const s = store();
     // Many unpinned facts + one pinned — the pinned one must rank first even with

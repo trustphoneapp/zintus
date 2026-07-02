@@ -916,6 +916,8 @@ export async function streamGatewayChat(params: {
   strategy?: RoutingStrategy;
   mode?: ContextMode;
   threadId?: string;
+  /** Active project id — compiles the project's memory facts into context. */
+  projectId?: string;
   webSearch?: boolean;
   searchDepth?: "basic" | "standard" | "deep";
   blockTraining?: boolean;
@@ -970,6 +972,7 @@ export async function streamGatewayChat(params: {
       strategy: params.strategy,
       mode: params.mode,
       thread_id: params.threadId,
+      project_id: params.projectId,
       artifact_mode: params.artifactMode,
       // Matches the gateway's body.search contract (@zintus/search strategies).
       search: params.webSearch

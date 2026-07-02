@@ -320,15 +320,16 @@ function buildMemoryAdapter(memory: MemoryStore) {
       const row = memory.getThreadState(threadId);
       return row ? (row.state as unknown as MemoryThreadState) : null;
     },
-    getTopFacts: async (threadId: string, _query: string, limit: number) =>
-      memory
-        .listFacts(threadId)
-        .slice(0, limit)
-        .map((fact) => ({
-          id: fact.id,
-          content: `${fact.key}: ${fact.value}`,
-          source: fact.source,
-        })),
+    // Delegate to memory.getTopFacts so the compiler gets the FULL selection —
+    // thread + global (+ project) facts, query-scored with a pinned boost — not
+    // just this thread's raw facts. (Previously this used listFacts directly,
+    // which silently excluded global/project memory from compiled context.)
+    getTopFacts: async (
+      threadId: string,
+      query: string,
+      limit: number,
+      projectId?: string,
+    ) => memory.getTopFacts(threadId, query, limit, projectId),
     searchChunks: async (threadId: string, query: string, topK?: number) =>
       (await memory.searchChunks(threadId, query, topK)).map((chunk) => ({
         id: String(chunk.id),
@@ -639,6 +640,7 @@ export function createEngine(config: EngineConfig = {}): Engine {
           codeSearch,
           diffText: request.diffText,
           artifactMode: request.artifactMode,
+          projectId: request.projectId,
         });
         effectiveMessages = compiled.messages;
         compileTokenEstimate = compiled.tokenEstimate;
@@ -669,11 +671,20 @@ export function createEngine(config: EngineConfig = {}): Engine {
         // background system message so global memory influences EVERY turn — the
         // single-source-of-truth replacement for the client-side memory shim.
         // Reading memory is allowed in incognito (the rule forbids WRITES).
-        const globalFacts = memory.listFactsByScope({ scope: "global" });
-        const memoryMsg = globalMemorySystemMessage(globalFacts);
+        // Include the active PROJECT's facts too when the turn belongs to one.
+        const backgroundFacts = [
+          ...memory.listFactsByScope({ scope: "global" }),
+          ...(request.projectId
+            ? memory.listFactsByScope({
+                scope: "project",
+                projectId: request.projectId,
+              })
+            : []),
+        ];
+        const memoryMsg = globalMemorySystemMessage(backgroundFacts);
         if (memoryMsg) {
           effectiveMessages = [memoryMsg, ...effectiveMessages];
-          memoryUsedThisTurn = globalFacts
+          memoryUsedThisTurn = backgroundFacts
             .slice(0, GLOBAL_MEMORY_LIMIT)
             .map((f) => ({ id: f.id, content: `${f.key}: ${f.value}` }));
         }

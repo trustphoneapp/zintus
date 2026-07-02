@@ -52,6 +52,9 @@ export interface CompileRequest {
   memory: MemoryStore;
   episodicMessages: ThreadMessage[];
   lastModel?: string;
+  /** When the turn belongs to a project, its facts are compiled alongside thread
+   *  + global facts. Absent ⇒ no project scope. */
+  projectId?: string;
   /**
    * Optional codebase retrieval (injected by the engine; keeps the compiler
    * decoupled from the indexer package). Returns the most relevant code chunks
