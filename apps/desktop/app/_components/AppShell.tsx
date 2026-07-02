@@ -2,7 +2,13 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
 import { useChatStore } from "@/lib/store";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
@@ -50,6 +56,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Which thread row is being renamed inline, and the draft title.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // History search (#16): title filter over the sidebar list; ⌘⇧F focuses it.
+  const [threadQuery, setThreadQuery] = useState("");
+  const threadSearchRef = useRef<HTMLInputElement>(null);
 
   // Loaded after mount (localStorage is client-only) to avoid an SSR flash.
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -59,6 +68,11 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const recentThreads = [...threads]
     .sort((a, b) => b.updatedAt - a.updatedAt)
+    .filter(
+      (t) =>
+        !threadQuery.trim() ||
+        t.title.toLowerCase().includes(threadQuery.trim().toLowerCase()),
+    )
     .slice(0, 40);
 
   function commitRename(id: string) {
@@ -103,9 +117,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         e.preventDefault();
         router.push("/settings");
       } else if ((e.key === "f" || e.key === "F") && e.shiftKey) {
-        // Search/history → the recent-threads sidebar lives on chat for now.
+        // Search history: jump to chat (where the sidebar lives) and focus
+        // the thread filter. rAF lets the route/render land first.
         e.preventDefault();
         router.push("/chat");
+        requestAnimationFrame(() => threadSearchRef.current?.focus());
       }
     }
     window.addEventListener("keydown", onKey);
@@ -325,9 +341,28 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 History
               </div>
+              <input
+                ref={threadSearchRef}
+                value={threadQuery}
+                onChange={(e) => setThreadQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") setThreadQuery("");
+                }}
+                placeholder="Search chats (⌘⇧F)"
+                aria-label="Search chats"
+                style={{
+                  margin: "2px 2px 4px",
+                  padding: "5px 8px",
+                  border: "1px solid var(--color-border)",
+                  borderRadius: 6,
+                  background: "var(--color-bg)",
+                  color: "var(--color-text)",
+                  fontSize: 12,
+                }}
+              />
               {recentThreads.length === 0 ? (
                 <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--color-text-sub)" }}>
-                  No conversations yet.
+                  {threadQuery.trim() ? "No chats match." : "No conversations yet."}
                 </div>
               ) : null}
               {recentThreads.map((thread) => {
