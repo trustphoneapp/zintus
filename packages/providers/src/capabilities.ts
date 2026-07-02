@@ -1,4 +1,8 @@
 import type { ProviderId } from "@zintus/types";
+import {
+  extendedCapabilities,
+  extendedVisionModels,
+} from "./manifest.js";
 
 /**
  * Data-driven model-capability registry — the single source of truth for what
@@ -61,7 +65,10 @@ export interface ModelCapabilities {
 // no native structured output are "none". This keeps `json` consistent as
 // `structuredOutput !== "none"`. Re-verify before promoting a provider to
 // "json_schema" — a wrong claim breaks the GUARANTEED-conformance contract.
+// Providers added after 2026-07-02 declare capabilities in manifest.ts (one
+// entry per provider); their slice is spread in below the original 12.
 export const MODEL_CAPABILITIES: Record<ProviderId, ModelCapabilities> = {
+  ...(extendedCapabilities() as Record<ProviderId, ModelCapabilities>),
   gemini:      { model: "gemini-2.5-flash",                                   contextWindow: 1_000_000, vision: true,  tools: true,  json: true,  structuredOutput: "json_schema", capabilityTier: 1 },
   openrouter:  { model: "meta-llama/llama-3.3-70b-instruct:free",            contextWindow: 128_000,   vision: false, tools: true,  json: true,  structuredOutput: "json_object", capabilityTier: 2 },
   fireworks:   { model: "accounts/fireworks/models/llama-v3p1-8b-instruct",  contextWindow: 128_000,   vision: false, tools: true,  json: true,  structuredOutput: "json_object", capabilityTier: 3 },
@@ -103,6 +110,8 @@ export function providerCapabilityTier(providerId: ProviderId): number {
 // provider DEFAULT (`meta-llama/llama-3.3-70b-instruct:free`) stays NON-vision —
 // only the specific models below are vision, never the whole provider.
 const VISION_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
+  // Manifest providers' verified vision routes (e.g. openai gpt-4o family).
+  ...extendedVisionModels(),
   gemini: new Set([
     "gemini-2.5-flash",
     "gemini-2.5-pro",

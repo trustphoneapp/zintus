@@ -1,4 +1,5 @@
 import type { ProviderId } from "@zintus/types";
+import { extendedMetadata } from "./manifest.js";
 
 /**
  * UI-facing metadata for each BYOK provider. This describes *how a user obtains
@@ -6,8 +7,9 @@ import type { ProviderId } from "@zintus/types";
  * runtime {@link import("@zintus/types").Provider} (streaming/validation) impl.
  *
  * Keyed by {@link ProviderId} so it can never drift from the real provider set
- * (`packages/types/src/provider-id.ts`). There is intentionally NO `anthropic`
- * entry — Zintus does not ship an Anthropic provider.
+ * (`packages/types/src/provider-id.ts`). Providers added after 2026-07-02
+ * (including the paid-BYOK anchors `openai`/`anthropic`/`perplexity` from the
+ * P1 plan) declare their metadata in manifest.ts and are spread in below.
  */
 export interface ProviderMetadata {
   /** Human-facing display name (matches the runtime provider's `name`). */
@@ -45,6 +47,7 @@ export interface ProviderMetadata {
  * cover {@link ProviderId} (TypeScript enforces this via the Record type).
  */
 export const PROVIDER_METADATA: Record<ProviderId, ProviderMetadata> = {
+  ...(extendedMetadata() as Record<ProviderId, ProviderMetadata>),
   cerebras: {
     name: "Cerebras",
     description: "Fastest Llama inference on wafer-scale chips.",

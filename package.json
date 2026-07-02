@@ -23,7 +23,8 @@
     "dev:mobile": "bun run --filter @zintus/mobile dev",
     "dev:gateway": "bun run --filter @zintus/gateway dev",
     "doctor:mobile": "bun run --filter @zintus/mobile doctor",
-    "build": "bun run typecheck"
+    "build": "bun run typecheck",
+    "catalog:drift": "bun run scripts/sync-model-catalog.ts"
   },
   "comment:overrides": "Transitive security pins (bun audit highs). All sit in dev/mobile/CLI tooling (ink, expo, wrangler), NOT the gateway runtime path. Patched versions per GHSA advisories; xmldom kept in expo-compatible 0.8.x.",
   "overrides": {

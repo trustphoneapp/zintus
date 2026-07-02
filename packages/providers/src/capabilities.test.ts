@@ -19,9 +19,13 @@ describe("model capability registry", () => {
     expect(Object.keys(MODEL_CAPABILITIES).sort()).toEqual([...IDS].sort());
   });
 
-  test("vision is true ONLY for gemini's default model (the audit invariant)", () => {
+  test("vision is true ONLY for verified vision defaults (the audit invariant)", () => {
+    // gemini (native multimodal) + openai (gpt-4o family, added 2026-07-02 via
+    // the provider manifest). Every other provider's DEFAULT stays non-vision
+    // until explicitly verified — never whole-provider assumptions.
+    const VISION_DEFAULTS = new Set<ProviderId>(["gemini", "openai"]);
     for (const id of IDS) {
-      expect(supportsVision(id)).toBe(id === "gemini");
+      expect(supportsVision(id)).toBe(VISION_DEFAULTS.has(id));
     }
   });
 

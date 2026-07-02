@@ -1,4 +1,5 @@
 import type { ProviderId } from "@zintus/types";
+import { extendedDataPolicies } from "./manifest.js";
 
 /**
  * Best-effort summaries of each provider's free-tier data-handling policy.
@@ -29,6 +30,8 @@ export interface DataPolicy {
 }
 
 export const DATA_POLICIES: Record<ProviderId, DataPolicy> = {
+  // Providers added after 2026-07-02 declare their policy in manifest.ts.
+  ...(extendedDataPolicies() as Record<ProviderId, DataPolicy>),
   cerebras: {
     trainsOnData: false,
     dataRetention: "Not used for training",

@@ -25,7 +25,8 @@ describe("keychain storage (in-memory backend)", () => {
   });
 
   test("setKey rejects an unknown provider", async () => {
-    await expect(setKey("anthropic" as never, "x")).rejects.toThrow(/Unknown provider/);
+    // (anthropic became a real provider on 2026-07-02 — use a genuinely unknown id.)
+    await expect(setKey("not-a-provider" as never, "x")).rejects.toThrow(/Unknown provider/);
   });
 
   test("getKey returns null for an unknown provider (no throw)", async () => {

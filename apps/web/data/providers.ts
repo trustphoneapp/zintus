@@ -2,19 +2,22 @@
 // router can ACTUALLY reach today vs. what is planned.
 //
 // HONESTY RULE (hard): the catalog must never imply a capability with no real
-// code path. The router can route to exactly 12 provider IDs — the closed
-// `ProviderId` union in @zintus/types (engine wiring in @zintus/router): cerebras,
-// groq, gemini, openrouter, cohere, mistral, deepseek, fireworks, xai,
-// huggingface, lmstudio, ollama. Those 12 are ROUTABLE; their badges are
-// "integrated" (or "add-key" for the openrouter BYOK key) and that is honest.
-// EVERY other provider/model below is listed for transparency/roadmap only and
-// is NOT yet routable: providers carry badge "coming-soon" and models are
-// flagged via `isRoutableModel()` so the UI renders an honest "Planned — not
-// yet routable" label and shows NO actionable "Add your key" CTA. Under-claim
-// when unsure. Core stays free; no key custody.
+// code path. The router can route to exactly 22 provider IDs — the closed
+// `ProviderId` union in @zintus/types (engine wiring in @zintus/router): the
+// original 12 (cerebras, groq, gemini, openrouter, cohere, mistral, deepseek,
+// fireworks, xai, huggingface, lmstudio, ollama) plus the 10 added 2026-07-02
+// via the provider manifest (packages/providers/src/manifest.ts): together,
+// sambanova, nvidia, novita, moonshot, zai, qwen, openai, anthropic,
+// perplexity. Those 22 are ROUTABLE; their badges are "integrated" (or
+// "add-key" for the openrouter BYOK key) and that is honest. EVERY other
+// provider/model below is listed for transparency/roadmap only and is NOT yet
+// routable: providers carry badge "coming-soon" and models are flagged via
+// `isRoutableModel()` so the UI renders an honest "Planned — not yet routable"
+// label and shows NO actionable "Add your key" CTA. Under-claim when unsure.
+// Core stays free; no key custody.
 //
-// SPLIT: 55 providers total = 12 routable + 43 planned (not yet routable).
-//        100 models total   = 64 routable + 36 planned (not yet routable).
+// SPLIT (derived live in catalog-stats.ts): 22 routable providers; the rest of
+// the listed providers/models are planned (not yet routable).
 //
 // A catalog names what it routes to, so provider and model names are verbatim.
 // `freetier` records whether a provider exposes a no-key free tier.
@@ -70,6 +73,17 @@ export const ROUTABLE_PROVIDER_IDS: ReadonlySet<string> = new Set([
   "huggingface",
   "lmstudio",
   "ollama",
+  // Added 2026-07-02 via the provider manifest (P1: 12 → 22).
+  "together",
+  "sambanova",
+  "nvidia",
+  "novita",
+  "moonshot",
+  "zai",
+  "qwen",
+  "openai",
+  "anthropic",
+  "perplexity",
 ]);
 
 /** True if the router can reach this provider today. */
@@ -83,11 +97,11 @@ export function isRoutableModel(model: Pick<Model, "provider">): boolean {
   return ROUTABLE_PROVIDER_IDS.has(model.provider);
 }
 
-// ── PROVIDERS (55) — 12 routable (integrated + openrouter BYOK), 43 planned ─────
+// ── PROVIDERS — 22 routable (integrated + openrouter BYOK), rest planned ────────
 //     Planned providers carry badge "coming-soon": listed for transparency, not
 //     yet routable. They render as "Planned", never "Add your key".
 export const PROVIDERS: Provider[] = [
-  // Tier 1 — integrated (12)
+  // Original 12 — integrated
   { id: "cerebras", name: "Cerebras", type: "inference", models: 4, contextMax: "128K", freetier: true, tier: "direct", badge: "integrated", specialty: "Fastest sustained throughput (~1,800 tok/s)" },
   { id: "groq", name: "Groq", type: "inference", models: 7, contextMax: "128K", freetier: true, tier: "direct", badge: "integrated", specialty: "LPU hardware · 500 tok/s · lowest latency" },
   { id: "gemini", name: "Google Gemini", type: "frontier", models: 8, contextMax: "1M", freetier: true, tier: "direct", badge: "integrated", specialty: "Multimodal · 1M context · 1.5K req/day free" },
@@ -101,15 +115,17 @@ export const PROVIDERS: Provider[] = [
   { id: "ollama", name: "Ollama", type: "local", models: 999, contextMax: "∞", freetier: true, tier: "local", badge: "integrated", specialty: "Unlimited local · any open-weight model" },
   { id: "lmstudio", name: "LM Studio", type: "local", models: 999, contextMax: "∞", freetier: true, tier: "local", badge: "integrated", specialty: "Desktop GUI · local inference · offline" },
 
-  // Tier 2 — planned / not yet routable (18) · badge "coming-soon"
-  { id: "anthropic", name: "Anthropic", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Claude Opus 4.8 · Sonnet 4.6 · Haiku 4.5" },
-  { id: "openai", name: "OpenAI", type: "frontier", models: 8, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "GPT-5.5 · o3 · o4-mini · GPT-4.1 family" },
-  { id: "together", name: "Together AI", type: "inference", models: 200, contextMax: "128K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "200+ models · fine-tuning · batch API" },
+  // Added 2026-07-02 via the provider manifest (P1: 12 → 22) — integrated
+  { id: "anthropic", name: "Anthropic", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "direct", badge: "integrated", specialty: "Claude via OpenAI-compat surface · BYOK (paid)" },
+  { id: "openai", name: "OpenAI", type: "frontier", models: 8, contextMax: "1M", freetier: false, tier: "direct", badge: "integrated", specialty: "GPT-4o family · BYOK (paid)" },
+  { id: "together", name: "Together AI", type: "inference", models: 200, contextMax: "128K", freetier: true, tier: "direct", badge: "integrated", specialty: "Free Llama 3.3 70B Turbo route + 200 models" },
+  { id: "nvidia", name: "NVIDIA NIM", type: "inference", models: 30, contextMax: "128K", freetier: true, tier: "direct", badge: "integrated", specialty: "build.nvidia.com hosted models · trial credits" },
+  { id: "qwen", name: "Qwen (DashScope)", type: "frontier", models: 10, contextMax: "131K", freetier: true, tier: "direct", badge: "integrated", specialty: "Alibaba Qwen · intl OpenAI-compat endpoint" },
   { id: "deepinfra", name: "DeepInfra", type: "inference", models: 100, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Cheapest per-token · widest open catalog" },
-  { id: "novita", name: "Novita AI", type: "inference", models: 100, contextMax: "131K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "100+ models · competitive pricing" },
-  { id: "sambanova", name: "SambaNova", type: "inference", models: 4, contextMax: "131K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Highest throughput · enterprise SLA" },
+  { id: "novita", name: "Novita AI", type: "inference", models: 100, contextMax: "131K", freetier: false, tier: "direct", badge: "integrated", specialty: "100+ models · competitive pricing" },
+  { id: "sambanova", name: "SambaNova", type: "inference", models: 4, contextMax: "131K", freetier: false, tier: "direct", badge: "integrated", specialty: "Highest throughput · enterprise SLA" },
   { id: "nebius", name: "Nebius AI", type: "inference", models: 20, contextMax: "131K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "EU sovereign · GDPR · data residency" },
-  { id: "perplexity", name: "Perplexity (Sonar)", type: "search", models: 5, contextMax: "200K", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Web-grounded · live citations per response" },
+  { id: "perplexity", name: "Perplexity (Sonar)", type: "search", models: 5, contextMax: "200K", freetier: false, tier: "direct", badge: "integrated", specialty: "Web-grounded · live citations per response" },
   { id: "cloudflare", name: "Cloudflare AI", type: "inference", models: 30, contextMax: "128K", freetier: true, tier: "direct", badge: "coming-soon", specialty: "Edge inference · Workers native · free tier" },
   { id: "bedrock", name: "AWS Bedrock", type: "cloud", models: 30, contextMax: "1M", freetier: false, tier: "cloud", badge: "coming-soon", specialty: "Enterprise compliance · VPC · regional routing" },
   { id: "vertex", name: "Google Vertex AI", type: "cloud", models: 15, contextMax: "1M", freetier: false, tier: "cloud", badge: "coming-soon", specialty: "Gemini with data residency · HIPAA · SOC 2" },
@@ -122,10 +138,10 @@ export const PROVIDERS: Provider[] = [
   { id: "nvidia-nim", name: "NVIDIA NIM", type: "inference", models: 10, contextMax: "1M", freetier: false, tier: "direct", badge: "coming-soon", specialty: "Nemotron family · optimized NVIDIA hardware" },
 
   // Tier 3 — planned / not yet routable (25) · badge "coming-soon"
-  { id: "moonshot", name: "Moonshot AI", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Kimi K2.7 Code · frontier coding" },
+  { id: "moonshot", name: "Moonshot AI", type: "frontier", models: 5, contextMax: "1M", freetier: false, tier: "meta", badge: "integrated", specialty: "Kimi K2.7 Code · frontier coding" },
   { id: "minimax", name: "MiniMax", type: "frontier", models: 3, contextMax: "1M", freetier: false, tier: "meta", badge: "coming-soon", specialty: "MiniMax M3 · 1M context · promo pricing" },
   { id: "stepfun", name: "StepFun", type: "frontier", models: 3, contextMax: "256K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Step 3.7 Flash · fast · multimodal" },
-  { id: "zai", name: "Z.AI (GLM)", type: "frontier", models: 5, contextMax: "200K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "GLM family · free tier · multilingual" },
+  { id: "zai", name: "Z.AI (GLM)", type: "frontier", models: 5, contextMax: "200K", freetier: true, tier: "meta", badge: "integrated", specialty: "GLM family · free tier · multilingual" },
   { id: "poolside", name: "Poolside", type: "coding", models: 2, contextMax: "256K", freetier: true, tier: "meta", badge: "coming-soon", specialty: "Laguna · coding agents · free tier" },
   { id: "nous", name: "Nous Research", type: "inference", models: 5, contextMax: "131K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Hermes family · strong instruction following" },
   { id: "noushermes", name: "01.AI", type: "frontier", models: 3, contextMax: "128K", freetier: false, tier: "meta", badge: "coming-soon", specialty: "Yi family · multilingual · Chinese lab" },

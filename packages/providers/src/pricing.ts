@@ -1,4 +1,5 @@
 import type { ProviderId } from "@zintus/types";
+import { extendedPricing } from "./manifest.js";
 
 /**
  * Static, NON-CUSTODIAL pricing catalog: published per-1M-token list prices for
@@ -201,6 +202,10 @@ export const PRICING_CATALOG: readonly ModelPricing[] = [
     freeLimitNotes: "Local — runs on your own hardware, no API charge.",
     updatedAt: VERIFIED,
   },
+
+  // Providers added after 2026-07-02 declare pricing rows in manifest.ts
+  // (verified dates live on each row there).
+  ...extendedPricing(),
 ];
 
 /**

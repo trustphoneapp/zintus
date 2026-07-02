@@ -17,7 +17,8 @@ import { CATALOG_STATS } from "./catalog-stats";
 describe("catalog honesty", () => {
   it("ROUTABLE_PROVIDER_IDS matches the router's real ProviderId union exactly", () => {
     expect([...ROUTABLE_PROVIDER_IDS].sort()).toEqual([...PROVIDER_IDS].sort());
-    expect(ROUTABLE_PROVIDER_IDS.size).toBe(12);
+    // 12 original + 10 added 2026-07-02 via the provider manifest (P1).
+    expect(ROUTABLE_PROVIDER_IDS.size).toBe(22);
   });
 
   it("no non-routable provider carries an actionable badge (add-key/integrated)", () => {
@@ -45,9 +46,9 @@ describe("catalog honesty", () => {
     expect(lying).toEqual([]);
   });
 
-  it("catalog stats report the honest split: 12 routable providers, the rest planned", () => {
-    expect(CATALOG_STATS.routableProviders).toBe(12);
-    expect(CATALOG_STATS.plannedProviders).toBe(PROVIDERS.length - 12);
+  it("catalog stats report the honest split: 22 routable providers, the rest planned", () => {
+    expect(CATALOG_STATS.routableProviders).toBe(22);
+    expect(CATALOG_STATS.plannedProviders).toBe(PROVIDERS.length - 22);
     expect(CATALOG_STATS.routableProviders + CATALOG_STATS.plannedProviders).toBe(
       CATALOG_STATS.totalProviders,
     );

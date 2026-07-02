@@ -13,8 +13,12 @@ import {
   xaiProvider,
 } from "./providers/skeletons.js";
 import { ollamaProvider } from "./providers/ollama.js";
+import { extendedRuntimeProviders } from "./manifest.js";
 
+// Original 12 wired explicitly; every provider added after 2026-07-02 comes
+// from the declarative manifest (manifest.ts — one entry per provider).
 const providers: Record<ProviderId, Provider> = {
+  ...(extendedRuntimeProviders() as Record<ProviderId, Provider>),
   cerebras: cerebrasProvider,
   groq: groqProvider,
   gemini: geminiProvider,

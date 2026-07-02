@@ -1,10 +1,10 @@
 # Zintus
 
-Cross-platform AI router — routes chat requests across 12 providers (Cerebras, Groq, Gemini, OpenRouter, Cohere, Mistral, DeepSeek, Fireworks AI, xAI Grok, Hugging Face, LM Studio, Ollama) with quota-aware failover.
+Cross-platform AI router — routes chat requests across 22 providers (Cerebras, Groq, Gemini, OpenRouter, Cohere, Mistral, DeepSeek, Fireworks AI, xAI Grok, Hugging Face, Together AI, SambaNova, NVIDIA NIM, Novita, Moonshot/Kimi, Z.ai GLM, Qwen, OpenAI, Anthropic, Perplexity, LM Studio, Ollama) with quota-aware failover. The 10 providers added 2026-07-02 are declared in a single manifest entry each (`packages/providers/src/manifest.ts`) and served by the shared OpenAI-compat adapter; they are unit-tested but awaiting their first keyed live smoke.
 
 ## What this is (and isn't)
 
-**Zintus is a local-first, BYOK router that maximizes free-tier quotas across ~12 providers** — automatic same-model failover, cooldown, health-aware routing, transparent quota bars, and an estimate of the money you'd otherwise have spent on paid APIs. Your keys live in your OS keychain (CLI/desktop) or your browser (web); there is **no SaaS bill and no hosted control plane**.
+**Zintus is a local-first, BYOK router that maximizes free-tier quotas across 22 providers** — automatic same-model failover, cooldown, health-aware routing, transparent quota bars, and an estimate of the money you'd otherwise have spent on paid APIs. Paid keys you already own (OpenAI, Anthropic, Perplexity) route through the same quota-aware engine. Your keys live in your OS keychain (CLI/desktop) or your browser (web); there is **no SaaS bill and no hosted control plane**.
 
 **Who it's for:** individuals and small teams who want to stretch free tiers across many providers from one OpenAI-compatible endpoint, self-hosted.
 
@@ -34,7 +34,7 @@ flowchart LR
   CLI & Web & Desktop & Mobile --> GW[Gateway /v1]
   GW --> ENG[Engine]
   ENG --> RT[Router: policy, latency, cooldown, quota ledger]
-  RT --> P[(12 providers)]
+  RT --> P[(22 providers)]
   RT -. policy.json hot-reload .-> RT
 ```
 

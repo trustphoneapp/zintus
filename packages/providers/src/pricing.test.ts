@@ -27,7 +27,9 @@ describe("PRICING_CATALOG is well-formed", () => {
 
   test("non-local, non-free models have positive prices", () => {
     for (const e of PRICING_CATALOG) {
-      const isFreeRoute = e.model.endsWith(":free");
+      // ":free" = OpenRouter's free-route convention; "-Free" = Together's
+      // (e.g. Llama-3.3-70B-Instruct-Turbo-Free). Both are genuine $0 routes.
+      const isFreeRoute = e.model.endsWith(":free") || /-free$/i.test(e.model);
       if (LOCAL.includes(e.provider) || isFreeRoute) {
         expect(e.inputPer1M).toBe(0);
         expect(e.outputPer1M).toBe(0);
