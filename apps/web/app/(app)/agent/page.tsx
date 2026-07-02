@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createAgentTask,
   resolveApproval,
@@ -10,18 +10,22 @@ import {
 } from "@/lib/agents";
 
 /**
- * Agent mode (P2): drive the gateway-hosted coding agent from the browser.
- * The agent runs ON YOUR MACHINE (the gateway host), confined to the sandbox
- * root; every file write / command run pauses here for your explicit approval
- * unless you check auto-approve. The phone gets the same surface via the relay.
+ * Agent — an operator console for the gateway-hosted coding agent
+ * (`/v1/agents`). It is deliberately NOT a chat: you arm a task, watch a live
+ * instrument readout of what the agent does on your machine, and every file
+ * write / command HALTS the run at an approval gate until you decide. The
+ * human-in-the-loop is the whole point.
  */
+
+type RunState = "idle" | "running" | "awaiting" | "done" | "stopped" | "error";
+
 export default function AgentPage() {
   const [task, setTask] = useState("");
   const [root, setRoot] = useState("");
   const [allowRun, setAllowRun] = useState(false);
-  const [autoApprove, setAutoApprove] = useState(false);
   const [sandbox, setSandbox] = useState(false);
   const [browse, setBrowse] = useState(false);
+  const [autoApprove, setAutoApprove] = useState(false);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [running, setRunning] = useState(false);
@@ -31,6 +35,38 @@ export default function AgentPage() {
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+  }, [events]);
+
+  const resolved = useMemo(
+    () =>
+      new Set(
+        events
+          .filter((e) => e.type === "approval_resolved")
+          .map((e) => String(e.approval_id)),
+      ),
+    [events],
+  );
+  const pending = events.filter(
+    (e) => e.type === "approval_required" && !resolved.has(String(e.approval_id)),
+  );
+
+  // Derive the console status strip from the live event stream + local state.
+  const runState: RunState = useMemo(() => {
+    if (error) return "error";
+    const last = [...events].reverse().find((e) =>
+      ["done", "stopped", "error"].includes(e.type),
+    );
+    if (last?.type === "done") return "done";
+    if (last?.type === "stopped") return "stopped";
+    if (last?.type === "error") return "error";
+    if (pending.length > 0) return "awaiting";
+    if (running) return "running";
+    return "idle";
+  }, [events, running, error, pending.length]);
+
+  const rounds = useMemo(() => {
+    const r = [...events].reverse().find((e) => typeof e.round === "number");
+    return typeof r?.round === "number" ? r.round + 1 : 0;
   }, [events]);
 
   const start = useCallback(async () => {
@@ -44,7 +80,6 @@ export default function AgentPage() {
         root: root.trim() || undefined,
         allowRun,
         autoApprove,
-        // Docker sandbox is only meaningful with allowRun (it isolates run_command).
         sandbox: allowRun ? sandbox : false,
         browse,
       });
@@ -64,7 +99,7 @@ export default function AgentPage() {
       setRunning(false);
       abortRef.current = null;
     }
-  }, [task, root, allowRun, autoApprove, sandbox, browse, running]);
+  }, [task, root, allowRun, sandbox, browse, autoApprove, running]);
 
   const stop = useCallback(() => {
     if (agentId) void stopAgent(agentId);
@@ -77,211 +112,254 @@ export default function AgentPage() {
     [agentId],
   );
 
-  // Approvals still pending = required minus resolved.
-  const resolved = new Set(
-    events
-      .filter((e) => e.type === "approval_resolved")
-      .map((e) => String(e.approval_id)),
-  );
-  const pending = events.filter(
-    (e) => e.type === "approval_required" && !resolved.has(String(e.approval_id)),
-  );
+  const armed = task.trim().length > 0;
+  const launchOpen = runState === "idle" || runState === "error";
 
   return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col gap-4 p-6">
-      <div>
-        <h1 className="text-xl font-semibold">Agent</h1>
-        <p className="text-sm text-neutral-400">
-          Runs on your gateway machine, sandboxed to the root below. Writes and
-          commands pause for your approval.
-        </p>
+    <div className="screen agent-screen">
+      {/* Status strip — the console heartbeat. */}
+      <div className={`agent-strip agent-strip--${runState}`}>
+        <span className="agent-strip-dot" aria-hidden />
+        <span className="agent-strip-state">{STATE_LABEL[runState]}</span>
+        {rounds > 0 ? (
+          <span className="agent-strip-meta">round {rounds}</span>
+        ) : null}
+        <span className="agent-strip-spacer" />
+        {running ? (
+          <button type="button" className="agent-stop" onClick={stop}>
+            Stop run
+          </button>
+        ) : null}
       </div>
 
-      <div className="flex flex-col gap-2">
-        <textarea
-          className="min-h-24 rounded-lg border border-neutral-700 bg-neutral-900 p-3 text-sm"
-          placeholder="Task — e.g. “add a --json flag to the export script”"
-          value={task}
-          onChange={(e) => setTask(e.target.value)}
-          disabled={running}
-        />
-        <input
-          className="rounded-lg border border-neutral-700 bg-neutral-900 p-2 text-sm"
-          placeholder="Sandbox root on the gateway host (default: gateway workspace)"
-          value={root}
-          onChange={(e) => setRoot(e.target.value)}
-          disabled={running}
-        />
-        <div className="flex flex-wrap items-center gap-4 text-sm text-neutral-300">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={allowRun}
-              onChange={(e) => setAllowRun(e.target.checked)}
-              disabled={running}
-            />
-            Allow verify commands (bun test/typecheck…)
-          </label>
-          <label
-            className={`flex items-center gap-2 ${allowRun ? "" : "opacity-40"}`}
-            title={allowRun ? "" : "Requires Allow verify commands"}
-          >
-            <input
-              type="checkbox"
-              checked={sandbox}
-              onChange={(e) => setSandbox(e.target.checked)}
-              disabled={running || !allowRun}
-            />
-            Docker sandbox
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={browse}
-              onChange={(e) => setBrowse(e.target.checked)}
-              disabled={running}
-            />
-            Browser tool
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={autoApprove}
-              onChange={(e) => setAutoApprove(e.target.checked)}
-              disabled={running}
-            />
-            Auto-approve writes (careful)
-          </label>
-          <div className="ml-auto flex gap-2">
-            {running ? (
+      <div className="agent-body">
+        {/* Launch bay — collapses to a summary once a run is underway. */}
+        {launchOpen ? (
+          <section className="agent-launch">
+            <label className="agent-field">
+              <span className="agent-field-label">Task</span>
+              <textarea
+                className="agent-task-input"
+                placeholder="Describe what the agent should do — e.g. add a --json flag to the export script and update its test"
+                value={task}
+                onChange={(e) => setTask(e.target.value)}
+                rows={3}
+              />
+            </label>
+            <label className="agent-field">
+              <span className="agent-field-label">Sandbox root</span>
+              <input
+                className="agent-root-input"
+                placeholder="Path on the gateway host — defaults to its workspace"
+                value={root}
+                onChange={(e) => setRoot(e.target.value)}
+              />
+            </label>
+
+            <div className="agent-switches">
+              <Switch checked={allowRun} onChange={setAllowRun} label="Run verify commands" hint="bun test / typecheck" />
+              <Switch checked={sandbox} onChange={setSandbox} disabled={!allowRun} label="Docker sandbox" hint="isolate commands" />
+              <Switch checked={browse} onChange={setBrowse} label="Browser tool" hint="read web pages" />
+              <Switch checked={autoApprove} onChange={setAutoApprove} label="Auto-approve" hint="skip the gate — careful" tone="warn" />
+            </div>
+
+            <div className="agent-launch-actions">
               <button
-                className="rounded-lg border border-red-500 px-4 py-1.5 text-red-400"
-                onClick={stop}
-              >
-                Stop
-              </button>
-            ) : (
-              <button
-                className="rounded-lg bg-emerald-600 px-4 py-1.5 font-medium text-white disabled:opacity-40"
+                type="button"
+                className="agent-launch-btn"
                 onClick={() => void start()}
-                disabled={!task.trim()}
+                disabled={!armed}
               >
-                Run agent
+                {armed ? "Launch agent" : "Enter a task to launch"}
               </button>
-            )}
-          </div>
-        </div>
-        <p className="text-xs text-neutral-500">
-          Docker sandbox and the browser tool run on the gateway host and need
-          Docker / Playwright installed there — if absent, the agent proceeds
-          without them (no silent failure). Browsing blocks private/internal
-          hosts by default.
-        </p>
-      </div>
+              <p className="agent-launch-note">
+                Runs on the gateway machine, sandboxed to the root above. Docker
+                and the browser tool need those installed there. Browsing blocks
+                internal hosts by default.
+              </p>
+            </div>
 
-      {error ? <p className="text-sm text-red-400">{error}</p> : null}
-
-      {pending.map((p) => (
-        <div
-          key={String(p.approval_id)}
-          className="rounded-lg border border-amber-500 bg-amber-950/40 p-3 text-sm"
-        >
-          <p className="font-medium text-amber-300">
-            {String(p.tool)} wants to touch {String(p.path)}
-          </p>
-          <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap text-xs text-neutral-300">
-            {String(p.diff)}
-          </pre>
-          <div className="mt-2 flex gap-2">
-            <button
-              className="rounded bg-emerald-600 px-3 py-1 text-white"
-              onClick={() => approve(String(p.approval_id), true)}
-            >
-              Approve
-            </button>
-            <button
-              className="rounded border border-neutral-600 px-3 py-1"
-              onClick={() => approve(String(p.approval_id), false)}
-            >
-              Decline
-            </button>
-          </div>
-        </div>
-      ))}
-
-      <div
-        ref={logRef}
-        className="flex-1 overflow-auto rounded-lg border border-neutral-800 bg-neutral-950 p-3 font-mono text-xs leading-relaxed"
-      >
-        {events.length === 0 ? (
-          <p className="text-neutral-500">
-            Events will stream here — routing, the agent&apos;s text, tool calls
-            and results, approvals, and the final change summary.
-          </p>
+            {error ? <p className="agent-error">{error}</p> : null}
+          </section>
         ) : (
-          events.map((e) => <EventLine key={e.seq} event={e} />)
+          <div className="agent-run-summary">
+            <span className="agent-run-task" title={task}>
+              {task}
+            </span>
+            <button
+              type="button"
+              className="agent-relaunch"
+              onClick={() => {
+                setEvents([]);
+                setError(null);
+              }}
+              disabled={running}
+            >
+              New task
+            </button>
+          </div>
         )}
+
+        {/* The load-bearing interrupt: pending approval gates. */}
+        {pending.map((p) => (
+          <div className="agent-gate" key={String(p.approval_id)}>
+            <div className="agent-gate-head">
+              <span className="agent-gate-badge">Waiting on you</span>
+              <span className="agent-gate-what">
+                <strong>{String(p.tool)}</strong> wants to touch{" "}
+                <code>{String(p.path)}</code>
+              </span>
+            </div>
+            <pre className="agent-gate-diff">{String(p.diff)}</pre>
+            <div className="agent-gate-actions">
+              <button
+                type="button"
+                className="agent-approve"
+                onClick={() => approve(String(p.approval_id), true)}
+              >
+                Approve
+              </button>
+              <button
+                type="button"
+                className="agent-decline"
+                onClick={() => approve(String(p.approval_id), false)}
+              >
+                Decline
+              </button>
+            </div>
+          </div>
+        ))}
+
+        {/* Live run log — the instrument readout. */}
+        <div className="agent-log" ref={logRef} aria-live="polite">
+          {events.length === 0 ? (
+            <p className="agent-log-empty">
+              The run appears here — routing, the agent&apos;s reasoning, each tool
+              call and result, approvals, and the final change summary.
+            </p>
+          ) : (
+            events.map((e) => <LogLine key={e.seq} event={e} />)
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function EventLine({ event }: { event: AgentEvent }) {
+const STATE_LABEL: Record<RunState, string> = {
+  idle: "Ready",
+  running: "Running",
+  awaiting: "Awaiting approval",
+  done: "Done",
+  stopped: "Stopped",
+  error: "Error",
+};
+
+function Switch({
+  checked,
+  onChange,
+  label,
+  hint,
+  disabled,
+  tone,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  hint?: string;
+  disabled?: boolean;
+  tone?: "warn";
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`agent-switch${checked ? " on" : ""}${tone === "warn" ? " warn" : ""}`}
+    >
+      <span className="agent-switch-track" aria-hidden>
+        <span className="agent-switch-thumb" />
+      </span>
+      <span className="agent-switch-text">
+        <span className="agent-switch-label">{label}</span>
+        {hint ? <span className="agent-switch-hint">{hint}</span> : null}
+      </span>
+    </button>
+  );
+}
+
+function LogLine({ event }: { event: AgentEvent }) {
   switch (event.type) {
     case "started":
       return (
-        <p className="text-cyan-400">
-          ▶ sandbox {String(event.root)} · max {String(event.max_rounds)} rounds
+        <p className="agent-ev agent-ev--start">
+          <span className="agent-ev-rail" />▶ sandbox <code>{String(event.root)}</code>
         </p>
       );
     case "routed":
       return (
-        <p className="text-neutral-500">
-          → routed to {String(event.provider ?? "?")}
+        <p className="agent-ev agent-ev--muted">
+          <span className="agent-ev-rail" />→ {String(event.provider ?? "?")}
           {event.model ? ` · ${String(event.model)}` : ""}
         </p>
       );
     case "text":
-      return <span className="whitespace-pre-wrap text-neutral-200">{String(event.text)}</span>;
+      return <span className="agent-ev-text">{String(event.text)}</span>;
     case "turn_end":
-      return <br />;
+      return <span className="agent-ev-break" />;
     case "tool_call":
       return (
-        <p className="text-blue-400">
-          🔧 {String(event.tool)}({JSON.stringify(event.arguments)})
+        <p className="agent-ev agent-ev--tool">
+          <span className="agent-ev-rail" />
+          {String(event.tool)}
+          <span className="agent-ev-args">({JSON.stringify(event.arguments)})</span>
         </p>
       );
     case "tool_result":
       return (
-        <p className={event.is_error ? "text-amber-400" : "text-neutral-500"}>
-          {event.is_error ? "⚠ " : "✓ "}
-          {String(event.tool)} → {String(event.content).slice(0, 200)}
+        <p className={`agent-ev ${event.is_error ? "agent-ev--warn" : "agent-ev--muted"}`}>
+          <span className="agent-ev-rail" />
+          {event.is_error ? "! " : "✓ "}
+          {String(event.tool)} → {String(event.content).slice(0, 220)}
         </p>
       );
     case "approval_required":
       return (
-        <p className="text-amber-300">
-          ⏸ approval required: {String(event.tool)} → {String(event.path)}
+        <p className="agent-ev agent-ev--gate">
+          <span className="agent-ev-rail" />⏸ approval — {String(event.tool)}{" "}
+          {String(event.path)}
         </p>
       );
     case "approval_resolved":
       return (
-        <p className="text-neutral-500">
-          {event.approved ? "✔ approved" : "✖ declined"}
+        <p className="agent-ev agent-ev--muted">
+          <span className="agent-ev-rail" />
+          {event.approved ? "✓ approved" : "✗ declined"}
           {event.auto ? " (auto)" : ""}
         </p>
       );
     case "done":
       return (
-        <p className="text-emerald-400">
-          ✅ done · {String(event.rounds)} round(s) · {String(event.mutations)}{" "}
-          change(s)
+        <p className="agent-ev agent-ev--done">
+          <span className="agent-ev-rail" />✓ done · {String(event.rounds)} round(s) ·{" "}
+          {String(event.mutations)} change(s)
         </p>
       );
     case "stopped":
-      return <p className="text-red-400">⏹ stopped</p>;
+      return (
+        <p className="agent-ev agent-ev--warn">
+          <span className="agent-ev-rail" />⏹ stopped
+        </p>
+      );
     case "error":
-      return <p className="text-red-400">✗ {String(event.message)}</p>;
+      return (
+        <p className="agent-ev agent-ev--error">
+          <span className="agent-ev-rail" />✗ {String(event.message)}
+        </p>
+      );
     default:
       return null;
   }
