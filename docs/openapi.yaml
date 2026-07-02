@@ -210,6 +210,13 @@ paths:
                 maxRounds: { type: integer }
                 autoApprove: { type: boolean }
                 allowRun: { type: boolean }
+                sandbox:
+                  type: boolean
+                  description: Run allowlisted commands in a hardened Docker container (needs allowRun + Docker on the host).
+                sandboxImage: { type: string }
+                browse:
+                  type: boolean
+                  description: Offer the read-only browser tool (needs Playwright on the host; silently unavailable otherwise).
                 strategy: { type: string }
                 mode: { type: string }
       responses:

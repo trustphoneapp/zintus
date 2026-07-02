@@ -58,6 +58,11 @@ export interface AgentOptions {
   /** The verify command the B3 gate runs deterministically after edits (must be on
    *  the run_command allowlist). Only used when allowRun is set. Default "bun run test". */
   verifyCommand?: string;
+  /** Run allowlisted commands inside a hardened Docker container (P3). Requires
+   *  --allow-run and a reachable Docker daemon. */
+  sandbox?: boolean;
+  /** Container image for --sandbox (default "oven/bun:1"). */
+  sandboxImage?: string;
 }
 
 /** The DEFAULT project verify command the B3 gate runs (allowlisted). */
@@ -65,7 +70,11 @@ export const DEFAULT_VERIFY_COMMAND = "bun run test";
 
 // B2 strategy seam — moved to the runtime package (@zintus/agent
 // route-request.ts) on 2026-07-02; re-exported so existing importers keep working.
-import { buildAgentRouteRequest, buildAgentSystemPreamble } from "@zintus/agent";
+import {
+  buildAgentRouteRequest,
+  buildAgentSystemPreamble,
+  createDockerSpawn,
+} from "@zintus/agent";
 export { buildAgentRouteRequest };
 
 // Preamble moved to @zintus/agent (runtime contract shared with the gateway host).
@@ -175,9 +184,18 @@ export async function runAgent(task: string, options?: AgentOptions): Promise<vo
     plan: createPlanState(),
     changeLog,
     context: contextConfig,
-    // run_command is OFF unless explicitly opted in via --allow-run.
+    // run_command is OFF unless explicitly opted in via --allow-run. With
+    // --sandbox, allowlisted commands run inside a hardened, network-isolated
+    // Docker container (P3) instead of directly on the host — the allowlist +
+    // confirm gate are unchanged; Docker is an extra isolation layer.
     run: options?.allowRun
-      ? { allow: true, budget: { used: 0, max: DEFAULT_RUN_BUDGET } }
+      ? {
+          allow: true,
+          budget: { used: 0, max: DEFAULT_RUN_BUDGET },
+          ...(options?.sandbox
+            ? { spawn: createDockerSpawn({ image: options.sandboxImage }) }
+            : {}),
+        }
       : undefined,
     semantic: {
       embed: semanticEmbed,

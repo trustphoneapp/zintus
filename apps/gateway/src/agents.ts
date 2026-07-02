@@ -12,12 +12,17 @@ import {
   RUN_COMMAND_TOOL_NAME,
   buildAgentRouteRequest,
   buildAgentSystemPreamble,
+  browserToolDefinition,
   buildRepoMap,
   createContextStore,
+  createDockerSpawn,
   createPlanState,
   createSandbox,
   executeAgentToolCall,
+  executeBrowseCall,
+  loadPlaywrightDriver,
   runAgentToolLoop,
+  type BrowserDriver,
   type AgentLoopHandlers,
   type AgentToolContext,
   type ChangeLogEntry,
@@ -108,6 +113,14 @@ export interface CreateAgentTaskBody {
   autoApprove?: boolean;
   /** Offer the allowlisted run_command tool to the model. */
   allowRun?: boolean;
+  /** Run allowlisted commands inside a hardened Docker container (P3). Requires
+   *  allowRun + a reachable Docker daemon on the gateway host. */
+  sandbox?: boolean;
+  /** Container image for `sandbox` (default oven/bun:1). */
+  sandboxImage?: string;
+  /** Offer the read-only `browse` tool (needs Playwright on the gateway host;
+   *  silently unavailable to the model if the driver can't load). */
+  browse?: boolean;
   strategy?: RoutingStrategy | "weighted";
   mode?: ContextMode;
 }
@@ -307,9 +320,18 @@ export class AgentTaskManager {
       MAX_AGENT_ROUNDS_CAP,
     );
     const allowRun = body.allowRun ?? false;
-    const toolDefinitions = allowRun
+    const fileTools = allowRun
       ? AGENT_TOOL_DEFINITIONS
       : AGENT_TOOL_DEFINITIONS.filter((d) => d.name !== RUN_COMMAND_TOOL_NAME);
+    // P3 browser tool: offered only when a Playwright driver actually loads
+    // (graceful absence — no fake capability). Read-only navigation, so it is
+    // NOT confirm-gated, but it is disabled entirely without the driver.
+    const browser: BrowserDriver | null = body.browse
+      ? await loadPlaywrightDriver().catch(() => null)
+      : null;
+    const toolDefinitions = browser
+      ? [...fileTools, browserToolDefinition]
+      : fileTools;
 
     const changeLog: ChangeLogEntry[] = [];
     const ccrStore = createContextStore();
@@ -324,7 +346,13 @@ export class AgentTaskManager {
         sessionId: `agents-${t.id.slice(0, 8)}`,
       },
       run: allowRun
-        ? { allow: true, budget: { used: 0, max: DEFAULT_RUN_BUDGET } }
+        ? {
+            allow: true,
+            budget: { used: 0, max: DEFAULT_RUN_BUDGET },
+            ...(body.sandbox
+              ? { spawn: createDockerSpawn({ image: body.sandboxImage }) }
+              : {}),
+          }
         : undefined,
       semantic: {},
     };
@@ -364,10 +392,15 @@ export class AgentTaskManager {
         );
       },
       execute: (call) =>
-        executeAgentToolCall(
-          { id: call.id, name: call.name, arguments: call.arguments },
-          ctx,
-        ),
+        call.name === "browse"
+          ? executeBrowseCall(
+              { id: call.id, arguments: call.arguments },
+              browser ?? undefined,
+            )
+          : executeAgentToolCall(
+              { id: call.id, name: call.name, arguments: call.arguments },
+              ctx,
+            ),
       onRouted: async (turn, round) => {
         t.rounds = round + 1;
         const meta = turn as { providerId?: string; model?: string; traceId?: string };

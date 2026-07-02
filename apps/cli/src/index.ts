@@ -215,6 +215,11 @@ program
     "Use only these configured MCP servers (by name); default: all enabled",
   )
   .option("--no-mcp", "Disable MCP tools (sandboxed file tools only)")
+  .option(
+    "--sandbox",
+    "Run allowlisted commands inside a hardened, network-isolated Docker container (requires --allow-run + Docker)",
+  )
+  .option("--sandbox-image <image>", "Container image for --sandbox (default oven/bun:1)")
   .action(
     async (
       task: string,
@@ -224,6 +229,8 @@ program
         allowRun?: boolean;
         maxRounds?: string;
         mcp?: string[] | boolean;
+        sandbox?: boolean;
+        sandboxImage?: string;
         // Commander sets `mcp: false` for `--no-mcp`.
       },
     ) => {
@@ -233,6 +240,17 @@ program
         maxRounds = Number(options.maxRounds);
         if (!Number.isInteger(maxRounds) || maxRounds < 1) {
           throw new Error("Invalid --max-rounds. Expected a positive integer.");
+        }
+      }
+      if (options.sandbox) {
+        if (!options.allowRun) {
+          throw new Error("--sandbox requires --allow-run (it isolates the run_command tool).");
+        }
+        const { dockerAvailable } = await import("@zintus/agent");
+        if (!dockerAvailable()) {
+          throw new Error(
+            "--sandbox needs a reachable Docker daemon (docker info failed). Start Docker and retry.",
+          );
         }
       }
       // Commander: `--no-mcp` => options.mcp === false; `--mcp a b` => string[];
@@ -246,6 +264,8 @@ program
         maxRounds,
         mcp: mcpNames,
         noMcp,
+        sandbox: options.sandbox,
+        sandboxImage: options.sandboxImage,
       });
     },
   );
