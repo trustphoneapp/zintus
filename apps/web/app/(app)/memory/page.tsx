@@ -215,7 +215,7 @@ export default function MemoryPage() {
   async function onTogglePin(fact: MemoryFact) {
     try {
       await updateMemory(fact.id, { pinned: !fact.pinned });
-      await load(scope);
+      await load(scope, scopeOpts);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update memory.");
     }
@@ -227,7 +227,7 @@ export default function MemoryPage() {
     try {
       await updateMemory(id, { value });
       setEditId(null);
-      await load(scope);
+      await load(scope, scopeOpts);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to update memory.");
     }
