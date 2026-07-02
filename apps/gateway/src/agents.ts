@@ -27,6 +27,7 @@ import {
   executeAgentToolCall,
   executeBrowseCall,
   loadPlaywrightDriver,
+  makePublicHostGuard,
   runAgentToolLoop,
   type BrowserDriver,
   type AgentLoopHandlers,
@@ -434,8 +435,12 @@ export class AgentTaskManager {
     // P3 browser tool: offered only when a Playwright driver actually loads
     // (graceful absence — no fake capability). Read-only navigation, so it is
     // NOT confirm-gated, but it is disabled entirely without the driver.
+    // Public tasks get the per-request host guard (redirect/subresource SSRF);
+    // executeBrowseCall separately resolve-and-pins the primary target.
     const browser: BrowserDriver | null = body.browse
-      ? await loadPlaywrightDriver().catch(() => null)
+      ? await loadPlaywrightDriver(
+          body.browseAllowPrivate ? {} : { hostGuard: makePublicHostGuard() },
+        ).catch(() => null)
       : null;
     const toolDefinitions = browser
       ? [...fileTools, browserToolDefinition]

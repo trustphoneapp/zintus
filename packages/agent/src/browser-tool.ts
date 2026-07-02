@@ -1,3 +1,4 @@
+import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ToolDefinition } from "@zintus/types";
 import type { ToolExecutionResult } from "./builtin-tools.js";
@@ -18,10 +19,16 @@ import type { ToolExecutionResult } from "./builtin-tools.js";
  *
  * SSRF: `executeBrowseCall` blocks private/loopback/link-local/metadata hosts
  * by default (`blockedHostReason`); `allowPrivate` opts into internal targets.
- * RESIDUAL (not yet closed): DNS rebinding — a public hostname that resolves to
- * a private IP passes the hostname check. Fully closing it needs resolve-then-
- * pin (resolve the host, re-check the IP, and force the connection to that IP)
- * inside the driver; do that before exposing `browse` on a public gateway.
+ * DNS rebinding is closed with resolve-then-pin: a DNS-named target is resolved
+ * up front, EVERY returned address is vetted (fail-closed on resolution
+ * failure), and the vetted address is pinned into the Playwright driver via
+ * Chromium's `--host-resolver-rules` so the browser cannot re-resolve the name
+ * to something else mid-fetch. Redirects and subresources are covered by a
+ * per-request route guard (`makePublicHostGuard`) that name-checks AND
+ * resolve-checks every requested host. Residual (accepted): the route guard's
+ * own lookup and Chromium's connection are two DNS queries — a resolver
+ * alternating answers faster than the OS cache could in principle win that
+ * race for a *redirect* target; the primary target is fully pinned.
  */
 
 /** One page action the model can request via the `browse` tool. */
@@ -33,6 +40,10 @@ export interface BrowseRequest {
   selector?: string;
   /** Max chars of text/html returned (default 8000; screenshots are bytes). */
   maxChars?: number;
+  /** Anti-rebinding pin: the vetted address this hostname MUST connect to.
+   *  Set by `executeBrowseCall` after resolve-and-vet; drivers that can pin
+   *  (Playwright via --host-resolver-rules) must honor it. */
+  pin?: { hostname: string; address: string };
 }
 
 export interface BrowseResult {
@@ -151,8 +162,73 @@ export function blockedHostReason(hostname: string): string | null {
     }
     return null;
   }
-  // A public DNS name — allowed (see DNS-rebinding caveat above).
+  // A public DNS name — the literal check passes; callers must still
+  // resolve-and-vet it (see resolveAndVetHost) before connecting.
   return null;
+}
+
+/** Injectable DNS lookup so the rebinding guard is unit-testable without
+ *  touching the network (and without bun `mock.module`, which leaks). */
+export type HostLookup = (
+  hostname: string,
+) => Promise<Array<{ address: string; family: number }>>;
+
+const defaultLookup: HostLookup = (hostname) =>
+  dnsLookup(hostname, { all: true, verbatim: true });
+
+/**
+ * Anti-rebinding resolution: resolve a DNS name and vet EVERY returned address
+ * with `blockedHostReason`. Fail-closed — a name that does not resolve is
+ * refused (we cannot vet what we cannot see). On success returns one vetted
+ * address (IPv4 preferred — Chromium host-resolver-rules take it verbatim) for
+ * the driver to pin the connection to.
+ */
+export async function resolveAndVetHost(
+  hostname: string,
+  lookupFn: HostLookup = defaultLookup,
+): Promise<{ reason: string | null; address?: string }> {
+  let addrs: Array<{ address: string; family: number }>;
+  try {
+    addrs = await lookupFn(hostname);
+  } catch {
+    return { reason: `"${hostname}" did not resolve` };
+  }
+  if (!addrs || addrs.length === 0) {
+    return { reason: `"${hostname}" did not resolve` };
+  }
+  for (const a of addrs) {
+    const blocked = blockedHostReason(a.address);
+    if (blocked) {
+      return {
+        reason: `"${hostname}" resolves to ${blocked} — blocked by the DNS-rebinding guard`,
+      };
+    }
+  }
+  const v4 = addrs.find((a) => a.family === 4);
+  return { reason: null, address: (v4 ?? addrs[0]!).address };
+}
+
+/**
+ * Per-request host guard for the driver's route interception: covers redirects
+ * and subresources, which `executeBrowseCall` cannot see. Name-checks first
+ * (cheap), then resolve-checks DNS names. Results are memoized per guard
+ * instance so a page with many same-host requests does one lookup.
+ */
+export function makePublicHostGuard(
+  lookupFn: HostLookup = defaultLookup,
+): (hostname: string) => Promise<string | null> {
+  const cache = new Map<string, string | null>();
+  return async (hostname: string) => {
+    const host = hostname.trim().toLowerCase();
+    const hit = cache.get(host);
+    if (hit !== undefined) return hit;
+    let reason = blockedHostReason(host);
+    if (!reason && isIP(host.replace(/^\[|\]$/g, "")) === 0) {
+      reason = (await resolveAndVetHost(host, lookupFn)).reason;
+    }
+    cache.set(host, reason);
+    return reason;
+  };
 }
 
 /**
@@ -167,6 +243,8 @@ export async function executeBrowseCall(
     /** Explicitly permit private/loopback/link-local hosts (default false).
      *  Only set when the host operator has opted into internal browsing. */
     allowPrivate?: boolean;
+    /** DNS lookup override for tests; production uses node:dns. */
+    lookup?: HostLookup;
   },
 ): Promise<ToolExecutionResult> {
   if (!driver) {
@@ -200,6 +278,7 @@ export async function executeBrowseCall(
       isError: true,
     };
   }
+  let pin: BrowseRequest["pin"];
   if (!opts?.allowPrivate) {
     const blocked = blockedHostReason(hostname);
     if (blocked) {
@@ -211,6 +290,23 @@ export async function executeBrowseCall(
         ),
         isError: true,
       };
+    }
+    // Resolve-then-pin: vet what the name ACTUALLY points at, and pin the
+    // driver to that address so it cannot be re-resolved mid-fetch.
+    const bare = hostname.replace(/^\[|\]$/g, "");
+    if (isIP(bare) === 0) {
+      const vetted = await resolveAndVetHost(hostname, opts?.lookup);
+      if (vetted.reason) {
+        return {
+          toolCallId: call.id,
+          content: err(
+            `refusing to browse: ${vetted.reason}. ` +
+              "The host operator can enable internal browsing explicitly.",
+          ),
+          isError: true,
+        };
+      }
+      pin = { hostname: hostname.toLowerCase(), address: vetted.address! };
     }
   }
   const extractRaw = call.arguments.extract;
@@ -229,6 +325,7 @@ export async function executeBrowseCall(
           ? call.arguments.selector
           : undefined,
       maxChars,
+      pin,
     });
     return { toolCallId: call.id, content: JSON.stringify(result), isError: false };
   } catch (error) {
@@ -248,6 +345,10 @@ export async function executeBrowseCall(
 export async function loadPlaywrightDriver(opts?: {
   /** navigation timeout ms (default 30s). */
   timeoutMs?: number;
+  /** Per-request host guard (redirects + subresources): return a reason string
+   *  to abort the request, null to allow. Wire `makePublicHostGuard()` here
+   *  unless the task opted into private browsing. */
+  hostGuard?: (hostname: string) => Promise<string | null>;
 }): Promise<BrowserDriver | null> {
   let chromium: {
     launch(o?: unknown): Promise<unknown>;
@@ -263,14 +364,46 @@ export async function loadPlaywrightDriver(opts?: {
     return null;
   }
   const timeout = opts?.timeoutMs ?? 30_000;
+  const hostGuard = opts?.hostGuard;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let browser: any = null;
+  // The --host-resolver-rules the running browser was launched with. Chromium
+  // only takes resolver rules at launch, so a pin change relaunches (rare —
+  // one relaunch per distinct pinned host in a task; correctness over reuse).
+  let launchedRule: string | null = null;
   return {
     async fetchPage(req: BrowseRequest): Promise<BrowseResult> {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (!browser) browser = await (chromium as any).launch({ headless: true });
+      const rule = req.pin
+        ? `MAP ${req.pin.hostname} ${req.pin.address}`
+        : null;
+      if (browser && rule !== launchedRule) {
+        await browser.close();
+        browser = null;
+      }
+      if (!browser) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        browser = await (chromium as any).launch({
+          headless: true,
+          ...(rule ? { args: [`--host-resolver-rules=${rule}`] } : {}),
+        });
+        launchedRule = rule;
+      }
       const page = await browser.newPage();
       try {
+        if (hostGuard) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await page.route("**/*", async (route: any) => {
+            let host: string;
+            try {
+              host = new URL(route.request().url()).hostname;
+            } catch {
+              return route.abort();
+            }
+            const reason = await hostGuard(host);
+            if (reason) return route.abort();
+            return route.continue();
+          });
+        }
         await page.goto(req.url, { timeout, waitUntil: "domcontentloaded" });
         const title = await page.title();
         const finalUrl = page.url();
