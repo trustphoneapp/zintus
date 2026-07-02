@@ -3,6 +3,7 @@ import {
   Alert,
   AppState,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -18,6 +19,7 @@ import type { ListRenderItem } from "react-native";
 import {
   PROVIDER_IDS,
   textOf,
+  type ImageContentBlock,
   type ProviderId,
   type ResponseFormat,
 } from "@zintus/types";
@@ -25,6 +27,17 @@ import { PROVIDER_METADATA } from "@zintus/providers";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 
 import { ChatMessageBubble } from "@/components/ChatMessageBubble";
+import {
+  buildImageMessageContent,
+  formatImageBytes,
+  imageSlotsRemaining,
+  providerCanSeeImages,
+} from "@/lib/image-attachments";
+import {
+  captureImageFromCamera,
+  pickImagesFromLibrary,
+} from "@/lib/image-picker";
+import { startDictation, type SpeechSession } from "@/lib/speech";
 import { ArtifactsModal } from "@/components/ArtifactsModal";
 import { streamChat, type ChatMcpConfig } from "@/lib/chat";
 import { getGatewayUrl } from "@/lib/gateway-url";
@@ -150,6 +163,9 @@ export default function ChatScreen() {
   );
   const [privateExplainVisible, setPrivateExplainVisible] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [images, setImages] = useState<ImageContentBlock[]>([]);
+  const [listening, setListening] = useState(false);
+  const speechRef = useRef<SpeechSession | null>(null);
   const [routeOptions, setRouteOptions] = useState<
     Record<string, RouteOptions | null>
   >({});
@@ -167,6 +183,7 @@ export default function ChatScreen() {
   const pendingSendRef = useRef<{
     composed: string;
     atts: Attachment[];
+    imgs: ImageContentBlock[];
     oneShot?: ProviderId;
   } | null>(null);
 
@@ -237,6 +254,7 @@ export default function ChatScreen() {
     setMessages([]);
     setInput("");
     setAttachments([]);
+    setImages([]);
     setError(null);
     router.setParams({ thread: "" });
   }
@@ -315,7 +333,12 @@ export default function ChatScreen() {
   }, []);
 
   const runTurn = useCallback(
-    async (text: string, oneShotProvider?: ProviderId, atts: Attachment[] = []) => {
+    async (
+      text: string,
+      oneShotProvider?: ProviderId,
+      atts: Attachment[] = [],
+      imgs: ImageContentBlock[] = [],
+    ) => {
       const config = loadConfig();
       const routing = deriveRouting(mode, config.routingStrategy);
       const effectiveProvider =
@@ -324,7 +347,7 @@ export default function ChatScreen() {
       // Ensure a local thread exists so the conversation persists.
       if (!threadIdRef.current) {
         const thread = await createThread({
-          title: text.slice(0, 48),
+          title: text.slice(0, 48) || (imgs.length ? "Image" : "Chat"),
           projectId: activeProject?.id ?? null,
           defaultProvider: effectiveProvider ?? null,
           strategy: routing.strategy ?? null,
@@ -334,25 +357,41 @@ export default function ChatScreen() {
       }
       const threadId = threadIdRef.current;
 
-      const userMessage = createUserMessage(text);
+      // A turn with images rides as a real multimodal ContentBlock[] (text +
+      // EXIF-stripped image blocks) — never an "[Image: name]" fake.
+      const userMessage = createUserMessage(
+        imgs.length ? buildImageMessageContent(text, imgs) : text,
+      );
       const placeholder = createAssistantPlaceholder();
       setMessages((current) => [...current, userMessage, placeholder]);
       setInput("");
       setSending(true);
       setError(null);
 
+      // History stores the TEXT + attachment/image METADATA only — never the
+      // image base64 bytes (keeps the on-device SQLite small; the bytes were a
+      // one-shot input to the model).
       void appendMessage({
         threadId,
         role: "user",
-        content: textOf(userMessage.content),
-        attachments: atts.length
-          ? atts.map((a) => ({
-              kind: "file" as const,
-              name: a.name,
-              mimeType: a.mimeType,
-              bytes: a.bytes,
-            }))
-          : null,
+        content: text,
+        attachments:
+          atts.length || imgs.length
+            ? [
+                ...atts.map((a) => ({
+                  kind: "file" as const,
+                  name: a.name,
+                  mimeType: a.mimeType,
+                  bytes: a.bytes,
+                })),
+                ...imgs.map((im, i) => ({
+                  kind: "file" as const,
+                  name: im.name ?? `image-${i + 1}.jpg`,
+                  mimeType: im.mimeType,
+                  bytes: im.bytes,
+                })),
+              ]
+            : null,
       });
 
       const controller = new AbortController();
@@ -572,22 +611,40 @@ export default function ChatScreen() {
   const send = useCallback(
     (oneShotProvider?: ProviderId) => {
       const text = input.trim();
-      if ((!text && attachments.length === 0) || sending || !gatewayOnline) {
+      if (
+        (!text && attachments.length === 0 && images.length === 0) ||
+        sending ||
+        !gatewayOnline
+      ) {
+        return;
+      }
+      // Capability guard: a concrete non-vision provider can't see images. Warn
+      // BEFORE burning a request the provider will 422 (auto routing is fine —
+      // the router picks a vision provider or the gateway returns a handled 422).
+      const targetProvider =
+        oneShotProvider ?? (provider === "auto" ? "auto" : provider);
+      if (images.length > 0 && !providerCanSeeImages(targetProvider)) {
+        Alert.alert(
+          "This provider can't see images",
+          `${targetProvider} has no vision model. Switch to Auto or a vision-capable provider (e.g. Gemini), or remove the image.`,
+        );
         return;
       }
       const composed = composeMessage(text, attachments);
       const atts = attachments;
+      const imgs = images;
       const routing = deriveRouting(mode, loadConfig().routingStrategy);
       // Apple 5.1.2(i): consent before sending to a third-party provider.
       if (routing.posture !== "local-only" && !hasProviderSendConsent()) {
-        pendingSendRef.current = { composed, atts, oneShot: oneShotProvider };
+        pendingSendRef.current = { composed, atts, imgs, oneShot: oneShotProvider };
         setConsentVisible(true);
         return;
       }
       setAttachments([]);
-      void runTurn(composed, oneShotProvider, atts);
+      setImages([]);
+      void runTurn(composed, oneShotProvider, atts, imgs);
     },
-    [input, attachments, sending, gatewayOnline, mode, runTurn],
+    [input, attachments, images, sending, gatewayOnline, mode, provider, runTurn],
   );
 
   function grantConsentAndSend() {
@@ -597,8 +654,36 @@ export default function ChatScreen() {
     pendingSendRef.current = null;
     if (pending) {
       setAttachments([]);
-      void runTurn(pending.composed, pending.oneShot, pending.atts);
+      setImages([]);
+      void runTurn(pending.composed, pending.oneShot, pending.atts, pending.imgs);
     }
+  }
+
+  async function addImage(source: "library" | "camera") {
+    const slots = imageSlotsRemaining(images.length);
+    if (slots <= 0) {
+      Alert.alert("Image limit", "You can attach up to 4 images per message.");
+      return;
+    }
+    const result =
+      source === "camera"
+        ? await captureImageFromCamera(slots)
+        : await pickImagesFromLibrary(slots);
+    if (!result.ok) {
+      Alert.alert("Couldn't add image", result.reason);
+      return;
+    }
+    if (result.blocks.length > 0) {
+      setImages((prev) => [...prev, ...result.blocks].slice(0, 4));
+    }
+  }
+
+  function promptAddImage() {
+    Alert.alert("Add image", "Send a photo to a vision-capable model.", [
+      { text: "Photo Library", onPress: () => void addImage("library") },
+      { text: "Take Photo", onPress: () => void addImage("camera") },
+      { text: "Cancel", style: "cancel" },
+    ]);
   }
 
   async function addAttachment() {
@@ -607,7 +692,7 @@ export default function ChatScreen() {
     if (att.unsupported) {
       Alert.alert(
         "Can't read this file on-device",
-        `${att.name} isn't a text format Zintus can extract here (PDFs and images aren't supported yet). Text files — txt, md, csv, json, code — work.`,
+        `${att.name} isn't a text format Zintus can extract here (PDFs aren't supported yet). For photos, use the 🖼 image button. Text files — txt, md, csv, json, code — work here.`,
       );
       return;
     }
@@ -664,15 +749,35 @@ export default function ChatScreen() {
     );
   }, []);
 
-  const voiceUnavailable = useCallback(() => {
-    // Spec-required "unavailable fallback" for voice dictation. Dictation needs
-    // on-device speech recognition (expo-speech-recognition) in a dev/preview
-    // build; until then we degrade gracefully and never auto-send anything.
-    Alert.alert(
-      "Voice dictation",
-      "On-device dictation isn't enabled in this build yet. Add expo-speech-recognition to a dev/preview build to turn it on. For now, type your message — Zintus never auto-sends a voice transcript.",
-    );
-  }, []);
+  // Voice dictation: uses on-device speech recognition WHEN the native module
+  // is present (dev/preview build), else shows the honest fallback. It only
+  // fills the composer — Zintus NEVER auto-sends a transcript.
+  const toggleDictation = useCallback(async () => {
+    if (listening) {
+      speechRef.current?.stop();
+      speechRef.current = null;
+      setListening(false);
+      return;
+    }
+    const session = await startDictation({
+      onTranscript: (t) => setInput(t),
+      onError: (msg) => {
+        setListening(false);
+        speechRef.current = null;
+        Alert.alert("Dictation error", msg);
+      },
+      onEnd: () => {
+        setListening(false);
+        speechRef.current = null;
+      },
+    });
+    if ("unavailable" in session) {
+      Alert.alert("Voice dictation", session.unavailable);
+      return;
+    }
+    speechRef.current = session;
+    setListening(true);
+  }, [listening]);
 
   const openArtifactsViewer = useCallback(() => {
     setOpenArtifacts(conversationArtifacts(messages));
@@ -726,7 +831,7 @@ export default function ChatScreen() {
   const keyExtractor = useCallback((item: UiMessage) => item.id, []);
   const modeDef = CHAT_MODES.find((m) => m.mode === mode)!;
   const canSend =
-    (Boolean(input.trim()) || attachments.length > 0) &&
+    (Boolean(input.trim()) || attachments.length > 0 || images.length > 0) &&
     !sending &&
     gatewayOnline;
 
@@ -912,6 +1017,30 @@ export default function ChatScreen() {
             </Text>
           </View>
         ) : null}
+        {images.length > 0 ? (
+          <View style={styles.imageStrip}>
+            {images.map((img, i) => (
+              <View key={`${i}-${img.bytes}`} style={styles.imageThumbWrap}>
+                <Image
+                  source={{ uri: `data:${img.mimeType};base64,${img.data}` }}
+                  style={styles.imageThumb}
+                />
+                <Pressable
+                  hitSlop={6}
+                  onPress={() =>
+                    setImages((prev) => prev.filter((_, idx) => idx !== i))
+                  }
+                  style={styles.imageRemove}
+                >
+                  <Text style={styles.imageRemoveText}>×</Text>
+                </Pressable>
+                <Text style={styles.imageSize} numberOfLines={1}>
+                  {formatImageBytes(img.bytes)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : null}
         <View style={styles.composerTopRow}>
           <Pressable
             hitSlop={6}
@@ -922,10 +1051,21 @@ export default function ChatScreen() {
           </Pressable>
           <Pressable
             hitSlop={6}
-            onPress={voiceUnavailable}
+            onPress={promptAddImage}
             style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
           >
-            <Text style={styles.iconBtnText}>🎤</Text>
+            <Text style={styles.iconBtnText}>🖼</Text>
+          </Pressable>
+          <Pressable
+            hitSlop={6}
+            onPress={() => void toggleDictation()}
+            style={({ pressed }) => [
+              styles.iconBtn,
+              listening && styles.iconBtnActive,
+              pressed && styles.pressed,
+            ]}
+          >
+            <Text style={styles.iconBtnText}>{listening ? "⏹" : "🎤"}</Text>
           </Pressable>
           <TextInput
             style={styles.input}
@@ -1166,6 +1306,31 @@ const styles = StyleSheet.create({
   attachName: { color: COLORS.ink, fontSize: 12, flexShrink: 1 },
   attachRemove: { color: COLORS.muted, fontSize: 16, fontWeight: "800" },
   attachNotice: { color: COLORS.muted, fontSize: 11, lineHeight: 15 },
+  imageStrip: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  imageThumbWrap: { position: "relative" },
+  imageThumb: {
+    width: 64,
+    height: 64,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.panel,
+  },
+  imageRemove: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.surface,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  imageRemoveText: { color: COLORS.ink, fontSize: 13, fontWeight: "800", lineHeight: 15 },
+  imageSize: { color: COLORS.muted, fontSize: 9, textAlign: "center", marginTop: 2 },
   composerTopRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
   composerBottomRow: {
     flexDirection: "row",
@@ -1183,6 +1348,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
+  iconBtnActive: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
   iconBtnText: { color: COLORS.accentBright, fontSize: 18 },
   input: {
     flex: 1,

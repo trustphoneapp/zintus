@@ -63,6 +63,23 @@ store-shaped**; what remains is EAS builds + accounts + device verification
    prompts go device → your gateway → the provider you chose. The iOS privacy
    manifest already encodes this; keep the App Privacy answers consistent.
 
+## Enabling real voice dictation (optional dev step)
+
+The mic button uses `expo-speech-recognition` when it's present in a dev/preview
+build; otherwise it shows an honest "unavailable" fallback (it is NOT a hard
+dependency because it can't be verified on a simulator/CI). To turn it on:
+
+```bash
+cd apps/mobile
+npx expo install expo-speech-recognition
+```
+Then in `app.json`: remove `android.permission.RECORD_AUDIO` from
+`blockedPermissions`, add it to `permissions`, and add the iOS
+`NSMicrophoneUsageDescription` + `NSSpeechRecognitionUsageDescription` purpose
+strings. Rebuild — the mic button will dictate into the composer (it never
+auto-sends a transcript). No app code changes needed; `lib/speech.ts` already
+guards the integration.
+
 ## Known non-blocker
 
 `expo-doctor` reports **20/21** — the one failure is bun's isolated-store

@@ -3,6 +3,21 @@
 Branch `feat/mobile-serious-app` (merged to main). Tracks the upgrade from basic
 text chat to a serious cross-platform (Android + iOS) AI app.
 
+## Image + voice input (2026-07-02) — closing the two "serious" gaps
+- **Image input SHIPPED** (was deferred): `expo-image-picker` +
+  `expo-image-manipulator` → pick from library OR camera → resize (≤2048
+  longest edge) + JPEG re-encode (real EXIF strip) → honest
+  `ImageContentBlock`s (max 4/turn). Capability-guarded: warns before sending
+  to a non-vision provider; the gateway/router still hard-errors otherwise.
+  Thumbnails in the composer + the user's bubble; history stores metadata only
+  (no base64 bloat). Pure logic unit-tested (`lib/image-attachments.test.ts`).
+  iOS purpose strings + Android CAMERA permission added; READ_MEDIA_IMAGES
+  unblocked (system photo picker needs none, but kept for older devices).
+- **Voice dictation REAL when enabled**: `lib/speech.ts` guard-loads
+  `expo-speech-recognition` (not a hard dep — can't verify on a simulator).
+  Present in a dev build → the mic button dictates into the composer (never
+  auto-sends); absent → the honest fallback. Enable step in STORE-SUBMISSION.
+
 ## Store-readiness pass (2026-07-02) — see `STORE-SUBMISSION.md`
 - **Real branded app icon** (was a blank purple square → guaranteed rejection):
   regenerated iOS `icon.png`/`adaptive-icon.png` as the purple-gradient +

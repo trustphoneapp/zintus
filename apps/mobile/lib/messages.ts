@@ -1,5 +1,6 @@
-import { textOf, type ChatMessage } from "@zintus/types";
+import { isContentBlockArray, textOf, type ChatMessage } from "@zintus/types";
 import type {
+  ContentBlock,
   ContextMode,
   ProviderId,
   ResponseFormat,
@@ -109,11 +110,13 @@ export interface UiMessage extends ChatMessage {
   mcpEvents?: McpToolEvent[];
 }
 
-export function createUserMessage(content: string): UiMessage {
+export function createUserMessage(content: string | ContentBlock[]): UiMessage {
   return {
     id: `${Date.now()}-user`,
     role: "user",
-    content: content.trim(),
+    // A multimodal turn (text + image blocks) is passed through as-is; a plain
+    // string turn is trimmed as before.
+    content: typeof content === "string" ? content.trim() : content,
   };
 }
 
@@ -128,7 +131,13 @@ export function createAssistantPlaceholder(): UiMessage {
 
 export function toChatMessages(messages: UiMessage[]): ChatMessage[] {
   return messages
-    .filter((message) => textOf(message.content).trim().length > 0)
+    .filter(
+      (message) =>
+        // Keep any turn with visible text OR any content blocks (an image-only
+        // turn has no text but must still be sent).
+        textOf(message.content).trim().length > 0 ||
+        (isContentBlockArray(message.content) && message.content.length > 0),
+    )
     .map(({ role, content }) => ({ role, content }));
 }
 

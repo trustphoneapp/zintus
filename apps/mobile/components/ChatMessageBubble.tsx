@@ -1,6 +1,7 @@
 import { memo } from "react";
 import {
   ActivityIndicator,
+  Image,
   Platform,
   Pressable,
   StyleSheet,
@@ -8,7 +9,7 @@ import {
   View,
 } from "react-native";
 
-import { textOf } from "@zintus/types";
+import { isContentBlockArray, textOf } from "@zintus/types";
 
 import { Markdown } from "@/components/Markdown";
 import { ResponseFooter } from "@/components/ResponseFooter";
@@ -112,6 +113,13 @@ function ChatMessageBubbleImpl({
   // Multimodal-safe text view of the turn (content may be ContentBlock[]).
   const text = textOf(message.content);
   const hasContent = text.trim().length > 0;
+  // Image blocks the user attached to this turn — shown as thumbnails so their
+  // own bubble reflects what they sent (the base64 lives only in memory).
+  const imageBlocks = isContentBlockArray(message.content)
+    ? message.content.filter(
+        (b): b is Extract<typeof b, { type: "image" }> => b.type === "image",
+      )
+    : [];
   // The headline "why this provider/model" — the prominent route reason from
   // the gateway's metadata frame. Mirrors web/desktop's top-line pill.
   const routeReason = !isUser ? message.meta?.routeReason : undefined;
@@ -128,6 +136,18 @@ function ChatMessageBubbleImpl({
         <Text style={styles.routeReason} numberOfLines={2}>
           {routeReason}
         </Text>
+      ) : null}
+
+      {imageBlocks.length > 0 ? (
+        <View style={styles.imageRow}>
+          {imageBlocks.map((img, i) => (
+            <Image
+              key={`${i}-${img.bytes}`}
+              source={{ uri: `data:${img.mimeType};base64,${img.data}` }}
+              style={styles.image}
+            />
+          ))}
+        </View>
       ) : null}
 
       {message.streaming && !hasContent ? (
@@ -280,6 +300,13 @@ const styles = StyleSheet.create({
   assistantBubble: { alignSelf: "flex-start", backgroundColor: COLORS.panel },
   userText: { color: COLORS.onAccent, fontSize: 15, lineHeight: 21 },
   streamingText: { color: COLORS.ink, fontSize: 15, lineHeight: 22 },
+  imageRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 },
+  image: {
+    width: 140,
+    height: 140,
+    borderRadius: 10,
+    backgroundColor: "rgba(0,0,0,0.15)",
+  },
   cursor: { color: COLORS.accentBright },
   typingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   typingText: { color: COLORS.muted, fontSize: 13 },
