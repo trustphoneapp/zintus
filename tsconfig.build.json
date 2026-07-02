@@ -17,6 +17,7 @@
     { "path": "./packages/engine" },
     { "path": "./packages/tokzen" },
     { "path": "./packages/agent" },
+    { "path": "./packages/scaffold" },
     { "path": "./apps/cli" },
     { "path": "./apps/gateway" },
     { "path": "./packages/test-utils" },

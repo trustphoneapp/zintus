@@ -15,7 +15,8 @@
     { "path": "../../packages/router" },
     { "path": "../../packages/engine" },
     { "path": "../../packages/memory" },
-    { "path": "../../packages/codebase-indexer" },
-    { "path": "../../packages/tokzen" }
+    { "path": "../../packages/agent" },
+    { "path": "../../packages/scaffold" },
+    { "path": "../../packages/mcp" }
   ]
 }

@@ -271,6 +271,37 @@ program
   );
 
 program
+  .command("scaffold")
+  .description("Scaffold a deploy-ready starter project (next-site | worker-api | expo-app)")
+  .argument("<template>", "Template id: next-site, worker-api, or expo-app")
+  .argument("<name>", "Project name (kebab-case)")
+  .option("--dir <dir>", "Parent directory to create the project in (default: current dir)")
+  .option("--deploy <target>", "Emit deploy config: cloudflare | vercel | fly | none", "none")
+  .action(
+    async (
+      template: string,
+      name: string,
+      options: { dir?: string; deploy?: string },
+    ) => {
+      const { scaffold } = await import("@zintus/scaffold");
+      const deploy = (options.deploy ?? "none") as
+        | "cloudflare"
+        | "vercel"
+        | "fly"
+        | "none";
+      const res = scaffold({
+        templateId: template,
+        name,
+        parentDir: options.dir ?? process.cwd(),
+        deploy,
+      });
+      console.error(`✅ Scaffolded ${res.files.length} file(s) into ${res.targetDir}`);
+      for (const f of res.files) console.error(`   ${f}`);
+      console.error("\nNext: cd into it, `npm install`, then run/deploy per the README.");
+    },
+  );
+
+program
   .command("status")
   .description("Live dashboard of providers and quota usage")
   .action(async () => {
