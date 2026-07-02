@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type CSSProperties } from "react";
+import { useRouter } from "next/navigation";
 import { QuotaBar } from "@/app/_components/QuotaBar";
 import { Icon } from "@/app/_components/Icons";
 import { RouteAdvisor } from "./RouteAdvisor";
@@ -273,8 +274,17 @@ interface ProviderStat {
 }
 
 export default function ProvidersPage() {
+  const router = useRouter();
   const { gatewayConnected, gatewayHealthLoaded, gatewayProviders } =
     useAppStore();
+  const setSelectedProvider = useAppStore((s) => s.setSelectedProvider);
+
+  // One-tap local runtime (#22): make the RUNNING runtime the chat provider
+  // and jump straight into a conversation with it.
+  const useInChat = (id: ProviderId) => {
+    setSelectedProvider(id);
+    router.push("/chat");
+  };
   const {
     providers,
     keys,
@@ -693,6 +703,16 @@ export default function ProvidersPage() {
                                     : "—"}
                               </span>
                             </div>
+                            {provider.status.key === "local-running" ? (
+                              <div className="actions">
+                                <button
+                                  type="button"
+                                  onClick={() => useInChat(provider.id)}
+                                >
+                                  Use in chat (on-device)
+                                </button>
+                              </div>
+                            ) : null}
                             {provider.status.key === "local-stopped" ? (
                               <p className="vault-hint" style={{ marginTop: 8 }}>
                                 {localStartHint(provider.id)}

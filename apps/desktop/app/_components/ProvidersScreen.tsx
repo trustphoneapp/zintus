@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
 import { deleteKey, getKey, isTauri, setKey } from "@/lib/tauri";
@@ -13,7 +14,9 @@ import { QuotaBar } from "./QuotaBar";
 import { RouteOptionsPanel } from "./RouteOptionsPanel";
 
 export default function ProvidersScreen() {
-  const { providers, statusMessage, refresh, setStatusMessage } = useProviderStatusStore();
+  const router = useRouter();
+  const { providers, statusMessage, refresh, setStatusMessage, setSelectedProvider } =
+    useProviderStatusStore();
   const [selected, setSelected] = useState<ProviderId>("groq");
   const [keyInput, setKeyInput] = useState("");
   const [testing, setTesting] = useState<string | null>(null);
@@ -232,6 +235,19 @@ export default function ProvidersScreen() {
                   </Button>
                 </div>
               )}
+              {(provider.id === "ollama" || provider.id === "lmstudio") &&
+                provider.enabled && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedProvider(provider.id);
+                      router.push("/chat");
+                    }}
+                  >
+                    Use in chat (on-device)
+                  </Button>
+                )}
               {showRouteOptions && (
                 <RouteOptionsPanel
                   provider={provider.id}
