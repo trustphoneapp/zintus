@@ -134,7 +134,7 @@ line below was true at audit time but is now stale; the corrected picture:
 >   before mobile had them — corrected.)
 > - **Image input** is now on **mobile ✅** too (camera + library, EXIF-stripped).
 
-- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ✅ (built-in tools) · Mobile ❌**.
+- **Tool / function calling** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (built-in tools) · Desktop ✅ (built-in tools) · Mobile ✅ (built-in tools, Tools toggle)**.
   Provider streaming (`packages/providers/src/utils.ts`), Gemini round-trip, and
   gateway 422-on-unsupported are tested; the CLI `--tools` loader
   (`apps/cli/src/commands/chat.ts`) is hardened (rejects null/array `parameters`).
@@ -150,8 +150,9 @@ line below was true at audit time but is now stale; the corrected picture:
   parity:** the same built-in tools + Tools toggle + bounded execute→feed-back loop
   landed in `apps/desktop/app/_components/ChatPanel.tsx` (`apps/desktop/lib/web-tools.ts`,
   unit-tested), with tool-call cards in the desktop `MessageBubble`. Same BUILT-IN-only
-  caveat as web. **Mobile has no tool UI (❌).**
-- **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web ❌ (no request UI yet) · Desktop ✅ (JSON toggle, Phase 7) · Mobile ❌**. NOTE the inversion: desktop has a request toggle but web chat does not yet — a known consistency gap (10/10 verdict).
+  caveat as web. **Mobile has the SAME built-in tools + Tools toggle (✅)** — the
+  merged serious-app closed this; same built-in-only caveat.
+- **Structured / JSON output** — per surface: **CLI ✅ · gateway API ✅ · Web ✅ (`StructuredOutputControl`) · Desktop ✅ (JSON toggle) · Mobile ✅ (JSON mode)**. (Historical note: web briefly lagged behind desktop's toggle — that inversion is closed; all GUIs now expose a JSON request control.)
   Engine validate→repair + gateway strict-422 tested. Conservative: only Gemini is
   `json_schema` (close to guaranteed-shape); all others are `json_object` /
   prompt-level, which is **best-effort, not guaranteed** JSON. **CLI now sends a
@@ -164,15 +165,18 @@ line below was true at audit time but is now stale; the corrected picture:
   *output-formatting* flags on other subcommands. Same honesty caveat: only
   **Gemini** guarantees `json_schema`; other providers degrade to best-effort
   `json_object`/prompt coercion, validated locally. Unit-tested in
-  `apps/cli/src/commands/chat-content.test.ts`. **Web has no structured-output UI
-  (❌):** the shared `streamGatewayChat` lib *can* carry a `response_format`, but
-  no web chat surface requests one or renders parsed JSON (verified: no
-  `response_format` in `apps/web/app/**`), so there is nothing a user can drive —
-  library plumbing only. **Mobile has no JSON UI (❌)**.
-- **Multimodal image input** — proven on **web + CLI + desktop** (Phase 7;
-  EXIF-stripped image blocks to a vision-capable model, hard-error rather than silent
-  text-only fallback), and now also **maps to OpenRouter vision models**. **Mobile
-  image UI is still absent (❌)** — the [HUMAN]/device track.
+  `apps/cli/src/commands/chat-content.test.ts`. **Web has a structured-output UI
+  (✅):** `StructuredOutputControl` (`apps/web/app/_components/StructuredOutputControl.tsx`)
+  is wired into `chat/page.tsx` — the user drives a `response_format` request and
+  parsed JSON renders. (The earlier "no request UI / library plumbing only" note
+  is stale — superseded.) **Mobile has a JSON mode (✅)** via the composer toggle
+  (`response_format` in `apps/mobile/lib/messages.ts`).
+- **Multimodal image input** — on **web + CLI + desktop + mobile** (Phase 7 +
+  mobile 2026-07-02; EXIF-stripped image blocks to a vision-capable model,
+  hard-error rather than silent text-only fallback), and also **maps to
+  OpenRouter vision models**. Mobile uses camera + photo library
+  (`expo-image-picker`/`-manipulator`); a keyed device run is the remaining
+  [HUMAN]/device verification (code + tests green).
 - **CSP nonce** — relanded in `apps/web/proxy.ts` (per-request nonce, dev-only
   `'unsafe-eval'` now fail-closed on `NODE_ENV === "development"`, Report-Only
   toggle). **NOT yet browser-verified** — the in-browser check against
