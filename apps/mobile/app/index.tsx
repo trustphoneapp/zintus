@@ -852,6 +852,9 @@ export default function ChatScreen() {
           <Pressable hitSlop={6} onPress={() => router.push("/projects")}>
             <Text style={styles.headerLink}>Projects</Text>
           </Pressable>
+          <Pressable hitSlop={6} onPress={() => router.push("/agent")}>
+            <Text style={styles.headerLink}>Agent</Text>
+          </Pressable>
           <Pressable hitSlop={6} onPress={togglePrivate}>
             <Text style={[styles.headerLink, privateMode && styles.shieldOn]}>
               {privateMode ? "🛡 Private" : "🛡"}

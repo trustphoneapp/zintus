@@ -11,6 +11,7 @@ import { Tooltip } from "./ui/tooltip";
 
 const NAV = [
   { href: "/chat", label: "Chat" },
+  { href: "/agent", label: "Agent" },
   { href: "/research", label: "Research" },
   { href: "/projects", label: "Projects" },
   { href: "/terminal", label: "Terminal" },

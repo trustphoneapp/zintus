@@ -158,6 +158,7 @@ export default function RootLayout() {
         <Tabs.Screen name="onboarding" options={{ href: null, headerShown: false }} />
         <Tabs.Screen name="history" options={{ href: null, title: "History" }} />
         <Tabs.Screen name="projects" options={{ href: null, title: "Projects" }} />
+        <Tabs.Screen name="agent" options={{ href: null, headerShown: false }} />
       </Tabs>
     </GestureHandlerRootView>
   );

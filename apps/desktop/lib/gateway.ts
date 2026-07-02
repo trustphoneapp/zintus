@@ -22,7 +22,7 @@ const DEFAULT_GATEWAY_URL = "http://localhost:8788";
 const ENV_GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL?.trim() || null;
 const GATEWAY_TOKEN = process.env.NEXT_PUBLIC_GATEWAY_TOKEN?.trim() || "";
 
-function gatewayAuthHeaders(): Record<string, string> {
+export function gatewayAuthHeaders(): Record<string, string> {
   return GATEWAY_TOKEN ? { Authorization: `Bearer ${GATEWAY_TOKEN}` } : {};
 }
 
