@@ -77,9 +77,12 @@ added (the workflow lists the exact names) or it just skips every provider.
   Playwright the tool is honestly absent (by design) — no action needed if you
   don't want it. **SSRF-hardened** (2026-07-02): the tool blocks
   private/loopback/link-local/cloud-metadata hosts by default; set
-  `browseAllowPrivate: true` per task to reach internal targets. Residual: DNS
-  rebinding (a public name resolving to a private IP) needs resolve-then-pin in
-  the driver — noted in `browser-tool.ts`, add before exposing browse publicly.
+  `browseAllowPrivate: true` per task to reach internal targets. The DNS-
+  rebinding residual is CLOSED (2026-07-02): resolve-then-pin (every A/AAAA
+  record vetted, fail-closed, vetted IP pinned via Chromium host-resolver-rules)
+  + a per-request route guard covering redirects/subresources. Remaining
+  accepted residual (documented in `browser-tool.ts`): a redirect target's
+  guard lookup and Chromium's connect are two DNS queries.
 - **Web Agent toggles** (2026-07-02): the `/agent` page now exposes Docker
   sandbox + browser-tool toggles (sandbox gated on "allow verify commands").
   They only take effect if Docker/Playwright are installed on the host.

@@ -37,20 +37,20 @@ Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupporte
 | 9 | response intelligence footer | ✅ | ✅ | ✅ | 🟡 | desktop now parses the `metadata` SSE frame (latency/saved-vs-Claude/out-tokens/strategy) + compression badge; route-options live in a side panel. CLI partial |
 | 10 | compression % | ✅ | ✅ | ✅ | 🟡 | `X-Zintus-*` headers everywhere |
 | 11 | tokens saved | ✅ | ✅ | 🟡 | 🟡 | |
-| 12 | cost saved estimate | ✅ | 🟡 | ❌ | ❌ | mobile surfaces saved-vs-Claude; others partial |
+| 12 | cost saved estimate | ✅ | ✅ | ✅ | ✅ | one shared $3/$15-per-MTok Sonnet anchor: mobile footer; web MessageBubble % + thread-header sum; desktop response-meta strip ("vs Claude Sonnet"); CLI turn summary (`savedVsClaudeSonnetUsd`, 2026-07-02) |
 | 13 | quota remaining | ✅ | ✅ | ✅ | ✅ | `QuotaBar` / `status` |
-| 14 | route-options actions | ✅ | ✅ | ✅ | ❌ | `RouteOptionsPanel` on web+desktop; not in CLI |
-| 15 | Deep Research | ✅ | ✅ | ✅ | 🟡 | CLI `zintus research <q>` rebuilds the engine deps in-process (`--depth`,`--json`); a brutal audit confirmed the deps are line-by-line faithful to the gateway (+ bundle), but it's **never been executed** (key-gated) — 🟡 until one keyed run. No idle watchdog yet (stalled upstream → Ctrl-C) |
+| 14 | route-options actions | ✅ | ✅ | ✅ | ✅ | `RouteOptionsPanel` on web+desktop; CLI `zintus route-options <provider> [--json]` (2026-07-02) calls the SAME `computeRouteOptions` the gateway route uses (extracted, not forked) |
+| 15 | Deep Research | ✅ | ✅ | ✅ | 🟡 | CLI `zintus research <q>` rebuilds the engine deps in-process (`--depth`,`--json`); a brutal audit confirmed the deps are line-by-line faithful to the gateway (+ bundle), but it's **never been executed** (key-gated) — 🟡 until one keyed run. Idle watchdog added 2026-07-02 (`withIdleTimeout`, 2-min silence → honest "stalled" abort) |
 | 16 | history | ✅ | ✅ | ✅ | ✅ | web threads/sidebar; **desktop now full (2026-07-02)** — persisted threads + sidebar History list with switch/**rename** (inline)/​**delete** (confirm); CLI `history` |
 | 17 | projects / workspaces | ✅ | ✅ | ✅ | ✅ | all 4; CLI `projects list/create/use/clear/delete` (CRUD live-verified) + `chat` injects the active project's instructions + default provider |
 | 18 | Private Mode | ✅ | ✅ | ✅ | 🟡 | desktop toggle → settings.blockTrainingProviders → gateway block_training |
 | 19 | provider key management | ✅ | ✅ | ✅ | ✅ | web `LocalKeyManager`, CLI `keys`, and desktop all work. **RESOLVED on `feat/zintus-10-10`**: desktop frontend (`lib/tauri.ts:38,52,61`) now calls the shipped Rust `keyring_*` cmds via `invoke()` (registered in `src-tauri/src/lib.rs:68-71`), and the Rust service name is unified to `"zintus"` (`lib.rs:12`) matching the gateway/CLI (`packages/keychain/src/storage.ts`), so desktop-entered keys are visible to the chat path. Covered by `apps/desktop/lib/tauri.test.ts`. See Audit corrections. |
-| 20 | provider key test | ✅ | 🟡 | 🟡 | ✅ | mobile explicit Test; CLI now has `zintus keys test <provider>`; web/desktop validate-on-save only |
-| 21 | local runtime display | ✅ | 🟡 | ✅ | 🟡 | desktop `ProviderRail`; web partial |
-| 22 | one-tap local runtime | ✅ | ❌ | ❌ | 🚫 | CLI = `--provider ollama` |
+| 20 | provider key test | ✅ | ✅ | ✅ | ✅ | mobile explicit Test; CLI `zintus keys test`; web per-key "Test this key" in KeyManager (row was stale); desktop "Test key" on form + keyed cards via new gateway `POST /v1/keys/validate` (2026-07-02) — 502 unreachable is never conflated with rejection |
+| 21 | local runtime display | ✅ | ✅ | ✅ | 🟡 | desktop `ProviderRail`; web providers page derives honest local-running/stopped/unknown (+ start hints) — "partial" was stale; CLI shows key/cooldown only |
+| 22 | one-tap local runtime | ✅ | ✅ | ✅ | 🚫 | web+desktop "Use in chat (on-device)" on a RUNNING local runtime (2026-07-02), mobile parity; CLI = `--provider ollama` |
 | 23 | file input | ✅ | ✅ | ✅ | 🟡 | mobile+web+desktop on-device text extraction (images refused honestly — no multimodal path); CLI partial |
 | 24 | image input | 🟡 | 🟡 | ✅ | 🟡 | **shipped** web + CLI + **desktop** + **mobile** (mobile 2026-07-02): picker/camera → real **EXIF-stripped** image blocks to a **vision-capable** model. Router hard-errors (`unsupported_capability` + provider suggestions) when none is available — **never** a silent text-only fallback or `[Image:]` fake. Image bytes never touch the relay and are never logged. Mobile: `expo-image-picker` + `expo-image-manipulator` (resize ≤2048 + JPEG re-encode strips EXIF), max 4/turn, capability-guarded (warns before sending to a non-vision provider), thumbnails in composer + bubble; history stores metadata only (no base64). **🟡 = code + tests + typecheck green, [HUMAN] keyed device run pending.** See `docs/multimodal-image-input.md` |
-| 25 | voice input | 🟡 | ❌ | ❌ | 🚫 | mobile: real on-device dictation via a GUARDED `expo-speech-recognition` load (2026-07-02) — mic button dictates into the composer (never auto-sends) when the native module is present in a dev/preview build, else the honest "unavailable" fallback. Enabling = one `expo install` + unblock RECORD_AUDIO + purpose strings (dev step). |
+| 25 | voice input | 🟡 | ✅ | 🚫 | 🚫 | mobile: real on-device dictation via a GUARDED `expo-speech-recognition` load (2026-07-02) — mic button dictates into the composer (never auto-sends) when the native module is present in a dev/preview build, else the honest "unavailable" fallback. Enabling = one `expo install` + unblock RECORD_AUDIO + purpose strings (dev step). Web ✅ (was stale ❌): `useSpeechRecognition` mic fills the composer, browser-dependent (Chrome yes / Firefox no), honest disabled state, audio never touches gateway/relay. Desktop 🚫: the Tauri webview (WKWebView/WebView2) has no Web Speech API — a mic would be a permanently dead control; native STT would be a Rust-side feature. |
 | 26 | consent gate (pre-send) | ✅ | ✅ | ✅ | ❌ | mobile + desktop + web gate the first provider send; CLI n/a |
 | 27 | report AI response | ✅ | ✅ | ✅ | ❌ | web + desktop have the Gen-AI flag control (web `MessageBubble` "Report" → on-device `zintus:reported-responses.v1`, parity with desktop); CLI n/a |
 | 28 | account / session / cloud remote | ✅ | ✅ | 🟡 | ✅ | web login/session; CLI `cloud`+`remote` |
@@ -260,7 +260,8 @@ leaks no raw key — but caught a P1 + P2, both fixed:
   else falls back to auto with a warning.
 - Honesty: CLI `research` (#15) downgraded ✅→🟡 — faithful but never run.
 - Known: research has no idle-watchdog/abort yet (gateway does) — a stalled
-  upstream hangs until Ctrl-C.
+  upstream hangs until Ctrl-C. **RESOLVED 2026-07-02** — `withIdleTimeout`
+  aborts after 2 min of silence with an honest "stalled" error.
 
 ## Hard-rule audit (this branch)
 
