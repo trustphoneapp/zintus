@@ -30,6 +30,7 @@ const SECTIONS: Array<{
       { href: "/compare", icon: "compare", label: "Compare" },
       { href: "/projects", icon: "layers", label: "Projects" },
       { href: "/research", icon: "globe", label: "Research" },
+      { href: "/agent", icon: "terminal", label: "Agent" },
       { href: "/terminal", icon: "terminal", label: "Terminal" },
     ],
   },

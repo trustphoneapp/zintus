@@ -20,7 +20,7 @@ import {
   isMcpAgentTool,
   selectAgentMcpServers,
 } from "./agent-mcp.js";
-import type { StoredMcpServer } from "./mcp-config.js";
+import type { StoredMcpServer } from "./agent-mcp.js";
 import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";

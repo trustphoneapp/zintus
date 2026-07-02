@@ -16,6 +16,7 @@
     { "path": "./packages/context-compiler" },
     { "path": "./packages/engine" },
     { "path": "./packages/tokzen" },
+    { "path": "./packages/agent" },
     { "path": "./apps/cli" },
     { "path": "./apps/gateway" },
     { "path": "./packages/test-utils" },

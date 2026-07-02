@@ -184,6 +184,108 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/agents:
+    post:
+      tags: [Agents]
+      operationId: createAgentTask
+      summary: Start a sandboxed coding-agent task on the gateway host
+      description: |
+        Runs the hardened @zintus/agent loop (the same one `zintus agent`
+        uses) on the gateway machine, confined to a sandbox root. Every file
+        write / allowlisted command pauses as an `approval_required` event
+        until resolved via the approvals endpoint, unless `autoApprove` is
+        sent explicitly. Progress streams from `/v1/agents/{id}/events`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task]
+              properties:
+                task: { type: string }
+                root:
+                  type: string
+                  description: Sandbox root on the gateway host (default ZINTUS_WORKSPACE or cwd).
+                maxRounds: { type: integer }
+                autoApprove: { type: boolean }
+                allowRun: { type: boolean }
+                strategy: { type: string }
+                mode: { type: string }
+      responses:
+        "201":
+          description: Task created and started.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string }
+        "400": { description: Missing/invalid task or sandbox root. }
+    get:
+      tags: [Agents]
+      operationId: listAgentTasks
+      summary: List agent tasks (this gateway process)
+      responses:
+        "200": { description: Task summaries. }
+  /v1/agents/{id}:
+    get:
+      tags: [Agents]
+      operationId: getAgentTask
+      summary: One agent task's summary (status, rounds, pending approvals)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Task summary. }
+        "404": { description: Unknown task id. }
+  /v1/agents/{id}/events:
+    get:
+      tags: [Agents]
+      operationId: streamAgentEvents
+      summary: SSE event stream (full backlog replay, then live)
+      description: |
+        Events: `started`, `routed`, `text`, `turn_end`, `tool_call`,
+        `tool_result`, `approval_required`, `approval_resolved`, `done`,
+        `stopped`, `error`. Terminates with `data: [DONE]`.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: SSE stream of agent events.
+          content:
+            text/event-stream: {}
+        "404": { description: Unknown task id. }
+  /v1/agents/{id}/approvals:
+    post:
+      tags: [Agents]
+      operationId: resolveAgentApproval
+      summary: Approve or decline a pending write/run gate
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approval_id, approved]
+              properties:
+                approval_id: { type: string }
+                approved: { type: boolean }
+      responses:
+        "200": { description: Approval resolved. }
+        "404": { description: No such pending approval. }
+  /v1/agents/{id}/stop:
+    post:
+      tags: [Agents]
+      operationId: stopAgentTask
+      summary: Stop a running task (pending gates are declined; fail closed)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Stop requested. }
+        "404": { description: Unknown task id. }
+
   /v1/research:
     post:
       tags: [Research]

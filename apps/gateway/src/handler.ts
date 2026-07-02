@@ -40,6 +40,11 @@ import {
 import type { MCPServerConfig } from "@zintus/mcp";
 import { MCPRegistry, configId } from "./mcp-registry.js";
 import {
+  AgentTaskManager,
+  type AgentEngine,
+  type CreateAgentTaskBody,
+} from "./agents.js";
+import {
   mcpToolsToDefinitions,
   mcpToolName,
   executeMcpToolCall,
@@ -648,6 +653,9 @@ export function createGatewayHandler(
   const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
   const activityStore = deps.activityStore;
   const mcpRegistry = deps.mcpRegistry ?? new MCPRegistry();
+  // P2: gateway-hosted agent runtime (one manager per handler; tasks live for
+  // the life of the process, finished runs persist to ~/.zintus/agents).
+  const agents = new AgentTaskManager(engine as unknown as AgentEngine);
 
   /**
    * Persist a completed turn to the durable activity store (best-effort). A
@@ -2654,6 +2662,78 @@ export function createGatewayHandler(
         return json(request, { error: "trace not found" }, 404);
       }
       return json(request, { trace });
+    }
+
+    // ── P2: gateway-hosted agent runtime ─────────────────────────────────────
+    if (url.pathname === "/v1/agents" && request.method === "POST") {
+      const body = (await request.json().catch(() => null)) as
+        | (CreateAgentTaskBody & { task?: unknown })
+        | null;
+      if (!body || typeof body.task !== "string" || !body.task.trim()) {
+        return json(request, { error: { message: "task (string) is required" } }, 400);
+      }
+      try {
+        const { id } = agents.create(body as CreateAgentTaskBody);
+        return json(request, { id }, 201);
+      } catch (error) {
+        return json(
+          request,
+          { error: { message: error instanceof Error ? error.message : String(error) } },
+          400,
+        );
+      }
+    }
+
+    if (url.pathname === "/v1/agents" && request.method === "GET") {
+      return json(request, { agents: agents.list() });
+    }
+
+    if (url.pathname.startsWith("/v1/agents/") && request.method === "GET") {
+      const parts = url.pathname.split("/");
+      const agentId = parts[3] ?? "";
+      if (parts[4] === "events") {
+        const stream = agents.subscribe(agentId);
+        if (!stream) return json(request, { error: { message: "agent not found" } }, 404);
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+            ...corsHeaders(request),
+          },
+        });
+      }
+      const summary = agents.get(agentId);
+      if (!summary) return json(request, { error: { message: "agent not found" } }, 404);
+      return json(request, summary);
+    }
+
+    if (url.pathname.startsWith("/v1/agents/") && request.method === "POST") {
+      const parts = url.pathname.split("/");
+      const agentId = parts[3] ?? "";
+      if (parts[4] === "approvals") {
+        const body = (await request.json().catch(() => null)) as {
+          approval_id?: string;
+          approved?: boolean;
+        } | null;
+        if (!body || typeof body.approval_id !== "string" || typeof body.approved !== "boolean") {
+          return json(
+            request,
+            { error: { message: "approval_id (string) and approved (boolean) are required" } },
+            400,
+          );
+        }
+        const ok = agents.approve(agentId, body.approval_id, body.approved);
+        return ok
+          ? json(request, { resolved: true })
+          : json(request, { error: { message: "no such pending approval" } }, 404);
+      }
+      if (parts[4] === "stop") {
+        return agents.stop(agentId)
+          ? json(request, { stopping: true })
+          : json(request, { error: { message: "agent not found" } }, 404);
+      }
+      return json(request, { error: { message: "unknown agent action" } }, 404);
     }
 
     if (url.pathname === "/v1/threads" && request.method === "GET") {

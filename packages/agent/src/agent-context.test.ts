@@ -33,7 +33,7 @@ import {
   maybeCompactConvo,
   runAgentToolLoop,
 } from "./agent-tools.js";
-import { buildAgentRouteRequest } from "../commands/agent.js";
+import { buildAgentRouteRequest } from "./route-request.js";
 
 const tmpDirs: string[] = [];
 const stores: CCRStore[] = [];

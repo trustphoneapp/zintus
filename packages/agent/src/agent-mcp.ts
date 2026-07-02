@@ -6,7 +6,22 @@ import {
   type MCPTool,
 } from "@zintus/mcp";
 import type { ToolExecutionResult } from "./builtin-tools.js";
-import type { StoredMcpServer } from "./mcp-config.js";
+
+/** The stored-server shape the agent consumes — structurally identical to the
+ *  CLI's `StoredMcpServer` (apps/cli/src/lib/mcp-config.ts), declared here so
+ *  the runtime package has no dependency on any one surface's config store. */
+export interface StoredMcpServer {
+  name: string;
+  config: MCPServerConfig;
+  /** Whether this server's tools are offered to the model at all. */
+  enabled: boolean;
+  /** Active tools: `"all"` (default) or an explicit allow-list of tool names. */
+  enabledTools: string[] | "all";
+  /** Tools discovered by the last successful `test` (display + filter). */
+  tools?: MCPTool[];
+  /** Epoch ms of the last successful connection. */
+  lastConnectedAt?: number;
+}
 
 /**
  * MCP tools for the SANDBOXED coding agent (`zintus agent`).

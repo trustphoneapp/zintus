@@ -28,7 +28,8 @@
     "@zintus/schemas": "workspace:*",
     "@zintus/search": "workspace:*",
     "@zintus/types": "workspace:*",
-    "tokzen": "workspace:*"
+    "tokzen": "workspace:*",
+    "@zintus/agent": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest",

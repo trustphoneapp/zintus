@@ -18,7 +18,7 @@ import { getActiveProject } from "../lib/projects.js";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   runBuiltinToolLoop,
-} from "../lib/builtin-tools.js";
+} from "@zintus/agent";
 import {
   buildChatContent,
   formatStructuredOutput,
