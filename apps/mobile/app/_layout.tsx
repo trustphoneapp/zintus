@@ -6,11 +6,12 @@ import "../global.css";
 
 import { useEffect } from "react";
 import * as Linking from "expo-linking";
-import { Tabs } from "expo-router";
+import { Tabs, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { Ionicons } from "@expo/vector-icons";
 import { ensureNotificationPermissions } from "@/lib/notifications";
+import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { COLORS } from "@/lib/theme";
 import * as WebBrowser from "expo-web-browser";
 
@@ -32,6 +33,15 @@ async function handleDeepLink(url: string | null): Promise<void> {
 }
 
 export default function RootLayout() {
+  const router = useRouter();
+
+  // First-run gate: send users to onboarding until they finish (or skip) it.
+  useEffect(() => {
+    if (!hasCompletedOnboarding()) {
+      router.replace("/onboarding");
+    }
+  }, [router]);
+
   useEffect(() => {
     void ensureNotificationPermissions();
     // Complete any in-progress expo-web-browser auth sessions.
@@ -77,6 +87,15 @@ export default function RootLayout() {
             headerShown: false,
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="chatbubbles" size={size} color={color} />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="research"
+          options={{
+            title: "Research",
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="search" size={size} color={color} />
             ),
           }}
         />
@@ -134,6 +153,10 @@ export default function RootLayout() {
             ),
           }}
         />
+        {/* Routed to imperatively; hidden from the tab bar. */}
+        <Tabs.Screen name="onboarding" options={{ href: null, headerShown: false }} />
+        <Tabs.Screen name="history" options={{ href: null, title: "History" }} />
+        <Tabs.Screen name="projects" options={{ href: null, title: "Projects" }} />
       </Tabs>
     </GestureHandlerRootView>
   );

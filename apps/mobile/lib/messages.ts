@@ -48,14 +48,65 @@ export interface ChatMeta {
   memoryUsed?: Array<{ id: string; content: string }>;
 }
 
+/**
+ * Per-response transparency metadata: the header-derived compression/cache
+ * signals UNIONED with the SSE `metadata` frame's `ChatMeta` fields (all
+ * optional — a stream that dies before the frame still has the header base).
+ * `parseResponseMeta` (lib/chat) builds the base from response headers;
+ * `streamChat` overlays the parsed `ChatMeta` when the frame arrives. This is
+ * the one meta shape the UI footer and history persistence share.
+ */
+export interface ResponseMeta extends Partial<ChatMeta> {
+  /** "hit" | "miss" | "stale" … — gateway cache outcome. */
+  cacheHit: string;
+  /** How many providers the router fell through before one served. */
+  failoverCount: number;
+  originalTokens?: number;
+  compressedTokens?: number;
+  tokensSaved?: number;
+  /** Compressed/original ratio in 0..1 (e.g. 0.85 = compressed to 85%). */
+  compressionRatio?: number;
+  /** Estimate-only USD saved on the compressed input tokens (from headers). */
+  costSavedUsd?: number;
+  /** Estimate-only USD this turn would have cost on a Claude Sonnet baseline.
+   *  Alias of ChatMeta.savedUsd kept for the history/footer contract. */
+  savedVsBaselineUsd?: number;
+}
+
+/** One tool call the model made, rendered transparently in the stream. */
+export interface ToolCallView {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/** The locally-executed result for a tool call, shown beneath it. */
+export interface ToolResultView {
+  toolCallId: string;
+  name: string;
+  content: string;
+  isError: boolean;
+}
+
 export interface UiMessage extends ChatMessage {
   id: string;
   streaming?: boolean;
+  /** Persisted DB id (lib/history) for the assistant message, when stored. */
+  storedId?: string;
   /** Routed provider for this assistant turn (set once the stream resolves). */
   providerId?: ProviderId;
   model?: string;
-  /** Transparency metadata for this assistant turn (route reason, latency, …). */
-  meta?: ChatMeta;
+  /** Transparency metadata for this assistant turn (route reason, latency,
+   *  compression, …). Header base + SSE metadata frame overlay. */
+  meta?: ResponseMeta;
+  error?: boolean;
+  /** Built-in tool calls the model made on this turn (Tools toggle on). */
+  toolCalls?: ToolCallView[];
+  /** Locally-executed results for `toolCalls`, paired by id. */
+  toolResults?: ToolResultView[];
+  /** Server-side MCP tool-loop events (call/result) the gateway streamed for
+   *  this turn. Display-only — the gateway already ran them. */
+  mcpEvents?: McpToolEvent[];
 }
 
 export function createUserMessage(content: string): UiMessage {
@@ -167,6 +218,10 @@ export function buildChatRequestBody(params: {
    *  server, runs a SERVER-SIDE tool loop, and streams `mcp_tool_call` /
    *  `mcp_tool_result` SSE frames alongside the text. The phone never hosts MCP. */
   mcp?: ChatMcpConfig;
+  /** Private Mode: refuse providers that train on user data. */
+  blockTraining?: boolean;
+  /** Explicit opt-in to training providers (overrides a block). */
+  allowTraining?: boolean;
 }): Record<string, unknown> {
   return {
     messages: params.messages,
@@ -181,6 +236,8 @@ export function buildChatRequestBody(params: {
     // Present ONLY when the user has MCP servers enabled. Omitted otherwise so a
     // normal turn carries no `mcp` field at all.
     mcp: params.mcp,
+    block_training: params.blockTraining,
+    allow_training: params.allowTraining,
   };
 }
 

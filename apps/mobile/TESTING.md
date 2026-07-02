@@ -96,10 +96,13 @@ CI does this automatically in `.github/workflows/release-mobile.yml`
 1. Run a `production` iOS build via EAS.
 2. `eas submit` uploads to App Store Connect.
 3. Add internal testers in App Store Connect → TestFlight.
-4. App Store privacy: the app collects no analytics; declare data use accordingly.
-   `ITSAppUsesNonExemptEncryption: false` is already set in `app.json` (the app
-   uses only standard HTTPS/x25519 BYOK crypto — export-exempt).
-5. Verify: streaming chat, provider sheet, secure-store keys, quota notifications.
+4. App Store privacy: declare the third-party-AI data sharing (Apple 5.1.2(i) —
+   the app sends prompts/files to user-chosen providers; see
+   `docs/store/ios-listing.md`). `ITSAppUsesNonExemptEncryption: false` is set in
+   `app.json`, but because the app runs its OWN x25519 key exchange (not just OS
+   TLS) for the BYOK key push, `false` is **not automatically correct** — this is
+   a counsel-gated [HUMAN] decision (two defensible paths in `ios-listing.md` §4).
+5. Verify the feature smoke matrix below.
 
 ## Android internal testing
 
@@ -108,6 +111,39 @@ CI does this automatically in `.github/workflows/release-mobile.yml`
 3. Complete the Play **Data safety** form (BYOK keys stored on-device via
    expo-secure-store; no data sold/shared).
 4. Verify: expo-sqlite quota, expo-notifications warnings, MMKV settings persistence.
+
+## Feature smoke matrix (real device, after EAS preview install)
+
+Run on a physical Android device and a physical iPhone (and an iPad — `supportsTablet`).
+
+| Area | What to check |
+|---|---|
+| Onboarding | first launch routes to onboarding; gateway health check; add+test a free-tier key; sample prompt prefills chat; Skip → limited state |
+| Gateway | auto-detected URL works; manual URL in Settings; offline banner + send disabled when gateway down |
+| Chat | multiline composer; streaming; **Stop** cancels mid-stream; markdown (headings/lists/tables/code + copy code); copy/retry/regenerate/report |
+| Response footer | after each answer: provider·model, compression % + tokens/cost saved, "saved vs Claude", quota %, route reason, low-quota actions |
+| Consent | first provider send shows the data-destination consent sheet (Apple 5.1.2(i)); reversible in Settings |
+| Private Mode | 🛡 toggle persists; explainer on first enable; training providers refused |
+| Files | ＋ picks a .txt/.md/.csv/.json/code file; chip + remove; privacy notice; content reaches the model; PDF/binary → honest "can't read on-device" |
+| Deep Research | Research tab runs `/v1/research`; staged progress; source cards/links; export; save-to-history (needs a Tavily/Serper key on the gateway) |
+| History | New/History; thread list; search; rename; delete; continue hydrates a thread |
+| Projects | create/edit/delete; New chat in project applies instructions (system msg) + defaults; project badge in chat |
+| Providers | add/update/remove/**test** keys; quota; est-cost; recommendation banner; one-tap **Use local** (Ollama/LM Studio) |
+| Voice | 🎤 shows the unavailable fallback (full STT requires expo-speech-recognition in the dev build) |
+| Cloud | `zintus://auth` deep-link login; Remote tab |
+
+## Permissions audit (after `eas build` / prebuild)
+
+- Current shipped natives need **no** runtime permissions beyond network +
+  SecureStore. `expo-document-picker` uses the system file UI (no storage
+  permission). `expo-notifications` requests notification permission at runtime.
+- **Before image/voice ship:** add iOS purpose strings (`NSCameraUsageDescription`,
+  `NSMicrophoneUsageDescription`, `NSPhotoLibraryUsageDescription`,
+  `NSSpeechRecognitionUsageDescription`) and audit the **generated AndroidManifest**
+  — `expo-image-picker` auto-adds `RECORD_AUDIO`; drop it via
+  `android.blockedPermissions` if camera-only. See `docs/store/*` for the
+  per-store justification tables.
+- Verify the final manifest/Info.plist from EAS output — do not assume.
 
 ## Required build-time env
 

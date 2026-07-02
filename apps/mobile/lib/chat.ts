@@ -18,14 +18,19 @@ import {
   parseChatMeta,
   parseMcpToolEvent,
   type ChatMcpConfig,
-  type ChatMeta,
   type GatewayChunk,
   type McpToolEvent,
+  type ResponseMeta,
   type ToolCallAccumulator,
 } from "./messages";
 import { getGatewayUrl } from "./gateway-url";
 
-export type { ChatMeta, ChatMcpConfig, McpToolEvent } from "./messages";
+export type {
+  ChatMeta,
+  ChatMcpConfig,
+  McpToolEvent,
+  ResponseMeta,
+} from "./messages";
 export { buildChatRequestBody, parseChatMeta } from "./messages";
 
 // Re-exported so existing importers (`@/lib/chat`) keep working; resolution
@@ -58,6 +63,10 @@ export interface StreamChatParams {
    *  SERVER-SIDE tool loop and streams `mcp_tool_call`/`mcp_tool_result` events;
    *  the phone displays them but never executes MCP tools. */
   mcp?: ChatMcpConfig;
+  /** Private Mode: refuse providers that train on user data. */
+  blockTraining?: boolean;
+  /** Explicit opt-in to training providers (overrides a block). */
+  allowTraining?: boolean;
   onChunk: (text: string) => void;
   /** Live callback for each server-side MCP tool-loop event (call/result), in
    *  arrival order. The final ordered list is also returned as `toolEvents`. */
@@ -117,6 +126,36 @@ export async function discoverMcpServer(
   }
 }
 
+/**
+ * Parse the header-derived half of `ResponseMeta` (see lib/messages): cache
+ * outcome, failover count, and the Tokzen compression signals. Headers are set
+ * before the body streams, so this base is available the moment the fetch
+ * resolves; the SSE `metadata` frame's `ChatMeta` fields are overlaid onto it
+ * as the stream ends. Derived integers/ratios only — never keys or content.
+ *
+ * Compression fields are present ONLY when real compression happened; the
+ * gateway omits the headers (rather than emitting zeros) otherwise.
+ */
+function parseResponseMeta(headers: Headers): ResponseMeta {
+  const num = (key: string): number | undefined => {
+    const raw = headers.get(key);
+    if (raw == null || raw.trim() === "") {
+      return undefined;
+    }
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : undefined;
+  };
+  return {
+    cacheHit: headers.get("X-Cache-Hit") ?? "miss",
+    failoverCount: num("X-Failover-Count") ?? 0,
+    originalTokens: num("X-Zintus-Original-Tokens"),
+    compressedTokens: num("X-Zintus-Compressed-Tokens"),
+    tokensSaved: num("X-Zintus-Tokens-Saved"),
+    compressionRatio: num("X-Zintus-Compression-Ratio"),
+    costSavedUsd: num("X-Zintus-Cost-Saved-Usd"),
+  };
+}
+
 export async function streamChat({
   providerId,
   strategy,
@@ -127,6 +166,8 @@ export async function streamChat({
   tools,
   toolChoice,
   mcp,
+  blockTraining,
+  allowTraining,
   onChunk,
   onMcpToolEvent,
   signal,
@@ -135,7 +176,9 @@ export async function streamChat({
   model: string;
   threadId?: string;
   traceId?: string;
-  meta?: ChatMeta;
+  /** Header-derived base (cache/failover/compression) + the SSE metadata
+   *  frame's fields once it arrives. Always present. */
+  meta: ResponseMeta;
   /** Tool calls the model made this turn (undefined for a normal text turn). The
    *  caller runs the built-in tools and feeds the results back as tool_result
    *  blocks on the next request. */
@@ -158,6 +201,8 @@ export async function streamChat({
         tools,
         toolChoice,
         mcp,
+        blockTraining,
+        allowTraining,
       }),
     ),
     signal,
@@ -174,6 +219,10 @@ export async function streamChat({
     throw new Error("Gateway returned no response body");
   }
 
+  // Compression/route metadata rides on the response headers, available now —
+  // before a single token of the body has streamed.
+  const meta = parseResponseMeta(response.headers);
+
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -181,7 +230,6 @@ export async function streamChat({
   let model = "unknown";
   let resolvedThreadId = threadId;
   let traceId: string | undefined;
-  let meta: ChatMeta | undefined;
   let output = "";
   // Accumulate streamed tool-call fragments by their `index`; the pure
   // fold/finalize helpers live in ./messages and are unit-tested directly.
@@ -224,11 +272,14 @@ export async function streamChat({
         continue;
       }
 
-      // Metadata frame (route reason, latency, tokens) — parse and continue;
-      // it carries no content delta and its `model` is the resolved winner.
+      // Metadata frame (route reason, latency, tokens) — overlay its ChatMeta
+      // fields onto the header-derived base and continue; it carries no content
+      // delta and its `model` is the resolved winner. `savedVsBaselineUsd`
+      // aliases `savedUsd` for the history/footer contract.
       const frameMeta = parseChatMeta(chunk);
       if (frameMeta) {
-        meta = frameMeta;
+        Object.assign(meta, frameMeta);
+        meta.savedVsBaselineUsd = frameMeta.savedUsd;
         provider = frameMeta.provider;
         model = frameMeta.model;
         continue;

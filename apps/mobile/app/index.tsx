@@ -1,24 +1,33 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
+  Alert,
+  AppState,
   FlatList,
+  KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
+  ScrollView,
   Share,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from "react-native";
-import type { ProviderId } from "@zintus/types";
-import { useFocusEffect, useRouter } from "expo-router";
-import type { ResponseFormat } from "@zintus/types";
+import type { ListRenderItem } from "react-native";
 import {
-  streamChat,
-  getGatewayUrl,
-  type ChatMcpConfig,
-  type McpToolEvent,
-} from "@/lib/chat";
+  PROVIDER_IDS,
+  textOf,
+  type ProviderId,
+  type ResponseFormat,
+} from "@zintus/types";
+import { PROVIDER_METADATA } from "@zintus/providers";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+
+import { ChatMessageBubble } from "@/components/ChatMessageBubble";
+import { ArtifactsModal } from "@/components/ArtifactsModal";
+import { streamChat, type ChatMcpConfig } from "@/lib/chat";
+import { getGatewayUrl } from "@/lib/gateway-url";
 import { fetchGatewayHealth } from "@/lib/gateway";
 import {
   loadConfig,
@@ -26,7 +35,9 @@ import {
   loadMcpServers,
   loadSelectedProvider,
   loadToolsMode,
+  saveConfig,
   saveJsonMode,
+  saveSelectedProvider,
   saveToolsMode,
 } from "@/lib/config";
 import { activeMcpServersForChat } from "@/lib/mcp-config";
@@ -35,53 +46,47 @@ import {
   MAX_TOOL_ROUNDS,
   executeBuiltinToolCall,
 } from "@/lib/builtin-tools";
-import { toChatMessages, type ChatMeta } from "@/lib/messages";
-import { migrateLegacyKeys } from "@/lib/secure-keys";
-import { COLORS } from "@/lib/theme";
 import {
   extractArtifacts,
   foldArtifactVersions,
   type Artifact,
   type VersionedArtifact,
 } from "@/lib/artifacts";
-import { ArtifactsModal } from "@/components/ArtifactsModal";
+import { getProject } from "@/lib/projects";
+import { CHAT_MODES, deriveRouting, nextMode, type ChatMode } from "@/lib/chat-mode";
+import { grantProviderSendConsent, hasProviderSendConsent } from "@/lib/consent";
+import { DESTINATIONS, attachmentPrivacyNotice, describeFlow } from "@/lib/data-flow";
+import {
+  composeMessage,
+  pickTextFile,
+  type Attachment,
+} from "@/lib/attachments";
+import {
+  fetchRouteOptions,
+  type RouteOption,
+  type RouteOptions,
+} from "@/lib/route-options";
+import {
+  appendMessage,
+  createThread,
+  getMessages,
+  setThreadGatewayId,
+} from "@/lib/history";
+import {
+  createAssistantPlaceholder,
+  createUserMessage,
+  toChatMessages,
+  type ToolCallView,
+  type ToolResultView,
+  type UiMessage,
+} from "@/lib/messages";
+import { migrateLegacyKeys } from "@/lib/secure-keys";
+import { takePendingPrompt } from "@/lib/onboarding";
+import { COLORS } from "@/lib/theme";
 
-// "auto" is a UI-only sentinel: it sends NO provider so the gateway routes
-// using the configured strategy.
 type ProviderSelection = ProviderId | "auto";
 
-/** One tool call the model made, rendered transparently in the stream. */
-interface ToolCallView {
-  id: string;
-  name: string;
-  arguments: Record<string, unknown>;
-}
-
-/** The locally-executed result for a tool call, shown beneath it. */
-interface ToolResultView {
-  toolCallId: string;
-  name: string;
-  content: string;
-  isError: boolean;
-}
-
-interface Message {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  streaming?: boolean;
-  providerId?: ProviderId;
-  model?: string;
-  /** Transparency metadata (route reason, latency) for an assistant turn. */
-  meta?: ChatMeta;
-  /** Built-in tool calls the model made on this turn (Tools toggle on). */
-  toolCalls?: ToolCallView[];
-  /** Locally-executed results for `toolCalls`, paired by id. */
-  toolResults?: ToolResultView[];
-  /** Server-side MCP tool-loop events (call/result) the gateway streamed for
-   *  this turn. Display-only — the gateway already ran them. */
-  mcpEvents?: McpToolEvent[];
-}
+const STREAM_FLUSH_MS = 50;
 
 /**
  * Build the chat body's `mcp` block from the user's enabled MCP servers, plus the
@@ -107,55 +112,20 @@ function activeMcpForChat(): { mcp: ChatMcpConfig | undefined; toolCount: number
   };
 }
 
-/** Render one MCP tool-loop event as a calm one-line summary (no arg/secret
- *  values — only parameter names / char counts come through the parser). */
-function mcpEventLine(event: McpToolEvent): string {
-  if (event.kind === "call") {
-    const where = event.server ? `${event.server}/` : "";
-    const args = event.argsSummary ? `(${event.argsSummary})` : "";
-    return `🔧 ${where}${event.tool}${args}`;
-  }
-  return `${event.ok ? "→ " : "error · "}${event.summary}`;
-}
-
-/** Compact one-line render of a tool's arguments object. */
-function formatToolArgs(args: Record<string, unknown>): string {
-  try {
-    return JSON.stringify(args);
-  } catch {
-    return "{…}";
-  }
-}
-
-/** Returns a pretty-printed JSON string iff `content` is a JSON object/array,
- *  else null. Lets a `response_format: json_object` turn render as formatted
- *  JSON without ever fabricating structure (mirrors desktop's auto-detect). */
-function asStructuredJson(content: string): string | null {
-  const trimmed = content.trim();
-  if (!trimmed || !(trimmed.startsWith("{") || trimmed.startsWith("["))) {
-    return null;
-  }
-  try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Fold the whole conversation's assistant turns into versioned artifacts: each
  * message is extracted (ids namespaced per message), concatenated in order, then
  * `foldArtifactVersions` merges same-identity blocks into one entry with a
- * version history. This is what powers the cross-message "vN of M" switcher —
- * the same iterative-artifacts model web/desktop use.
+ * version history. This powers the cross-message "vN of M" switcher — the same
+ * iterative-artifacts model web/desktop use.
  */
-function conversationArtifacts(messages: Message[]): VersionedArtifact[] {
+function conversationArtifacts(messages: UiMessage[]): VersionedArtifact[] {
   const flat: Artifact[] = [];
   for (const message of messages) {
     if (message.role !== "assistant" || message.streaming || !message.content) {
       continue;
     }
-    for (const artifact of extractArtifacts(message.content)) {
+    for (const artifact of extractArtifacts(textOf(message.content))) {
       flat.push({ ...artifact, id: `${message.id}:${artifact.id}` });
     }
   }
@@ -164,299 +134,631 @@ function conversationArtifacts(messages: Message[]): VersionedArtifact[] {
 
 export default function ChatScreen() {
   const router = useRouter();
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [artifactsOpen, setArtifactsOpen] = useState(false);
-  const [openArtifacts, setOpenArtifacts] = useState<VersionedArtifact[]>([]);
+  const params = useLocalSearchParams<{ thread?: string; project?: string }>();
+  const [messages, setMessages] = useState<UiMessage[]>([]);
   const [input, setInput] = useState("");
-  const [selectedProvider, setSelectedProvider] =
-    useState<ProviderSelection>("auto");
+  const [provider, setProvider] = useState<ProviderSelection>("auto");
+  const [mode, setMode] = useState<ChatMode>("auto");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [gatewayOnline, setGatewayOnline] = useState(true);
   const [gatewayChecked, setGatewayChecked] = useState(false);
+  const [consentVisible, setConsentVisible] = useState(false);
+  const [overrideVisible, setOverrideVisible] = useState(false);
+  const [privateMode, setPrivateMode] = useState(
+    () => loadConfig().blockTrainingProviders ?? false,
+  );
+  const [privateExplainVisible, setPrivateExplainVisible] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [routeOptions, setRouteOptions] = useState<
+    Record<string, RouteOptions | null>
+  >({});
   const [jsonMode, setJsonMode] = useState(false);
   const [toolsMode, setToolsMode] = useState(false);
   // Count of MCP tools active across enabled servers — drives the header
   // indicator. Refreshed on focus (the MCP screen may have changed it).
   const [mcpToolCount, setMcpToolCount] = useState(0);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [openArtifacts, setOpenArtifacts] = useState<VersionedArtifact[]>([]);
+
+  const threadIdRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const listRef = useRef<FlatList<UiMessage>>(null);
+  const pendingSendRef = useRef<{
+    composed: string;
+    atts: Attachment[];
+    oneShot?: ProviderId;
+  } | null>(null);
+
+  const activeProject = useMemo(
+    () =>
+      typeof params.project === "string" && params.project
+        ? getProject(params.project)
+        : null,
+    [params.project],
+  );
 
   useEffect(() => {
     void migrateLegacyKeys();
     setJsonMode(loadJsonMode());
     setToolsMode(loadToolsMode());
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    async function refresh() {
-      const health = await fetchGatewayHealth();
-      if (!active) return;
-      setGatewayOnline(Boolean(health?.ok));
-      setGatewayChecked(true);
-    }
-    void refresh();
-    const interval = setInterval(() => void refresh(), 5000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
+    const pending = takePendingPrompt();
+    if (pending) setInput(pending);
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      setSelectedProvider(loadSelectedProvider());
+      setProvider(loadSelectedProvider());
       setMcpToolCount(activeMcpForChat().toolCount);
     }, []),
   );
 
-  function toggleAuto() {
-    setSelectedProvider((current) =>
-      current === "auto" ? loadSelectedProvider() : "auto",
-    );
-  }
+  // Continue a thread opened from History (?thread=<id>): hydrate its messages.
+  useFocusEffect(
+    useCallback(() => {
+      const id = typeof params.thread === "string" ? params.thread : undefined;
+      if (!id || id === threadIdRef.current) return;
+      void (async () => {
+        const stored = await getMessages(id);
+        threadIdRef.current = id;
+        setMessages(
+          stored.map((m) => ({
+            id: m.id,
+            storedId: m.id,
+            role: m.role,
+            content: m.content,
+            providerId: m.providerId ?? undefined,
+            model: m.model ?? undefined,
+            meta: m.meta ?? undefined,
+          })),
+        );
+      })();
+    }, [params.thread]),
+  );
 
-  async function copyMessage(content: string) {
-    if (!content.trim()) {
-      return;
-    }
-    try {
-      await Share.share({ message: content });
-    } catch {
-      // Share sheet dismissed/unavailable — ignore.
-    }
-  }
+  // Apply a project's routing defaults when chatting inside it.
+  useFocusEffect(
+    useCallback(() => {
+      if (!activeProject) return;
+      if (activeProject.defaultProvider) {
+        setProvider(activeProject.defaultProvider);
+        saveSelectedProvider(activeProject.defaultProvider);
+      }
+      if (activeProject.privateDefault) {
+        setPrivateMode(true);
+        saveConfig({ blockTrainingProviders: true });
+      }
+    }, [activeProject]),
+  );
 
-  async function send() {
-    if (!input.trim() || sending) {
-      return;
-    }
-
-    const config = loadConfig();
-    const userMessage: Message = {
-      id: `${Date.now()}-user`,
-      role: "user",
-      content: input.trim(),
-    };
-    const assistantId = `${Date.now()}-assistant`;
-
-    setMessages((current) => [
-      ...current,
-      userMessage,
-      { id: assistantId, role: "assistant", content: "", streaming: true },
-    ]);
+  function newChat() {
+    abortRef.current?.abort();
+    threadIdRef.current = null;
+    setMessages([]);
     setInput("");
-    setSending(true);
+    setAttachments([]);
     setError(null);
+    router.setParams({ thread: "" });
+  }
 
-    // When JSON mode is on, ask the gateway for json_object structured output;
-    // it resolves the best level the routed provider can actually serve.
-    const responseFormat: ResponseFormat | undefined = jsonMode
-      ? { type: "json_object" }
-      : undefined;
+  function togglePrivate() {
+    const next = !privateMode;
+    setPrivateMode(next);
+    saveConfig({ blockTrainingProviders: next });
+    if (next) setPrivateExplainVisible(true);
+  }
 
-    // Shared routing params for every turn this send makes (the tool loop reuses
-    // them each round). "auto" -> send no provider so the gateway routes by strategy.
-    const routing = {
-      providerId:
-        selectedProvider === "auto" ? undefined : selectedProvider,
-      strategy:
-        selectedProvider === "auto" ? config.routingStrategy : undefined,
-      mode: config.contextMode,
-      responseFormat,
-    } as const;
+  // Gateway health: polled ONLY while the Chat tab is focused AND the app is
+  // foregrounded, with 5→30s backoff while status is unchanged and the in-flight
+  // probe aborted on teardown. Replaces the old always-on 5s setInterval that
+  // woke the radio ~720x/hour even when blurred (battery + store-compliance).
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let controller: AbortController | null = null;
+      let delay = 5000;
+      const onlineRef = { current: null as boolean | null };
 
-    // Built-in tool definitions are sent only when the Tools toggle is on; the
-    // chat then runs the bounded execute→feed-back loop locally (the SAME loop
-    // web/desktop/CLI run — "one Zintus" tools-everywhere parity).
-    const tools = toolsMode ? BUILTIN_TOOL_DEFINITIONS : undefined;
+      const tick = async () => {
+        controller?.abort();
+        controller = new AbortController();
+        const health = await fetchGatewayHealth(controller.signal);
+        if (cancelled) return;
+        const online = Boolean(health?.ok);
+        delay =
+          onlineRef.current === online ? Math.min(delay * 1.5, 30000) : 5000;
+        onlineRef.current = online;
+        setGatewayOnline(online);
+        setGatewayChecked(true);
+        timer = setTimeout(() => void tick(), delay);
+      };
 
-    // Enabled MCP servers for this turn (server-side tool loop). Undefined when
-    // none are enabled, so a normal turn carries no `mcp` field at all.
-    const { mcp } = activeMcpForChat();
+      void tick();
 
-    // The bubble the active turn streams into — updated as the tool loop opens a
-    // fresh bubble per round, so a mid-loop error attaches to the right one.
-    let currentAssistantId = assistantId;
+      const sub = AppState.addEventListener("change", (state) => {
+        if (state === "active") {
+          if (!timer && !cancelled) {
+            delay = 5000;
+            void tick();
+          }
+        } else {
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          controller?.abort();
+        }
+      });
 
-    try {
-      // The conversation we feed the gateway. The tool loop appends the model's
-      // assistant tool_call turn and our tool_result turn each round.
-      const convo = toChatMessages([...messages, userMessage]);
+      return () => {
+        cancelled = true;
+        if (timer) clearTimeout(timer);
+        controller?.abort();
+        sub.remove();
+      };
+    }, []),
+  );
 
-      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-        let streamedText = "";
-        const result = await streamChat({
-          ...routing,
-          tools,
-          mcp,
-          messages: convo,
-          onChunk: (text) => {
-            streamedText = text;
-            const id = currentAssistantId;
-            setMessages((current) =>
-              current.map((message) =>
-                message.id === id ? { ...message, content: text } : message,
-              ),
-            );
-          },
-          // Each server-side MCP call/result lands live on the active bubble —
-          // calm transparency without ever executing a tool on the phone.
-          onMcpToolEvent: (event) => {
-            const id = currentAssistantId;
-            setMessages((current) =>
-              current.map((message) =>
-                message.id === id
-                  ? { ...message, mcpEvents: [...(message.mcpEvents ?? []), event] }
-                  : message,
-              ),
-            );
-          },
+  const setAssistant = useCallback(
+    (id: string, patch: Partial<UiMessage>) => {
+      setMessages((current) =>
+        current.map((m) => (m.id === id ? { ...m, ...patch } : m)),
+      );
+    },
+    [],
+  );
+
+  const loadRouteOptions = useCallback(async (providerId: ProviderId) => {
+    const options = await fetchRouteOptions(providerId);
+    setRouteOptions((prev) => ({ ...prev, [providerId]: options }));
+  }, []);
+
+  const runTurn = useCallback(
+    async (text: string, oneShotProvider?: ProviderId, atts: Attachment[] = []) => {
+      const config = loadConfig();
+      const routing = deriveRouting(mode, config.routingStrategy);
+      const effectiveProvider =
+        oneShotProvider ?? (provider === "auto" ? undefined : provider);
+
+      // Ensure a local thread exists so the conversation persists.
+      if (!threadIdRef.current) {
+        const thread = await createThread({
+          title: text.slice(0, 48),
+          projectId: activeProject?.id ?? null,
+          defaultProvider: effectiveProvider ?? null,
+          strategy: routing.strategy ?? null,
+          privacyPosture: routing.posture,
         });
+        threadIdRef.current = thread.id;
+      }
+      const threadId = threadIdRef.current;
 
-        const calls = result.toolCalls ?? [];
+      const userMessage = createUserMessage(text);
+      const placeholder = createAssistantPlaceholder();
+      setMessages((current) => [...current, userMessage, placeholder]);
+      setInput("");
+      setSending(true);
+      setError(null);
 
-        // No tool calls -> this is the final answer; settle the bubble and stop.
-        if (calls.length === 0) {
-          const id = currentAssistantId;
-          setMessages((current) =>
-            current.map((message) =>
-              message.id === id
-                ? {
-                    ...message,
-                    streaming: false,
-                    providerId: result.providerId,
-                    model: result.model,
-                    meta: result.meta,
-                    content:
-                      message.content ||
-                      `[${result.providerId}/${result.model}] (empty response)`,
-                  }
-                : message,
-            ),
-          );
-          break;
+      void appendMessage({
+        threadId,
+        role: "user",
+        content: textOf(userMessage.content),
+        attachments: atts.length
+          ? atts.map((a) => ({
+              kind: "file" as const,
+              name: a.name,
+              mimeType: a.mimeType,
+              bytes: a.bytes,
+            }))
+          : null,
+      });
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // When JSON mode is on, ask the gateway for json_object structured output;
+      // it resolves the best level the routed provider can actually serve.
+      const responseFormat: ResponseFormat | undefined = jsonMode
+        ? { type: "json_object" }
+        : undefined;
+
+      // Built-in tool definitions are sent only when the Tools toggle is on; the
+      // chat then runs the bounded execute→feed-back loop locally (the SAME loop
+      // web/desktop/CLI run — "one Zintus" tools-everywhere parity).
+      const tools = toolsMode ? BUILTIN_TOOL_DEFINITIONS : undefined;
+
+      // Enabled MCP servers for this turn (server-side tool loop). Undefined when
+      // none are enabled, so a normal turn carries no `mcp` field at all.
+      const { mcp } = activeMcpForChat();
+
+      // The bubble the active turn streams into — the tool loop opens a fresh
+      // bubble per round, so a mid-loop error attaches to the right one.
+      let currentAssistantId = placeholder.id;
+
+      // Throttle stream→state so we don't re-render the list per token.
+      let latest = "";
+      let flushScheduled = false;
+      const flush = () => {
+        flushScheduled = false;
+        setAssistant(currentAssistantId, { content: latest });
+      };
+
+      try {
+        // The conversation we feed the gateway. The tool loop appends the model's
+        // assistant tool_call turn and our tool_result turn each round.
+        const convo = toChatMessages([...messages, userMessage]);
+        if (activeProject?.instructions) {
+          convo.unshift({ role: "system", content: activeProject.instructions });
         }
 
-        // Execute each built-in tool locally; an unknown tool / failure comes
-        // back as an honest isError result the model can recover from.
-        const toolViews: ToolCallView[] = calls.map((c) => ({
-          id: c.id,
-          name: c.name,
-          arguments: c.arguments,
-        }));
-        const results = calls.map((c) =>
-          executeBuiltinToolCall({
+        for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+          latest = "";
+          const result = await streamChat({
+            providerId: effectiveProvider,
+            strategy: effectiveProvider ? undefined : routing.strategy,
+            blockTraining: routing.blockTraining || privateMode,
+            mode: config.contextMode,
+            threadId: threadIdRef.current ?? undefined,
+            responseFormat,
+            tools,
+            mcp,
+            messages: convo,
+            signal: controller.signal,
+            onChunk: (t) => {
+              latest = t;
+              if (!flushScheduled) {
+                flushScheduled = true;
+                setTimeout(flush, STREAM_FLUSH_MS);
+              }
+            },
+            // Each server-side MCP call/result lands live on the active bubble —
+            // calm transparency without ever executing a tool on the phone.
+            onMcpToolEvent: (event) => {
+              const id = currentAssistantId;
+              setMessages((current) =>
+                current.map((m) =>
+                  m.id === id
+                    ? { ...m, mcpEvents: [...(m.mcpEvents ?? []), event] }
+                    : m,
+                ),
+              );
+            },
+          });
+
+          const calls = result.toolCalls ?? [];
+
+          // No tool calls -> this is the final answer; settle the bubble,
+          // persist it, and stop.
+          if (calls.length === 0) {
+            setAssistant(currentAssistantId, {
+              streaming: false,
+              providerId: result.providerId,
+              model: result.model,
+              meta: result.meta,
+              content:
+                latest ||
+                `[${result.providerId}/${result.model}] (empty response)`,
+            });
+
+            if (result.threadId && threadId) {
+              void setThreadGatewayId(threadId, result.threadId);
+            }
+            void appendMessage({
+              threadId,
+              role: "assistant",
+              content: latest,
+              providerId: result.providerId,
+              model: result.model,
+              meta: result.meta,
+            });
+            void loadRouteOptions(result.providerId);
+            break;
+          }
+
+          // Execute each built-in tool locally; an unknown tool / failure comes
+          // back as an honest isError result the model can recover from.
+          const toolViews: ToolCallView[] = calls.map((c) => ({
             id: c.id,
             name: c.name,
             arguments: c.arguments,
-          }),
-        );
-        const resultViews: ToolResultView[] = results.map((r) => {
-          const call = calls.find((c) => c.id === r.toolCallId);
-          return {
-            toolCallId: r.toolCallId,
-            name: call?.name ?? "tool",
-            content: r.content,
-            isError: r.isError,
-          };
-        });
+          }));
+          const results = calls.map((c) =>
+            executeBuiltinToolCall({
+              id: c.id,
+              name: c.name,
+              arguments: c.arguments,
+            }),
+          );
+          const resultViews: ToolResultView[] = results.map((r) => {
+            const call = calls.find((c) => c.id === r.toolCallId);
+            return {
+              toolCallId: r.toolCallId,
+              name: call?.name ?? "tool",
+              content: r.content,
+              isError: r.isError,
+            };
+          });
 
-        const hitCap = round === MAX_TOOL_ROUNDS;
-        const settledId = currentAssistantId;
-        setMessages((current) =>
-          current.map((message) =>
-            message.id === settledId
-              ? {
-                  ...message,
-                  streaming: false,
-                  providerId: result.providerId,
-                  model: result.model,
-                  meta: result.meta,
-                  toolCalls: toolViews,
-                  toolResults: resultViews,
-                  content: hitCap
-                    ? message.content ||
-                      `Stopped after ${MAX_TOOL_ROUNDS} tool rounds.`
-                    : message.content,
-                }
-              : message,
-          ),
-        );
+          const hitCap = round === MAX_TOOL_ROUNDS;
+          setAssistant(currentAssistantId, {
+            streaming: false,
+            providerId: result.providerId,
+            model: result.model,
+            meta: result.meta,
+            toolCalls: toolViews,
+            toolResults: resultViews,
+            ...(hitCap && !latest
+              ? { content: `Stopped after ${MAX_TOOL_ROUNDS} tool rounds.` }
+              : {}),
+          });
 
-        // Bounded: a model still calling tools at the cap is surfaced, not looped.
-        if (hitCap) break;
+          // Persist the intermediate turn when it streamed visible text.
+          if (latest.trim()) {
+            void appendMessage({
+              threadId,
+              role: "assistant",
+              content: latest,
+              providerId: result.providerId,
+              model: result.model,
+              meta: result.meta,
+            });
+          }
 
-        // Feed the assistant tool_call turn + our tool_result turn back, then
-        // open a fresh bubble for the next round's answer.
-        convo.push({
-          role: "assistant",
-          content: [
-            ...(streamedText.trim()
-              ? [{ type: "text" as const, text: streamedText }]
-              : []),
-            ...calls,
-          ],
-        });
-        convo.push({
-          role: "user",
-          content: results.map((r) => ({
-            type: "tool_result" as const,
-            toolCallId: r.toolCallId,
-            content: r.content,
-            isError: r.isError,
-          })),
-        });
+          // Bounded: a model still calling tools at the cap is surfaced, not looped.
+          if (hitCap) break;
 
-        const nextId = `${Date.now()}-assistant-${round}`;
-        currentAssistantId = nextId;
-        setMessages((current) => [
-          ...current,
-          { id: nextId, role: "assistant", content: "", streaming: true },
-        ]);
+          // Feed the assistant tool_call turn + our tool_result turn back, then
+          // open a fresh bubble for the next round's answer.
+          convo.push({
+            role: "assistant",
+            content: [
+              ...(latest.trim()
+                ? [{ type: "text" as const, text: latest }]
+                : []),
+              ...calls,
+            ],
+          });
+          convo.push({
+            role: "user",
+            content: results.map((r) => ({
+              type: "tool_result" as const,
+              toolCallId: r.toolCallId,
+              content: r.content,
+              isError: r.isError,
+            })),
+          });
+
+          const next = createAssistantPlaceholder();
+          const nextId = `${next.id}-${round}`;
+          currentAssistantId = nextId;
+          setMessages((current) => [...current, { ...next, id: nextId }]);
+        }
+      } catch (sendError) {
+        if (controller.signal.aborted) {
+          setAssistant(currentAssistantId, {
+            streaming: false,
+            content: latest || "(stopped)",
+          });
+        } else {
+          const message =
+            sendError instanceof Error ? sendError.message : "Request failed";
+          setError(message);
+          setAssistant(currentAssistantId, {
+            streaming: false,
+            error: true,
+            content: `Error: ${message}`,
+          });
+        }
+      } finally {
+        setSending(false);
+        abortRef.current = null;
       }
-    } catch (sendError) {
-      const message =
-        sendError instanceof Error ? sendError.message : "Request failed";
-      setError(message);
-      setMessages((current) =>
-        current.map((item) =>
-          item.id === currentAssistantId
-            ? {
-                ...item,
-                streaming: false,
-                content: `Error: ${message}`,
-              }
-            : item,
-        ),
-      );
-    } finally {
-      setSending(false);
+    },
+    [
+      messages,
+      mode,
+      provider,
+      privateMode,
+      jsonMode,
+      toolsMode,
+      activeProject,
+      setAssistant,
+      loadRouteOptions,
+    ],
+  );
+
+  const send = useCallback(
+    (oneShotProvider?: ProviderId) => {
+      const text = input.trim();
+      if ((!text && attachments.length === 0) || sending || !gatewayOnline) {
+        return;
+      }
+      const composed = composeMessage(text, attachments);
+      const atts = attachments;
+      const routing = deriveRouting(mode, loadConfig().routingStrategy);
+      // Apple 5.1.2(i): consent before sending to a third-party provider.
+      if (routing.posture !== "local-only" && !hasProviderSendConsent()) {
+        pendingSendRef.current = { composed, atts, oneShot: oneShotProvider };
+        setConsentVisible(true);
+        return;
+      }
+      setAttachments([]);
+      void runTurn(composed, oneShotProvider, atts);
+    },
+    [input, attachments, sending, gatewayOnline, mode, runTurn],
+  );
+
+  function grantConsentAndSend() {
+    grantProviderSendConsent();
+    setConsentVisible(false);
+    const pending = pendingSendRef.current;
+    pendingSendRef.current = null;
+    if (pending) {
+      setAttachments([]);
+      void runTurn(pending.composed, pending.oneShot, pending.atts);
     }
   }
 
-  const chipLabel = selectedProvider === "auto" ? "Auto" : selectedProvider;
+  async function addAttachment() {
+    const att = await pickTextFile();
+    if (!att) return;
+    if (att.unsupported) {
+      Alert.alert(
+        "Can't read this file on-device",
+        `${att.name} isn't a text format Zintus can extract here (PDFs and images aren't supported yet). Text files — txt, md, csv, json, code — work.`,
+      );
+      return;
+    }
+    if (att.truncated) {
+      Alert.alert(
+        "Large file truncated",
+        `${att.name} was truncated to fit the prompt budget.`,
+      );
+    }
+    setAttachments((prev) => [...prev, att]);
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+  }
+
+  const copy = useCallback((text: string) => {
+    if (text.trim()) void Share.share({ message: text });
+  }, []);
+
+  const lastUserText = useMemo(() => {
+    const last = [...messages].reverse().find((m) => m.role === "user");
+    return last ? textOf(last.content) : "";
+  }, [messages]);
+
+  const retry = useCallback(() => {
+    if (lastUserText) void runTurn(lastUserText);
+  }, [lastUserText, runTurn]);
+
+  const regenerate = useCallback(() => {
+    if (!lastUserText) return;
+    const lastProvider = [...messages]
+      .reverse()
+      .find((m) => m.role === "assistant" && m.providerId)?.providerId;
+    const idx = lastProvider ? PROVIDER_IDS.indexOf(lastProvider) : -1;
+    const next = PROVIDER_IDS[(idx + 1) % PROVIDER_IDS.length];
+    void runTurn(lastUserText, next);
+  }, [lastUserText, messages, runTurn]);
+
+  const report = useCallback(() => {
+    // Play Gen-AI policy / Apple 1.2: in-app way to flag offensive AI content.
+    Alert.alert(
+      "Report this response",
+      "Flag this AI-generated response as offensive, unsafe, or inaccurate? This stays on your device and helps you track problem providers.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Report",
+          style: "destructive",
+          onPress: () =>
+            Alert.alert("Reported", "Thanks — response flagged on this device."),
+        },
+      ],
+    );
+  }, []);
+
+  const voiceUnavailable = useCallback(() => {
+    // Spec-required "unavailable fallback" for voice dictation. Dictation needs
+    // on-device speech recognition (expo-speech-recognition) in a dev/preview
+    // build; until then we degrade gracefully and never auto-send anything.
+    Alert.alert(
+      "Voice dictation",
+      "On-device dictation isn't enabled in this build yet. Add expo-speech-recognition to a dev/preview build to turn it on. For now, type your message — Zintus never auto-sends a voice transcript.",
+    );
+  }, []);
+
+  const openArtifactsViewer = useCallback(() => {
+    setOpenArtifacts(conversationArtifacts(messages));
+    setArtifactsOpen(true);
+  }, [messages]);
+
+  const renderItem = useCallback<ListRenderItem<UiMessage>>(
+    ({ item }) => {
+      // Count of artifact-worthy blocks in THIS turn — drives the "Artifacts (N)"
+      // action. The viewer itself shows the whole conversation's folded history.
+      const artifactCount =
+        item.role === "assistant" && !item.streaming && item.content
+          ? extractArtifacts(textOf(item.content)).length
+          : 0;
+      return (
+        <ChatMessageBubble
+          message={item}
+          routeOptions={item.providerId ? routeOptions[item.providerId] : null}
+          artifactCount={artifactCount}
+          onCopy={copy}
+          onCopyCode={copy}
+          onRetry={!sending ? retry : undefined}
+          onRegenerate={!sending ? regenerate : undefined}
+          onReport={report}
+          onRouteAction={handleRouteAction}
+          onOpenArtifacts={openArtifactsViewer}
+        />
+      );
+    },
+    [routeOptions, copy, retry, regenerate, report, sending, openArtifactsViewer],
+  );
+
+  function handleRouteAction(action: RouteOption) {
+    switch (action) {
+      case "switch_provider":
+      case "use_local":
+        router.push("/providers");
+        break;
+      case "compress_harder":
+        Alert.alert(
+          "Compress harder",
+          "Tokzen already compresses every turn. Shorter prompts and fewer attachments stretch your free-tier budget further.",
+        );
+        break;
+      case "wait":
+        Alert.alert("Wait for reset", "No healthy alternative right now — your quota will recover at the provider's reset time.");
+        break;
+    }
+  }
+
+  const keyExtractor = useCallback((item: UiMessage) => item.id, []);
+  const modeDef = CHAT_MODES.find((m) => m.mode === mode)!;
+  const canSend =
+    (Boolean(input.trim()) || attachments.length > 0) &&
+    !sending &&
+    gatewayOnline;
 
   return (
-    <View style={styles.container}>
+    <KeyboardAvoidingView
+      style={styles.container}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
       <View style={styles.header}>
-        <Text style={styles.title}>Zintus</Text>
+        <View style={styles.headerLeft}>
+          <Text style={styles.title}>Zintus</Text>
+          <Pressable hitSlop={6} onPress={newChat}>
+            <Text style={styles.headerLink}>＋ New</Text>
+          </Pressable>
+          <Pressable hitSlop={6} onPress={() => router.push("/history")}>
+            <Text style={styles.headerLink}>History</Text>
+          </Pressable>
+          <Pressable hitSlop={6} onPress={() => router.push("/projects")}>
+            <Text style={styles.headerLink}>Projects</Text>
+          </Pressable>
+          <Pressable hitSlop={6} onPress={togglePrivate}>
+            <Text style={[styles.headerLink, privateMode && styles.shieldOn]}>
+              {privateMode ? "🛡 Private" : "🛡"}
+            </Text>
+          </Pressable>
+        </View>
         <View style={styles.chipRow}>
           <Pressable
-            style={({ pressed }) => [
-              styles.chip,
-              selectedProvider === "auto" && styles.chipActive,
-              pressed && styles.pressed,
-            ]}
-            onPress={toggleAuto}
+            style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
+            onPress={() => setMode((m) => nextMode(m))}
           >
-            <Text
-              style={[
-                styles.chipText,
-                selectedProvider === "auto" && styles.chipTextActive,
-              ]}
-            >
-              {chipLabel}
-            </Text>
+            <Text style={styles.chipText}>{modeDef.label}</Text>
           </Pressable>
           <Pressable
             style={({ pressed }) => [
@@ -474,10 +776,8 @@ export default function ChatScreen() {
               });
             }}
           >
-            <Text
-              style={[styles.chipText, jsonMode && styles.chipTextActive]}
-            >
-              {"{} JSON"}
+            <Text style={[styles.chipText, jsonMode && styles.chipTextActive]}>
+              {"{}"}
             </Text>
           </Pressable>
           <Pressable
@@ -496,10 +796,8 @@ export default function ChatScreen() {
               });
             }}
           >
-            <Text
-              style={[styles.chipText, toolsMode && styles.chipTextActive]}
-            >
-              {"🔧 Tools"}
+            <Text style={[styles.chipText, toolsMode && styles.chipTextActive]}>
+              🔧
             </Text>
           </Pressable>
           {mcpToolCount > 0 ? (
@@ -509,25 +807,33 @@ export default function ChatScreen() {
                 styles.chipActive,
                 pressed && styles.pressed,
               ]}
-              onPress={() => {
-                router.push("/mcp");
-              }}
+              onPress={() => router.push("/mcp")}
             >
               <Text style={[styles.chipText, styles.chipTextActive]}>
-                {`🔧 ${mcpToolCount} tools active`}
+                {`MCP ${mcpToolCount}`}
               </Text>
             </Pressable>
           ) : null}
           <Pressable
-            style={({ pressed }) => [styles.chip, pressed && styles.pressed]}
-            onPress={() => {
-              router.push("/providers");
-            }}
+            style={({ pressed }) => [
+              styles.chip,
+              provider === "auto" && styles.chipActive,
+              pressed && styles.pressed,
+            ]}
+            onPress={() => router.push("/providers")}
           >
-            <Text style={styles.chipText}>Change</Text>
+            <Text
+              style={[
+                styles.chipText,
+                provider === "auto" && styles.chipTextActive,
+              ]}
+            >
+              {provider === "auto" ? "Auto" : provider}
+            </Text>
           </Pressable>
         </View>
       </View>
+
       {gatewayChecked && !gatewayOnline && (
         <View style={styles.offlineBanner}>
           <Text style={styles.offlineText}>
@@ -539,214 +845,39 @@ export default function ChatScreen() {
           </Text>
         </View>
       )}
+
+      {activeProject ? (
+        <Text style={styles.projectBadge}>📁 {activeProject.name}</Text>
+      ) : null}
       <Text style={styles.gatewayHint}>
-        Gateway: {getGatewayUrl()}
-        {selectedProvider === "auto" ? " · auto-routing" : ""}
+        Gateway: {getGatewayUrl()} · {modeDef.hint}
       </Text>
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       <FlatList
+        ref={listRef}
         style={styles.list}
         data={messages}
-        keyExtractor={(item) => item.id}
+        keyExtractor={keyExtractor}
+        renderItem={renderItem}
         contentContainerStyle={
-          messages.length === 0 ? styles.emptyContainer : undefined
+          messages.length === 0 ? styles.emptyContainer : styles.listContent
         }
+        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+        windowSize={10}
+        maxToRenderPerBatch={8}
+        removeClippedSubviews
+        keyboardShouldPersistTaps="handled"
         ListEmptyComponent={
           <View style={styles.empty}>
             <Text style={styles.emptyTitle}>Ask anything</Text>
             <Text style={styles.emptySubtitle}>
-              {selectedProvider === "auto"
-                ? "Auto mode routes your message to the best available free provider."
-                : `Messages route through ${selectedProvider}. Tap Auto to let the gateway choose.`}
+              {provider === "auto"
+                ? "Auto mode routes your message to the best available free provider — through your gateway, using your own keys."
+                : `Messages route through ${provider}. Tap the chip to change.`}
             </Text>
           </View>
         }
-        renderItem={({ item }) => {
-          const isUser = item.role === "user";
-          // The headline "why this provider/model" — the prominent route reason
-          // from the gateway's metadata frame. Mirrors web/desktop's top-line pill.
-          const routeReason = !isUser ? item.meta?.routeReason : undefined;
-          // Render a settled assistant turn that is itself JSON as formatted
-          // monospace (the response_format: json_object path), never faking it.
-          const structuredJson =
-            !isUser && !item.streaming ? asStructuredJson(item.content) : null;
-          // Count of artifact-worthy blocks in THIS turn — drives the
-          // "Artifacts (N)" affordance. The viewer itself shows the whole
-          // conversation's folded version history.
-          const artifactCount =
-            !isUser && !item.streaming && item.content
-              ? extractArtifacts(item.content).length
-              : 0;
-          return (
-            <View
-              style={[
-                styles.bubble,
-                isUser ? styles.userBubble : styles.assistantBubble,
-              ]}
-            >
-              {routeReason ? (
-                <Text style={styles.routeReason} numberOfLines={2}>
-                  {routeReason}
-                </Text>
-              ) : null}
-
-              {item.streaming && !item.content ? (
-                <View style={styles.typingRow}>
-                  <ActivityIndicator size="small" color={COLORS.accentBright} />
-                  <Text style={styles.typingText}>Thinking…</Text>
-                </View>
-              ) : structuredJson ? (
-                <View style={styles.jsonBlock}>
-                  <Text style={styles.jsonLabel}>JSON output</Text>
-                  <Text style={styles.jsonText}>{structuredJson}</Text>
-                </View>
-              ) : (
-                <Text style={[styles.bubbleText, isUser && styles.userBubbleText]}>
-                  {item.content}
-                  {item.streaming ? (
-                    <Text style={styles.cursor}>▋</Text>
-                  ) : null}
-                </Text>
-              )}
-
-              {item.toolCalls && item.toolCalls.length > 0 ? (
-                <View style={styles.toolBlock}>
-                  {item.toolCalls.map((call) => {
-                    const toolResult = item.toolResults?.find(
-                      (r) => r.toolCallId === call.id,
-                    );
-                    return (
-                      <View key={call.id} style={styles.toolCallRow}>
-                        <Text style={styles.toolCallName} numberOfLines={2}>
-                          {`🔧 ${call.name}(${formatToolArgs(call.arguments)})`}
-                        </Text>
-                        {toolResult ? (
-                          <Text
-                            style={[
-                              styles.toolResult,
-                              toolResult.isError && styles.toolResultError,
-                            ]}
-                            numberOfLines={4}
-                          >
-                            {toolResult.isError ? "error · " : "→ "}
-                            {toolResult.content}
-                          </Text>
-                        ) : null}
-                      </View>
-                    );
-                  })}
-                </View>
-              ) : null}
-
-              {item.mcpEvents && item.mcpEvents.length > 0 ? (
-                <View style={styles.toolBlock}>
-                  {item.mcpEvents.map((event, i) => (
-                    <Text
-                      key={`${event.kind}-${event.id}-${i}`}
-                      style={[
-                        event.kind === "call"
-                          ? styles.toolCallName
-                          : styles.toolResult,
-                        event.kind === "result" &&
-                          !event.ok &&
-                          styles.toolResultError,
-                      ]}
-                      numberOfLines={3}
-                    >
-                      {mcpEventLine(event)}
-                    </Text>
-                  ))}
-                </View>
-              ) : null}
-
-              {!isUser && !item.streaming && item.content ? (
-                <View style={styles.assistantFooter}>
-                  {item.providerId ? (
-                    <Text style={styles.attribution}>
-                      {item.providerId}
-                      {item.model ? ` · ${item.model}` : ""}
-                      {item.meta?.latencyMs
-                        ? ` · ${item.meta.latencyMs} ms`
-                        : ""}
-                    </Text>
-                  ) : (
-                    <View />
-                  )}
-                  <View style={styles.footerActions}>
-                    {artifactCount > 0 ? (
-                      <Pressable
-                        style={({ pressed }) => [
-                          styles.copyButton,
-                          styles.artifactButton,
-                          pressed && styles.pressed,
-                        ]}
-                        onPress={() => {
-                          setOpenArtifacts(conversationArtifacts(messages));
-                          setArtifactsOpen(true);
-                        }}
-                      >
-                        <Text style={styles.artifactText}>
-                          {`📄 Artifacts (${artifactCount})`}
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                    <Pressable
-                      style={({ pressed }) => [
-                        styles.copyButton,
-                        pressed && styles.pressed,
-                      ]}
-                      onPress={() => {
-                        void copyMessage(item.content);
-                      }}
-                    >
-                      <Text style={styles.copyText}>Copy</Text>
-                    </Pressable>
-                  </View>
-                </View>
-              ) : null}
-
-              {/* Per-response Private-Mode badge — mirrors web/desktop's pill
-                  copy + honesty exactly. `privacyHonored` is undefined when
-                  Private Mode was off (no badge), true when a no-training
-                  provider served the turn, false when a may-train provider was
-                  used anyway. Never claim "honored" unless the gateway confirmed it. */}
-              {!isUser && !item.streaming && item.meta?.privacyHonored != null ? (
-                <View
-                  style={[
-                    styles.privacyBadge,
-                    item.meta.privacyHonored
-                      ? styles.privacyBadgeHonored
-                      : styles.privacyBadgeBroken,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.privacyBadgeText,
-                      { color: item.meta.privacyHonored ? COLORS.good : COLORS.warn },
-                    ]}
-                  >
-                    {item.meta.privacyHonored
-                      ? "✓ Private Mode honored"
-                      : "⚠ Private Mode not honored"}
-                  </Text>
-                </View>
-              ) : null}
-
-              {/* "Memory used this turn" — stored facts that influenced the
-                  answer (background data, not instructions). */}
-              {!isUser &&
-              !item.streaming &&
-              item.meta?.memoryUsed &&
-              item.meta.memoryUsed.length > 0 ? (
-                <Text style={styles.memoryUsed}>
-                  {item.meta.memoryUsed.length}{" "}
-                  {item.meta.memoryUsed.length === 1 ? "memory" : "memories"} used
-                </Text>
-              ) : null}
-            </View>
-          );
-        }}
       />
 
       <ArtifactsModal
@@ -756,36 +887,185 @@ export default function ChatScreen() {
       />
 
       <View style={styles.composer}>
-        <TextInput
-          style={styles.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder="Message..."
-          placeholderTextColor={COLORS.muted}
-          editable={!sending}
-          onSubmitEditing={() => {
-            void send();
-          }}
-        />
-        <Pressable
-          style={({ pressed }) => [
-            styles.sendButton,
-            (sending || !input.trim()) && styles.sendButtonDisabled,
-            pressed && !sending && input.trim() ? styles.pressed : null,
-          ]}
-          onPress={() => {
-            void send();
-          }}
-          disabled={sending || !input.trim()}
-        >
+        {attachments.length > 0 ? (
+          <View style={styles.attachWrap}>
+            <View style={styles.attachChips}>
+              {attachments.map((a) => (
+                <View key={a.id} style={styles.attachChip}>
+                  <Text style={styles.attachName} numberOfLines={1}>
+                    📄 {a.name}
+                    {a.truncated ? " (truncated)" : ""}
+                  </Text>
+                  <Pressable
+                    hitSlop={6}
+                    onPress={() =>
+                      setAttachments((prev) => prev.filter((x) => x.id !== a.id))
+                    }
+                  >
+                    <Text style={styles.attachRemove}>×</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </View>
+            <Text style={styles.attachNotice}>
+              {attachmentPrivacyNotice("standard")[0]}
+            </Text>
+          </View>
+        ) : null}
+        <View style={styles.composerTopRow}>
+          <Pressable
+            hitSlop={6}
+            onPress={() => void addAttachment()}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.iconBtnText}>＋</Text>
+          </Pressable>
+          <Pressable
+            hitSlop={6}
+            onPress={voiceUnavailable}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+          >
+            <Text style={styles.iconBtnText}>🎤</Text>
+          </Pressable>
+          <TextInput
+            style={styles.input}
+            value={input}
+            onChangeText={setInput}
+            placeholder={gatewayOnline ? "Message…" : "Gateway offline"}
+            placeholderTextColor={COLORS.muted}
+            editable={!sending}
+            multiline
+          />
+        </View>
+        <View style={styles.composerBottomRow}>
+          <Text style={styles.composerMeta}>
+            {provider === "auto" ? `Auto · ${modeDef.label}` : provider}
+            {jsonMode ? " · JSON" : ""}
+            {toolsMode ? " · tools" : ""}
+          </Text>
           {sending ? (
-            <ActivityIndicator color={COLORS.onAccent} />
+            <Pressable
+              onPress={stop}
+              style={({ pressed }) => [styles.stopButton, pressed && styles.pressed]}
+            >
+              <Text style={styles.stopText}>Stop</Text>
+            </Pressable>
           ) : (
-            <Text style={styles.sendText}>Send</Text>
+            <Pressable
+              onPress={() => send()}
+              onLongPress={() => input.trim() && setOverrideVisible(true)}
+              disabled={!canSend}
+              style={({ pressed }) => [
+                styles.sendButton,
+                !canSend && styles.sendButtonDisabled,
+                pressed && canSend && styles.pressed,
+              ]}
+            >
+              <Text style={styles.sendText}>Send</Text>
+            </Pressable>
           )}
-        </Pressable>
+        </View>
       </View>
-    </View>
+
+      {/* Pre-send consent (Apple 5.1.2(i)) — where the data actually goes. */}
+      <Modal visible={consentVisible} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Before your first send</Text>
+            <Text style={styles.modalBody}>
+              Your message goes to the AI provider you choose, routed through your
+              own gateway. Here&apos;s exactly where data travels:
+            </Text>
+            <ScrollView style={styles.flowList}>
+              {describeFlow("standard").map((item, i) => (
+                <View key={i} style={styles.flowItem}>
+                  <Text style={styles.flowDest}>
+                    {DESTINATIONS[item.destination].label}
+                  </Text>
+                  <Text style={styles.flowData}>{item.data}</Text>
+                  <Text style={styles.flowDetail}>{item.detail}</Text>
+                </View>
+              ))}
+            </ScrollView>
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setConsentVisible(false)}
+                style={({ pressed }) => [styles.modalBtn, pressed && styles.pressed]}
+              >
+                <Text style={styles.modalBtnText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={grantConsentAndSend}
+                style={({ pressed }) => [
+                  styles.modalBtn,
+                  styles.modalBtnPrimary,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.modalBtnPrimaryText}>Got it — send</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Private Mode explainer (shown the first time it's enabled). */}
+      <Modal visible={privateExplainVisible} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>🛡 Private Mode on</Text>
+            <Text style={styles.modalBody}>
+              Zintus will refuse providers that train on your data for every
+              message. Your prompts still travel to a no-training provider
+              through your gateway — for fully on-device processing, pick a local
+              runtime (Ollama / LM Studio).
+              {"\n\n"}Tradeoff: blocking training providers can reduce
+              availability, so some free providers may be skipped.
+            </Text>
+            <View style={styles.modalActions}>
+              <Pressable
+                onPress={() => setPrivateExplainVisible(false)}
+                style={({ pressed }) => [
+                  styles.modalBtn,
+                  styles.modalBtnPrimary,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <Text style={styles.modalBtnPrimaryText}>Got it</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Long-press Send → one-message provider override. */}
+      <Modal visible={overrideVisible} transparent animationType="slide">
+        <Pressable
+          style={styles.modalBackdrop}
+          onPress={() => setOverrideVisible(false)}
+        >
+          <View style={styles.sheet}>
+            <Text style={styles.sheetTitle}>Send this message via…</Text>
+            <ScrollView>
+              {PROVIDER_IDS.map((id) => (
+                <Pressable
+                  key={id}
+                  onPress={() => {
+                    setOverrideVisible(false);
+                    send(id);
+                  }}
+                  style={({ pressed }) => [styles.sheetRow, pressed && styles.pressed]}
+                >
+                  <Text style={styles.sheetRowText}>
+                    {PROVIDER_METADATA[id]?.name ?? id}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -800,12 +1080,28 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   title: { color: COLORS.ink, fontSize: 22, fontWeight: "700" },
-  chipRow: { flexDirection: "row", gap: 8 },
+  headerLeft: { flexDirection: "row", alignItems: "center", gap: 12 },
+  headerLink: { color: COLORS.accentBright, fontSize: 13, fontWeight: "600" },
+  shieldOn: { color: COLORS.good, fontWeight: "800" },
+  chipRow: {
+    flexDirection: "row",
+    gap: 8,
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    flexShrink: 1,
+  },
   gatewayHint: {
     color: COLORS.muted,
     fontSize: 12,
     paddingHorizontal: 16,
     paddingBottom: 8,
+  },
+  projectBadge: {
+    color: COLORS.accentBright,
+    fontSize: 12,
+    fontWeight: "700",
+    paddingHorizontal: 16,
+    paddingBottom: 2,
   },
   errorText: {
     color: COLORS.error,
@@ -822,16 +1118,8 @@ const styles = StyleSheet.create({
     borderColor: COLORS.error,
     backgroundColor: COLORS.panel,
   },
-  offlineText: {
-    color: COLORS.error,
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  offlineSub: {
-    color: COLORS.muted,
-    fontSize: 11,
-    marginTop: 2,
-  },
+  offlineText: { color: COLORS.error, fontSize: 13, fontWeight: "600" },
+  offlineSub: { color: COLORS.muted, fontSize: 11, marginTop: 2 },
   chip: {
     backgroundColor: COLORS.panel,
     borderRadius: 999,
@@ -840,141 +1128,62 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
-  chipActive: {
-    backgroundColor: COLORS.accent,
-    borderColor: COLORS.accent,
-  },
+  chipActive: { backgroundColor: COLORS.accent, borderColor: COLORS.accent },
   chipText: { color: COLORS.accentBright, textTransform: "capitalize" },
   chipTextActive: { color: COLORS.onAccent, fontWeight: "700" },
   pressed: { opacity: 0.7 },
   list: { flex: 1, paddingHorizontal: 16 },
+  listContent: { paddingBottom: 8 },
   emptyContainer: { flexGrow: 1, justifyContent: "center" },
   empty: { alignItems: "center", paddingHorizontal: 24 },
-  emptyTitle: {
-    color: COLORS.ink,
-    fontSize: 18,
-    fontWeight: "700",
-    marginBottom: 8,
-  },
+  emptyTitle: { color: COLORS.ink, fontSize: 18, fontWeight: "700", marginBottom: 8 },
   emptySubtitle: {
     color: COLORS.muted,
     fontSize: 14,
     textAlign: "center",
     lineHeight: 20,
   },
-  bubble: {
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 10,
-    maxWidth: "85%",
-  },
-  userBubble: { alignSelf: "flex-end", backgroundColor: COLORS.accent },
-  assistantBubble: { alignSelf: "flex-start", backgroundColor: COLORS.panel },
-  bubbleText: { color: COLORS.ink },
-  userBubbleText: { color: COLORS.onAccent },
-  routeReason: {
-    color: COLORS.accentBright,
-    fontSize: 12,
-    fontWeight: "600",
-    marginBottom: 6,
-  },
-  memoryUsed: {
-    color: COLORS.muted,
-    fontSize: 11.5,
-    marginTop: 4,
-  },
-  privacyBadge: {
-    alignSelf: "flex-start",
-    marginTop: 6,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 999,
-    borderWidth: 1,
-  },
-  privacyBadgeHonored: {
-    borderColor: COLORS.good,
-    backgroundColor: "rgba(52,211,153,0.12)",
-  },
-  privacyBadgeBroken: {
-    borderColor: COLORS.warn,
-    backgroundColor: "rgba(245,158,11,0.12)",
-  },
-  privacyBadgeText: {
-    fontSize: 11,
-    fontWeight: "600",
-  },
-  jsonBlock: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 10,
-  },
-  jsonLabel: {
-    color: COLORS.muted,
-    fontSize: 10,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginBottom: 4,
-  },
-  jsonText: {
-    color: COLORS.ink,
-    fontSize: 12,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
-  },
-  cursor: { color: COLORS.accentBright },
-  toolBlock: {
-    marginTop: 8,
-    gap: 6,
-  },
-  toolCallRow: {
-    backgroundColor: COLORS.surface,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    padding: 8,
-  },
-  toolCallName: {
-    color: COLORS.accentBright,
-    fontSize: 12,
-    fontWeight: "600",
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
-  },
-  toolResult: {
-    color: COLORS.muted,
-    fontSize: 12,
-    marginTop: 4,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace" }),
-  },
-  toolResultError: { color: COLORS.error },
-  typingRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  typingText: { color: COLORS.muted, fontSize: 13 },
-  assistantFooter: {
-    marginTop: 8,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  attribution: { color: COLORS.muted, fontSize: 11 },
-  footerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
-  copyButton: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  copyText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "600" },
-  artifactButton: { borderColor: COLORS.accent },
-  artifactText: { color: COLORS.accentBright, fontSize: 12, fontWeight: "600" },
   composer: {
-    flexDirection: "row",
-    gap: 8,
-    padding: 16,
+    padding: 12,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
+    gap: 8,
   },
+  attachWrap: { gap: 6 },
+  attachChips: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
+  attachChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    maxWidth: "100%",
+    backgroundColor: COLORS.panel,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  attachName: { color: COLORS.ink, fontSize: 12, flexShrink: 1 },
+  attachRemove: { color: COLORS.muted, fontSize: 16, fontWeight: "800" },
+  attachNotice: { color: COLORS.muted, fontSize: 11, lineHeight: 15 },
+  composerTopRow: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
+  composerBottomRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  composerMeta: { color: COLORS.muted, fontSize: 11, textTransform: "capitalize" },
+  iconBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: COLORS.panel,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  iconBtnText: { color: COLORS.accentBright, fontSize: 18 },
   input: {
     flex: 1,
     backgroundColor: COLORS.panel,
@@ -982,15 +1191,71 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,
+    maxHeight: 140,
+    minHeight: 38,
   },
   sendButton: {
     backgroundColor: COLORS.accent,
     borderRadius: 10,
     justifyContent: "center",
-    paddingHorizontal: 14,
-    minWidth: 56,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
     alignItems: "center",
   },
-  sendButtonDisabled: { opacity: 0.5 },
+  sendButtonDisabled: { opacity: 0.4 },
   sendText: { color: COLORS.onAccent, fontWeight: "700" },
+  stopButton: {
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.error,
+    paddingHorizontal: 18,
+    paddingVertical: 8,
+  },
+  stopText: { color: COLORS.error, fontWeight: "700" },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.6)",
+    justifyContent: "center",
+    padding: 24,
+  },
+  modalCard: {
+    backgroundColor: COLORS.panel,
+    borderRadius: 14,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  modalTitle: { color: COLORS.ink, fontSize: 17, fontWeight: "800", marginBottom: 8 },
+  modalBody: { color: COLORS.muted, fontSize: 13, lineHeight: 19, marginBottom: 10 },
+  flowList: { maxHeight: 230 },
+  flowItem: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+    paddingVertical: 8,
+  },
+  flowDest: { color: COLORS.accentBright, fontSize: 12, fontWeight: "800" },
+  flowData: { color: COLORS.ink, fontSize: 13, fontWeight: "600", marginTop: 1 },
+  flowDetail: { color: COLORS.muted, fontSize: 12, lineHeight: 17, marginTop: 1 },
+  modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 10, marginTop: 14 },
+  modalBtn: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 9 },
+  modalBtnText: { color: COLORS.muted, fontWeight: "700" },
+  modalBtnPrimary: { backgroundColor: COLORS.accent },
+  modalBtnPrimaryText: { color: COLORS.onAccent, fontWeight: "800" },
+  sheet: {
+    marginTop: "auto",
+    backgroundColor: COLORS.panel,
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    padding: 16,
+    maxHeight: "70%",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  sheetTitle: { color: COLORS.ink, fontSize: 15, fontWeight: "800", marginBottom: 8 },
+  sheetRow: {
+    paddingVertical: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: COLORS.border,
+  },
+  sheetRowText: { color: COLORS.ink, fontSize: 15 },
 });
