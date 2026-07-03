@@ -678,8 +678,11 @@ export default function ChatScreen() {
     }
   }
 
-  function promptAddImage() {
-    Alert.alert("Add image", "Send a photo to a vision-capable model.", [
+  /** Unified "+" attach menu (web-composer parity): files + photos + camera
+   *  behind ONE button instead of a row of per-type icons. */
+  function promptPlusMenu() {
+    Alert.alert("Add to message", undefined, [
+      { text: "Add files", onPress: () => void addAttachment() },
       { text: "Photo Library", onPress: () => void addImage("library") },
       { text: "Take Photo", onPress: () => void addImage("camera") },
       { text: "Cancel", style: "cancel" },
@@ -692,7 +695,7 @@ export default function ChatScreen() {
     if (att.unsupported) {
       Alert.alert(
         "Can't read this file on-device",
-        `${att.name} isn't a text format Zintus can extract here (PDFs aren't supported yet). For photos, use the 🖼 image button. Text files — txt, md, csv, json, code — work here.`,
+        `${att.name} isn't a text format Zintus can extract here (PDFs aren't supported yet). For photos, use "＋ → Photo Library". Text files — txt, md, csv, json, code — work here.`,
       );
       return;
     }
@@ -1047,17 +1050,11 @@ export default function ChatScreen() {
         <View style={styles.composerTopRow}>
           <Pressable
             hitSlop={6}
-            onPress={() => void addAttachment()}
+            accessibilityLabel="Add files or photos"
+            onPress={promptPlusMenu}
             style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
           >
             <Text style={styles.iconBtnText}>＋</Text>
-          </Pressable>
-          <Pressable
-            hitSlop={6}
-            onPress={promptAddImage}
-            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
-          >
-            <Text style={styles.iconBtnText}>🖼</Text>
           </Pressable>
           <Pressable
             hitSlop={6}
