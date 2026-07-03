@@ -1,0 +1,21 @@
+{
+  "name": "@zintus/pricing-worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy --message \"$(git rev-parse --short HEAD)$(git diff --quiet HEAD || echo -dirty)\"",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test tests/"
+  },
+  "dependencies": {
+    "@zintus/burn": "workspace:*",
+    "@zintus/types": "workspace:*",
+    "hono": "^4.12.23"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "wrangler": "^4.0.0"
+  }
+}

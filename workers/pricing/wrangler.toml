@@ -1,0 +1,30 @@
+# Zintus pricing worker — versioned, alert-gated price-table publishing.
+#
+# Publishes billing-grade PriceSnapshots (see @zintus/burn) to KV on a cron.
+# A snapshot with any >10% rate move is BLOCKED (stored as pending) until a
+# human approves via POST /v1/refresh?force=true — provider price moves and
+# scraper bugs alike always get eyes before they change what users are charged.
+#
+# Run with `bunx wrangler` (repo convention). Before first deploy:
+#   bunx wrangler kv namespace create PRICING_KV   # then fill the id below
+name = "pricing"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Refresh every 6 hours.
+[triggers]
+crons = ["0 */6 * * *"]
+
+[[kv_namespaces]]
+binding = "PRICING_KV"
+id = "FILL_AFTER_kv_namespace_create"
+
+# [vars]
+# Optional JSON URL serving a proposed rates array (human-maintained source of
+# truth, e.g. a raw repo file). Unset → the bundled snapshot's rates are used.
+# PRICE_SOURCE_URL = "https://raw.githubusercontent.com/.../rates.json"
+# Optional webhook POSTed the refresh report when alerts fire.
+# ALERT_WEBHOOK_URL = ""
+# Required to call POST /v1/refresh (manual trigger / force-approve pending).
+# Set via: bunx wrangler secret put ADMIN_TOKEN

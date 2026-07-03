@@ -301,6 +301,13 @@ export interface RouteUsage {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** Reasoning/"thinking" tokens, when the winning provider reported them.
+   *  Absent means "not reported" — see `TokenUsage.reasoningTokens`. */
+  reasoningTokens?: number;
+  /** Prompt-cache read tokens (subset of `inputTokens`), when reported. */
+  cacheReadTokens?: number;
+  /** Prompt-cache write tokens, when reported. */
+  cacheWriteTokens?: number;
   latencyMs: number;
 }
 

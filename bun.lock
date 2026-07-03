@@ -214,6 +214,13 @@
         "typescript": "^5.7.0",
       },
     },
+    "packages/burn": {
+      "name": "@zintus/burn",
+      "version": "0.0.0",
+      "dependencies": {
+        "@zintus/types": "workspace:*",
+      },
+    },
     "packages/cache": {
       "name": "@zintus/cache",
       "version": "0.0.1",
@@ -427,6 +434,19 @@
     "packages/ui": {
       "name": "@zintus/ui",
       "version": "0.0.1",
+    },
+    "workers/pricing": {
+      "name": "@zintus/pricing-worker",
+      "version": "0.0.1",
+      "dependencies": {
+        "@zintus/burn": "workspace:*",
+        "@zintus/types": "workspace:*",
+        "hono": "^4.12.23",
+      },
+      "devDependencies": {
+        "@cloudflare/workers-types": "^4.20250214.0",
+        "wrangler": "^4.0.0",
+      },
     },
     "workers/relay": {
       "name": "@zintus/relay-worker",
@@ -1254,6 +1274,8 @@
 
     "@zintus/agent": ["@zintus/agent@workspace:packages/agent"],
 
+    "@zintus/burn": ["@zintus/burn@workspace:packages/burn"],
+
     "@zintus/cache": ["@zintus/cache@workspace:packages/cache"],
 
     "@zintus/codebase-indexer": ["@zintus/codebase-indexer@workspace:packages/codebase-indexer"],
@@ -1277,6 +1299,8 @@
     "@zintus/memory": ["@zintus/memory@workspace:packages/memory"],
 
     "@zintus/mobile": ["@zintus/mobile@workspace:apps/mobile"],
+
+    "@zintus/pricing-worker": ["@zintus/pricing-worker@workspace:workers/pricing"],
 
     "@zintus/providers": ["@zintus/providers@workspace:packages/providers"],
 

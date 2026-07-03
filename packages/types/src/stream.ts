@@ -56,6 +56,19 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  /** Reasoning/"thinking" tokens when the provider reports them separately
+   *  (OpenAI `completion_tokens_details.reasoning_tokens`, Gemini
+   *  `thoughtsTokenCount`). Billed at the output rate. Absent means
+   *  "not reported", never zero — callers must not default this to 0 when
+   *  deciding whether a model reasons. */
+  reasoningTokens?: number;
+  /** Input tokens served from the provider's prompt cache (OpenAI
+   *  `prompt_tokens_details.cached_tokens`, Gemini `cachedContentTokenCount`).
+   *  A subset of `inputTokens`, billed at a discounted rate. */
+  cacheReadTokens?: number;
+  /** Tokens written to the provider's prompt cache (Anthropic-style
+   *  `cache_creation_input_tokens`). Billed at a premium on some providers. */
+  cacheWriteTokens?: number;
   source: "provider" | "estimate";
 }
 

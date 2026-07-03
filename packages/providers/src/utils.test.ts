@@ -47,6 +47,55 @@ describe("parseOpenAiSseStream", () => {
     expect(usageSeen?.source).toBe("provider");
   });
 
+  test("surfaces reasoning and cached-token details from the usage frame", async () => {
+    const stream = sseStream([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: "ok" } }] })}\n\n`,
+      `data: ${JSON.stringify({
+        choices: [],
+        usage: {
+          prompt_tokens: 200,
+          completion_tokens: 120,
+          total_tokens: 320,
+          completion_tokens_details: { reasoning_tokens: 90 },
+          prompt_tokens_details: { cached_tokens: 150 },
+        },
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ]);
+
+    let usageSeen: import("@zintus/types").TokenUsage | undefined;
+    for await (const chunk of parseOpenAiSseStream(stream)) {
+      if (chunk.usage) {
+        usageSeen = chunk.usage;
+      }
+    }
+
+    expect(usageSeen?.reasoningTokens).toBe(90);
+    expect(usageSeen?.cacheReadTokens).toBe(150);
+    expect(usageSeen?.cacheWriteTokens).toBeUndefined();
+  });
+
+  test("usage detail fields stay absent when the provider omits the detail objects", async () => {
+    const stream = sseStream([
+      `data: ${JSON.stringify({
+        choices: [],
+        usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+      })}\n\n`,
+      "data: [DONE]\n\n",
+    ]);
+
+    let usageSeen: import("@zintus/types").TokenUsage | undefined;
+    for await (const chunk of parseOpenAiSseStream(stream)) {
+      if (chunk.usage) {
+        usageSeen = chunk.usage;
+      }
+    }
+
+    expect(usageSeen).toBeDefined();
+    expect("reasoningTokens" in (usageSeen ?? {})).toBe(false);
+    expect("cacheReadTokens" in (usageSeen ?? {})).toBe(false);
+  });
+
   test("handles streams without a usage payload", async () => {
     const stream = sseStream([
       `data: ${JSON.stringify({ choices: [{ delta: { content: "hi" } }] })}\n\n`,

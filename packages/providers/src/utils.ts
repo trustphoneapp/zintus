@@ -5,6 +5,10 @@ interface OpenAiUsageFields {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  /** Reasoning-token breakdown (o-series/GPT-5.x and compatible providers). */
+  completion_tokens_details?: { reasoning_tokens?: number };
+  /** Prompt-cache breakdown (OpenAI-compatible providers that cache prompts). */
+  prompt_tokens_details?: { cached_tokens?: number };
 }
 
 function toUsageChunk(usage: OpenAiUsageFields | undefined): StreamChunk | null {
@@ -15,6 +19,8 @@ function toUsageChunk(usage: OpenAiUsageFields | undefined): StreamChunk | null 
     inputTokens: usage.prompt_tokens,
     outputTokens: usage.completion_tokens,
     totalTokens: usage.total_tokens,
+    reasoningTokens: usage.completion_tokens_details?.reasoning_tokens,
+    cacheReadTokens: usage.prompt_tokens_details?.cached_tokens,
   });
   return normalized ? { usage: normalized } : null;
 }

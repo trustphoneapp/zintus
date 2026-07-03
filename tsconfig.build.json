@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "./packages/types" },
+    { "path": "./packages/burn" },
     { "path": "./packages/media" },
     { "path": "./packages/schemas" },
     { "path": "./packages/crypto-e2e" },
@@ -22,6 +23,7 @@
     { "path": "./apps/gateway" },
     { "path": "./packages/test-utils" },
     { "path": "./workers/validate-key" },
-    { "path": "./workers/relay" }
+    { "path": "./workers/relay" },
+    { "path": "./workers/pricing" }
   ]
 }

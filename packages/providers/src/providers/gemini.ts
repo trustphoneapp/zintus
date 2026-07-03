@@ -275,6 +275,8 @@ export async function* parseGeminiSseStream(
               promptTokenCount?: number;
               candidatesTokenCount?: number;
               totalTokenCount?: number;
+              thoughtsTokenCount?: number;
+              cachedContentTokenCount?: number;
             };
           };
           const candidate = parsed.candidates?.[0];
@@ -317,6 +319,8 @@ export async function* parseGeminiSseStream(
               inputTokens: parsed.usageMetadata.promptTokenCount,
               outputTokens: parsed.usageMetadata.candidatesTokenCount,
               totalTokens: parsed.usageMetadata.totalTokenCount,
+              reasoningTokens: parsed.usageMetadata.thoughtsTokenCount,
+              cacheReadTokens: parsed.usageMetadata.cachedContentTokenCount,
             });
             if (usage) {
               yield { usage };

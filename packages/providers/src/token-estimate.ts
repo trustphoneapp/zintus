@@ -56,6 +56,9 @@ export function usageFromProviderFields(fields: {
   inputTokens?: number | null;
   outputTokens?: number | null;
   totalTokens?: number | null;
+  reasoningTokens?: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
 }): TokenUsage | null {
   const input = numberOrNull(fields.inputTokens);
   const output = numberOrNull(fields.outputTokens);
@@ -67,12 +70,27 @@ export function usageFromProviderFields(fields: {
 
   const inputTokens = input ?? (total != null && output != null ? total - output : 0);
   const outputTokens = output ?? (total != null && input != null ? total - input : 0);
-  return {
+  const usage: TokenUsage = {
     inputTokens: Math.max(0, inputTokens),
     outputTokens: Math.max(0, outputTokens),
     totalTokens: total ?? Math.max(0, inputTokens) + Math.max(0, outputTokens),
     source: "provider",
   };
+  // Detail fields stay absent (not 0) when the provider didn't report them —
+  // "not reported" and "reported zero" mean different things to burn metering.
+  const reasoning = numberOrNull(fields.reasoningTokens);
+  if (reasoning != null) {
+    usage.reasoningTokens = Math.max(0, reasoning);
+  }
+  const cacheRead = numberOrNull(fields.cacheReadTokens);
+  if (cacheRead != null) {
+    usage.cacheReadTokens = Math.max(0, cacheRead);
+  }
+  const cacheWrite = numberOrNull(fields.cacheWriteTokens);
+  if (cacheWrite != null) {
+    usage.cacheWriteTokens = Math.max(0, cacheWrite);
+  }
+  return usage;
 }
 
 function numberOrNull(value: number | null | undefined): number | null {

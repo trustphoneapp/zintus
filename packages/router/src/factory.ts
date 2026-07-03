@@ -911,6 +911,9 @@ export function createRouter(config: RouterConfig = {}): Router {
                   model,
                   inputTokens: usage.inputTokens,
                   outputTokens: usage.outputTokens,
+                  reasoningTokens: usage.reasoningTokens,
+                  cacheReadTokens: usage.cacheReadTokens,
+                  cacheWriteTokens: usage.cacheWriteTokens,
                   latencyMs: completionLatencyMs,
                 });
                 // The stream fully drained — NOW it's honestly a success. Recording

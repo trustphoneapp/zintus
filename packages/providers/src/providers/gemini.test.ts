@@ -491,3 +491,52 @@ describe("parseGeminiSseStream — tool calls", () => {
     });
   });
 });
+
+describe("parseGeminiSseStream — usage metadata details", () => {
+  test("surfaces thoughts and cached-content token counts when reported", async () => {
+    const chunks = await collect(
+      parseGeminiSseStream(
+        sseStream([
+          `data: ${JSON.stringify({
+            candidates: [
+              { content: { parts: [{ text: "hi" }] }, finishReason: "STOP" },
+            ],
+            usageMetadata: {
+              promptTokenCount: 40,
+              candidatesTokenCount: 10,
+              totalTokenCount: 50,
+              thoughtsTokenCount: 6,
+              cachedContentTokenCount: 25,
+            },
+          })}\n\n`,
+        ]),
+      ),
+    );
+
+    const usage = chunks.find((c) => c.usage)?.usage;
+    expect(usage?.inputTokens).toBe(40);
+    expect(usage?.reasoningTokens).toBe(6);
+    expect(usage?.cacheReadTokens).toBe(25);
+    expect(usage?.cacheWriteTokens).toBeUndefined();
+  });
+
+  test("detail fields stay absent when usageMetadata omits them", async () => {
+    const chunks = await collect(
+      parseGeminiSseStream(
+        sseStream([
+          `data: ${JSON.stringify({
+            candidates: [
+              { content: { parts: [{ text: "hi" }] }, finishReason: "STOP" },
+            ],
+            usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 },
+          })}\n\n`,
+        ]),
+      ),
+    );
+
+    const usage = chunks.find((c) => c.usage)?.usage;
+    expect(usage).toBeDefined();
+    expect("reasoningTokens" in (usage ?? {})).toBe(false);
+    expect("cacheReadTokens" in (usage ?? {})).toBe(false);
+  });
+});

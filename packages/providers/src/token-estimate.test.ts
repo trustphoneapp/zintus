@@ -54,6 +54,37 @@ describe("usageFromProviderFields", () => {
       usageFromProviderFields({ inputTokens: null, outputTokens: undefined }),
     ).toBeNull();
   });
+
+  test("passes through reasoning/cache detail fields when reported", () => {
+    const usage = usageFromProviderFields({
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+      reasoningTokens: 30,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 12,
+    });
+    expect(usage?.reasoningTokens).toBe(30);
+    expect(usage?.cacheReadTokens).toBe(80);
+    expect(usage?.cacheWriteTokens).toBe(12);
+  });
+
+  test("detail fields stay ABSENT (not 0) when the provider omits them", () => {
+    const usage = usageFromProviderFields({ inputTokens: 10, outputTokens: 5 });
+    expect(usage).not.toBeNull();
+    expect("reasoningTokens" in (usage ?? {})).toBe(false);
+    expect("cacheReadTokens" in (usage ?? {})).toBe(false);
+    expect("cacheWriteTokens" in (usage ?? {})).toBe(false);
+  });
+
+  test("clamps negative detail fields to 0 but keeps them present", () => {
+    const usage = usageFromProviderFields({
+      inputTokens: 10,
+      outputTokens: 5,
+      reasoningTokens: -3,
+    });
+    expect(usage?.reasoningTokens).toBe(0);
+  });
 });
 
 describe("token estimation — content density & large input", () => {
