@@ -6,14 +6,21 @@ Multi-provider AI CLI — route chat, code, and agent workloads across providers
 
 ```bash
 npm install -g zintus
-# or
-bun install -g zintus
 ```
 
-> **Runtime requirement:** the `zintus` command runs on the [Bun](https://bun.sh) runtime
-> (it uses `bun:sqlite`, `Bun.serve`, and other Bun APIs). Install Bun first:
-> `curl -fsSL https://bun.sh/install | bash`. `npm install -g zintus` will place the
-> `zintus` binary on your PATH, but invoking it requires Bun to be installed.
+Nothing else to install — the npm package ships a **self-contained compiled
+binary** for your platform (macOS arm64/x64, Linux x64/arm64, Windows x64) with
+the runtime embedded. Stock Node ≥ 18 is only needed for the thin launcher npm
+runs.
+
+No npm? One line (macOS/Linux):
+
+```bash
+curl -fsSL https://zintus.ai/install | sh
+```
+
+Building from source instead requires [Bun](https://bun.sh) ≥ 1.2
+(`bun install && bun run --cwd apps/cli dev`).
 
 ## Quick start
 

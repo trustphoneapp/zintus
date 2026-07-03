@@ -1,0 +1,66 @@
+#!/bin/sh
+# Zintus installer — https://zintus.ai/install
+#
+#   curl -fsSL https://zintus.ai/install | sh
+#
+# Downloads the self-contained zintus binary (no Bun/Node required) for this
+# machine from the latest GitHub release and installs it to ~/.local/bin
+# (override with ZINTUS_INSTALL). Windows: use `npm install -g zintus` or grab
+# zintus-win32-x64.exe from the releases page.
+set -eu
+
+REPO="trustphoneapp/zintus"
+INSTALL_DIR="${ZINTUS_INSTALL:-$HOME/.local/bin}"
+
+os="$(uname -s)"
+arch="$(uname -m)"
+
+case "$os" in
+  Darwin) platform="darwin" ;;
+  Linux) platform="linux" ;;
+  *)
+    echo "zintus: unsupported OS '$os' — use npm install -g zintus, or see" >&2
+    echo "https://github.com/$REPO/releases" >&2
+    exit 1
+    ;;
+esac
+
+case "$arch" in
+  arm64 | aarch64) cpu="arm64" ;;
+  x86_64 | amd64) cpu="x64" ;;
+  *)
+    echo "zintus: unsupported architecture '$arch' — see https://github.com/$REPO/releases" >&2
+    exit 1
+    ;;
+esac
+
+asset="zintus-$platform-$cpu"
+url="https://github.com/$REPO/releases/latest/download/$asset"
+
+echo "Downloading $asset ..."
+mkdir -p "$INSTALL_DIR"
+tmp="$(mktemp)"
+if ! curl -fSL --progress-bar "$url" -o "$tmp"; then
+  echo "zintus: download failed — is there a published release yet?" >&2
+  echo "  $url" >&2
+  rm -f "$tmp"
+  exit 1
+fi
+chmod +x "$tmp"
+mv "$tmp" "$INSTALL_DIR/zintus"
+
+echo "Installed to $INSTALL_DIR/zintus"
+
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*)
+    echo
+    "$INSTALL_DIR/zintus" --version >/dev/null 2>&1 || true
+    echo "Run: zintus setup"
+    ;;
+  *)
+    echo
+    echo "NOTE: $INSTALL_DIR is not on your PATH. Add it, e.g.:"
+    echo "  echo 'export PATH=\"$INSTALL_DIR:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
+    echo "Then run: zintus setup"
+    ;;
+esac

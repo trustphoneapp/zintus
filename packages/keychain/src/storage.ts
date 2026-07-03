@@ -40,6 +40,17 @@ function forceMemory(): boolean {
 let entryCtor: typeof KeyringEntry | null | undefined;
 function loadEntryCtor(): typeof KeyringEntry | null {
   if (entryCtor !== undefined) return entryCtor;
+  // Compiled single-file binaries (bun build --compile) have no node_modules,
+  // so createRequire can never resolve the napi package there. The per-platform
+  // build entry embeds the right .node addon and registers its Entry here
+  // BEFORE importing the CLI (see apps/cli/scripts/build-binaries.ts).
+  const injected = (
+    globalThis as { __ZINTUS_KEYRING_ENTRY__?: typeof KeyringEntry }
+  ).__ZINTUS_KEYRING_ENTRY__;
+  if (injected) {
+    entryCtor = injected;
+    return entryCtor;
+  }
   try {
     const require = createRequire(import.meta.url);
     entryCtor = (require("@napi-rs/keyring") as typeof import("@napi-rs/keyring"))

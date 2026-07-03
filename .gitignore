@@ -30,3 +30,9 @@ coverage/
 /backup/
 .idea/
 previews/
+
+# CLI compiled-binary pipeline outputs (apps/cli/scripts/build-binaries.ts)
+apps/cli/dist-bin/
+apps/cli/vendor/
+apps/cli/gen/
+apps/cli/npm-dist/

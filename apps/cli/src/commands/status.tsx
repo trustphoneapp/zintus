@@ -122,44 +122,8 @@ function StatusDashboard() {
   );
 }
 
-/**
- * `--json`: one snapshot of the same facts the live dashboard shows (provider
- * key/cooldown/quota + estimated savings), for automation. No ink, no polling,
- * no fabricated quota denominators (`quotaLimit` stays null when unreported).
- */
-async function printStatusJson(): Promise<void> {
-  const config = await loadConfig();
-  const router = createAppRouter(config);
-  const infos = await getProviderInfos(router);
-  const savings = router.getSavings();
-  console.log(
-    JSON.stringify(
-      {
-        providers: infos.map((p) => ({
-          id: p.id,
-          name: p.name,
-          hasKey: p.hasKey,
-          enabled: p.enabled,
-          inCooldown: p.inCooldown,
-          quotaUsed: p.quotaUsed,
-          quotaLimit: p.quotaLimit ?? null,
-        })),
-        configured: infos.filter((p) => p.hasKey).length,
-        savings: {
-          estimatedUsdSaved: Number(savings.total.toFixed(4)),
-          note: "estimate vs. paid-API list pricing",
-        },
-      },
-      null,
-      2,
-    ),
-  );
-}
-
-export function runStatus(options: { json?: boolean } = {}): void {
-  if (options.json) {
-    void printStatusJson();
-    return;
-  }
+// NOTE: `--json` lives in status-json.ts (dispatched in index.ts) so the JSON
+// path never imports ink/React.
+export function runStatus(): void {
   render(<StatusDashboard />);
 }

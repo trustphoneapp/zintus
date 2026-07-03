@@ -136,6 +136,7 @@ program
     async (
       query: string,
       options: { depth?: string; json?: boolean },
+      cmd: Command,
     ) => {
       const { runResearch } = await import("./commands/research.js");
       const depth =
@@ -144,7 +145,9 @@ program
         options.depth === "standard"
           ? options.depth
           : "standard";
-      await runResearch(query, { depth, json: options.json });
+      // Root also defines --json (chat JSON mode) and commander lets the parent
+      // claim it even after the subcommand name — optsWithGlobals sees both.
+      await runResearch(query, { depth, json: Boolean(cmd.optsWithGlobals().json) });
     },
   );
 
@@ -305,11 +308,17 @@ program
   .command("status")
   .description("Live dashboard of providers and quota usage")
   .option("--json", "Print one JSON snapshot (no live dashboard) for automation")
-  .action(async (options: { json?: boolean }) => {
+  .action(async (_options: { json?: boolean }, cmd: Command) => {
+    if (cmd.optsWithGlobals().json) {
+      // JSON path avoids importing ink/React entirely (see status-json.ts).
+      const { printStatusJson } = await import("./commands/status-json.js");
+      await printStatusJson();
+      return;
+    }
     // Source is status.tsx; TS/bundler emits status.js, so the ESM
     // specifier must use the .js extension (not .tsx) to resolve at runtime.
     const { runStatus } = await import("./commands/status.js");
-    runStatus({ json: options.json });
+    runStatus();
   });
 
 const keys = program
@@ -333,8 +342,8 @@ keys
   .command("list")
   .description("List stored API keys (masked)")
   .option("--json", "Output as JSON for automation")
-  .action(async (options: { json?: boolean }) => {
-    await runKeysList(options);
+  .action(async (_options: { json?: boolean }, cmd: Command) => {
+    await runKeysList({ json: Boolean(cmd.optsWithGlobals().json) });
   });
 
 keys
@@ -401,9 +410,9 @@ mcp
   .command("list")
   .description("List configured MCP servers (● enabled) with tool counts")
   .option("--json", "Output as JSON for automation")
-  .action(async (options: { json?: boolean }) => {
+  .action(async (_options: { json?: boolean }, cmd: Command) => {
     const { runMcpList } = await import("./commands/mcp.js");
-    await runMcpList(options);
+    await runMcpList({ json: Boolean(cmd.optsWithGlobals().json) });
   });
 
 mcp
@@ -558,18 +567,18 @@ cloud
   .command("status")
   .description("Show cloud connection status")
   .option("--json", "Output the status as JSON for automation")
-  .action(async (options: { json?: boolean }) => {
+  .action(async (_options: { json?: boolean }, cmd: Command) => {
     const { runCloudStatus } = await import("./commands/cloud.js");
-    await runCloudStatus({ json: options.json });
+    await runCloudStatus({ json: Boolean(cmd.optsWithGlobals().json) });
   });
 
 cloud
   .command("logout")
   .description("Sign out (revoke the server session) and remove ~/.zintus/cloud.json")
   .option("--json", "Output the result as JSON for automation")
-  .action(async (options: { json?: boolean }) => {
+  .action(async (_options: { json?: boolean }, cmd: Command) => {
     const { runCloudLogout } = await import("./commands/cloud.js");
-    await runCloudLogout({ json: options.json });
+    await runCloudLogout({ json: Boolean(cmd.optsWithGlobals().json) });
   });
 
 program
@@ -577,18 +586,18 @@ program
   .argument("<provider>", "Provider id to evaluate (e.g. groq)")
   .description("BYOK quota-decision: best fallback action for a provider (same logic as web/desktop)")
   .option("--json", "Print the decision as JSON for automation")
-  .action(async (provider: string, options: { json?: boolean }) => {
+  .action(async (provider: string, _options: { json?: boolean }, cmd: Command) => {
     const { runRouteOptions } = await import("./commands/route-options.js");
-    await runRouteOptions(provider, options);
+    await runRouteOptions(provider, { json: Boolean(cmd.optsWithGlobals().json) });
   });
 
 program
   .command("doctor")
   .description("Check system health: keychain, quota DB, provider keys, Ollama, relay")
   .option("--json", "Emit { ok, checks } JSON for automation")
-  .action(async (options: { json?: boolean }) => {
+  .action(async (_options: { json?: boolean }, cmd: Command) => {
     const { runDoctor } = await import("./commands/doctor.js");
-    await runDoctor({ json: options.json });
+    await runDoctor({ json: Boolean(cmd.optsWithGlobals().json) });
   });
 
 program

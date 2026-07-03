@@ -20,9 +20,21 @@ Full detail + pass criteria: `docs/audit/2026-07-02/p0-human-gate.md`.
    `[Image:]` fake. Flips FEATURE-MATRIX #24 to ✅.
 2. **CLI research keyed run** (~5 min) — `TAVILY_API_KEY=… zintus research "…"`,
    confirm cited sources. Flips FEATURE-MATRIX #15.
-3. **npm publish** (~5 min) — `cd apps/cli && npm publish --access public`
-   (dry-run first). Pass = `npx zintus@latest --help` runs. Decide the package
-   name if `zintus` is taken.
+3. **npm publish** (~10 min) — the CLI now ships as SELF-CONTAINED compiled
+   binaries (2026-07-02: `bun build --compile` + embedded keychain addon), so
+   end users need no Bun/Node runtime. Name decision: **`zintus` and
+   `zintus-ai` were both free on npm as of 2026-07-02** — take `zintus`.
+   Steps:
+   ```bash
+   cd apps/cli && bun run prepare:npm      # builds 5 binaries + stages npm-dist/
+   for d in npm-dist/cli-*; do (cd "$d" && npm publish --access public); done
+   (cd npm-dist/zintus && npm publish --access public)   # main pkg LAST
+   ```
+   Pass = `npm i -g zintus && zintus doctor --json` works on a machine with
+   only stock Node (verified locally against Node 24 via the simulated
+   install). ALSO cut a GitHub release uploading `apps/cli/dist-bin/*` as
+   assets (names as-is) — that activates `curl -fsSL zintus.ai/install | sh`
+   (`apps/web/public/install`, deployed with the web app).
 4. **Relay deploy** (~10 min) — `workers/relay`: create D1 + KV, set secrets,
    `bunx wrangler deploy`. Pass = `zintus cloud login` + a 2-min heartbeat.
 
