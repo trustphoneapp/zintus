@@ -25,10 +25,16 @@ interface ProviderStatusState {
   statusMessage: string;
   selectedProvider: ProviderId | null;
   activeProvider: ProviderId | null;
+  /** Zintus MANAGED model id (e.g. "zintus/llama-3.3-70b") the chat should use.
+   *  Mutually exclusive with selectedProvider: setting one clears the other —
+   *  managed turns are served by the relay with plan tokens, BYOK turns by the
+   *  local gateway. Null = normal gateway routing. */
+  managedModel: string | null;
   refresh: () => Promise<void>;
   setStatusMessage: (message: string) => void;
   setSelectedProvider: (id: ProviderId | null) => void;
   setActiveProvider: (id: ProviderId | null) => void;
+  setManagedModel: (model: string | null) => void;
 }
 
 /** A tool the model asked to call this turn, stamped on the assistant bubble so the
@@ -137,6 +143,7 @@ export const useProviderStatusStore = create<ProviderStatusState>((set) => ({
   statusMessage: "",
   selectedProvider: null,
   activeProvider: null,
+  managedModel: null,
   refresh: async () => {
     set({ loading: true });
     try {
@@ -147,8 +154,11 @@ export const useProviderStatusStore = create<ProviderStatusState>((set) => ({
     }
   },
   setStatusMessage: (statusMessage) => set({ statusMessage }),
-  setSelectedProvider: (selectedProvider) => set({ selectedProvider }),
+  setSelectedProvider: (selectedProvider) =>
+    set(selectedProvider ? { selectedProvider, managedModel: null } : { selectedProvider }),
   setActiveProvider: (activeProvider) => set({ activeProvider }),
+  setManagedModel: (managedModel) =>
+    set(managedModel ? { managedModel, selectedProvider: null } : { managedModel }),
 }));
 
 export const useChatStore = create<ChatState>()(
@@ -265,4 +275,76 @@ export function createChatMessage(
     content,
     ...(images && images.length > 0 ? { images } : {}),
   };
+}
+
+// ── Zintus Cloud (membership) store ─────────────────────────────────────────
+
+import { getCloudEmail, getMe } from "./cloud";
+import {
+  fetchBillingStatus,
+  fetchManagedModels,
+  type BillingStatus,
+  type ManagedModelInfo,
+} from "./billing";
+
+interface CloudState {
+  /** null = not signed in (or not yet checked). */
+  email: string | null;
+  authenticated: boolean;
+  /** Relay billing status; null when signed out or unreachable. */
+  billing: BillingStatus | null;
+  /** Managed models the relay can serve RIGHT NOW (honest list). */
+  managedModels: ManagedModelInfo[];
+  checked: boolean;
+  refreshing: boolean;
+  /** Re-pull auth + billing + managed catalog from the relay. */
+  refreshCloud: () => Promise<void>;
+  /** Clear local state after sign-out (lib/cloud.signOut already ran). */
+  resetCloud: () => void;
+}
+
+export const useCloudStore = create<CloudState>((set, get) => ({
+  email: null,
+  authenticated: false,
+  billing: null,
+  managedModels: [],
+  checked: false,
+  refreshing: false,
+  refreshCloud: async () => {
+    if (get().refreshing) return;
+    set({ refreshing: true });
+    try {
+      // Managed catalog is public — always fetch so plans render pre-sign-in.
+      const [me, managedModels] = await Promise.all([getMe(), fetchManagedModels()]);
+      if (!me.authenticated) {
+        set({
+          authenticated: false,
+          email: null,
+          billing: null,
+          managedModels,
+          checked: true,
+          refreshing: false,
+        });
+        return;
+      }
+      const billing = await fetchBillingStatus();
+      set({
+        authenticated: true,
+        email: me.email ?? getCloudEmail(),
+        billing,
+        managedModels,
+        checked: true,
+        refreshing: false,
+      });
+    } catch {
+      set({ checked: true, refreshing: false });
+    }
+  },
+  resetCloud: () =>
+    set({ authenticated: false, email: null, billing: null, checked: true }),
+}));
+
+/** True when the signed-in user is on an active managed (paid) tier. */
+export function isActiveMember(billing: BillingStatus | null): boolean {
+  return Boolean(billing && billing.tier !== "free" && billing.status === "active");
 }

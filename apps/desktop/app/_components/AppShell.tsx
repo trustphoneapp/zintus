@@ -13,13 +13,12 @@ import {
   BarChart3,
   Bot,
   FolderOpen,
-  KeyRound,
+  LayoutGrid,
   MessageSquare,
   Pencil,
   Plus,
   Search,
   Settings,
-  SquareTerminal,
   Trash2,
 } from "lucide-react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
@@ -37,13 +36,17 @@ import { Tooltip } from "./ui/tooltip";
  * drag region); content is a single pane with no web-style top nav.
  */
 
+// V1 sidebar set (Light.dc design): Models replaces Providers as the primary
+// provider/model surface (the /providers route stays reachable, just not from
+// primary nav). Terminal intentionally left OUT of the nav — TerminalPane
+// stays in the codebase for a later "developer mode"; the Agent page keeps
+// its own console for run transparency.
 const NAV = [
   { href: "/chat", label: "Chat", icon: MessageSquare },
+  { href: "/models", label: "Models", icon: LayoutGrid },
   { href: "/agent", label: "Agent", icon: Bot },
   { href: "/research", label: "Research", icon: Search },
   { href: "/projects", label: "Projects", icon: FolderOpen },
-  { href: "/terminal", label: "Terminal", icon: SquareTerminal },
-  { href: "/providers", label: "Providers", icon: KeyRound },
   { href: "/usage", label: "Usage", icon: BarChart3 },
   { href: "/settings", label: "Settings", icon: Settings },
 ];

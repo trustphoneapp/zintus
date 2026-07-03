@@ -57,6 +57,20 @@ fn keyring_delete(provider_id: String) -> Result<(), String> {
   }
 }
 
+/// Open an external URL in the user's default browser (cloud sign-in, Stripe
+/// checkout, provider key consoles). https-only: the webview can never use
+/// this to launch arbitrary schemes/programs through the shell plugin.
+#[tauri::command]
+fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+  if !url.starts_with("https://") {
+    return Err("only https URLs can be opened".to_string());
+  }
+  app
+    .shell()
+    .open(&url, None)
+    .map_err(|error| error.to_string())
+}
+
 /// Resolve a sensible default shell per OS for the embedded terminal. The
 /// webview cannot read host env (`$SHELL`/`%COMSPEC%`), so the backend does it:
 /// honor the user's login shell on macOS/Linux, fall back to a shell that is
@@ -136,7 +150,8 @@ pub fn run() {
       keyring_get,
       keyring_set,
       keyring_delete,
-      default_shell
+      default_shell,
+      open_external
     ])
     .setup(|app| {
       spawn_gateway(&app.handle().clone());

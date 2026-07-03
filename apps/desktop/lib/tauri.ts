@@ -71,3 +71,19 @@ export async function hasKey(providerId: ProviderId): Promise<boolean> {
   const key = await getKey(providerId);
   return Boolean(key);
 }
+
+/**
+ * Open an https URL in the user's default browser. Packaged app: routed
+ * through the Rust `open_external` command (https-only, see lib.rs). Dev
+ * browser (`next dev`): plain window.open.
+ */
+export async function openExternal(url: string): Promise<void> {
+  if (!url.startsWith("https://")) {
+    throw new Error("only https URLs can be opened");
+  }
+  if (isTauri()) {
+    await invokeTauri<void>("open_external", { url });
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}

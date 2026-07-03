@@ -263,6 +263,24 @@ button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
   color: var(--color-text) !important;
 }
 
+/* Models directory rows: hover lift + details chevron reveal (same calm-row
+   grammar as history threads). */
+.models-row:hover {
+  background: var(--color-surface) !important;
+}
+.models-row-info {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.models-row:hover .models-row-info,
+.models-row:focus-within .models-row-info {
+  opacity: 1;
+}
+.models-row-info:hover {
+  background: var(--color-bg) !important;
+  color: var(--color-text) !important;
+}
+
 /* Transparent icon/nav chrome: hover lifts to the elevated surface. */
 .app-icon-btn {
   background: transparent;

@@ -33,10 +33,12 @@ import {
 import {
   createChatMessage,
   useChatStore,
+  useCloudStore,
   useProviderStatusStore,
   useSettingsStore,
   type UiImageMeta,
 } from "@/lib/store";
+import { ManagedChatFailure, streamManagedChat } from "@/lib/managed-chat";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -119,6 +121,8 @@ export function ChatPanel() {
     activeProvider,
     setSelectedProvider,
     setActiveProvider,
+    managedModel,
+    setManagedModel,
     refresh,
   } = useProviderStatusStore();
   const {
@@ -321,6 +325,68 @@ export function ChatPanel() {
       // loop SERVER-SIDE and streams call/result frames; we only display them.
       const { mcp } = activeMcpForChat();
 
+      // ── Zintus MANAGED path ─────────────────────────────────────────────
+      // A managed model is served by the relay with Zintus-owned keys and plan
+      // tokens — it never touches the local gateway. v1 managed turns are plain
+      // chat (+ JSON mode): local tools/MCP stay a BYOK/gateway feature, and the
+      // UI reflects that instead of silently dropping them.
+      if (managedModel) {
+        try {
+          let streamedText = "";
+          const result = await streamManagedChat({
+            model: managedModel,
+            messages: convo,
+            responseFormat,
+            signal: controller.signal,
+            onChunk: (delta) => {
+              if (!controller.signal.aborted) {
+                streamedText += delta;
+                updateMessage(currentAssistantId, { content: streamedText });
+              }
+            },
+          });
+          updateMessage(currentAssistantId, {
+            model: result.model,
+            meta: {
+              latencyMs: result.latencyMs,
+              ...(result.usage
+                ? {
+                    inputTokens: result.usage.inputTokens,
+                    outputTokens: result.usage.outputTokens,
+                  }
+                : {}),
+              routeReason: result.servedBy
+                ? `Zintus membership — served by ${result.servedBy}, billed from plan tokens`
+                : "Zintus membership — billed from plan tokens",
+            },
+          });
+          void useCloudStore.getState().refreshCloud();
+        } catch (error) {
+          if (error instanceof Error && error.name === "AbortError") return;
+          if (error instanceof ManagedChatFailure) {
+            const d = error.detail;
+            const message =
+              d.kind === "membership_required"
+                ? "This model needs an active Zintus membership. Pick a plan on the Models page — or use a BYOK provider."
+                : d.kind === "plan_tokens_exhausted"
+                  ? `Your plan tokens for this month are used up (${d.used.toLocaleString()} of ${d.limit.toLocaleString()}). They reset on ${new Date(d.reset * 1000).toLocaleDateString()} — until then BYOK providers keep working.`
+                  : d.kind === "unauthorized"
+                    ? "Your Zintus sign-in expired. Sign in again from the Models page."
+                    : d.kind === "model_unavailable"
+                      ? "That managed model is not available right now. Pick another on the Models page."
+                      : d.message;
+            updateMessage(currentAssistantId, { content: message });
+            return;
+          }
+          updateMessage(currentAssistantId, {
+            content: error instanceof Error ? error.message : "Request failed",
+          });
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+
       try {
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
           let streamedText = "";
@@ -443,6 +509,7 @@ export function ChatPanel() {
     [
       settings,
       selectedProvider,
+      managedModel,
       toolsEnabled,
       jsonMode,
       setActiveProvider,
@@ -1051,10 +1118,16 @@ export function ChatPanel() {
               <select
                 id="provider-select"
                 aria-label="Provider override"
-                value={selectedProvider ?? "auto"}
+                value={managedModel ? `managed:${managedModel}` : (selectedProvider ?? "auto")}
                 onChange={(e) => {
                   const value = e.target.value;
-                  setSelectedProvider(value === "auto" ? null : (value as ProviderId));
+                  if (value.startsWith("managed:")) return; // already active
+                  if (value === "auto") {
+                    setManagedModel(null);
+                    setSelectedProvider(null);
+                    return;
+                  }
+                  setSelectedProvider(value as ProviderId);
                 }}
                 style={{
                   height: 28,
@@ -1066,6 +1139,11 @@ export function ChatPanel() {
                   cursor: "pointer",
                 }}
               >
+                {managedModel ? (
+                  <option value={`managed:${managedModel}`}>
+                    zintus · {managedModel.replace(/^zintus\//, "")} (plan)
+                  </option>
+                ) : null}
                 <option value="auto">Auto ({settings.routingStrategy})</option>
                 {PROVIDER_IDS.map((id) => (
                   <option key={id} value={id}>
