@@ -32,6 +32,7 @@ import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
 import { formatSpend, onSpendChange, todaySpendUsd } from "@/lib/spend";
 import { OnboardingOverlay } from "./OnboardingOverlay";
+import { CommandPalette } from "./CommandPalette";
 import { Tooltip } from "./ui/tooltip";
 
 /**
@@ -188,6 +189,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       {showOnboarding ? (
         <OnboardingOverlay onDone={() => setShowOnboarding(false)} />
       ) : null}
+      <CommandPalette />
 
       {/* ── Sidebar: the app frame ─────────────────────────────────────── */}
       <aside
@@ -575,7 +577,43 @@ export function AppShell({ children }: { children: ReactNode }) {
             </button>
           </Tooltip>
 
-          <div data-tauri-drag-region style={{ flex: 1 }} />
+          <div
+            data-tauri-drag-region
+            style={{ flex: 1, display: "flex", justifyContent: "center" }}
+          >
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new CustomEvent("zintus:cmdk"))}
+              aria-label="Search or ask (Command K)"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 8,
+                width: 300,
+                maxWidth: "60%",
+                height: 34,
+                padding: "0 12px",
+                border: "1px solid var(--color-border)",
+                borderRadius: 10,
+                background: "var(--color-surface)",
+                color: "var(--color-text-muted)",
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              <Search size={14} />
+              Search or ask…
+              <span
+                style={{
+                  marginLeft: "auto",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                }}
+              >
+                ⌘K
+              </span>
+            </button>
+          </div>
 
           <Tooltip
             content={

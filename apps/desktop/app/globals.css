@@ -1075,3 +1075,81 @@ button:not(.secondary):not(.app-icon-btn):not(:disabled):hover {
 .agent-screen button.agent-decline:not(:disabled):hover { background: var(--color-surface); }
 .agent-screen button.agent-relaunch:not(:disabled):hover { background: var(--color-surface); }
 .agent-screen button.agent-stop:not(:disabled):hover { background: color-mix(in srgb, var(--agent-bad) 10%, transparent); }
+
+
+/* ── ⌘K command palette (ported from apps/web) ──────────────────────────── */
+.cmdk-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 14vh;
+  background: rgba(0, 0, 0, 0.4);
+}
+.cmdk-modal {
+  width: 100%;
+  max-width: 600px;
+  border-radius: var(--radius-xl);
+  border: 0.5px solid var(--c-border);
+  background: var(--color-surface);
+  overflow: hidden;
+  box-shadow: var(--shadow-float);
+}
+.cmdk-input {
+  width: 100%;
+  padding: 16px 18px;
+  border: none;
+  border-bottom: 0.5px solid var(--c-border);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  outline: none;
+}
+.cmdk-list {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 6px;
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--t-fast);
+}
+.cmdk-item.active {
+  background: var(--c-accent-light);
+}
+.cmdk-group {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.cmdk-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+.cmdk-item kbd {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  border: 0.5px solid var(--c-border);
+  background: var(--c-bg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
