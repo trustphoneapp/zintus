@@ -20,7 +20,7 @@ Full detail + pass criteria: `docs/audit/2026-07-02/p0-human-gate.md`.
    `[Image:]` fake. Flips FEATURE-MATRIX #24 to ✅.
 2. **CLI research keyed run** (~5 min) — `TAVILY_API_KEY=… zintus research "…"`,
    confirm cited sources. Flips FEATURE-MATRIX #15.
-3. **npm publish** (~10 min) — the CLI now ships as SELF-CONTAINED compiled
+3. ~~npm publish~~ ✅ **DONE 2026-07-02** — `zintus@0.2.0` + 5 `@zintusai/cli-*` platform packages are LIVE on npm; pass check ran (`zintus doctor --json` from a global install, keychain=pass). Remaining optional piece: cut a GitHub release with `apps/cli/dist-bin/*` assets to activate `curl zintus.ai/install \| sh`. Original steps (for future versions): — the CLI now ships as SELF-CONTAINED compiled
    binaries (2026-07-02: `bun build --compile` + embedded keychain addon), so
    end users need no Bun/Node runtime. Name decision (settled
    2026-07-02): main package = **`zintus`** (unscoped name was free); platform
