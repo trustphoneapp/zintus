@@ -143,7 +143,9 @@ function stageMainPackage(optionalDeps: Record<string, string>): void {
         // Stock Node is all the launcher needs — the binary brings its own runtime.
         engines: { node: ">=18" },
         optionalDependencies: optionalDeps,
-        publishConfig: { access: "public", provenance: true },
+        // No provenance: npm can only attest builds from a supported CI
+        // (GitHub Actions OIDC) — a laptop publish hard-errors on it.
+        publishConfig: { access: "public" },
       },
       null,
       2,
