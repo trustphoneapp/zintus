@@ -1,28 +1,23 @@
 # Zintus Cross-Surface Feature Matrix
 
 The single shared product contract. Every surface declares each capability so no
-surface **silently claims an unsupported feature**. Verified against code on
-`feat/cross-surface-parity` (off `main`), 2026-06-26. The capability statuses
-(tool calling, structured output, multimodal, CSP) were **re-verified against
-code on `feat/desktop-parity`, 2026-06-28** — see the "Capability status"
-section below. Desktop tool/JSON/image UI was re-confirmed **absent** by reading
-`apps/desktop/app/_components/ChatPanel.tsx` (no Tools toggle, no JSON control,
-no image picker on this branch).
+surface **silently claims an unsupported feature**. Rows reflect **`main`**,
+last trued-up **2026-07-02** (post feature-branch merges + the parity loop).
+A ✅ means the code path is wired AND verified by gates (typecheck/tests/build);
+keyed, device, or packaged-build proof is called out per row — a ✅ never
+implies a live smoke that hasn't run.
 
 Legend: ✅ done · 🟡 partial · ❌ missing · 🚫 intentionally unsupported ·
 ⚠️ **present but broken/misleading** (must fix or remove).
 
-> Mobile reflects the unmerged `feat/mobile-serious-app` branch and is
-> **UNVERIFIABLE from this branch** — its cited `apps/mobile/BUILD-STATUS.md` lives
-> on that branch, not here. Treat the mobile column as *claimed, not certified*
-> until that branch is checked out or merged.
->
-> **Audit 2026-06-26:** a re-audit confirmed the rich mobile features (markdown,
-> projects, research, consent gate, history, file/voice, report) are **ABSENT on
-> `feat/cross-surface-parity`** and exist only on `feat/mobile-serious-app`
-> (+4497 lines / 18 files). Every Mobile ✅ below is *that branch*, not this one;
-> the on-branch app is a basic single-screen text chat. See "Audit corrections"
-> below.
+> **Historical note (2026-06-26/28, superseded):** earlier revisions of this doc
+> were verified against the then-unmerged `feat/cross-surface-parity` /
+> `feat/desktop-parity` branches and carried caveats that the rich mobile app
+> lived only on `feat/mobile-serious-app` and that desktop tool/JSON/image UI
+> was absent. **Both branches have since merged to `main`** (mobile via
+> `02913d3f`) and those caveats no longer describe this branch. The dated
+> "Audit corrections" sections below are kept as history — read them as
+> point-in-time findings, not live state.
 
 | # | Feature | Mobile | Web | Desktop | CLI | Notes / source |
 |---|---------|:---:|:---:|:---:|:---:|----------------|
