@@ -1,5 +1,26 @@
 @import "@xterm/xterm/css/xterm.css";
 
+/* Tailwind v4 — utilities + theme ONLY (no preflight: the app predates
+   Tailwind here and its plain CSS must not be reset under it). postcss runs
+   @tailwindcss/postcss, but nothing ever imported tailwind, so every utility
+   class in ChatPanel/ui components silently did NOTHING — first seen (and
+   caught) on the first packaged-app eyeball, 2026-07-02. */
+@layer theme, base, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@layer base {
+  /* The one preflight rule utilities structurally depend on: `border-*`
+     classes set width/color and assume style+width come from here. Layered,
+     so any unlayered `border: 1px solid …` in this file still wins. */
+  *,
+  ::before,
+  ::after {
+    border-width: 0;
+    border-style: solid;
+    border-color: var(--color-border);
+  }
+}
+
 :root {
   color-scheme: dark;
   --color-bg: #0b0f14;
