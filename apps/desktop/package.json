@@ -9,7 +9,8 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "stage:sidecar": "bun scripts/stage-sidecar.ts"
   },
   "dependencies": {
     "@radix-ui/react-tooltip": "^1.2.10",

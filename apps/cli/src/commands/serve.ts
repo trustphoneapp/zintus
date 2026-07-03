@@ -238,6 +238,31 @@ export async function runServe(options?: ServeOptions): Promise<void> {
   // forces an immediate exit.
   installShutdownHandlers(running, () => cloud?.close());
 
+  // Sidecar mode (desktop app sets ZINTUS_PARENT_PID to its own pid): exit
+  // when the parent dies. The desktop app kills us on a clean quit
+  // (RunEvent::Exit), but a crash / force-quit / SIGKILL never runs that
+  // handler — verified in the 2026-07-02 packaged smoke, which orphaned the
+  // gateway. `kill(pid, 0)` is a liveness probe (no signal sent): ESRCH =
+  // parent gone → shut down; EPERM = alive-but-foreign → keep serving.
+  const parentPid = Number(process.env.ZINTUS_PARENT_PID);
+  if (Number.isInteger(parentPid) && parentPid > 0) {
+    console.error(
+      chalk.dim(`  Sidecar mode: exiting if parent pid ${parentPid} dies.`),
+    );
+    setInterval(() => {
+      try {
+        process.kill(parentPid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EPERM") {
+          console.error(
+            chalk.dim("Parent process is gone — shutting the gateway down."),
+          );
+          process.kill(process.pid, "SIGTERM");
+        }
+      }
+    }, 2_000).unref();
+  }
+
   // Bun.serve keeps the event loop alive; this promise never resolves so the
   // command stays in the foreground until a signal handler exits the process.
   await new Promise<void>(() => {});

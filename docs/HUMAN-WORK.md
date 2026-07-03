@@ -127,6 +127,14 @@ added (the workflow lists the exact names) or it just skips every provider.
 
 ## F. Store / distribution (pre-existing P0 debt)
 
+- **Desktop is now SELF-CONTAINED (2026-07-02)**: the packaged app bundles the
+  compiled `zintus` CLI as a Tauri sidecar and starts `zintus serve` itself
+  (port-preflight so it never double-starts next to a user-run gateway; kills
+  its own child on quit; the gateway parent-watches the app pid and self-exits
+  on crash/force-quit). **First packaged build ever ran on 2026-07-02**
+  (unsigned `Zintus.app` + `Zintus_0.2.0_aarch64.dmg` on the dev Mac): launch →
+  gateway `/health` ok in ~3s → SIGTERM and SIGKILL both leave no orphan.
+  The packaged smoke on a CLEAN machine (Gatekeeper path) still needs signing.
 - Desktop signing + notarization (Apple Developer / Windows cert).
 - Desktop app icons + store assets — see `docs/STORE-READINESS.md`.
 - **Mobile (Android + iOS) is now store-shaped** (2026-07-02): real branded

@@ -36,3 +36,6 @@ apps/cli/dist-bin/
 apps/cli/vendor/
 apps/cli/gen/
 apps/cli/npm-dist/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/gen/schemas/
+apps/desktop/src-tauri/target/

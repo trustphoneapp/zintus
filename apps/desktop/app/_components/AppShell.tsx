@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
+import { isTauri } from "@/lib/tauri";
 import { useChatStore } from "@/lib/store";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { OnboardingOverlay } from "./OnboardingOverlay";
@@ -255,19 +256,39 @@ export function AppShell({ children }: { children: ReactNode }) {
               background: "var(--color-red)",
             }}
           />
-          <span>
-            Gateway offline — run{" "}
-            <code
-              style={{
-                padding: "1px 6px",
-                borderRadius: 4,
-                background: "var(--color-bg)",
-                color: "var(--color-text)",
-              }}
-            >
-              zintus serve
-            </code>
-          </span>
+          {isTauri() ? (
+            // The packaged app starts the gateway sidecar itself — offline here
+            // is almost always the first seconds of startup, not a user task.
+            <span>
+              Starting the local gateway… If this persists, quit and reopen the
+              app (or run{" "}
+              <code
+                style={{
+                  padding: "1px 6px",
+                  borderRadius: 4,
+                  background: "var(--color-bg)",
+                  color: "var(--color-text)",
+                }}
+              >
+                zintus serve
+              </code>
+              ).
+            </span>
+          ) : (
+            <span>
+              Gateway offline — run{" "}
+              <code
+                style={{
+                  padding: "1px 6px",
+                  borderRadius: 4,
+                  background: "var(--color-bg)",
+                  color: "var(--color-text)",
+                }}
+              >
+                zintus serve
+              </code>
+            </span>
+          )}
           <span style={{ color: "var(--color-text-sub)" }}>
             Expecting it at {getGatewayUrl()}
           </span>

@@ -1,6 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::net::{SocketAddr, TcpStream};
+use std::sync::Mutex;
+use std::time::Duration;
+
 use keyring::Entry;
+use tauri::{Manager, RunEvent};
+use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::ShellExt;
 
 // OS-keychain service name. Must match the gateway/CLI keychain service
 // (`packages/keychain/src/storage.ts`, `const SERVICE = "zintus"`) so a key the
@@ -10,6 +17,16 @@ use keyring::Entry;
 // layout. Previously this was "com.zintus.desktop", which made desktop-entered
 // keys invisible to the gateway even once the invoke path was fixed.
 const SERVICE: &str = "zintus";
+
+// The port `zintus serve` listens on by default — matches the frontend's
+// DEFAULT_GATEWAY_URL (apps/desktop/lib/gateway.ts, http://localhost:8788).
+const GATEWAY_PORT: u16 = 8788;
+
+/// Handle to the gateway sidecar we spawned (None when an external gateway was
+/// already running, or the spawn failed). Killed on app exit so we never leave
+/// an orphaned `zintus serve` behind — but ONLY for the process WE started; a
+/// user-run gateway is never touched.
+struct GatewaySidecar(Mutex<Option<CommandChild>>);
 
 fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
   Entry::new(SERVICE, provider_id).map_err(|error| error.to_string())
@@ -60,19 +77,82 @@ fn default_shell() -> String {
   }
 }
 
+/// True when something is already listening on the gateway port — either a
+/// user-run `zintus serve` or a previous sidecar. We must NOT double-start:
+/// the second instance would fail to bind and exit noisily.
+fn gateway_already_running() -> bool {
+  let addr: SocketAddr = ([127, 0, 0, 1], GATEWAY_PORT).into();
+  TcpStream::connect_timeout(&addr, Duration::from_millis(400)).is_ok()
+}
+
+/// Start the bundled gateway (`zintus serve`) as a Tauri sidecar. This is what
+/// makes the desktop app self-contained: no terminal, no `zintus serve` by
+/// hand. Failure is NON-FATAL — the app still works against a manually run
+/// gateway, and the shell's offline banner tells the user what's wrong.
+fn spawn_gateway(app: &tauri::AppHandle) {
+  if gateway_already_running() {
+    eprintln!("[zintus] gateway already listening on :{GATEWAY_PORT} — not starting the sidecar");
+    return;
+  }
+  let command = match app.shell().sidecar("zintus") {
+    // ZINTUS_PARENT_PID arms the gateway's parent-watch: it self-exits when
+    // this process dies, covering crash/force-quit paths where RunEvent::Exit
+    // (our kill below) never runs.
+    Ok(command) => command
+      .args(["serve"])
+      .env("ZINTUS_PARENT_PID", std::process::id().to_string()),
+    Err(error) => {
+      eprintln!("[zintus] gateway sidecar unavailable ({error}) — run `zintus serve` manually");
+      return;
+    }
+  };
+  match command.spawn() {
+    Ok((_events, child)) => {
+      eprintln!("[zintus] started gateway sidecar (pid {})", child.pid());
+      if let Some(state) = app.try_state::<GatewaySidecar>() {
+        *state.0.lock().unwrap() = Some(child);
+      }
+    }
+    Err(error) => {
+      eprintln!("[zintus] failed to start gateway sidecar ({error}) — run `zintus serve` manually");
+    }
+  }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-  tauri::Builder::default()
+  let app = tauri::Builder::default()
+    .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_pty::init())
-    .plugin(tauri_plugin_updater::Builder::new().build())
+    // NOTE: no updater plugin. It was registered here once, but with no
+    // plugins.updater config (endpoint + signing pubkey) it PANICS at startup
+    // in a bundled build ("invalid type: null") — first caught by the packaged
+    // smoke on 2026-07-02. Re-add together with a real update endpoint,
+    // signing keys, and createUpdaterArtifacts: true.
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
+    .manage(GatewaySidecar(Mutex::new(None)))
     .invoke_handler(tauri::generate_handler![
       keyring_get,
       keyring_set,
       keyring_delete,
       default_shell
     ])
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    .setup(|app| {
+      spawn_gateway(&app.handle().clone());
+      Ok(())
+    })
+    .build(tauri::generate_context!())
+    .expect("error while building tauri application");
+
+  app.run(|app_handle, event| {
+    if let RunEvent::Exit = event {
+      // Kill only the sidecar WE spawned; a user-run gateway is untouched.
+      if let Some(state) = app_handle.try_state::<GatewaySidecar>() {
+        if let Some(child) = state.0.lock().unwrap().take() {
+          let _ = child.kill();
+        }
+      }
+    }
+  });
 }

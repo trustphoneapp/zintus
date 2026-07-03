@@ -4,9 +4,9 @@
   "version": "0.2.0",
   "identifier": "app.zintus.desktop",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun run stage:sidecar && bun run dev",
     "devUrl": "http://localhost:3001",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run stage:sidecar && bun run build",
     "frontendDist": "../out"
   },
   "app": {
@@ -35,6 +35,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": false
+    "createUpdaterArtifacts": false,
+    "externalBin": [
+      "binaries/zintus"
+    ]
   }
 }

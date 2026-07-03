@@ -2,20 +2,29 @@
   "$schema": "https://schema.tauri.app/config/2",
   "identifier": "com.zintus.desktop",
   "description": "Zintus desktop capabilities",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "pty:default",
-    "updater:default",
     "dialog:allow-save",
     {
       "identifier": "fs:allow-write-text-file",
       "comment": "Exports go to a user-chosen path from the native save dialog; scope it to the user's own save locations rather than the whole filesystem (no system paths).",
       "allow": [
-        { "path": "$HOME/**" },
-        { "path": "$DOWNLOAD/**" },
-        { "path": "$DOCUMENT/**" },
-        { "path": "$DESKTOP/**" }
+        {
+          "path": "$HOME/**"
+        },
+        {
+          "path": "$DOWNLOAD/**"
+        },
+        {
+          "path": "$DOCUMENT/**"
+        },
+        {
+          "path": "$DESKTOP/**"
+        }
       ]
     }
   ]
