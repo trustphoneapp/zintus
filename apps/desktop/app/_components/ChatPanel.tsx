@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Layers, MessageSquarePlus, Wrench } from "lucide-react";
+import { ArrowUp, ImagePlus, Layers, MessageSquarePlus, Paperclip, Plus, Square, Wrench } from "lucide-react";
 import type {
   ContentBlock,
   ImageContentBlock,
@@ -147,6 +147,26 @@ export function ChatPanel() {
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  // "+" attach menu (web-composer parity) — closes on outside click / Escape.
+  const [plusOpen, setPlusOpen] = useState(false);
+  const plusRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!plusOpen) return;
+    function onDown(e: MouseEvent) {
+      if (plusRef.current && !plusRef.current.contains(e.target as Node)) {
+        setPlusOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setPlusOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [plusOpen]);
   // Synchronous mirror of the image count so a multi-file pick honors the max-4 cap
   // (state is async; closing over it would read a stale count).
   const imageCountRef = useRef(0);
@@ -736,110 +756,7 @@ export function ChatPanel() {
           </div>
         </CardHeader>
         <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-0">
-          <div className="flex items-center gap-2">
-            <label className="text-xs text-[var(--color-text-muted)]" htmlFor="provider-select">
-              Override
-            </label>
-            <select
-              id="provider-select"
-              value={selectedProvider ?? "auto"}
-              onChange={(e) => {
-                const value = e.target.value;
-                setSelectedProvider(value === "auto" ? null : (value as ProviderId));
-              }}
-              className="h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-elevated)] px-2 text-sm"
-            >
-              <option value="auto">Auto ({settings.routingStrategy})</option>
-              {PROVIDER_IDS.map((id) => (
-                <option key={id} value={id}>
-                  {id}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={() =>
-                update({ blockTrainingProviders: !settings.blockTrainingProviders })
-              }
-              className="h-9 rounded-md border px-3 text-sm"
-              style={{
-                borderColor: settings.blockTrainingProviders
-                  ? "var(--color-good, #34d399)"
-                  : "var(--color-border)",
-                color: settings.blockTrainingProviders
-                  ? "var(--color-good, #34d399)"
-                  : "var(--color-text-muted)",
-                background: "var(--color-elevated)",
-              }}
-              title="Private Mode — refuse providers that train on your data (may reduce availability)"
-            >
-              🛡 {settings.blockTrainingProviders ? "Private on" : "Private"}
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                setToolsEnabled((v) => {
-                  const next = !v;
-                  if (typeof localStorage !== "undefined") {
-                    localStorage.setItem("zintus:desktop-tools", String(next));
-                  }
-                  return next;
-                })
-              }
-              aria-pressed={toolsEnabled}
-              className="h-9 rounded-md border px-3 text-sm"
-              style={{
-                borderColor: toolsEnabled
-                  ? "var(--color-good, #34d399)"
-                  : "var(--color-border)",
-                color: toolsEnabled
-                  ? "var(--color-good, #34d399)"
-                  : "var(--color-text-muted)",
-                background: "var(--color-elevated)",
-              }}
-              title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally on this device; needs a tool-capable provider.`}
-            >
-              🔧 {toolsEnabled ? "Tools on" : "Tools"}
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                setJsonMode((v) => {
-                  const next = !v;
-                  if (typeof localStorage !== "undefined") {
-                    localStorage.setItem("zintus:desktop-json", String(next));
-                  }
-                  return next;
-                })
-              }
-              aria-pressed={jsonMode}
-              className="h-9 rounded-md border px-3 text-sm"
-              style={{
-                borderColor: jsonMode
-                  ? "var(--color-good, #34d399)"
-                  : "var(--color-border)",
-                color: jsonMode
-                  ? "var(--color-good, #34d399)"
-                  : "var(--color-text-muted)",
-                background: "var(--color-elevated)",
-              }}
-              title="Structured output — request response_format: json_object. The gateway resolves the best level the routed provider can serve; only real JSON is rendered."
-            >
-              {"{}"} {jsonMode ? "JSON on" : "JSON"}
-            </button>
-            <select
-              value={settings.routingStrategy}
-              onChange={(e) =>
-                update({ routingStrategy: e.target.value as RoutingStrategy })
-              }
-              className="h-9 rounded-md border border-[var(--color-border)] bg-[var(--color-elevated)] px-2 text-sm"
-              title="Routing strategy (used in Auto mode)"
-            >
-              <option value="fastest">Fastest</option>
-              <option value="capability">Capability</option>
-              <option value="economy">Cheapest</option>
-            </select>
-          </div>
+
 
           <div
             ref={outputRef}
@@ -970,48 +887,270 @@ export function ChatPanel() {
               e.target.value = "";
             }}
           />
-          <Textarea
-            rows={3}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Ask anything..."
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                void send();
-              }
+          {/* Composer — web-app parity: one rounded container, "+" attach
+              menu bottom-left, compact mode chips + route pulldowns, round
+              accent send arrow bottom-right. */}
+          <div
+            style={{
+              border: "1px solid var(--color-border)",
+              background: "var(--color-elevated)",
+              borderRadius: 16,
+              padding: "10px 12px 8px",
             }}
-          />
+          >
+            <Textarea
+              rows={2}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="Ask anything…"
+              className="border-0 bg-transparent px-1 shadow-none focus-visible:ring-0"
+              style={{ resize: "none" }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+            />
+            <div className="mt-1 flex items-center gap-1.5">
+              {/* + attach menu */}
+              <div ref={plusRef} style={{ position: "relative" }}>
+                <button
+                  type="button"
+                  aria-label="Add attachments"
+                  aria-expanded={plusOpen}
+                  onClick={() => setPlusOpen((v) => !v)}
+                  className="app-icon-btn"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 30,
+                    height: 30,
+                    border: "1px solid var(--color-border)",
+                    borderRadius: 8,
+                    color: "var(--color-text-sub)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Plus size={15} />
+                </button>
+                {plusOpen ? (
+                  <div
+                    role="menu"
+                    style={{
+                      position: "absolute",
+                      bottom: 38,
+                      left: 0,
+                      minWidth: 200,
+                      background: "var(--color-surface)",
+                      border: "1px solid var(--color-border)",
+                      borderRadius: 12,
+                      padding: 4,
+                      boxShadow: "var(--shadow-md)",
+                      zIndex: 30,
+                    }}
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setPlusOpen(false);
+                        fileInputRef.current?.click();
+                      }}
+                      className="app-icon-btn"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 9,
+                        width: "100%",
+                        padding: "8px 10px",
+                        border: "none",
+                        borderRadius: 8,
+                        color: "var(--color-text)",
+                        fontSize: 13,
+                        cursor: "pointer",
+                        textAlign: "left",
+                      }}
+                    >
+                      <Paperclip size={14} style={{ color: "var(--color-text-sub)" }} />
+                      Add files
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setPlusOpen(false);
+                        imageInputRef.current?.click();
+                      }}
+                      title="PNG/JPEG/WebP — decoded, resized and EXIF-stripped on this device; needs a vision-capable provider."
+                      className="app-icon-btn"
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 9,
+                        width: "100%",
+                        padding: "8px 10px",
+                        border: "none",
+                        borderRadius: 8,
+                        color: "var(--color-text)",
+                        fontSize: 13,
+                        cursor: "pointer",
+                        textAlign: "left",
+                      }}
+                    >
+                      <ImagePlus size={14} style={{ color: "var(--color-text-sub)" }} />
+                      Add photos
+                    </button>
+                  </div>
+                ) : null}
+              </div>
 
-          <div className="flex gap-2">
-            <Button type="button" variant="secondary" onClick={() => fileInputRef.current?.click()}>
-              ＋ File
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => imageInputRef.current?.click()}
-              title="Attach an image (PNG/JPEG/WebP). Decoded, resized and EXIF-stripped on this device; needs a vision-capable provider."
-            >
-              🖼 Image
-            </Button>
-            <Button
-              type="button"
-              onClick={() => void send()}
-              disabled={
-                loading ||
-                (!prompt.trim() &&
-                  attachments.length === 0 &&
-                  imageAttachments.length === 0)
-              }
-            >
-              {loading ? "Streaming..." : "Send"}
-            </Button>
-            {loading && (
-              <Button type="button" variant="secondary" onClick={stop}>
-                Stop
-              </Button>
-            )}
+              {/* Mode chips */}
+              <ComposerChip
+                active={Boolean(settings.blockTrainingProviders)}
+                onClick={() =>
+                  update({ blockTrainingProviders: !settings.blockTrainingProviders })
+                }
+                title="Private Mode — refuse providers that train on your data (may reduce availability)"
+              >
+                Private
+              </ComposerChip>
+              <ComposerChip
+                active={toolsEnabled}
+                onClick={() =>
+                  setToolsEnabled((v) => {
+                    const next = !v;
+                    if (typeof localStorage !== "undefined") {
+                      localStorage.setItem("zintus:desktop-tools", String(next));
+                    }
+                    return next;
+                  })
+                }
+                title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally on this device; needs a tool-capable provider.`}
+              >
+                Tools
+              </ComposerChip>
+              <ComposerChip
+                active={jsonMode}
+                onClick={() =>
+                  setJsonMode((v) => {
+                    const next = !v;
+                    if (typeof localStorage !== "undefined") {
+                      localStorage.setItem("zintus:desktop-json", String(next));
+                    }
+                    return next;
+                  })
+                }
+                title="Structured output — request response_format: json_object. The gateway resolves the best level the routed provider can serve; only real JSON is rendered."
+              >
+                JSON
+              </ComposerChip>
+
+              {/* Route pulldowns — compact, borderless */}
+              <select
+                id="provider-select"
+                aria-label="Provider override"
+                value={selectedProvider ?? "auto"}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setSelectedProvider(value === "auto" ? null : (value as ProviderId));
+                }}
+                style={{
+                  height: 28,
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--color-text-sub)",
+                  fontSize: 12,
+                  padding: "0 4px",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="auto">Auto ({settings.routingStrategy})</option>
+                {PROVIDER_IDS.map((id) => (
+                  <option key={id} value={id}>
+                    {id}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Routing strategy"
+                value={settings.routingStrategy}
+                onChange={(e) =>
+                  update({ routingStrategy: e.target.value as RoutingStrategy })
+                }
+                title="Routing strategy (used in Auto mode)"
+                style={{
+                  height: 28,
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--color-text-sub)",
+                  fontSize: 12,
+                  padding: "0 4px",
+                  cursor: "pointer",
+                }}
+              >
+                <option value="fastest">Fastest</option>
+                <option value="capability">Capability</option>
+                <option value="economy">Cheapest</option>
+              </select>
+
+              <div style={{ flex: 1 }} />
+
+              {loading ? (
+                <button
+                  type="button"
+                  onClick={stop}
+                  aria-label="Stop generating"
+                  title="Stop generating"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 32,
+                    height: 32,
+                    borderRadius: "50%",
+                    border: "1px solid var(--color-border)",
+                    background: "var(--color-surface)",
+                    color: "var(--color-text)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <Square size={12} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void send()}
+                  aria-label="Send"
+                  disabled={
+                    !prompt.trim() &&
+                    attachments.length === 0 &&
+                    imageAttachments.length === 0
+                  }
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 32,
+                    height: 32,
+                    borderRadius: "50%",
+                    border: "none",
+                    background: "var(--color-purple-mid)",
+                    color: "#fff",
+                    cursor: "pointer",
+                    opacity:
+                      !prompt.trim() &&
+                      attachments.length === 0 &&
+                      imageAttachments.length === 0
+                        ? 0.4
+                        : 1,
+                  }}
+                >
+                  <ArrowUp size={16} strokeWidth={2.4} />
+                </button>
+              )}
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -1054,5 +1193,41 @@ export function ChatPanel() {
         </div>
       )}
     </div>
+  );
+}
+
+/** Small pill toggle for the composer row (Private / Tools / JSON). */
+function ComposerChip({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      title={title}
+      style={{
+        height: 28,
+        padding: "0 10px",
+        borderRadius: 999,
+        fontSize: 12,
+        fontWeight: 600,
+        cursor: "pointer",
+        border: `1px solid ${active ? "var(--color-purple-mid)" : "var(--color-border)"}`,
+        background: active ? "var(--color-purple-faint)" : "transparent",
+        color: active ? "var(--color-purple-bright)" : "var(--color-text-sub)",
+        transition: "all 120ms ease",
+      }}
+    >
+      {children}
+    </button>
   );
 }
