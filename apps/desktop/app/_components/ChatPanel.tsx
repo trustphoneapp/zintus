@@ -653,10 +653,12 @@ export function ChatPanel() {
   }, [artifactList.length]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col p-4">
-      <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-[var(--color-surface)]">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Chat</CardTitle>
+    <div className="flex min-h-0 flex-1 flex-col px-5 pb-4">
+      {/* No card chrome: in the desktop shell the conversation IS the page
+          (Claude-desktop pattern), not a panel floating inside one. */}
+      <Card className="flex min-h-0 flex-1 flex-col border-0 bg-transparent shadow-none">
+        <CardHeader className="flex flex-row items-center justify-between px-0">
+          <CardTitle className="sr-only">Chat</CardTitle>
           <div className="flex items-center gap-2">
             {activeProjectName && (
               <span style={{ fontSize: 12, color: "var(--color-purple-bright, #c4b5fd)", display: "flex", alignItems: "center", gap: 4 }}>
@@ -733,7 +735,7 @@ export function ChatPanel() {
             )}
           </div>
         </CardHeader>
-        <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
+        <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-0">
           <div className="flex items-center gap-2">
             <label className="text-xs text-[var(--color-text-muted)]" htmlFor="provider-select">
               Override
