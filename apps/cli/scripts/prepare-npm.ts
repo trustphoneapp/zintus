@@ -42,9 +42,11 @@ const cliPkg = (await import(join(CLI_DIR, "package.json"))) as {
   keywords: string[];
 };
 
-/** npm package name for a platform (e.g. @zintus/cli-darwin-arm64). */
+/** npm package name for a platform (e.g. @zintusai/cli-darwin-arm64).
+ *  Scope is `@zintusai` — the `zintus` org NAME was taken on npm (2026-07-02),
+ *  while the unscoped `zintus` PACKAGE name was free; only the scope moved. */
 function platformPkgName(platform: string, arch: string): string {
-  return `@zintus/cli-${platform}-${arch}`;
+  return `@zintusai/cli-${platform}-${arch}`;
 }
 
 function stagePlatformPackages(): Record<string, string> {
@@ -94,7 +96,7 @@ const LAUNCHER = `#!/usr/bin/env node
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
-const pkg = "@zintus/cli-" + process.platform + "-" + process.arch;
+const pkg = "@zintusai/cli-" + process.platform + "-" + process.arch;
 const binName = process.platform === "win32" ? "zintus.exe" : "zintus";
 
 let binary;

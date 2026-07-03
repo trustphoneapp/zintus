@@ -22,8 +22,10 @@ Full detail + pass criteria: `docs/audit/2026-07-02/p0-human-gate.md`.
    confirm cited sources. Flips FEATURE-MATRIX #15.
 3. **npm publish** (~10 min) — the CLI now ships as SELF-CONTAINED compiled
    binaries (2026-07-02: `bun build --compile` + embedded keychain addon), so
-   end users need no Bun/Node runtime. Name decision: **`zintus` and
-   `zintus-ai` were both free on npm as of 2026-07-02** — take `zintus`.
+   end users need no Bun/Node runtime. Name decision (settled
+   2026-07-02): main package = **`zintus`** (unscoped name was free); platform
+   packages = **`@zintusai/cli-*`** because the `zintus` ORG name was taken
+   even though the package name wasn't — create the free `zintusai` org first.
    Steps:
    ```bash
    cd apps/cli && bun run prepare:npm      # builds 5 binaries + stages npm-dist/
