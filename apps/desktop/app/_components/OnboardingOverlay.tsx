@@ -28,14 +28,15 @@ export function OnboardingOverlay({ onDone }: { onDone: () => void }) {
           <>
             <h2 className="consent-title">Welcome to Zintus</h2>
             <p className="consent-body">
-              A bring-your-own-key AI router. Zintus doesn&apos;t sell model
-              access — you connect your own provider keys (or local models) and a
-              gateway you run routes every request, with privacy you can see.
+              The AI app that shows you the meter. Bring your own provider keys
+              (or local models) for free, or join a Zintus membership and use
+              managed models with no keys at all — either way a gateway routes
+              every request with privacy and costs you can see.
             </p>
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.7, color: "var(--color-text)" }}>
               <li>Your keys stay on this device (OS keyring).</li>
-              <li>Tokzen compresses each turn to stretch free tiers.</li>
-              <li>Every answer shows provider, savings, and quota.</li>
+              <li>Membership replies show the exact tokens deducted.</li>
+              <li>Every answer shows provider, cost, savings, and quota.</li>
             </ul>
           </>
         ) : step === 1 ? (

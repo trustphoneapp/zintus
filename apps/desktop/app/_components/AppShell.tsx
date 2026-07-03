@@ -15,16 +15,22 @@ import {
   FolderOpen,
   LayoutGrid,
   MessageSquare,
+  Moon,
+  PanelLeft,
   Pencil,
   Plus,
   Search,
   Settings,
+  ShieldCheck,
+  Sun,
   Trash2,
 } from "lucide-react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
 import { isTauri } from "@/lib/tauri";
-import { useChatStore } from "@/lib/store";
+import { useChatStore, useSettingsStore } from "@/lib/store";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
+import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
+import { formatSpend, onSpendChange, todaySpendUsd } from "@/lib/spend";
 import { OnboardingOverlay } from "./OnboardingOverlay";
 import { Tooltip } from "./ui/tooltip";
 
@@ -64,11 +70,41 @@ const threadActionStyle: CSSProperties = {
   lineHeight: 1,
 };
 
+const COLLAPSE_KEY = "zintus:sidebar-collapsed";
+
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [online, setOnline] = useState(true);
   const [checked, setChecked] = useState(false);
+
+  // Top-bar state: sidebar collapse (persisted), theme, Private Mode, spend.
+  const [collapsed, setCollapsed] = useState(false);
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
+  const [spend, setSpend] = useState(0);
+  const { settings, update: updateSettings, hydrate: hydrateSettings } = useSettingsStore();
+  const privateMode = Boolean(settings.blockTrainingProviders);
+
+  useEffect(() => {
+    hydrateSettings();
+    setCollapsed(localStorage.getItem(COLLAPSE_KEY) === "1");
+    setTheme(resolvedTheme());
+    setSpend(todaySpendUsd());
+    const unsubscribeSpend = onSpendChange(setSpend);
+    const unwatchSystem = watchSystemTheme();
+    return () => {
+      unsubscribeSpend();
+      unwatchSystem();
+    };
+  }, [hydrateSettings]);
+
+  function toggleCollapsed() {
+    setCollapsed((current) => {
+      const next = !current;
+      localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
+      return next;
+    });
+  }
 
   const { threads, activeThreadId, switchThread, newChat, deleteThread, renameThread } =
     useChatStore();
@@ -156,7 +192,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       {/* ── Sidebar: the app frame ─────────────────────────────────────── */}
       <aside
         style={{
-          width: 236,
+          width: collapsed ? 56 : 236,
+          transition: "width 180ms ease",
           flexShrink: 0,
           display: "flex",
           flexDirection: "column",
@@ -178,10 +215,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           style={{
             display: "flex",
             alignItems: "center",
+            justifyContent: collapsed ? "center" : "flex-start",
             gap: 8,
-            padding: "0 14px 10px",
+            padding: collapsed ? "0 0 10px" : "0 14px 10px",
           }}
         >
+          {!collapsed ? (
           <span
             style={{
               fontSize: 17,
@@ -192,6 +231,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             Zintus
           </span>
+          ) : null}
           {checked && (
             <Tooltip
               content={
@@ -241,17 +281,21 @@ export function AppShell({ children }: { children: ReactNode }) {
             }}
           >
             <Plus size={14} />
-            New chat
-            <span
-              style={{
-                marginLeft: "auto",
-                fontSize: 10,
-                color: "var(--color-text-muted)",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              ⌘N
-            </span>
+            {!collapsed ? (
+              <>
+                New chat
+                <span
+                  style={{
+                    marginLeft: "auto",
+                    fontSize: 10,
+                    color: "var(--color-text-muted)",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
+                  ⌘N
+                </span>
+              </>
+            ) : null}
           </button>
         </div>
 
@@ -261,16 +305,18 @@ export function AppShell({ children }: { children: ReactNode }) {
             const active =
               pathname === item.href || pathname.startsWith(`${item.href}/`);
             const Icon = item.icon;
-            return (
+            const link = (
               <Link
                 key={item.href}
                 href={item.href}
                 className={`app-nav-link${active ? " active" : ""}`}
+                aria-label={item.label}
                 style={{
                   display: "flex",
                   alignItems: "center",
+                  justifyContent: collapsed ? "center" : "flex-start",
                   gap: 10,
-                  padding: "7px 10px",
+                  padding: collapsed ? "8px 0" : "7px 10px",
                   borderRadius: 7,
                   fontSize: 13,
                   fontWeight: active ? 600 : 500,
@@ -287,18 +333,25 @@ export function AppShell({ children }: { children: ReactNode }) {
                       : "var(--color-text-muted)",
                   }}
                 />
-                {item.label}
+                {!collapsed ? item.label : null}
               </Link>
+            );
+            return collapsed ? (
+              <Tooltip key={item.href} content={item.label} side="right">
+                {link}
+              </Tooltip>
+            ) : (
+              link
             );
           })}
         </nav>
 
-        {/* History */}
+        {/* History (hidden in the collapsed icon rail) */}
         <div
           style={{
             flex: 1,
             minHeight: 0,
-            display: "flex",
+            display: collapsed ? "none" : "flex",
             flexDirection: "column",
             padding: "2px 10px 6px",
             borderTop: "1px solid var(--color-border)",
@@ -444,12 +497,16 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
 
+        {/* Rail mode: keep the footer pinned to the bottom while History is hidden. */}
+        {collapsed ? <div style={{ flex: 1 }} /> : null}
+
         {/* Status footer */}
         <div
           style={{
             flexShrink: 0,
             borderTop: "1px solid var(--color-border)",
-            padding: "8px 14px",
+            justifyContent: collapsed ? "center" : "flex-start",
+            padding: collapsed ? "8px 0" : "8px 14px",
             display: "flex",
             alignItems: "center",
             gap: 7,
@@ -470,14 +527,146 @@ export function AppShell({ children }: { children: ReactNode }) {
                 : "var(--color-text-muted)",
             }}
           />
-          {checked ? (online ? "gateway online" : "gateway offline") : "checking…"}
+          {!collapsed
+            ? checked
+              ? online
+                ? "gateway online"
+                : "gateway offline"
+              : "checking…"
+            : null}
         </div>
       </aside>
 
       {/* ── Main pane ──────────────────────────────────────────────────── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
-        {/* Slim drag strip so the window stays draggable over content too. */}
-        <div data-tauri-drag-region style={{ height: 14, flexShrink: 0 }} />
+        {/* Top bar (Light.dc): collapse · [⌘K trigger lands in S3] · privacy
+            shield · spend · theme. Doubles as the window drag region. */}
+        <div
+          data-tauri-drag-region
+          style={{
+            height: 52,
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "0 14px",
+            borderBottom: "1px solid var(--color-border)",
+          }}
+        >
+          <Tooltip content={collapsed ? "Expand sidebar" : "Collapse sidebar"} side="bottom">
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              className="app-icon-btn"
+              style={{
+                display: "grid",
+                placeItems: "center",
+                width: 32,
+                height: 32,
+                border: "none",
+                borderRadius: 8,
+                background: "transparent",
+                color: "var(--color-text-sub)",
+                cursor: "pointer",
+              }}
+            >
+              <PanelLeft size={16} />
+            </button>
+          </Tooltip>
+
+          <div data-tauri-drag-region style={{ flex: 1 }} />
+
+          <Tooltip
+            content={
+              privateMode
+                ? "Private Mode is ON — only providers with a no-training policy serve your chats. Every reply shows whether that was honored."
+                : "Private Mode is OFF — click to route only to providers that don't train on your data."
+            }
+            side="bottom"
+          >
+            <button
+              type="button"
+              onClick={() => updateSettings({ blockTrainingProviders: !privateMode })}
+              aria-label={privateMode ? "Turn Private Mode off" : "Turn Private Mode on"}
+              aria-pressed={privateMode}
+              className="app-icon-btn"
+              style={{
+                display: "grid",
+                placeItems: "center",
+                width: 32,
+                height: 32,
+                border: "none",
+                borderRadius: 8,
+                background: privateMode
+                  ? "color-mix(in srgb, var(--color-green) 14%, transparent)"
+                  : "transparent",
+                color: privateMode ? "var(--color-green)" : "var(--color-text-sub)",
+                cursor: "pointer",
+              }}
+            >
+              <ShieldCheck size={16} />
+            </button>
+          </Tooltip>
+
+          <Tooltip
+            content="Estimated BYOK spend today (gateway estimates; managed replies bill plan tokens instead). Click for Usage."
+            side="bottom"
+          >
+            <button
+              type="button"
+              onClick={() => router.push("/usage")}
+              className="app-icon-btn"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                height: 30,
+                padding: "0 10px",
+                border: "none",
+                borderRadius: 8,
+                background: "transparent",
+                color: "var(--color-text-sub)",
+                fontSize: 12,
+                cursor: "pointer",
+              }}
+            >
+              <span
+                style={{
+                  fontWeight: 600,
+                  color: "var(--color-text)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11.5,
+                }}
+              >
+                {formatSpend(spend)}
+              </span>
+              today
+            </button>
+          </Tooltip>
+
+          <Tooltip content={theme === "light" ? "Switch to dark" : "Switch to light"} side="bottom">
+            <button
+              type="button"
+              onClick={() => setTheme(toggleTheme())}
+              aria-label="Toggle theme"
+              className="app-icon-btn"
+              style={{
+                display: "grid",
+                placeItems: "center",
+                width: 32,
+                height: 32,
+                border: "none",
+                borderRadius: 8,
+                background: "transparent",
+                color: "var(--color-text-sub)",
+                cursor: "pointer",
+              }}
+            >
+              {theme === "light" ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+          </Tooltip>
+        </div>
         {checked && !online && (
           <div
             role="status"

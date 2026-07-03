@@ -39,6 +39,7 @@ import {
   type UiImageMeta,
 } from "@/lib/store";
 import { ManagedChatFailure, streamManagedChat } from "@/lib/managed-chat";
+import { addSpendUsd } from "@/lib/spend";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -421,6 +422,7 @@ export function ChatPanel() {
             compression: result.compression,
             meta: result.meta,
           });
+          if (result.meta?.costUsd) addSpendUsd(result.meta.costUsd);
           setActiveProvider(result.providerId);
           void refresh();
 
