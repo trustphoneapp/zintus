@@ -264,6 +264,10 @@ describe("credential lifecycle (web login → CLI session → cloud status/logou
       status: "complete",
       session_id: sessionId,
       gateway_secret: gatewaySecret,
+      // cli-complete also mints a USER session token for native clients
+      // (desktop membership/billing calls) — see index.ts cli-complete.
+      session_token: expect.any(String),
+      email: "lifecycle@example.com",
     });
   });
 

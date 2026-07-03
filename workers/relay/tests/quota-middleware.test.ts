@@ -74,17 +74,17 @@ describe("enforceQuota", () => {
     const { env } = fakeEnv(sub("starter"), counter);
     const r = await enforceQuota("u1", env);
     expect(r.tier).toBe("starter");
-    expect(r.allowed).toBe(true); // 100k < 500k
-    expect(r.limit).toBe(500_000);
+    expect(r.allowed).toBe(true); // 100k < 1M
+    expect(r.limit).toBe(1_000_000);
     expect(r.used).toBe(100_000);
   });
 
   test("paid tier at/over the cap is blocked (429 path)", async () => {
     const counter = fakeQuotaCounter();
-    counter.totals.set(counterKey("u1"), 500_000);
+    counter.totals.set(counterKey("u1"), 1_000_000);
     const { env } = fakeEnv(sub("starter"), counter);
     const r = await enforceQuota("u1", env);
-    expect(r.allowed).toBe(false); // 500k not < 500k
+    expect(r.allowed).toBe(false); // 1M not < 1M
     expect(r.reset).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 });

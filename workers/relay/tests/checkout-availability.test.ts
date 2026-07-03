@@ -27,8 +27,11 @@ describe("isStripePriceConfigured", () => {
 });
 
 describe("checkoutAvailability", () => {
-  test("production constant stays disabled (managed keys NOT available)", () => {
-    expect(MANAGED_KEYS_AVAILABLE).toBe(false);
+  test("production constant is ON — the managed backend exists (src/managed.ts)", () => {
+    // Flipped 2026-07-03 together with the /v1/managed/* routes. Purchasability
+    // is still gated by the placeholder-price check below until [HUMAN] fills
+    // real STRIPE_PRICES.
+    expect(MANAGED_KEYS_AVAILABLE).toBe(true);
   });
 
   test("blocks managed-key tiers with 503 managed_keys_unavailable while gated off", () => {

@@ -15,6 +15,14 @@ export interface Env {
   // Observability (opt-in; unset → no-op error sink, see observability.ts)
   SENTRY_DSN?: string;
   SENTRY_ENVIRONMENT?: string;
+  // Managed-membership operator provider keys (Cloudflare secrets, [HUMAN]-set;
+  // see managed.ts). A model is only listed/servable when its key is present —
+  // unset keys degrade honestly, they never 500.
+  MANAGED_KEY_GROQ?: string;
+  MANAGED_KEY_CEREBRAS?: string;
+  MANAGED_KEY_OPENAI?: string;
+  MANAGED_KEY_DEEPSEEK?: string;
+  MANAGED_KEY_MOONSHOT?: string;
 }
 
 /** Attached to every accepted WebSocket (survives DO hibernation). */

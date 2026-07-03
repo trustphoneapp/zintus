@@ -80,7 +80,7 @@ const starterSub: SubscriptionRow = {
   user_id: "u1",
   tier: "starter",
   status: "active",
-  tokens_used_this_period: 600_000,
+  tokens_used_this_period: 1_100_000,
 } as unknown as SubscriptionRow;
 
 async function buildEnvWithCookie() {
@@ -93,7 +93,7 @@ async function buildEnvWithCookie() {
   const env = {
     KV: kv,
     DB: fakeDb(starterSub),
-    QUOTA_COUNTER: fakeCounter(600_000), // starter cap is 500k → over budget
+    QUOTA_COUNTER: fakeCounter(1_100_000), // starter cap is 1M → over budget
     GATEWAY_SESSION: fakeGateway,
   } as unknown as Env;
   return { env, cookie: `zintus_session=${token}` };

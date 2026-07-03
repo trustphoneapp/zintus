@@ -134,7 +134,7 @@ describe("handleStripeWebhook — checkout.session.completed persistence (B4)", 
     expect(upsert!.sql).toContain("stripe_customer_id");
     expect(upsert!.sql).toContain("tokens_limit");
     expect(upsert!.args).toContain("cus_123");
-    expect(upsert!.args).toContain(5_000_000); // growth tier monthly budget
+    expect(upsert!.args).toContain(10_000_000); // growth tier monthly budget (public pricing: 10M)
   });
 
   test("rejects an unsigned/forged webhook before any DB write", async () => {

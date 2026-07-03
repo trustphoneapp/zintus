@@ -51,6 +51,7 @@ import {
 } from "./auth.js";
 import { createCheckoutSession, createPortalSession, handleStripeWebhook, cancelStripeSubscription } from "./billing.js";
 import { checkoutAvailability } from "./tiers.js";
+import { handleManagedChat, handleManagedModels } from "./managed.js";
 import { corsOrigin, validateRedirectTo } from "./http-security.js";
 import { enforceQuota, recordUsage, getQuotaUsed, resetQuota } from "./middleware/quota.js";
 import { createErrorSink } from "./observability.js";
@@ -202,9 +203,15 @@ app.use(
 async function requireSession(
   c: Context<{ Bindings: Env }>,
 ): Promise<SessionPayload | null> {
+  // Cookie (browser) OR `Authorization: Bearer <session_token>` (desktop/mobile
+  // native clients, which cannot set cross-origin cookies). Both carry the SAME
+  // KV-verified session token — the bearer path adds no new credential class.
+  // Gateway secrets are a different token family and fail verifySessionToken,
+  // so they cannot masquerade as user sessions here.
   const cookie = parseSessionCookie(c.req.header("Cookie") ?? null);
-  if (!cookie) return null;
-  const session = await verifySessionToken(c.env.KV, cookie);
+  const presented = cookie || parseBearerToken(c.req.header("Authorization") ?? null);
+  if (!presented) return null;
+  const session = await verifySessionToken(c.env.KV, presented);
   if (!session) return null;
   // Reject ANY still-cached session token for a deleted user. Account deletion
   // only revokes the presented cookie's KV token; this tombstone check (one KV
@@ -545,9 +552,20 @@ app.post("/api/auth/cli-complete", async (c) => {
   const raw = await c.env.KV.get(`cli:${state}`);
   if (!raw) return c.json({ error: "Unknown or expired state" }, 400);
 
+  // Also mint a USER session token for the polling client. The desktop app
+  // completes this same device flow and then needs to call billing/usage/
+  // managed endpoints as the user — which the gateway_secret (a per-gateway
+  // credential) deliberately cannot do. Issued while the dashboard's
+  // authenticated cookie session is present, exactly like /api/auth/mobile-verify.
+  const clientSession = await issueSessionToken(c.env.KV, {
+    session_id: crypto.randomUUID(),
+    user_id: session.user_id,
+    email: session.email,
+  });
+
   await c.env.KV.put(
     `cli:${state}`,
-    JSON.stringify({ session_id, gateway_secret }),
+    JSON.stringify({ session_id, gateway_secret, session_token: clientSession, email: session.email }),
     { expirationTtl: 300 },
   );
   return c.json({ ok: true });
@@ -976,8 +994,8 @@ app.post('/api/billing/checkout', async (c) => {
   const session = await requireSession(c);
   if (!session) return c.json({ error: 'Unauthorized' }, 401);
 
-  const { tier, ref } = await c.req.json<{ tier: 'starter' | 'growth' | 'scale'; ref?: string }>();
-  if (!['starter', 'growth', 'scale'].includes(tier)) {
+  const { tier, ref } = await c.req.json<{ tier: 'starter' | 'growth' | 'scale' | 'pro'; ref?: string }>();
+  if (!['starter', 'growth', 'scale', 'pro'].includes(tier)) {
     return c.json({ error: 'Invalid tier' }, 400);
   }
 
@@ -1099,6 +1117,18 @@ app.post('/api/usage/report', async (c) => {
 
   await recordUsage(session.user_id, provider, model, input_tokens, output_tokens, c.env);
   return c.json({ ok: true });
+});
+
+// ── Managed membership (Zintus-served models) ─────────────────────────────
+// See managed.ts. Models list is public (pricing/capability info only); the
+// chat path requires an authenticated member session.
+
+app.get('/v1/managed/models', (c) => handleManagedModels(c));
+
+app.post('/v1/managed/chat/completions', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+  return handleManagedChat(c, session);
 });
 
 // ── Referral routes ───────────────────────────────────────────────────────
