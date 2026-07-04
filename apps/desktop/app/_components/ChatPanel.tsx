@@ -6,6 +6,7 @@ import { ArrowUp, Braces, ChevronDown, Globe, ImagePlus, Layers, MessageSquarePl
 import type {
   ContentBlock,
   ImageContentBlock,
+  ProviderId,
   ResponseFormat,
   RoutingStrategy,
 } from "@zintus/types";
@@ -409,7 +410,12 @@ export function ChatPanel() {
   // stateless (the full history is sent every turn), so there is no threadId to
   // drop. Mirrors web's streamAssistant.
   const runTurn = useCallback(
-    async (history: ChatMessage[], assistantId: string) => {
+    async (
+      history: ChatMessage[],
+      assistantId: string,
+      // One-shot route override (Regenerate with …) — never touches the pills.
+      override?: { provider?: ProviderId; managed?: string },
+    ) => {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -435,11 +441,14 @@ export function ChatPanel() {
       // tokens — it never touches the local gateway. v1 managed turns are plain
       // chat (+ JSON mode): local tools/MCP stay a BYOK/gateway feature, and the
       // UI reflects that instead of silently dropping them.
-      if (managedModel) {
+      const managedTarget = override?.provider
+        ? null
+        : (override?.managed ?? managedModel);
+      if (managedTarget) {
         try {
           let streamedText = "";
           const result = await streamManagedChat({
-            model: managedModel,
+            model: managedTarget,
             messages: convo,
             responseFormat,
             signal: controller.signal,
@@ -500,7 +509,7 @@ export function ChatPanel() {
           const result = await streamChat({
             messages: convo,
             settings,
-            providerId: selectedProvider ?? undefined,
+            providerId: override?.provider ?? selectedProvider ?? undefined,
             mode: settings.contextMode,
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
             responseFormat,
@@ -815,7 +824,9 @@ export function ChatPanel() {
     if (p !== null) void doSend(p);
   }
 
-  const regenerate = useCallback(async () => {
+  const regenerateWith = useCallback(async (
+    override?: { provider?: ProviderId; managed?: string },
+  ) => {
     if (loading) return;
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
     if (!lastAssistant) return;
@@ -862,9 +873,14 @@ export function ChatPanel() {
       content: "",
       toolCalls: undefined,
       mcpToolEvents: undefined,
+      providerId: undefined,
+      model: undefined,
+      meta: undefined,
     });
-    await runTurn(history, lastAssistant.id);
+    await runTurn(history, lastAssistant.id, override);
   }, [loading, messages, runTurn, updateMessage]);
+
+  const regenerate = useCallback(() => regenerateWith(undefined), [regenerateWith]);
 
   const stop = () => {
     abortRef.current?.abort();
@@ -1078,8 +1094,32 @@ export function ChatPanel() {
                   mcpToolEvents={message.mcpToolEvents}
                   artifacts={artifactsByMessage[message.id]}
                   onOpenArtifact={openArtifact}
+                  onEdit={
+                    message.role === "user"
+                      ? () => {
+                          setPrompt(message.content);
+                          document.getElementById("chat-composer-input")?.focus();
+                        }
+                      : undefined
+                  }
                   onRegenerate={
                     message.id === lastAssistantId && !loading ? regenerate : undefined
+                  }
+                  regenTargets={
+                    message.id === lastAssistantId && !loading
+                      ? [
+                          ...memberModels.map((m) => ({
+                            key: `managed:${m.id}`,
+                            label: `${m.display_name} · plan`,
+                            run: () => void regenerateWith({ managed: m.id }),
+                          })),
+                          ...connectedProviders.map((cp) => ({
+                            key: `provider:${cp.id}`,
+                            label: cp.name,
+                            run: () => void regenerateWith({ provider: cp.id }),
+                          })),
+                        ]
+                      : undefined
                   }
                 />
                 ),

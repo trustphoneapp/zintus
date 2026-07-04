@@ -194,9 +194,17 @@ function McpToolActivity({ events }: { events: McpToolEvent[] }) {
  * answer body is itself JSON — which is how a `response_format: json_object` turn
  * (the composer's JSON toggle) surfaces, with no fake structure ever claimed.
  */
+export interface RegenTarget {
+  key: string;
+  label: string;
+  run: () => void;
+}
+
 export function MessageBubble({
   message,
   onRegenerate,
+  regenTargets,
+  onEdit,
   isStreaming = false,
   toolCalls,
   mcpToolEvents,
@@ -206,6 +214,12 @@ export function MessageBubble({
 }: {
   message: ChatMessageUi;
   onRegenerate?: () => void;
+  /** "Regenerate with …" targets (members' plan models + connected BYOK
+   *  providers). Only a router app can offer this — same prompt, different
+   *  provider, one click. */
+  regenTargets?: RegenTarget[];
+  /** Edit-and-resend: load this USER turn back into the composer. */
+  onEdit?: () => void;
   isStreaming?: boolean;
   /** Tool/function calls emitted by this assistant turn. */
   toolCalls?: ToolCall[];
@@ -220,6 +234,7 @@ export function MessageBubble({
 }) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
+  const [regenOpen, setRegenOpen] = useState(false);
 
   async function copy() {
     try {
@@ -325,6 +340,23 @@ export function MessageBubble({
               {message.model ? ` · ${message.model}` : ""}
             </span>
           ) : null}
+          {message.meta?.routeReason &&
+          /failover|fell back|retry|rate.?limit/i.test(message.meta.routeReason) ? (
+            <span
+              title="The first-choice provider failed this turn; the router failed over automatically."
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "1px 7px",
+                borderRadius: 999,
+                fontWeight: 600,
+                color: "var(--c-warn)",
+                background: "color-mix(in srgb, var(--c-warn) 14%, transparent)",
+              }}
+            >
+              ⚡ failover
+            </span>
+          ) : null}
           {message.meta?.routeReason ? (
             // The headline "why this provider/model" — the prominent route reason
             // (the rest of the transparency strip stays below). Mirrors web's
@@ -404,8 +436,25 @@ export function MessageBubble({
           {message.meta.latencyMs != null ? (
             <span>{message.meta.latencyMs} ms</span>
           ) : null}
-          {message.meta.outputTokens != null ? (
-            <span>{message.meta.outputTokens} out tok</span>
+          {message.meta.inputTokens != null || message.meta.outputTokens != null ? (
+            <span title="Exact token counts for this turn (provider-reported when available)">
+              {message.meta.inputTokens ?? "?"} in / {message.meta.outputTokens ?? "?"} out tok
+            </span>
+          ) : null}
+          {message.model?.startsWith("zintus/") &&
+          message.meta.inputTokens != null &&
+          message.meta.outputTokens != null ? (
+            <span
+              title="Deducted from your monthly plan tokens (1× — every multiplier is always shown)"
+              style={{ color: "var(--color-purple-bright)", fontWeight: 600 }}
+            >
+              plan −{(message.meta.inputTokens + message.meta.outputTokens).toLocaleString()} tok
+            </span>
+          ) : null}
+          {message.meta.costUsd != null && message.meta.costUsd > 0 ? (
+            <span title="Estimated from the provider's list prices — your key, your bill">
+              {formatUsd(message.meta.costUsd)}
+            </span>
           ) : null}
           {message.meta.savedVsBaselineUsd != null &&
           message.meta.savedVsBaselineUsd > 0 ? (
@@ -440,10 +489,68 @@ export function MessageBubble({
           <button type="button" className="chat-bubble-action" onClick={() => void copy()}>
             {copied ? "Copied" : "Copy"}
           </button>
+          {onEdit ? (
+            <button
+              type="button"
+              className="chat-bubble-action"
+              title="Load this message back into the composer to tweak and resend"
+              onClick={onEdit}
+            >
+              Edit
+            </button>
+          ) : null}
           {onRegenerate ? (
             <button type="button" className="chat-bubble-action" onClick={onRegenerate}>
               Regenerate
             </button>
+          ) : null}
+          {regenTargets && regenTargets.length > 0 ? (
+            <span style={{ position: "relative" }}>
+              <button
+                type="button"
+                className="chat-bubble-action"
+                aria-expanded={regenOpen}
+                title="Same prompt, different provider — compare answers with one click"
+                onClick={() => setRegenOpen((v) => !v)}
+              >
+                ↻ Other provider ▾
+              </button>
+              {regenOpen ? (
+                <span
+                  role="menu"
+                  style={{
+                    position: "absolute",
+                    bottom: 24,
+                    left: 0,
+                    minWidth: 200,
+                    display: "flex",
+                    flexDirection: "column",
+                    background: "var(--color-surface)",
+                    border: "1px solid var(--color-border)",
+                    borderRadius: 10,
+                    padding: 4,
+                    boxShadow: "var(--shadow-md)",
+                    zIndex: 30,
+                  }}
+                >
+                  {regenTargets.map((target) => (
+                    <button
+                      key={target.key}
+                      type="button"
+                      role="menuitem"
+                      className="chat-bubble-action"
+                      style={{ textAlign: "left", padding: "7px 10px", borderRadius: 7 }}
+                      onClick={() => {
+                        setRegenOpen(false);
+                        target.run();
+                      }}
+                    >
+                      {target.label}
+                    </button>
+                  ))}
+                </span>
+              ) : null}
+            </span>
           ) : null}
           <button
             type="button"
