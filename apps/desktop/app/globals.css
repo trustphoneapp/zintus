@@ -23,33 +23,36 @@
 
 :root {
   color-scheme: dark;
-  --color-bg: #0b0f14;
-  --color-surface: #111827;
-  --color-elevated: #1f2937;
-  --color-border: #374151;
-  --color-text: #e8eef5;
-  --color-text-sub: #9ca3af;
-  --color-text-muted: #6b7280;
+  /* Dark theme = the Light.dc prototype's [data-theme="dark"] palette: warm
+     charcoal ink, NOT the legacy blue-slate (#0b0f14/#111827 navy). */
+  --color-bg: #1e1d1a;
+  --color-surface: #232220;
+  --color-elevated: #2c2b27;
+  --color-border: #2e2d29;
+  --color-text: #ebe9e4;
+  --color-text-sub: #a8a49c;
+  --color-text-muted: #736f67;
   /* Accent — indigo design system (2026). Legacy `--color-purple-*` names kept
      so existing desktop components pick up the indigo accent without a rename. */
   --color-purple-bright: #818cf8;
-  --color-purple-mid: #6366f1;
-  --color-purple-faint: rgba(99, 102, 241, 0.1);
-  --color-purple-glow: rgba(99, 102, 241, 0.25);
-  --color-green: #34d399;
-  --color-red: #f87171;
+  --color-purple-mid: #818cf8;
+  --color-purple-faint: rgba(129, 140, 248, 0.14);
+  --color-purple-glow: rgba(129, 140, 248, 0.25);
+  --color-green: #2fbf71;
+  --color-red: #f06a8a;
   /* Primary action (Light.dc): solid ink button, inverted label — NOT accent
      purple. Dark theme flips it (light button, dark label), per the design. */
   --color-primary: #ebe9e4;
   --color-primary-hover: #ffffff;
   --color-primary-contrast: #1e1d1a;
 
-  /* Design-system layer (2026) — shared with apps/web (dark-mode values). */
-  --c-accent: #6366f1;
-  --c-accent-light: rgba(99, 102, 241, 0.1);
-  --c-accent-mid: rgba(99, 102, 241, 0.25);
-  --c-accent-contrast: #ffffff;
-  --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(99, 102, 241, 0.4);
+  /* Design-system layer (2026) — dark values follow the prototype's dark
+     accent (#818cf8) and warm status colors. */
+  --c-accent: #818cf8;
+  --c-accent-light: rgba(129, 140, 248, 0.14);
+  --c-accent-mid: rgba(129, 140, 248, 0.25);
+  --c-accent-contrast: #1e1d1a;
+  --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(129, 140, 248, 0.4);
   --c-bg: var(--color-bg);
   --c-border: rgba(255, 255, 255, 0.08);
   --c-border-strong: rgba(255, 255, 255, 0.14);
@@ -67,9 +70,9 @@
   --shadow-lg: 0 0 0 0.5px var(--c-border), 0 8px 28px -6px rgba(0, 0, 0, 0.55);
   --shadow-float: 0 0 0 0.5px var(--c-border), 0 16px 64px rgba(0, 0, 0, 0.6);
   --c-inset: inset 0 1px 2px rgba(0, 0, 0, 0.4);
-  --c-ok: #22c55e;
-  --c-warn: #f59e0b;
-  --c-danger: #ef4444;
+  --c-ok: #2fbf71;
+  --c-warn: #e8964a;
+  --c-danger: #f06a8a;
 
   /* Font roles. next/font (layout.tsx) provides --font-inter / --font-jetbrains-mono;
      these map them to the role names the components consume. Without this mapping
@@ -409,7 +412,7 @@ button.ghostbtn:not(:disabled):hover {
   border: 1px solid var(--color-border);
   border-radius: 12px;
   overflow: hidden;
-  background: #0b0f14;
+  background: #141311;
 }
 
 .status {
@@ -665,20 +668,20 @@ button.ghostbtn:not(:disabled):hover {
 .md-ul, .md-ol { margin: 4px 0; padding-left: 20px; }
 .md-ul li, .md-ol li { line-height: 1.5; }
 .md-inline-code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.85em; background: rgba(148,163,184,0.15); padding: 1px 4px; border-radius: 4px; }
-.md-code-block { border: 1px solid var(--color-border, #1f2937); border-radius: 8px; overflow: hidden; margin: 6px 0; background: #0a0e13; }
+.md-code-block { border: 1px solid var(--color-border); border-radius: 8px; overflow: hidden; margin: 6px 0; background: var(--color-surface); }
 .md-code-head { display: flex; justify-content: space-between; align-items: center; padding: 4px 10px; border-bottom: 1px solid var(--color-border, #1f2937); background: rgba(255,255,255,0.03); }
 .md-code-lang { font-size: 11px; color: var(--color-text-muted, #94a3b8); }
-.md-code-copy { font-size: 11px; color: #cbd5e1; background: none; border: none; cursor: pointer; }
-.md-code-copy:hover { color: #fff; }
+.md-code-copy { font-size: 11px; color: var(--color-text-sub); background: none; border: none; cursor: pointer; }
+.md-code-copy:hover { color: var(--color-text); }
 .md-code-pre { margin: 0; padding: 10px; overflow-x: auto; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12.5px; line-height: 1.5; }
-.md-quote { border-left: 3px solid var(--color-accent, #64748b); padding-left: 10px; margin: 4px 0; color: var(--color-text-muted, #94a3b8); font-style: italic; }
+.md-quote { border-left: 3px solid var(--color-purple-bright); padding-left: 10px; margin: 4px 0; color: var(--color-text-muted, #94a3b8); font-style: italic; }
 .md-hr { border: none; border-top: 1px solid var(--color-border, #1f2937); margin: 8px 0; }
 .md-table { border-collapse: collapse; margin: 6px 0; font-size: 13px; display: block; overflow-x: auto; }
 .md-table th, .md-table td { border: 1px solid var(--color-border, #1f2937); padding: 5px 8px; text-align: left; }
 .md-table th { background: rgba(255,255,255,0.04); }
 .chat-bubble-actions { display: flex; gap: 12px; margin-top: 6px; }
-.chat-bubble-action { font-size: 12px; color: #cbd5e1; background: none; border: none; cursor: pointer; padding: 0; }
-.chat-bubble-action:hover { color: #fff; }
+.chat-bubble-action { font-size: 12px; color: var(--color-text-sub); background: none; border: none; cursor: pointer; padding: 0; }
+.chat-bubble-action:hover { color: var(--color-text); }
 
 /* ── Consent dialog (pre-send data-destination gate) ── */
 .consent-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: grid; place-items: center; z-index: 50; padding: 24px; }
