@@ -52,8 +52,9 @@ function fmtDate(ts: number | null): string {
 const TIER_LABEL: Record<BillingStatus["tier"], string> = {
   free: "Free",
   starter: "Starter",
-  growth: "Growth",
-  scale: "Scale",
+  pro: "Pro",
+  max: "Max",
+  ultra: "Ultra",
 };
 
 const STATUS_COLOR: Record<BillingStatus["status"], string> = {
@@ -427,7 +428,7 @@ export default function DashboardPage() {
                   </span>
                 </div>
                 <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                  {billing.tier !== "scale" && (
+                  {billing.tier !== "ultra" && (
                     <a href="/pricing" className="session-btn session-btn--primary" style={{ textDecoration: "none" }}>
                       Upgrade
                     </a>

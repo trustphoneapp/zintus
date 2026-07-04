@@ -15,11 +15,14 @@ import {
 // flipping the production constant (it stays false).
 
 describe("isStripePriceConfigured", () => {
-  test("placeholder price IDs count as NOT configured", () => {
-    // Shipping default: all three are `price_FILL_FROM_STRIPE`.
-    expect(isStripePriceConfigured("starter")).toBe(false);
-    expect(isStripePriceConfigured("growth")).toBe(false);
-    expect(isStripePriceConfigured("scale")).toBe(false);
+  test("real (test-mode) price IDs count as configured; placeholders would not", () => {
+    // 2026-07-04: Stripe TEST-mode prices are set for all four tiers. The
+    // placeholder guard itself is covered by the unknown-tier case below and
+    // the prefix check (`price_FILL…` → false) in isStripePriceConfigured.
+    expect(isStripePriceConfigured("starter")).toBe(true);
+    expect(isStripePriceConfigured("pro")).toBe(true);
+    expect(isStripePriceConfigured("max")).toBe(true);
+    expect(isStripePriceConfigured("ultra")).toBe(true);
   });
   test("an unknown tier is not configured", () => {
     expect(isStripePriceConfigured("nope")).toBe(false);
@@ -35,16 +38,24 @@ describe("checkoutAvailability", () => {
   });
 
   test("blocks managed-key tiers with 503 managed_keys_unavailable while gated off", () => {
-    const block = checkoutAvailability("growth", false);
+    const block = checkoutAvailability("pro", false);
     expect(block).not.toBeNull();
     expect(block!.status).toBe(503);
     expect(block!.code).toBe("managed_keys_unavailable");
   });
 
-  test("with managed keys ON but placeholder prices -> 503 billing_not_configured (no 500)", () => {
-    const block = checkoutAvailability("growth", true);
+  test("an unconfigured tier with managed keys ON -> 503 billing_not_configured (no 500)", () => {
+    // Behavior guard survives real prices: a tier with no configured price
+    // (here: an unknown tier name) must 503 clearly, never 500 from Stripe.
+    const block = checkoutAvailability("not-a-tier", true);
     expect(block).not.toBeNull();
     expect(block!.status).toBe(503);
     expect(block!.code).toBe("billing_not_configured");
+  });
+
+  test("configured tiers with managed keys ON may proceed to checkout", () => {
+    for (const tier of ["starter", "pro", "max", "ultra"]) {
+      expect(checkoutAvailability(tier, true)).toBeNull();
+    }
   });
 });

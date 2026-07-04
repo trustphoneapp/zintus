@@ -1,7 +1,7 @@
 const RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL ?? 'https://relay.zintus.ai';
 
 export interface BillingStatus {
-  tier: 'free' | 'starter' | 'growth' | 'scale';
+  tier: 'free' | 'starter' | 'pro' | 'max' | 'ultra';
   status: 'active' | 'past_due' | 'cancelled';
   tokens_used: number;
   tokens_limit: number | null;
@@ -79,7 +79,7 @@ export async function fetchReferralStats(): Promise<ReferralStats | null> {
   } catch { return null; }
 }
 
-export async function createCheckout(tier: 'starter' | 'growth' | 'scale', ref?: string): Promise<string | null> {
+export async function createCheckout(tier: 'starter' | 'pro' | 'max' | 'ultra', ref?: string): Promise<string | null> {
   try {
     const res = await fetch(`${RELAY_URL}/api/billing/checkout`, {
       method: 'POST',

@@ -3,7 +3,7 @@ import { STRIPE_PRICES, REFERRAL_RULES, TIERS, type Tier } from './tiers.js';
 
 export async function createCheckoutSession(
   userId: string, userEmail: string,
-  tier: 'starter' | 'growth' | 'scale' | 'pro',
+  tier: 'starter' | 'pro' | 'max' | 'ultra',
   referralCode: string | null,
   env: Env,
 ): Promise<string> {

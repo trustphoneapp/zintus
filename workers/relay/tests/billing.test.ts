@@ -106,7 +106,7 @@ describe("handleStripeWebhook — checkout.session.completed persistence (B4)", 
       type: "checkout.session.completed",
       data: {
         object: {
-          metadata: { user_id: "u1", tier: "growth" },
+          metadata: { user_id: "u1", tier: "pro" },
           customer: "cus_123",
           subscription: "sub_123",
         },
@@ -191,7 +191,7 @@ describe("withinReplayWindow", () => {
 describe("handleStripeWebhook — replay window", () => {
   const event = JSON.stringify({
     type: "checkout.session.completed",
-    data: { object: { metadata: { user_id: "u1", tier: "growth" }, customer: "cus_1", subscription: "sub_1" } },
+    data: { object: { metadata: { user_id: "u1", tier: "pro" }, customer: "cus_1", subscription: "sub_1" } },
   });
 
   test("rejects a correctly-signed but STALE event (400) with zero DB writes", async () => {
@@ -260,7 +260,7 @@ describe("createPortalSession — Stripe error path", () => {
 // clean 503 rather than letting an empty `line_items[0][price]` reach Stripe.
 
 describe("createCheckoutSession — placeholder price guard", () => {
-  test("throws before any fetch when the price is an unconfigured placeholder", async () => {
+  test("throws before any fetch when the tier has no configured price", async () => {
     const realFetch = globalThis.fetch;
     let fetched = false;
     globalThis.fetch = (async () => {
@@ -269,7 +269,7 @@ describe("createCheckoutSession — placeholder price guard", () => {
     }) as typeof fetch;
     const env = { STRIPE_SECRET_KEY: "sk_test" } as unknown as Env;
     try {
-      await expect(createCheckoutSession("u1", "u1@e.com", "growth", null, env)).rejects.toThrow(/price not configured/i);
+      await expect(createCheckoutSession("u1", "u1@e.com", "not-a-tier", null, env)).rejects.toThrow(/price not configured/i);
       expect(fetched).toBe(false); // never reached Stripe
     } finally {
       globalThis.fetch = realFetch;
@@ -333,7 +333,7 @@ describe("handleStripeWebhook — event-id replay dedup", () => {
     JSON.stringify({
       id,
       type: "checkout.session.completed",
-      data: { object: { metadata: { user_id: "u1", tier: "growth" }, customer: "cus_1", subscription: "sub_1" } },
+      data: { object: { metadata: { user_id: "u1", tier: "pro" }, customer: "cus_1", subscription: "sub_1" } },
     });
 
   test("a valid first-time event processes (200) and records its id in KV", async () => {

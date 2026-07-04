@@ -62,8 +62,8 @@ const TIERS: TierCard[] = [
     ribbonColor: GREEN,
   },
   {
-    id: "growth",
-    badge: "Growth",
+    id: "pro",
+    badge: "Pro",
     price: "$49",
     per: "/mo",
     pill: "10,000,000 tokens / month",
@@ -78,8 +78,8 @@ const TIERS: TierCard[] = [
     borderColor: VIOLET,
   },
   {
-    id: "scale",
-    badge: "Scale",
+    id: "max",
+    badge: "Max",
     price: "$99",
     per: "/mo",
     pill: "50,000,000 tokens / month",
@@ -94,8 +94,8 @@ const TIERS: TierCard[] = [
     borderColor: "var(--marketing-accent-dim)",
   },
   {
-    id: "pro",
-    badge: "Pro",
+    id: "ultra",
+    badge: "Ultra",
     price: "$199",
     per: "/mo",
     pill: "200,000,000 tokens / month",
@@ -141,17 +141,17 @@ const COMPARISON: Array<{
   { plan: "$100 tier", price: "$100", tokens: "5× window (still hidden)", transparency: "hidden" },
   { plan: "$200 tier", price: "$200", tokens: "20× window (still hidden)", transparency: "hidden" },
   { plan: "Zintus Starter", price: "$15", tokens: "1,000,000 exact", transparency: "shown", zintus: true },
-  { plan: "Zintus Growth", price: "$49", tokens: "10,000,000 exact", transparency: "shown", zintus: true },
-  { plan: "Zintus Scale", price: "$99", tokens: "50,000,000 exact", transparency: "shown", zintus: true },
-  { plan: "Zintus Pro", price: "$199", tokens: "200,000,000 exact", transparency: "shown", zintus: true },
+  { plan: "Zintus Pro", price: "$49", tokens: "10,000,000 exact", transparency: "shown", zintus: true },
+  { plan: "Zintus Max", price: "$99", tokens: "50,000,000 exact", transparency: "shown", zintus: true },
+  { plan: "Zintus Ultra", price: "$199", tokens: "200,000,000 exact", transparency: "shown", zintus: true },
 ];
 
 /* ─── referral rows ──────────────────────────────────────── */
 const REFERRALS: Array<{ tier: string; price: string; reward: string }> = [
   { tier: "Starter", price: "$15", reward: "$15 one-time per referral" },
-  { tier: "Growth", price: "$49", reward: "20% recurring · $9.80/mo · $117.60/year" },
-  { tier: "Scale", price: "$99", reward: "20% recurring · $19.80/mo · $237.60/year" },
-  { tier: "Pro", price: "$199", reward: "20% recurring · $39.80/mo · $477.60/year" },
+  { tier: "Pro", price: "$49", reward: "20% recurring · $9.80/mo · $117.60/year" },
+  { tier: "Max", price: "$99", reward: "20% recurring · $19.80/mo · $237.60/year" },
+  { tier: "Ultra", price: "$199", reward: "20% recurring · $39.80/mo · $477.60/year" },
 ];
 
 /* ─── helpers ────────────────────────────────────────────── */
@@ -455,7 +455,7 @@ export default function PricingPage() {
             Earn by sharing
           </h2>
           <p className="m-subtitle" style={{ maxWidth: "680px", marginBottom: "1.5rem" }}>
-            Every paid referral earns you a reward. Growth and Scale referrals pay 20% of their subscription for 12
+            Every paid referral earns you a reward. Pro, Max and Ultra referrals pay 20% of their subscription for 12
             months. Starter referrals pay a flat $15 one-time. <strong>Payouts are coming soon</strong> — referrals
             are tracked from day one, and disbursement (monthly via Stripe) goes live with paid plans.
           </p>

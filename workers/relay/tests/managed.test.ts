@@ -109,23 +109,22 @@ afterEach(() => {
 // ── tier honesty ──────────────────────────────────────────────────────────
 
 describe("tiers match the public pricing page", () => {
-  // apps/web/app/pricing/page.tsx sells: Starter 1M · Growth 10M · Scale 50M ·
+  // apps/web/app/pricing/page.tsx sells: Starter 1M · Pro 10M · Max 50M ·
   // Pro 200M tokens/month. The relay must never grant less than the page sells.
   test("token budgets equal the sold amounts", () => {
     expect(TIERS.starter.tokens_per_month).toBe(1_000_000);
-    expect(TIERS.growth.tokens_per_month).toBe(10_000_000);
-    expect(TIERS.scale.tokens_per_month).toBe(50_000_000);
-    expect(TIERS.pro.tokens_per_month).toBe(200_000_000);
+    expect(TIERS.pro.tokens_per_month).toBe(10_000_000);
+    expect(TIERS.max.tokens_per_month).toBe(50_000_000);
+    expect(TIERS.ultra.tokens_per_month).toBe(200_000_000);
   });
 
   test("managed backend flag is on and pro is a managed tier", () => {
     expect(MANAGED_KEYS_AVAILABLE).toBe(true);
-    expect(MANAGED_KEY_TIERS).toContain("pro");
+    expect(MANAGED_KEY_TIERS).toContain("ultra");
   });
 
-  test("checkout still blocks while Stripe prices are placeholders", () => {
-    const block = checkoutAvailability("starter");
-    expect(block?.code).toBe("billing_not_configured");
+  test("checkout is open now that test-mode Stripe prices are configured", () => {
+    expect(checkoutAvailability("starter")).toBeNull();
   });
 });
 
@@ -242,7 +241,7 @@ describe("handleManagedChat gating", () => {
   });
 
   test("member non-stream request is served and metered from provider usage", async () => {
-    const env = memberEnv("growth", { MANAGED_KEY_GROQ: "gsk_live" });
+    const env = memberEnv("pro", { MANAGED_KEY_GROQ: "gsk_live" });
     const { c, waited } = fakeContext(env, VALID_BODY);
 
     let upstreamAuth = "";

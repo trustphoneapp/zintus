@@ -13,9 +13,9 @@ describe("PLANS display constants", () => {
   test("match the relay tier budgets and public prices", () => {
     expect(PLANS).toEqual([
       { tier: "starter", name: "Starter", priceUsd: 15, tokensPerMonth: 1_000_000 },
-      { tier: "growth", name: "Growth", priceUsd: 49, tokensPerMonth: 10_000_000 },
-      { tier: "scale", name: "Scale", priceUsd: 99, tokensPerMonth: 50_000_000 },
-      { tier: "pro", name: "Pro", priceUsd: 199, tokensPerMonth: 200_000_000 },
+      { tier: "pro", name: "Pro", priceUsd: 49, tokensPerMonth: 10_000_000 },
+      { tier: "max", name: "Max", priceUsd: 99, tokensPerMonth: 50_000_000 },
+      { tier: "ultra", name: "Ultra", priceUsd: 199, tokensPerMonth: 200_000_000 },
     ]);
   });
 });
@@ -40,7 +40,7 @@ describe("createCheckout", () => {
         }),
         { status: 503 },
       )) as unknown as typeof fetch;
-    const r = await createCheckout("growth");
+    const r = await createCheckout("pro");
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.code).toBe("billing_not_configured");
@@ -60,7 +60,7 @@ describe("createCheckout", () => {
     globalThis.fetch = (async () => {
       throw new Error("offline");
     }) as unknown as typeof fetch;
-    const r = await createCheckout("scale");
+    const r = await createCheckout("max");
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("error");
   });

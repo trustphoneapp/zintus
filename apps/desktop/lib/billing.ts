@@ -7,7 +7,7 @@
 
 import { relayFetch, RELAY_URL } from "./cloud";
 
-export type ManagedTier = "starter" | "growth" | "scale" | "pro";
+export type ManagedTier = "starter" | "pro" | "max" | "ultra";
 
 export interface PlanInfo {
   tier: ManagedTier;
@@ -19,9 +19,9 @@ export interface PlanInfo {
 /** Display metadata for the purchasable plans (Free/BYOK is implicit). */
 export const PLANS: PlanInfo[] = [
   { tier: "starter", name: "Starter", priceUsd: 15, tokensPerMonth: 1_000_000 },
-  { tier: "growth", name: "Growth", priceUsd: 49, tokensPerMonth: 10_000_000 },
-  { tier: "scale", name: "Scale", priceUsd: 99, tokensPerMonth: 50_000_000 },
-  { tier: "pro", name: "Pro", priceUsd: 199, tokensPerMonth: 200_000_000 },
+  { tier: "pro", name: "Pro", priceUsd: 49, tokensPerMonth: 10_000_000 },
+  { tier: "max", name: "Max", priceUsd: 99, tokensPerMonth: 50_000_000 },
+  { tier: "ultra", name: "Ultra", priceUsd: 199, tokensPerMonth: 200_000_000 },
 ];
 
 export interface BillingStatus {

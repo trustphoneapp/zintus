@@ -122,7 +122,7 @@ describe("recordUsage", () => {
     // The previous KV read-modify-write lost concurrent increments. The Durable
     // Object counter serialises per-object writes, so 5 concurrent +100s sum to
     // exactly 500. This pins the B3 atomicity fix.
-    const { env, counter } = fakeEnv(sub("growth"));
+    const { env, counter } = fakeEnv(sub("pro"));
     await Promise.all(
       Array.from({ length: 5 }, () => recordUsage("u1", "groq", "llama", 100, 0, env)),
     );

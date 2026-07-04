@@ -994,8 +994,8 @@ app.post('/api/billing/checkout', async (c) => {
   const session = await requireSession(c);
   if (!session) return c.json({ error: 'Unauthorized' }, 401);
 
-  const { tier, ref } = await c.req.json<{ tier: 'starter' | 'growth' | 'scale' | 'pro'; ref?: string }>();
-  if (!['starter', 'growth', 'scale', 'pro'].includes(tier)) {
+  const { tier, ref } = await c.req.json<{ tier: 'starter' | 'pro' | 'max' | 'ultra'; ref?: string }>();
+  if (!['starter', 'pro', 'max', 'ultra'].includes(tier)) {
     return c.json({ error: 'Invalid tier' }, 400);
   }
 

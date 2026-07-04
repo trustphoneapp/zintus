@@ -37,7 +37,7 @@ describe("tier gating", () => {
   });
 
   test("access is strictly monotonic: each tier includes everything below it", () => {
-    const order = ["free", "starter", "growth", "scale"] as const;
+    const order = ["free", "starter", "pro", "max", "ultra"] as const;
     for (let i = 1; i < order.length; i++) {
       const lower = new Set(TIER_MODEL_ACCESS[order[i - 1] as (typeof order)[number]]);
       const higher = new Set(TIER_MODEL_ACCESS[order[i] as (typeof order)[number]]);
@@ -49,8 +49,8 @@ describe("tier gating", () => {
   });
 
   test("only scale unlocks ultra", () => {
-    expect(isModelAllowed("scale", "ultra")).toBe(true);
-    expect(isModelAllowed("growth", "ultra")).toBe(false);
+    expect(isModelAllowed("max", "ultra")).toBe(true);
+    expect(isModelAllowed("pro", "ultra")).toBe(false);
   });
 });
 

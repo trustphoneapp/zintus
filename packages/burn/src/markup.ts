@@ -32,7 +32,10 @@ export function multiplierFor(cls: ModelClass): number {
  * Subscription tiers, matching the relay's tier ids (`workers/relay/src/tiers.ts`).
  * Kept as a plain union here so this package stays dependency-free of the relay.
  */
-export type BurnTier = "free" | "starter" | "growth" | "scale";
+// NOTE: tier "ultra" (subscription) and model class "ultra" (price band) are
+// distinct enums that happen to share a name after the 2026-07-04 tier rename
+// (growth→pro, scale→max, + new top tier ultra).
+export type BurnTier = "free" | "starter" | "pro" | "max" | "ultra";
 
 /**
  * Which model classes each tier may burn managed credits on.
@@ -46,8 +49,9 @@ export type BurnTier = "free" | "starter" | "growth" | "scale";
 export const TIER_MODEL_ACCESS: Readonly<Record<BurnTier, readonly ModelClass[]>> = {
   free: ["free", "cheap"],
   starter: ["free", "cheap", "mid"],
-  growth: ["free", "cheap", "mid", "frontier"],
-  scale: ["free", "cheap", "mid", "frontier", "ultra"],
+  pro: ["free", "cheap", "mid", "frontier"],
+  max: ["free", "cheap", "mid", "frontier", "ultra"],
+  ultra: ["free", "cheap", "mid", "frontier", "ultra"],
 };
 
 /** Whether `tier` may burn managed credits on a model of class `cls`. */

@@ -7,7 +7,7 @@
 export const MANAGED_KEYS_AVAILABLE = true;
 
 // Tiers that require the managed-keys backend (i.e. everything except free/BYOK).
-export const MANAGED_KEY_TIERS = ['starter', 'growth', 'scale', 'pro'] as const;
+export const MANAGED_KEY_TIERS = ['starter', 'pro', 'max', 'ultra'] as const;
 
 export const TIERS = {
   // `managed_keys` reflects whether the tier USES managed keys as its value prop;
@@ -15,24 +15,31 @@ export const TIERS = {
   // MANAGED_KEYS_AVAILABLE above (do not key purchasability off this field).
   //
   // tokens_per_month MUST equal the public pricing page (apps/web/app/pricing:
-  // Starter 1M · Growth 10M · Scale 50M · Pro 200M). These were 500k/5M/20M —
+  // Starter 1M · Pro 10M · Max 50M · Ultra 200M). These were 500k/5M/20M —
   // i.e. the relay would have granted LESS than the page sells. Enforcement
   // follows the promise, never the other way around.
   free:    { tokens_per_month: null,         concurrent: 10,   rpm: 60,   managed_keys: false },
   starter: { tokens_per_month: 1_000_000,    concurrent: 5,    rpm: 60,   managed_keys: true  },
-  growth:  { tokens_per_month: 10_000_000,   concurrent: 20,   rpm: 300,  managed_keys: true  },
-  scale:   { tokens_per_month: 50_000_000,   concurrent: null, rpm: null, managed_keys: true  },
-  pro:     { tokens_per_month: 200_000_000,  concurrent: null, rpm: null, managed_keys: true  },
+  pro:  { tokens_per_month: 10_000_000,   concurrent: 20,   rpm: 300,  managed_keys: true  },
+  max:   { tokens_per_month: 50_000_000,   concurrent: null, rpm: null, managed_keys: true  },
+  ultra:     { tokens_per_month: 200_000_000,  concurrent: null, rpm: null, managed_keys: true  },
 } as const;
 
 export type Tier = keyof typeof TIERS;
 
-// Fill these from Stripe dashboard after creating products
+// ── STRIPE TEST MODE (sandbox, livemode:false — no real money) ─────────────
+// Set 2026-07-04 for the membership smoke. Tier keys were renamed 2026-07-04
+// to match the Stripe products 1:1: starter(1M) / pro(10M) / max(50M) /
+// ultra(200M). Before go-live, replace each id with the LIVE price id:
+//   starter_monthly: 'price_FILL_FROM_STRIPE_LIVE'
+//   pro_monthly:     'price_FILL_FROM_STRIPE_LIVE'
+//   max_monthly:     'price_FILL_FROM_STRIPE_LIVE'
+//   ultra_monthly:   'price_FILL_FROM_STRIPE_LIVE'
 export const STRIPE_PRICES: Record<string, string> = {
-  starter_monthly: 'price_FILL_FROM_STRIPE',
-  growth_monthly:  'price_FILL_FROM_STRIPE',
-  scale_monthly:   'price_FILL_FROM_STRIPE',
-  pro_monthly:     'price_FILL_FROM_STRIPE',
+  starter_monthly: 'price_1TpWqECHHqmpXopk9caifs35', // TEST · starter · 1M
+  pro_monthly:  'price_1TpWqWCHHqmpXopklq1i3yaD', // TEST · pro · 10M
+  max_monthly:   'price_1TpWqjCHHqmpXopkzifgFXRG', // TEST · max · 50M
+  ultra_monthly:     'price_1TpWqsCHHqmpXopk6VRtHegV', // TEST · ultra · 200M
 };
 
 /** True when a real Stripe price (not a `price_FILL…` placeholder) is configured. */
@@ -80,7 +87,7 @@ export function checkoutAvailability(
 
 export const REFERRAL_RULES = {
   starter: { type: 'one_time'  as const, cents: 1500, pct: 0,    months: 0  },
-  growth:  { type: 'recurring' as const, cents: 0,    pct: 0.20, months: 12 },
-  scale:   { type: 'recurring' as const, cents: 0,    pct: 0.20, months: 12 },
-  pro:     { type: 'recurring' as const, cents: 0,    pct: 0.20, months: 12 },
+  pro:  { type: 'recurring' as const, cents: 0,    pct: 0.20, months: 12 },
+  max:   { type: 'recurring' as const, cents: 0,    pct: 0.20, months: 12 },
+  ultra:     { type: 'recurring' as const, cents: 0,    pct: 0.20, months: 12 },
 } as const;

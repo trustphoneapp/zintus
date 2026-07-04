@@ -140,7 +140,7 @@ export default function SettingsPage() {
           ) : (
             <p style={{ margin: 0, fontSize: 13, color: "var(--color-text-sub)" }}>
               {authenticated
-                ? "Free plan (BYOK) — your own keys, $0 forever. Upgrade for managed models with exact token accounting: Starter $15 · Growth $49 · Scale $99 · Pro $199 /mo."
+                ? "Free plan (BYOK) — your own keys, $0 forever. Upgrade for managed models with exact token accounting: Starter $15 · Pro $49 · Max $99 · Ultra $199 /mo."
                 : "Not signed in. Sign in from the Models page to join — managed models, no API keys, exact token accounting."}
             </p>
           )}

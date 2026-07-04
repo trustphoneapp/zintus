@@ -58,7 +58,7 @@ export interface UserSessionRow {
 export interface SubscriptionRow {
   id: string;
   user_id: string;
-  tier: 'free' | 'starter' | 'growth' | 'scale';
+  tier: 'free' | 'starter' | 'pro' | 'max';
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
   status: 'active' | 'past_due' | 'cancelled';
