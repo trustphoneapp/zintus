@@ -369,12 +369,27 @@ export function MessageBubble({
                 padding: "1px 7px",
                 borderRadius: 999,
                 fontWeight: 600,
-                color: "var(--color-accent, #7C3AED)",
-                background:
-                  "color-mix(in oklch, var(--color-accent, #7C3AED) 14%, transparent)",
+                color: "var(--color-purple-bright)",
+                background: "var(--color-purple-faint)",
               }}
             >
               {message.meta.routeReason}
+            </span>
+          ) : null}
+          {!message.meta?.routeReason && message.meta?.routingStrategy ? (
+            <span
+              title="Routing strategy the gateway actually used for this turn"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "1px 7px",
+                borderRadius: 999,
+                fontWeight: 600,
+                color: "var(--color-purple-bright)",
+                background: "var(--color-purple-faint)",
+              }}
+            >
+              {message.meta.routingStrategy}
             </span>
           ) : null}
         </p>
@@ -430,9 +445,6 @@ export function MessageBubble({
       {message.compression ? <CompressionBadge stats={message.compression} /> : null}
       {message.meta ? (
         <div className="response-meta-strip">
-          {message.meta.routingStrategy ? (
-            <span>via {message.meta.routingStrategy}</span>
-          ) : null}
           {message.meta.latencyMs != null ? (
             <span>{message.meta.latencyMs} ms</span>
           ) : null}

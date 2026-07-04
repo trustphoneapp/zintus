@@ -626,23 +626,27 @@ a.ghostbtn:hover {
   animation-delay: 0.4s;
 }
 
+/* Light.dc bubbles: user = raised pill (16/16/5/16), assistant = boxless prose. */
 .chat-bubble-user {
   align-self: flex-end;
-  max-width: 80%;
-  background: var(--color-purple-faint);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  padding: 0.6rem 0.85rem;
+  max-width: 76%;
+  background: var(--color-elevated);
+  border: none;
+  border-radius: 16px 16px 5px 16px;
+  padding: 10px 15px;
+  font-size: 14.5px;
   white-space: pre-wrap;
 }
 
 .chat-bubble-assistant {
   align-self: flex-start;
-  max-width: 90%;
-  background: var(--color-elevated);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  padding: 0.6rem 0.85rem;
+  max-width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1.7;
   white-space: pre-wrap;
 }
 
@@ -773,7 +777,8 @@ a.ghostbtn:hover {
 .consent-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
 
 /* ── Response meta strip (latency / saved-vs-Claude / strategy) ── */
-.response-meta-strip { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; font-size: 10px; color: var(--color-text-muted, #94a3b8); }
+.response-meta-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 8px; font-size: 10.5px; font-family: var(--font-mono); color: var(--color-text-muted); }
+.response-meta-strip > span:not(:first-child)::before { content: "·"; margin-right: 10px; color: var(--color-text-muted); }
 .response-meta-saved { color: var(--color-good, #34d399); font-weight: 700; }
 
 /* ── Artifacts / canvas drawer ──────────────────────────────────────────────
