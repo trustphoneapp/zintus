@@ -97,6 +97,15 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [online, setOnline] = useState(true);
   const [checked, setChecked] = useState(false);
 
+  // Platform chrome: macOS overlays traffic lights over the sidebar top-left;
+  // Windows/Linux overlay native caption buttons top-RIGHT instead, so the
+  // top bar reserves space there and the lights strip shrinks. Detected after
+  // mount (SSR renders the macOS layout; the swap is a benign reflow).
+  const [isMac, setIsMac] = useState(true);
+  useEffect(() => {
+    setIsMac(/Mac/i.test(navigator.platform));
+  }, []);
+
   // Top-bar state: sidebar collapse (persisted), theme, Private Mode, spend.
   const [collapsed, setCollapsed] = useState(false);
   const [theme, setTheme] = useState<"light" | "dark">("dark");
@@ -260,7 +269,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             strip is the window drag region. */}
         <div
           data-tauri-drag-region
-          style={{ height: 44, flexShrink: 0 }}
+          style={{ height: isMac ? 44 : 12, flexShrink: 0 }}
         />
 
         {/* Brand + gateway heartbeat */}
@@ -847,7 +856,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             display: "flex",
             alignItems: "center",
             gap: 8,
-            padding: "0 14px",
+            // Non-mac: leave room for the OS caption buttons overlaid top-right.
+            padding: isMac ? "0 14px" : "0 150px 0 14px",
             borderBottom: "1px solid var(--color-border)",
           }}
         >

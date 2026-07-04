@@ -58,17 +58,22 @@ fn keyring_delete(provider_id: String) -> Result<(), String> {
 }
 
 /// Open an external URL in the user's default browser (cloud sign-in, Stripe
-/// checkout, provider key consoles). https-only: the webview can never use
-/// this to launch arbitrary schemes/programs through the shell plugin.
+/// checkout, provider key consoles). https-only, passed as a single argv (no
+/// shell interpolation) — the webview can never launch arbitrary programs.
 #[tauri::command]
-fn open_external(app: tauri::AppHandle, url: String) -> Result<(), String> {
+fn open_external(url: String) -> Result<(), String> {
   if !url.starts_with("https://") {
     return Err("only https URLs can be opened".to_string());
   }
-  app
-    .shell()
-    .open(&url, None)
-    .map_err(|error| error.to_string())
+  #[cfg(target_os = "macos")]
+  let result = std::process::Command::new("open").arg(&url).spawn();
+  #[cfg(target_os = "windows")]
+  let result = std::process::Command::new("rundll32")
+    .args(["url.dll,FileProtocolHandler", &url])
+    .spawn();
+  #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+  let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+  result.map(|_| ()).map_err(|error| error.to_string())
 }
 
 /// Resolve a sensible default shell per OS for the embedded terminal. The
