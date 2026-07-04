@@ -86,4 +86,6 @@ export const lmStudioProvider = createOpenAiCompatProvider({
   keyRegex: null,
   defaultModel: "local-model",
   baseUrl: process.env.LM_STUDIO_HOST ?? "http://localhost:1234/v1",
+  // "local-model" is a placeholder: resolve against what LM Studio loaded.
+  dynamicLocalDefault: true,
 });

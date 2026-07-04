@@ -333,6 +333,13 @@ export interface OpenAiCompatConfig {
   validatePath?: string;
   /** Provider supports OpenRouter-style `openrouter:web_search` tool calls. */
   supportsNativeWebSearch?: boolean;
+  /**
+   * LOCAL runtimes only (LM Studio): `defaultModel` is a placeholder, not a
+   * real catalog id — resolve it against GET {baseUrl}/models (first loaded
+   * model) whenever the caller didn't pin a concrete model. Cloud providers
+   * must NOT set this: their defaultModel is a real model.
+   */
+  dynamicLocalDefault?: boolean;
 }
 
 export function createOpenAiCompatProvider(
@@ -349,7 +356,26 @@ export function createOpenAiCompatProvider(
     includeRateLimit = false,
     validatePath = "/models",
     supportsNativeWebSearch = false,
+    dynamicLocalDefault = false,
   } = config;
+
+  // 30s-cached first-loaded-model lookup for dynamicLocalDefault runtimes.
+  let cachedLocalModel: { at: number; model: string | null } | null = null;
+  async function resolveLocalDefault(): Promise<string | null> {
+    if (cachedLocalModel && Date.now() - cachedLocalModel.at < 30_000) {
+      return cachedLocalModel.model;
+    }
+    try {
+      const res = await fetch(`${baseUrl}/models`);
+      if (!res.ok) return null;
+      const data = (await res.json()) as { data?: Array<{ id?: string }> };
+      const model = data.data?.find((m) => typeof m.id === "string" && m.id)?.id ?? null;
+      cachedLocalModel = { at: Date.now(), model };
+      return model;
+    } catch {
+      return null;
+    }
+  }
 
   return {
     id,
@@ -398,12 +424,27 @@ export function createOpenAiCompatProvider(
       // prompt-coercion + validation and the adapter must not pretend.
       const responseFormat = toOpenAiResponseFormat(options.responseFormat);
 
+      // Same substitution contract as the Ollama provider: only OUR placeholder
+      // is resolved against what the local runtime actually loaded; a model the
+      // user pinned explicitly still errors honestly.
+      let model = options.model ?? defaultModel;
+      if (dynamicLocalDefault && (!options.model || options.model === defaultModel)) {
+        const resolved = await resolveLocalDefault();
+        if (resolved) {
+          model = resolved;
+        } else if (cachedLocalModel?.model === null) {
+          throw new Error(
+            `${name} is running but has no model loaded — load one in the ${name} UI first.`,
+          );
+        }
+      }
+
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers,
         signal: options.signal,
         body: JSON.stringify({
-          model: options.model ?? defaultModel,
+          model,
           messages: toOpenAiMessages(messages),
           stream: true,
           // Ask OpenAI-compatible providers to emit a final usage chunk so we

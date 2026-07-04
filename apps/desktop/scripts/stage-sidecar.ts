@@ -80,6 +80,10 @@ if (process.platform === "darwin") {
       throw new Error("could not build both darwin CLI slices for the universal sidecar");
     }
   }
+  // A universal build compiles each slice separately and each pass resolves
+  // its own per-arch triple, so stage BOTH arch binaries alongside the fat one.
+  copyFileSync(armSrc, join(BIN_DIR, "zintus-aarch64-apple-darwin"));
+  copyFileSync(x64Src, join(BIN_DIR, "zintus-x86_64-apple-darwin"));
   const universalDest = join(BIN_DIR, "zintus-universal-apple-darwin");
   const lipo = spawnSync("lipo", ["-create", armSrc, x64Src, "-output", universalDest], {
     stdio: "inherit",
@@ -87,5 +91,5 @@ if (process.platform === "darwin") {
   if (lipo.status !== 0) {
     throw new Error("lipo failed to produce the universal sidecar");
   }
-  console.log(`staged universal sidecar → ${universalDest}`);
+  console.log(`staged darwin sidecars → aarch64 + x86_64 + universal`);
 }
