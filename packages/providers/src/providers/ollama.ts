@@ -10,6 +10,37 @@ import { usageFromProviderFields } from "../token-estimate.js";
 
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 
+/**
+ * Resolve the model to serve when the caller didn't pick one. The static
+ * defaultModel ("llama3.3") is only a catalog label — users install whatever
+ * they install, and requesting a model that isn't in `ollama list` 404s.
+ * Prefer the static default when it IS installed, else the first installed
+ * model; a clear error when Ollama is up but empty. Cached briefly so every
+ * turn doesn't re-hit /api/tags.
+ */
+let cachedDefault: { at: number; model: string | null } | null = null;
+async function installedDefaultModel(baseUrl: string): Promise<string | null> {
+  if (cachedDefault && Date.now() - cachedDefault.at < 30_000) {
+    return cachedDefault.model;
+  }
+  try {
+    const response = await fetch(`${baseUrl}/api/tags`);
+    if (!response.ok) return null;
+    const data = (await response.json()) as { models?: Array<{ name?: string }> };
+    const names = (data.models ?? [])
+      .map((m) => m?.name)
+      .filter((n): n is string => typeof n === "string" && n.length > 0);
+    const preferred = names.find(
+      (n) => n === ollamaProvider.defaultModel || n.startsWith(`${ollamaProvider.defaultModel}:`),
+    );
+    const model = preferred ?? names[0] ?? null;
+    cachedDefault = { at: Date.now(), model };
+    return model;
+  } catch {
+    return null;
+  }
+}
+
 export const ollamaProvider: Provider = {
   id: "ollama",
   name: "Ollama",
@@ -23,12 +54,31 @@ export const ollamaProvider: Provider = {
     options: StreamChatOptions = {},
   ): Promise<StreamChatResult> {
     const baseUrl = process.env.OLLAMA_HOST ?? DEFAULT_OLLAMA_URL;
+    let model = options.model;
+    // The router forwards the CATALOG default ("llama3.3") when the user only
+    // picked the provider — but users serve whatever they pulled, and a
+    // not-installed model 404s. Resolve our own placeholder against what is
+    // actually installed; an explicitly-pinned other model still errors
+    // honestly rather than being swapped.
+    if (!model || model === ollamaProvider.defaultModel) {
+      const installed = await installedDefaultModel(baseUrl);
+      if (installed) {
+        model = installed;
+      } else if (cachedDefault?.model === null) {
+        // Tags answered but no models exist — say exactly what to do.
+        throw new Error(
+          "Ollama is running but has no models installed — run `ollama pull llama3.2` (or any model) first.",
+        );
+      } else {
+        model = model ?? ollamaProvider.defaultModel; // tags unreachable; let /api/chat surface the real error
+      }
+    }
     const response = await fetch(`${baseUrl}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       signal: options.signal,
       body: JSON.stringify({
-        model: options.model ?? ollamaProvider.defaultModel,
+        model,
         messages,
         stream: true,
         options: {
