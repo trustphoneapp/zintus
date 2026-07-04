@@ -2342,12 +2342,23 @@ export function createGatewayHandler(
     // the public /health to close the topology-disclosure leak.
     if (url.pathname === "/v1/status" && request.method === "GET") {
       const statuses = await engine.getProviderStatus();
+      // Local runtimes have no key/limit, so the router's `available` says yes
+      // even when the process is down — every client then shows "Connected"
+      // for a dead Ollama/LM Studio. Gate on the live probe (the same cached
+      // detection route-options already uses).
+      const runtimes = await detectLocal();
+      const liveAvailable = (status: { id: string; available: boolean }) =>
+        status.id === "ollama"
+          ? runtimes.ollama.detected
+          : status.id === "lmstudio"
+            ? runtimes.lmstudio.detected
+            : status.available;
       const savings = engine.getSavings();
       return json(request, {
         ok: true,
         providers: statuses.map((status) => ({
           id: status.id,
-          available: status.available,
+          available: liveAvailable(status),
           hasKey: status.hasKey,
           inCooldown: status.inCooldown,
           quotaUsed: status.tokensToday,
@@ -2372,6 +2383,8 @@ export function createGatewayHandler(
     // and `quota_remaining_ratio` is null whenever the limit is unknown.
     if (url.pathname === "/v1/key" && request.method === "GET") {
       const statuses = await engine.getProviderStatus();
+      // Same local-runtime liveness gating as /v1/status (see comment there).
+      const keyRuntimes = await detectLocal();
       return json(request, {
         object: "key_status",
         label: "zintus-gateway",
@@ -2386,7 +2399,12 @@ export function createGatewayHandler(
           return {
             id: status.id,
             has_key: status.hasKey,
-            available: status.available,
+            available:
+              status.id === "ollama"
+                ? keyRuntimes.ollama.detected
+                : status.id === "lmstudio"
+                  ? keyRuntimes.lmstudio.detected
+                  : status.available,
             in_cooldown: status.inCooldown,
             quota_used: quotaUsed,
             quota_limit: quotaLimit,
