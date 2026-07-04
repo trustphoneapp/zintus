@@ -92,7 +92,7 @@ export default function MemoryPage() {
         >
           <ArrowLeft size={14} />
         </Link>
-        <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>Memory</h1>
+        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Memory</h1>
         <span
           style={{
             fontSize: 10.5,

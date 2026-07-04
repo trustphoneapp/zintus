@@ -13,7 +13,6 @@ import {
 } from "@/lib/projects";
 import { useChatStore, useProviderStatusStore, useSettingsStore } from "@/lib/store";
 import { Button } from "@/app/_components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/app/_components/ui/card";
 import { Textarea } from "@/app/_components/ui/textarea";
 
 interface FormState {
@@ -69,14 +68,15 @@ export default function ProjectsPage() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col p-4">
-      <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-[var(--color-surface)]">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Projects</CardTitle>
-          <Button type="button" onClick={() => setForm({ ...EMPTY })}>＋ New project</Button>
-        </CardHeader>
-        <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto">
-          <p style={{ fontSize: 13, color: "var(--color-text-muted)", margin: 0 }}>
+    <div className="scroll" style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+      <div style={{ maxWidth: 760, margin: "0 auto", width: "100%", padding: "22px 24px 60px", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Projects</h1>
+          <button type="button" className="ghostbtn" style={{ marginLeft: "auto" }} onClick={() => setForm({ ...EMPTY })}>
+            + New project
+          </button>
+        </div>
+          <p style={{ fontSize: 12.5, color: "var(--color-text-sub)", margin: 0 }}>
             Workspaces with shared instructions and routing defaults. A project&apos;s
             instructions are sent as a system message for every chat started from it.
           </p>
@@ -84,25 +84,52 @@ export default function ProjectsPage() {
           {projects.length === 0 ? (
             <p style={{ fontSize: 13, color: "var(--color-text-muted)" }}>No projects yet.</p>
           ) : (
-            projects.map((p) => (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {projects.map((p) => (
               <div
                 key={p.id}
                 style={{
                   border: "1px solid var(--color-border)",
                   borderRadius: 12,
-                  padding: 14,
-                  background: "var(--color-elevated)",
+                  padding: "14px 16px",
+                  background: "var(--color-surface)",
                 }}
               >
-                <div style={{ fontSize: 16, fontWeight: 700, color: "var(--color-text)" }}>{p.name}</div>
+                <div style={{ fontSize: 13.5, fontWeight: 650, color: "var(--color-text)" }}>{p.name}</div>
                 {p.instructions ? (
-                  <div style={{ fontSize: 13, color: "var(--color-text-muted)", marginTop: 4 }}>
+                  <div style={{ fontSize: 12.5, color: "var(--color-text-sub)", marginTop: 2 }}>
                     {p.instructions.slice(0, 140)}
                   </div>
                 ) : null}
-                <div style={{ fontSize: 11, color: "var(--color-text-muted)", marginTop: 8 }}>
-                  {p.defaultProvider ?? "Auto routing"}
-                  {p.privateDefault ? " · 🛡 Private" : ""}
+                <div style={{ marginTop: 8 }}>
+                  <span
+                    title="Project-scoped default route"
+                    style={{
+                      fontSize: 10.5,
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      fontWeight: 600,
+                      color: "var(--color-purple-bright)",
+                      background: "var(--color-purple-faint)",
+                    }}
+                  >
+                    route: {p.defaultProvider ?? "auto"}
+                  </span>
+                  {p.privateDefault ? (
+                    <span
+                      style={{
+                        fontSize: 10.5,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        fontWeight: 600,
+                        marginLeft: 6,
+                        color: "var(--color-green)",
+                        background: "color-mix(in srgb, var(--color-green) 12%, transparent)",
+                      }}
+                    >
+                      private
+                    </span>
+                  ) : null}
                 </div>
                 <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
                   <Button type="button" onClick={() => useInChat(p)}>New chat</Button>
@@ -135,10 +162,9 @@ export default function ProjectsPage() {
                   </Button>
                 </div>
               </div>
-            ))
+            ))}
+          </div>
           )}
-        </CardContent>
-      </Card>
 
       {form && (
         <div className="consent-backdrop" role="dialog" aria-modal="true">
@@ -193,6 +219,7 @@ export default function ProjectsPage() {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }
