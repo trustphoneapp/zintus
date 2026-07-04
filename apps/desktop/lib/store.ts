@@ -84,6 +84,8 @@ export interface Thread {
   title: string;
   messages: ChatMessageUi[];
   updatedAt: number;
+  /** Pinned chats sort above the rest in Recents. */
+  pinned?: boolean;
 }
 
 interface ChatState {
@@ -100,6 +102,7 @@ interface ChatState {
   switchThread: (id: string) => void;
   deleteThread: (id: string) => void;
   renameThread: (id: string, title: string) => void;
+  togglePinThread: (id: string) => void;
 }
 
 function createMessageId(): string {
@@ -225,6 +228,12 @@ export const useChatStore = create<ChatState>()(
         }));
       },
       switchThread: (id) => set({ activeThreadId: id }),
+      togglePinThread: (id) =>
+        set((state) => ({
+          threads: state.threads.map((thread) =>
+            thread.id === id ? { ...thread, pinned: !thread.pinned } : thread,
+          ),
+        })),
       renameThread: (id, title) =>
         set((state) => {
           const clean = title.trim().slice(0, 80);

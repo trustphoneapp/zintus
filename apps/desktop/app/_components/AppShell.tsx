@@ -10,24 +10,28 @@ import {
   type ReactNode,
 } from "react";
 import {
+  ArrowRight,
   BarChart3,
   Bot,
+  ChevronUp,
   FolderOpen,
   LayoutGrid,
   MessageSquare,
+  MoreHorizontal,
   Moon,
   PanelLeft,
-  Pencil,
+  Pin,
   Plus,
   Search,
   Settings,
   ShieldCheck,
   Sun,
-  Trash2,
 } from "lucide-react";
 import { fetchGatewayHealth, getGatewayUrl } from "@/lib/gateway";
 import { isTauri } from "@/lib/tauri";
-import { useChatStore, useSettingsStore } from "@/lib/store";
+import { useChatStore, useCloudStore, useSettingsStore } from "@/lib/store";
+import { openExternal } from "@/lib/tauri";
+import { signOut } from "@/lib/cloud";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
 import { formatSpend, onSpendChange, todaySpendUsd } from "@/lib/spend";
@@ -71,6 +75,20 @@ const threadActionStyle: CSSProperties = {
   lineHeight: 1,
 };
 
+const threadMenuItemStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  width: "100%",
+  padding: "6px 10px",
+  border: "none",
+  borderRadius: 7,
+  background: "transparent",
+  color: "var(--color-text)",
+  fontSize: 12.5,
+  cursor: "pointer",
+  textAlign: "left",
+};
+
 const COLLAPSE_KEY = "zintus:sidebar-collapsed";
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -107,14 +125,51 @@ export function AppShell({ children }: { children: ReactNode }) {
     });
   }
 
-  const { threads, activeThreadId, switchThread, newChat, deleteThread, renameThread } =
-    useChatStore();
+  const {
+    threads,
+    activeThreadId,
+    switchThread,
+    newChat,
+    deleteThread,
+    renameThread,
+    togglePinThread,
+  } = useChatStore();
+  const { authenticated, email, billing, refreshCloud } = useCloudStore();
   // Which thread row is being renamed inline, and the draft title.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  // History search (#16): title filter over the sidebar list; ⌘⇧F focuses it.
-  const [threadQuery, setThreadQuery] = useState("");
-  const threadSearchRef = useRef<HTMLInputElement>(null);
+  // Per-thread ⋯ overflow menu + the account-footer popover.
+  const [threadMenuId, setThreadMenuId] = useState<string | null>(null);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const accountRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!accountOpen && !threadMenuId) return;
+    function onDown(e: MouseEvent) {
+      if (accountRef.current && !accountRef.current.contains(e.target as Node)) {
+        setAccountOpen(false);
+      }
+      setThreadMenuId((current) => {
+        if (!current) return current;
+        const menu = document.getElementById(`thread-menu-${current}`);
+        return menu && menu.contains(e.target as Node) ? current : null;
+      });
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setAccountOpen(false);
+        setThreadMenuId(null);
+      }
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [accountOpen, threadMenuId]);
+  useEffect(() => {
+    void refreshCloud();
+  }, [refreshCloud]);
 
   // Loaded after mount (localStorage is client-only) to avoid an SSR flash.
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -123,11 +178,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, []);
 
   const recentThreads = [...threads]
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .filter(
-      (t) =>
-        !threadQuery.trim() ||
-        t.title.toLowerCase().includes(threadQuery.trim().toLowerCase()),
+    .sort(
+      (a, b) =>
+        Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) ||
+        b.updatedAt - a.updatedAt,
     )
     .slice(0, 40);
 
@@ -173,11 +227,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         e.preventDefault();
         router.push("/settings");
       } else if ((e.key === "f" || e.key === "F") && e.shiftKey) {
-        // Search history: jump to chat (where the sidebar lives) and focus
-        // the thread filter. rAF lets the route/render land first.
+        // Search history now lives in the ⌘K palette (recent chats group).
         e.preventDefault();
-        router.push("/chat");
-        requestAnimationFrame(() => threadSearchRef.current?.focus());
+        window.dispatchEvent(new CustomEvent("zintus:cmdk"));
       }
     }
     window.addEventListener("keydown", onKey);
@@ -222,10 +274,24 @@ export function AppShell({ children }: { children: ReactNode }) {
             padding: collapsed ? "0 0 10px" : "0 14px 10px",
           }}
         >
+          <span
+            aria-hidden
+            style={{
+              width: 26,
+              height: 26,
+              borderRadius: 8,
+              flexShrink: 0,
+              display: "grid",
+              placeItems: "center",
+              background: "linear-gradient(135deg, var(--color-purple-mid), #8b7bf7)",
+            }}
+          >
+            <ArrowRight size={14} color="#fff" strokeWidth={2.6} />
+          </span>
           {!collapsed ? (
           <span
             style={{
-              fontSize: 17,
+              fontSize: 16,
               fontWeight: 700,
               color: "var(--color-text)",
               letterSpacing: "-0.01em",
@@ -371,29 +437,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             History
           </div>
-          <input
-            ref={threadSearchRef}
-            value={threadQuery}
-            onChange={(e) => setThreadQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setThreadQuery("");
-            }}
-            placeholder="Search chats"
-            aria-label="Search chats"
-            style={{
-              margin: "0 2px 6px",
-              padding: "5px 8px",
-              border: "1px solid var(--color-border)",
-              borderRadius: 6,
-              background: "var(--color-bg)",
-              color: "var(--color-text)",
-              fontSize: 12,
-            }}
-          />
           <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1 }}>
             {recentThreads.length === 0 ? (
               <div style={{ padding: "4px 8px", fontSize: 12, color: "var(--color-text-muted)" }}>
-                {threadQuery.trim() ? "No chats match." : "No conversations yet."}
+                No conversations yet.
               </div>
             ) : null}
             {recentThreads.map((thread) => {
@@ -468,29 +515,88 @@ export function AppShell({ children }: { children: ReactNode }) {
                           ? thread.title.slice(0, 26) + "…"
                           : thread.title}
                       </button>
-                      <button
-                        type="button"
-                        className="ds-thread-action"
-                        aria-label={`Rename ${thread.title}`}
-                        title="Rename"
-                        onClick={() => {
-                          setRenamingId(thread.id);
-                          setRenameDraft(thread.title);
-                        }}
-                        style={threadActionStyle}
-                      >
-                        <Pencil size={12} />
-                      </button>
-                      <button
-                        type="button"
-                        className="ds-thread-action"
-                        aria-label={`Delete ${thread.title}`}
-                        title="Delete"
-                        onClick={() => confirmDelete(thread.id, thread.title)}
-                        style={threadActionStyle}
-                      >
-                        <Trash2 size={12} />
-                      </button>
+                      {thread.pinned ? (
+                        <Pin
+                          size={11}
+                          aria-label="Pinned"
+                          style={{ flexShrink: 0, color: "var(--color-text-muted)" }}
+                        />
+                      ) : null}
+                      <span style={{ position: "relative", flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          className="ds-thread-action"
+                          aria-label={`Options for ${thread.title}`}
+                          aria-expanded={threadMenuId === thread.id}
+                          title="Options"
+                          onClick={() =>
+                            setThreadMenuId((current) =>
+                              current === thread.id ? null : thread.id,
+                            )
+                          }
+                          style={threadActionStyle}
+                        >
+                          <MoreHorizontal size={13} />
+                        </button>
+                        {threadMenuId === thread.id ? (
+                          <span
+                            id={`thread-menu-${thread.id}`}
+                            role="menu"
+                            style={{
+                              position: "absolute",
+                              right: 0,
+                              top: 24,
+                              minWidth: 130,
+                              display: "flex",
+                              flexDirection: "column",
+                              background: "var(--color-surface)",
+                              border: "1px solid var(--color-border)",
+                              borderRadius: 9,
+                              padding: 3,
+                              boxShadow: "var(--shadow-md)",
+                              zIndex: 40,
+                            }}
+                          >
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="app-icon-btn"
+                              style={threadMenuItemStyle}
+                              onClick={() => {
+                                togglePinThread(thread.id);
+                                setThreadMenuId(null);
+                              }}
+                            >
+                              {thread.pinned ? "Unpin" : "Pin to top"}
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="app-icon-btn"
+                              style={threadMenuItemStyle}
+                              onClick={() => {
+                                setRenamingId(thread.id);
+                                setRenameDraft(thread.title);
+                                setThreadMenuId(null);
+                              }}
+                            >
+                              Rename
+                            </button>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              className="app-icon-btn"
+                              style={{ ...threadMenuItemStyle, color: "var(--color-red)" }}
+                              onClick={() => {
+                                setThreadMenuId(null);
+                                confirmDelete(thread.id, thread.title);
+                              }}
+                            >
+                              Delete
+                            </button>
+                          </span>
+                        ) : null}
+                      </span>
                     </>
                   )}
                 </div>
@@ -502,40 +608,230 @@ export function AppShell({ children }: { children: ReactNode }) {
         {/* Rail mode: keep the footer pinned to the bottom while History is hidden. */}
         {collapsed ? <div style={{ flex: 1 }} /> : null}
 
-        {/* Status footer */}
+        {/* Account footer — avatar, name/plan, gateway heartbeat, popover menu. */}
         <div
+          ref={accountRef}
           style={{
+            position: "relative",
             flexShrink: 0,
             borderTop: "1px solid var(--color-border)",
-            justifyContent: collapsed ? "center" : "flex-start",
-            padding: collapsed ? "8px 0" : "8px 14px",
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            fontSize: 11,
-            fontFamily: "var(--font-mono)",
-            color: online ? "var(--color-text-sub)" : "var(--color-red)",
+            padding: collapsed ? "10px 0" : "10px 11px",
           }}
         >
-          <span
+          <button
+            type="button"
+            onClick={() => setAccountOpen((v) => !v)}
+            aria-expanded={accountOpen}
+            aria-label="Account and app menu"
+            className="app-icon-btn"
             style={{
-              width: 6,
-              height: 6,
-              borderRadius: "50%",
-              background: checked
-                ? online
-                  ? "var(--color-green)"
-                  : "var(--color-red)"
-                : "var(--color-text-muted)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: collapsed ? "center" : "flex-start",
+              gap: 9,
+              width: "100%",
+              padding: 4,
+              border: "none",
+              borderRadius: 9,
+              background: "transparent",
+              cursor: "pointer",
             }}
-          />
-          {!collapsed
-            ? checked
-              ? online
-                ? "gateway online"
-                : "gateway offline"
-              : "checking…"
-            : null}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 8,
+                flexShrink: 0,
+                display: "grid",
+                placeItems: "center",
+                background: authenticated
+                  ? "var(--color-purple-mid)"
+                  : "var(--color-elevated)",
+                color: authenticated ? "#fff" : "var(--color-text-sub)",
+                fontSize: 11,
+                fontWeight: 700,
+              }}
+            >
+              {authenticated && email ? email.slice(0, 2).toUpperCase() : "·"}
+            </span>
+            {!collapsed ? (
+              <>
+                <span
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    minWidth: 0,
+                    textAlign: "left",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      color: "var(--color-text)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      maxWidth: 130,
+                    }}
+                  >
+                    {authenticated ? (email ?? "Signed in") : "Not signed in"}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontFamily: "var(--font-mono)",
+                      color: checked
+                        ? online
+                          ? "var(--color-green)"
+                          : "var(--color-red)"
+                        : "var(--color-text-muted)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        background: checked
+                          ? online
+                            ? "var(--color-green)"
+                            : "var(--color-red)"
+                          : "var(--color-text-muted)",
+                      }}
+                    />
+                    {checked ? (online ? "gateway online" : "gateway offline") : "checking…"}
+                  </span>
+                </span>
+                <ChevronUp
+                  size={14}
+                  style={{ marginLeft: "auto", color: "var(--color-text-muted)" }}
+                />
+              </>
+            ) : null}
+          </button>
+
+          {accountOpen ? (
+            <div
+              role="menu"
+              style={{
+                position: "absolute",
+                bottom: "calc(100% + 6px)",
+                left: 8,
+                right: collapsed ? "auto" : 8,
+                minWidth: 210,
+                background: "var(--color-surface)",
+                border: "1px solid var(--color-border)",
+                borderRadius: 12,
+                padding: 4,
+                boxShadow: "var(--shadow-md)",
+                zIndex: 50,
+              }}
+            >
+              <div
+                style={{
+                  padding: "7px 10px 4px",
+                  fontSize: 10.5,
+                  color: "var(--color-text-muted)",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {authenticated
+                  ? (email ?? "Signed in")
+                  : "Sign in from the Models page to use membership"}
+              </div>
+              <button
+                type="button"
+                role="menuitem"
+                className="app-icon-btn"
+                style={threadMenuItemStyle}
+                onClick={() => {
+                  setAccountOpen(false);
+                  router.push("/models");
+                }}
+              >
+                {billing && billing.tier !== "free"
+                  ? `Plan: ${billing.tier[0]!.toUpperCase()}${billing.tier.slice(1)} · manage`
+                  : "Plan: Free (BYOK) · upgrade"}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="app-icon-btn"
+                style={threadMenuItemStyle}
+                onClick={() => {
+                  setAccountOpen(false);
+                  router.push("/settings");
+                }}
+              >
+                Settings
+                <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--color-text-muted)" }}>
+                  ⌘,
+                </span>
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="app-icon-btn"
+                style={threadMenuItemStyle}
+                onClick={() => {
+                  setAccountOpen(false);
+                  router.push("/usage");
+                }}
+              >
+                Usage &amp; health
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="app-icon-btn"
+                style={threadMenuItemStyle}
+                onClick={() => {
+                  setAccountOpen(false);
+                  void openExternal("https://www.zintus.ai/help");
+                }}
+              >
+                Help &amp; docs ↗
+              </button>
+              <div style={{ height: 1, background: "var(--color-border)", margin: "4px 8px" }} />
+              {authenticated ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="app-icon-btn"
+                  style={{ ...threadMenuItemStyle, color: "var(--color-text-sub)" }}
+                  onClick={() => {
+                    setAccountOpen(false);
+                    void signOut().then(() => {
+                      useCloudStore.getState().resetCloud();
+                    });
+                  }}
+                >
+                  Sign out
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="app-icon-btn"
+                  style={threadMenuItemStyle}
+                  onClick={() => {
+                    setAccountOpen(false);
+                    router.push("/models");
+                  }}
+                >
+                  Sign in…
+                </button>
+              )}
+            </div>
+          ) : null}
         </div>
       </aside>
 
