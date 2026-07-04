@@ -822,7 +822,7 @@ export default function ChatScreen() {
       case "compress_harder":
         Alert.alert(
           "Compress harder",
-          "Tokzen already compresses every turn. Shorter prompts and fewer attachments stretch your free-tier budget further.",
+          "Zintus already compresses every turn. Shorter prompts and fewer attachments stretch your free-tier budget further.",
         );
         break;
       case "wait":

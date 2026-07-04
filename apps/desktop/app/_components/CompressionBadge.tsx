@@ -25,7 +25,7 @@ export function CompressionBadge({ stats }: { stats: CompressionStats }) {
   return (
     <div
       className="compression-badge"
-      title="Tokzen compressed your prompt before sending it to the provider. The cost figure is an estimate, not a charge."
+      title="Zintus compressed your prompt before sending it to the provider. The cost figure is an estimate, not a charge."
     >
       <span className="compression-badge-icon" aria-hidden>
         ⤵

@@ -134,7 +134,7 @@ export default function Onboarding() {
             <View style={styles.bullets}>
               <Text style={styles.bullet}>• Your keys stay on this device.</Text>
               <Text style={styles.bullet}>
-                • Tokzen compresses each turn to stretch free tiers.
+                • Each turn is compressed to stretch free tiers.
               </Text>
               <Text style={styles.bullet}>
                 • Every answer shows provider, savings, and quota.

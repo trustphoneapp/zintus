@@ -54,7 +54,7 @@ export const ROUTE_OPTION_META: Record<
 > = {
   compress_harder: {
     label: "Compress harder",
-    hint: "Squeeze more out of the remaining free-tier budget with Tokzen.",
+    hint: "Squeeze more out of the remaining free-tier budget with compression.",
   },
   switch_provider: {
     label: "Switch provider",

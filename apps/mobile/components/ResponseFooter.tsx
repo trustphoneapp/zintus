@@ -107,7 +107,7 @@ function ResponseFooterImpl({
       {showSavings && meta ? (
         <View style={styles.savingsRow}>
           <View style={styles.savingsPill}>
-            <Text style={styles.savingsPillText}>Tokzen −{reduction}%</Text>
+            <Text style={styles.savingsPillText}>compressed −{reduction}%</Text>
           </View>
           <Text style={styles.savingsDetail}>
             {meta.originalTokens?.toLocaleString()} →{" "}
