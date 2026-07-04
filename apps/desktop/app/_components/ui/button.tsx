@@ -2,19 +2,22 @@ import { cva, type VariantProps } from "class-variance-authority";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
+// Variants map to the REAL global classes in globals.css (Light.dc button
+// system): default = the unclassed ink primary, `secondary` = bordered raised,
+// `ghostbtn` = quiet bordered ghost. Tailwind color classes like bg-purple-mid
+// were never registered in a @theme block, so they'd silently do nothing.
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 rounded-md text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-purple-mid disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-2 transition-colors focus-visible:outline-none disabled:pointer-events-none",
   {
     variants: {
       variant: {
-        default: "bg-purple-mid text-white hover:bg-purple-light",
-        secondary:
-          "bg-elevated text-text-sub border border-border hover:border-border-bright hover:text-text",
-        ghost: "text-text-sub hover:bg-elevated hover:text-text",
+        default: "",
+        secondary: "secondary",
+        ghost: "ghostbtn",
       },
       size: {
-        default: "h-9 px-4 py-2",
-        sm: "h-8 rounded-md px-3 text-xs",
+        default: "",
+        sm: "text-xs",
         icon: "h-9 w-9",
       },
     },

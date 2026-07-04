@@ -29,9 +29,10 @@ const STRATEGIES: Array<{ value: RoutingStrategy; label: string }> = [
 const PAGES: Array<{ href: string; label: string }> = [
   { href: "/chat", label: "Go to Chat" },
   { href: "/models", label: "Go to Models" },
-  { href: "/agent", label: "Go to Agent" },
-  { href: "/research", label: "Go to Research" },
+  { href: "/compare", label: "Go to Compare" },
   { href: "/projects", label: "Go to Projects" },
+  { href: "/research", label: "Go to Research" },
+  { href: "/agent", label: "Go to Agent" },
   { href: "/usage", label: "Go to Usage" },
   { href: "/settings", label: "Go to Settings" },
 ];
@@ -117,6 +118,15 @@ export function CommandPalette() {
         run: () => {
           toggleTheme();
           close();
+        },
+      },
+      {
+        id: "shortcuts",
+        label: "Keyboard shortcuts",
+        group: "Actions",
+        run: () => {
+          close();
+          window.dispatchEvent(new CustomEvent("zintus:shortcuts"));
         },
       },
       ...PAGES.map((page) => ({

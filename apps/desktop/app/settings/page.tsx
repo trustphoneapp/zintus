@@ -8,6 +8,7 @@ import { PROVIDER_IDS } from "@zintus/types";
 import { isActiveMember, useCloudStore, useSettingsStore } from "@/lib/store";
 import { getBudgetUsd, setBudgetUsd } from "@/lib/spend";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
+import { getThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
 import { openExternal } from "@/lib/tauri";
 import { Card, CardContent, CardHeader, CardTitle } from "../_components/ui/card";
 
@@ -62,12 +63,14 @@ export default function SettingsPage() {
   const member = isActiveMember(billing);
   const [budgetDraft, setBudgetDraft] = useState("");
   const [updateState, setUpdateState] = useState<UpdateCheck | "checking" | null>(null);
+  const [themePref, setThemePref] = useState<ThemePreference>("system");
 
   useEffect(() => {
     hydrate();
     void refreshCloud();
     const budget = getBudgetUsd();
     setBudgetDraft(budget != null ? String(budget) : "");
+    setThemePref(getThemePreference());
   }, [hydrate, refreshCloud]);
 
   async function runUpdateCheck() {
@@ -145,10 +148,10 @@ export default function SettingsPage() {
                 display: "inline-flex",
                 alignItems: "center",
                 padding: "6px 12px",
-                borderRadius: 8,
+                borderRadius: 9,
                 border: "none",
-                background: "var(--color-purple-mid)",
-                color: "#fff",
+                background: "var(--color-primary)",
+                color: "var(--color-primary-contrast)",
                 fontSize: 12.5,
                 fontWeight: 600,
                 textDecoration: "none",
@@ -159,6 +162,37 @@ export default function SettingsPage() {
             <span style={{ fontSize: 11.5, color: "var(--color-text-muted)" }}>
               Referral program: commission accrues per paid referral — payouts coming soon.
             </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Appearance ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Appearance</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div>
+            <b style={{ display: "block", fontSize: 13, fontWeight: 600 }}>Theme</b>
+            <span style={{ fontSize: 12, color: "var(--color-text-sub)" }}>
+              System follows the OS appearance
+            </span>
+          </div>
+          <div className="seg" style={{ marginLeft: "auto", flexShrink: 0 }}>
+            {(["system", "light", "dark"] as const).map((pref) => (
+              <button
+                key={pref}
+                type="button"
+                className={themePref === pref ? "on" : undefined}
+                style={{ textTransform: "capitalize" }}
+                onClick={() => {
+                  setThemePreference(pref);
+                  setThemePref(pref);
+                }}
+              >
+                {pref}
+              </button>
+            ))}
           </div>
         </CardContent>
       </Card>
@@ -292,6 +326,30 @@ export default function SettingsPage() {
                 </span>
               )
             ) : null}
+          </div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              paddingTop: 11,
+              borderTop: "1px solid var(--color-border)",
+            }}
+          >
+            <div>
+              <b style={{ display: "block", fontSize: 13, fontWeight: 600 }}>Keyboard shortcuts</b>
+              <span style={{ fontSize: 12, color: "var(--color-text-sub)" }}>
+                Every shortcut in one place
+              </span>
+            </div>
+            <button
+              type="button"
+              className="ghostbtn"
+              style={{ marginLeft: "auto", flexShrink: 0 }}
+              onClick={() => window.dispatchEvent(new CustomEvent("zintus:shortcuts"))}
+            >
+              View · ⌘/
+            </button>
           </div>
         </CardContent>
       </Card>

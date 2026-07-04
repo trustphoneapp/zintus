@@ -564,8 +564,8 @@ export default function ModelsDirectory() {
                   padding: "0 15px",
                   border: "none",
                   borderRadius: 9,
-                  background: "var(--color-purple-mid)",
-                  color: "#fff",
+                  background: "var(--color-primary)",
+                  color: "var(--color-primary-contrast)",
                   fontSize: 12.5,
                   fontWeight: 600,
                   cursor: "pointer",
@@ -901,8 +901,8 @@ function ProviderDetail(props: {
             height: 34,
             border: "none",
             borderRadius: 9,
-            background: "var(--color-purple-mid)",
-            color: "#fff",
+            background: "var(--color-primary)",
+            color: "var(--color-primary-contrast)",
             fontSize: 12.5,
             fontWeight: 600,
             cursor: "pointer",
@@ -1019,8 +1019,8 @@ function ZintusPanel(props: {
             height: 36,
             border: "none",
             borderRadius: 9,
-            background: "var(--color-purple-mid)",
-            color: "#fff",
+            background: "var(--color-primary)",
+            color: "var(--color-primary-contrast)",
             fontSize: 13,
             fontWeight: 600,
             cursor: "pointer",
@@ -1188,8 +1188,11 @@ function ZintusPanel(props: {
                     background:
                       props.managedModel === m.id
                         ? "var(--color-green)"
-                        : "var(--color-purple-mid)",
-                    color: "#fff",
+                        : "var(--color-primary)",
+                    color:
+                      props.managedModel === m.id
+                        ? "#fff"
+                        : "var(--color-primary-contrast)",
                     fontSize: 10.5,
                     fontWeight: 600,
                     cursor: "pointer",

@@ -1242,13 +1242,14 @@ export function ChatPanel() {
                     justifyContent: "center",
                     width: 30,
                     height: 30,
-                    border: "1px solid var(--color-border)",
+                    border: "none",
+                    background: "transparent",
                     borderRadius: 8,
                     color: "var(--color-text-sub)",
                     cursor: "pointer",
                   }}
                 >
-                  <Plus size={15} />
+                  <Plus size={17} />
                 </button>
                 {plusOpen ? (
                   <div
@@ -1748,10 +1749,11 @@ export function ChatPanel() {
                     justifyContent: "center",
                     width: 32,
                     height: 32,
-                    borderRadius: "50%",
+                    borderRadius: 9,
                     border: "none",
-                    background: "var(--color-purple-mid)",
-                    color: "#fff",
+                    padding: 0,
+                    background: "var(--color-primary)",
+                    color: "var(--color-primary-contrast)",
                     cursor: "pointer",
                     opacity:
                       !prompt.trim() &&

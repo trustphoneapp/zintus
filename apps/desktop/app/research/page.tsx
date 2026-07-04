@@ -13,7 +13,6 @@ import {
   hasProviderSendConsent,
 } from "@/lib/consent";
 import { Button } from "@/app/_components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/app/_components/ui/card";
 import { Textarea } from "@/app/_components/ui/textarea";
 
 type Stage =
@@ -113,16 +112,38 @@ export default function ResearchPage() {
   const activeIdx = FLOW.indexOf(stage);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col p-4">
-      <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-[var(--color-surface)]">
-        <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Deep Research</CardTitle>
+    <div className="scroll" style={{ flex: 1, overflowY: "auto" }}>
+      <div
+        style={{
+          maxWidth: 760,
+          margin: "0 auto",
+          padding: "22px 24px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 14,
+          width: "100%",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0, color: "var(--color-text)" }}>Research</h1>
           {answer && !running ? (
-            <Button type="button" variant="secondary" onClick={exportReport}>Export</Button>
+            <Button type="button" variant="ghost" style={{ marginLeft: "auto" }} onClick={exportReport}>
+              Export report
+            </Button>
           ) : null}
-        </CardHeader>
-        <CardContent className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto">
-          <p style={{ fontSize: 13, color: "var(--color-text-muted)", margin: 0 }}>
+        </div>
+        <div
+          style={{
+            border: "1px solid var(--color-border)",
+            borderRadius: 12,
+            background: "var(--color-surface)",
+            padding: "14px 16px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+          }}
+        >
+          <p style={{ fontSize: 12.5, color: "var(--color-text-sub)", margin: 0 }}>
             Multi-step web research with cited sources, routed through your gateway.
             Requires a search key (Tavily/Serper) configured on the gateway.
           </p>
@@ -133,23 +154,20 @@ export default function ResearchPage() {
             placeholder="Ask a research question…"
           />
           <div className="flex items-center gap-2">
-            {DEPTHS.map((d) => (
-              <button
-                key={d}
-                type="button"
-                onClick={() => setDepth(d)}
-                disabled={running}
-                className="h-8 rounded-md border px-3 text-xs"
-                style={{
-                  borderColor: depth === d ? "var(--color-purple-bright, #c4b5fd)" : "var(--color-border)",
-                  color: depth === d ? "var(--color-purple-bright, #c4b5fd)" : "var(--color-text-muted)",
-                  background: "var(--color-elevated)",
-                  textTransform: "capitalize",
-                }}
-              >
-                {d}
-              </button>
-            ))}
+            <div className="seg">
+              {DEPTHS.map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setDepth(d)}
+                  disabled={running}
+                  className={depth === d ? "on" : undefined}
+                  style={{ textTransform: "capitalize" }}
+                >
+                  {d}
+                </button>
+              ))}
+            </div>
             <div style={{ flex: 1 }} />
             {running ? (
               <Button type="button" variant="secondary" onClick={stop}>Stop</Button>
@@ -225,8 +243,8 @@ export default function ResearchPage() {
               ))}
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {consentOpen ? (
         <div className="consent-backdrop" role="dialog" aria-modal="true">

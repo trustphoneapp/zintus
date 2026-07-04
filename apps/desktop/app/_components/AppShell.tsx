@@ -11,10 +11,11 @@ import {
 } from "react";
 import {
   ArrowRight,
-  BarChart3,
   Bot,
   ChevronUp,
+  Columns2,
   FolderOpen,
+  Globe,
   LayoutGrid,
   MessageSquare,
   MoreHorizontal,
@@ -23,7 +24,6 @@ import {
   Pin,
   Plus,
   Search,
-  Settings,
   ShieldCheck,
   Sun,
 } from "lucide-react";
@@ -34,9 +34,11 @@ import { openExternal } from "@/lib/tauri";
 import { signOut } from "@/lib/cloud";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
+import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
 import { formatSpend, getBudgetUsd, onSpendChange, todaySpendUsd } from "@/lib/spend";
 import { OnboardingOverlay } from "./OnboardingOverlay";
 import { CommandPalette } from "./CommandPalette";
+import { ShortcutsOverlay } from "./ShortcutsOverlay";
 import { Tooltip } from "./ui/tooltip";
 
 /**
@@ -47,19 +49,18 @@ import { Tooltip } from "./ui/tooltip";
  * drag region); content is a single pane with no web-style top nav.
  */
 
-// V1 sidebar set (Light.dc design): Models replaces Providers as the primary
-// provider/model surface (the /providers route stays reachable, just not from
-// primary nav). Terminal intentionally left OUT of the nav — TerminalPane
-// stays in the codebase for a later "developer mode"; the Agent page keeps
-// its own console for run transparency.
+// V1 sidebar set (Light.dc design) — the prototype's WORKSPACE section, in its
+// exact order. Usage and Settings are NOT primary nav: they're reached from the
+// account-footer popover (and the top-bar spend button / ⌘,), same as the
+// prototype. Terminal intentionally left OUT of the nav — TerminalPane stays in
+// the codebase for a later "developer mode"; the Agent page keeps its console.
 const NAV = [
   { href: "/chat", label: "Chat", icon: MessageSquare },
   { href: "/models", label: "Models", icon: LayoutGrid },
-  { href: "/agent", label: "Agent", icon: Bot },
-  { href: "/research", label: "Research", icon: Search },
+  { href: "/compare", label: "Compare", icon: Columns2 },
   { href: "/projects", label: "Projects", icon: FolderOpen },
-  { href: "/usage", label: "Usage", icon: BarChart3 },
-  { href: "/settings", label: "Settings", icon: Settings },
+  { href: "/research", label: "Research", icon: Globe },
+  { href: "/agent", label: "Agent", icon: Bot },
 ];
 
 /** Per-thread hover action button (rename / delete). Shown on row hover via CSS. */
@@ -150,6 +151,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Per-thread ⋯ overflow menu + the account-footer popover.
   const [threadMenuId, setThreadMenuId] = useState<string | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
+  // Account-popover update check (same honest manifest check Settings uses).
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | "checking" | null>(null);
   const accountRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!accountOpen && !threadMenuId) return;
@@ -239,6 +242,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         // Search history now lives in the ⌘K palette (recent chats group).
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("zintus:cmdk"));
+      } else if (e.key === "/") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("zintus:shortcuts"));
       }
     }
     window.addEventListener("keydown", onKey);
@@ -251,6 +257,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <OnboardingOverlay onDone={() => setShowOnboarding(false)} />
       ) : null}
       <CommandPalette />
+      <ShortcutsOverlay />
 
       {/* ── Sidebar: the app frame ─────────────────────────────────────── */}
       <aside
@@ -377,6 +384,20 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         {/* Primary nav */}
+        {!collapsed ? (
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: 0.6,
+              color: "var(--color-text-muted)",
+              padding: "4px 20px 4px",
+            }}
+          >
+            Workspace
+          </div>
+        ) : null}
         <nav style={{ padding: "4px 10px 8px", display: "flex", flexDirection: "column", gap: 1 }}>
           {NAV.map((item) => {
             const active =
@@ -444,7 +465,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               padding: "10px 8px 6px",
             }}
           >
-            History
+            Recents
           </div>
           <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1 }}>
             {recentThreads.length === 0 ? (
@@ -809,7 +830,60 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 Help &amp; docs ↗
               </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="app-icon-btn"
+                style={threadMenuItemStyle}
+                onClick={() => setTheme(toggleTheme())}
+              >
+                Toggle theme
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className="app-icon-btn"
+                style={threadMenuItemStyle}
+                onClick={() => {
+                  setAccountOpen(false);
+                  window.dispatchEvent(new CustomEvent("zintus:shortcuts"));
+                }}
+              >
+                Keyboard shortcuts
+                <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--color-text-muted)" }}>
+                  ⌘/
+                </span>
+              </button>
               <div style={{ height: 1, background: "var(--color-border)", margin: "4px 8px" }} />
+              <button
+                type="button"
+                role="menuitem"
+                className="app-icon-btn"
+                style={threadMenuItemStyle}
+                disabled={updateCheck === "checking"}
+                onClick={() => {
+                  if (updateCheck && updateCheck !== "checking" && updateCheck.status === "update") {
+                    void openExternal(updateCheck.info.url);
+                    setAccountOpen(false);
+                    return;
+                  }
+                  setUpdateCheck("checking");
+                  void checkForUpdate().then(setUpdateCheck);
+                }}
+              >
+                {updateCheck === "checking"
+                  ? "Checking for updates…"
+                  : updateCheck?.status === "update"
+                    ? `Update ready · ${updateCheck.info.version} — download`
+                    : updateCheck?.status === "current"
+                      ? `Up to date · ${APP_VERSION}`
+                      : updateCheck?.status === "unreachable"
+                        ? "Release feed unreachable — retry"
+                        : "Check for updates"}
+                {updateCheck !== "checking" && updateCheck?.status === "update" ? (
+                  <span aria-hidden style={{ marginLeft: "auto", color: "var(--color-green)" }}>●</span>
+                ) : null}
+              </button>
               {authenticated ? (
                 <button
                   type="button"
