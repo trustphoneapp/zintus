@@ -370,7 +370,8 @@ button.pop-item.on:not(:disabled):hover {
 }
 
 /* Light.dc ghost button — quiet bordered action; hover lifts to raised. */
-button.ghostbtn {
+button.ghostbtn,
+a.ghostbtn {
   height: 30px;
   padding: 0 12px;
   border: 1px solid var(--color-border);
@@ -380,7 +381,8 @@ button.ghostbtn {
   font-size: 12px;
   font-weight: 600;
 }
-button.ghostbtn:not(:disabled):hover {
+button.ghostbtn:not(:disabled):hover,
+a.ghostbtn:hover {
   background: var(--color-elevated);
   color: var(--color-text);
 }

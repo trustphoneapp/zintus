@@ -75,3 +75,93 @@ export function overBudget(): boolean {
   const budget = getBudgetUsd();
   return budget != null && todaySpendUsd() >= budget;
 }
+
+// ── Per-day usage ledger (requests + per-model tokens + saved) ──────────────
+// Same honesty contract as the spend keys above: local estimates for display,
+// accumulated per calendar day so Usage can show Today / 7d / 30d without
+// inventing history. The gateway/relay stay the source of billing truth.
+
+export interface DayUsage {
+  requests: number;
+  /** key = `${providerId}·${model}` */
+  models: Record<string, { in: number; out: number }>;
+  /** Estimated USD saved this day (compression + free-tier routing). */
+  savedUsd: number;
+}
+
+function usageKey(offsetDays = 0): string {
+  const d = new Date();
+  d.setDate(d.getDate() - offsetDays);
+  return `zintus:usage:${d.toISOString().slice(0, 10)}`;
+}
+
+function readDay(key: string): DayUsage {
+  if (typeof localStorage === "undefined") return { requests: 0, models: {}, savedUsd: 0 };
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return { requests: 0, models: {}, savedUsd: 0 };
+    const parsed = JSON.parse(raw) as Partial<DayUsage>;
+    return {
+      requests: parsed.requests ?? 0,
+      models: parsed.models ?? {},
+      savedUsd: parsed.savedUsd ?? 0,
+    };
+  } catch {
+    return { requests: 0, models: {}, savedUsd: 0 };
+  }
+}
+
+/** Record one completed turn into today's ledger. */
+export function recordTurnUsage(entry: {
+  providerId: string;
+  model: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  savedUsd?: number;
+}): void {
+  if (typeof localStorage === "undefined") return;
+  const key = usageKey();
+  const day = readDay(key);
+  day.requests += 1;
+  const modelKey = `${entry.providerId}·${entry.model}`;
+  const m = day.models[modelKey] ?? { in: 0, out: 0 };
+  m.in += entry.tokensIn ?? 0;
+  m.out += entry.tokensOut ?? 0;
+  day.models[modelKey] = m;
+  if (entry.savedUsd && Number.isFinite(entry.savedUsd)) day.savedUsd += entry.savedUsd;
+  localStorage.setItem(key, JSON.stringify(day));
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(EVENT, { detail: todaySpendUsd() }));
+  }
+}
+
+/** Merge the last `days` calendar days of the ledger (1 = today only). */
+export function usageForDays(days: number): DayUsage {
+  const merged: DayUsage = { requests: 0, models: {}, savedUsd: 0 };
+  for (let i = 0; i < days; i += 1) {
+    const day = readDay(usageKey(i));
+    merged.requests += day.requests;
+    merged.savedUsd += day.savedUsd;
+    for (const [k, v] of Object.entries(day.models)) {
+      const m = merged.models[k] ?? { in: 0, out: 0 };
+      m.in += v.in;
+      m.out += v.out;
+      merged.models[k] = m;
+    }
+  }
+  return merged;
+}
+
+/** Sum estimated spend over the last `days` calendar days (1 = today). */
+export function spendUsdForDays(days: number): number {
+  if (typeof localStorage === "undefined") return 0;
+  let total = 0;
+  for (let i = 0; i < days; i += 1) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const raw = localStorage.getItem(`zintus:spend:${d.toISOString().slice(0, 10)}`);
+    const value = raw ? Number(raw) : 0;
+    if (Number.isFinite(value)) total += value;
+  }
+  return total;
+}

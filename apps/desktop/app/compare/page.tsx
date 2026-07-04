@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProviderId } from "@zintus/types";
 import { streamChat } from "@/lib/chat-client";
 import { fetchProviderInfos, type DesktopProviderInfo } from "@/lib/providers";
-import { addSpendUsd } from "@/lib/spend";
+import { addSpendUsd, recordTurnUsage } from "@/lib/spend";
 import { useProviderStatusStore, useSettingsStore } from "@/lib/store";
 import {
   DATA_FLOW,
@@ -99,6 +99,13 @@ export default function ComparePage() {
           });
           const ms = Math.round(performance.now() - startedAt);
           if (result.meta?.costUsd) addSpendUsd(result.meta.costUsd);
+          recordTurnUsage({
+            providerId: result.providerId,
+            model: result.model,
+            tokensIn: result.meta?.inputTokens,
+            tokensOut: result.meta?.outputTokens,
+            savedUsd: result.compression?.costSavedUsd ?? undefined,
+          });
           setColumns((cols) =>
             cols.map((c, i) =>
               i === index

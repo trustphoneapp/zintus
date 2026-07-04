@@ -39,7 +39,7 @@ import {
   type UiImageMeta,
 } from "@/lib/store";
 import { ManagedChatFailure, streamManagedChat } from "@/lib/managed-chat";
-import { addSpendUsd } from "@/lib/spend";
+import { addSpendUsd, recordTurnUsage } from "@/lib/spend";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -518,6 +518,13 @@ export function ChatPanel() {
             meta: result.meta,
           });
           if (result.meta?.costUsd) addSpendUsd(result.meta.costUsd);
+          recordTurnUsage({
+            providerId: result.providerId,
+            model: result.model,
+            tokensIn: result.meta?.inputTokens,
+            tokensOut: result.meta?.outputTokens,
+            savedUsd: result.compression?.costSavedUsd ?? undefined,
+          });
           setActiveProvider(result.providerId);
           void refresh();
 
