@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Wrench } from "lucide-react";
+import { Brain, RefreshCw, Wrench } from "lucide-react";
 import type { ContextMode, ProviderId, RoutingStrategy } from "@zintus/types";
 import { PROVIDER_IDS } from "@zintus/types";
-import { useSettingsStore } from "@/lib/store";
+import { isActiveMember, useCloudStore, useSettingsStore } from "@/lib/store";
+import { getBudgetUsd, setBudgetUsd } from "@/lib/spend";
+import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
+import { openExternal } from "@/lib/tauri";
 import { Card, CardContent, CardHeader, CardTitle } from "../_components/ui/card";
 
 const STRATEGIES: Array<{
@@ -55,10 +58,22 @@ const CONTEXT_MODES: Array<{
 
 export default function SettingsPage() {
   const { settings, hydrated, hydrate, update } = useSettingsStore();
+  const { authenticated, email, billing, refreshCloud } = useCloudStore();
+  const member = isActiveMember(billing);
+  const [budgetDraft, setBudgetDraft] = useState("");
+  const [updateState, setUpdateState] = useState<UpdateCheck | "checking" | null>(null);
 
   useEffect(() => {
     hydrate();
-  }, [hydrate]);
+    void refreshCloud();
+    const budget = getBudgetUsd();
+    setBudgetDraft(budget != null ? String(budget) : "");
+  }, [hydrate, refreshCloud]);
+
+  async function runUpdateCheck() {
+    setUpdateState("checking");
+    setUpdateState(await checkForUpdate());
+  }
 
   if (!hydrated) {
     return null;
@@ -72,6 +87,214 @@ export default function SettingsPage() {
           Routing strategy and defaults — applied to chat auto-routing.
         </p>
       </div>
+
+      {/* ── Zintus membership ── */}
+      <Card
+        style={{
+          borderColor: "color-mix(in srgb, var(--color-purple-bright) 30%, var(--color-border))",
+          background: "color-mix(in srgb, var(--color-purple-bright) 6%, var(--color-bg))",
+        }}
+      >
+        <CardHeader>
+          <CardTitle>Zintus membership</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {member && billing ? (
+            <>
+              <p style={{ margin: 0, fontSize: 13.5, fontWeight: 600 }}>
+                {billing.tier[0]!.toUpperCase() + billing.tier.slice(1)} plan · active
+                {email ? ` · ${email}` : ""}
+              </p>
+              {billing.tokens_limit ? (
+                <>
+                  <p
+                    style={{
+                      margin: 0,
+                      fontSize: 12,
+                      color: "var(--color-text-muted)",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
+                    {(billing.tokens_limit - billing.tokens_used).toLocaleString()} of{" "}
+                    {billing.tokens_limit.toLocaleString()} plan tokens left this month
+                  </p>
+                  <div style={{ height: 5, borderRadius: 99, background: "var(--color-elevated)" }}>
+                    <div
+                      style={{
+                        height: 5,
+                        borderRadius: 99,
+                        width: `${Math.min(100, Math.round((billing.tokens_used / billing.tokens_limit) * 100))}%`,
+                        background: "var(--color-purple-bright)",
+                      }}
+                    />
+                  </div>
+                </>
+              ) : null}
+            </>
+          ) : (
+            <p style={{ margin: 0, fontSize: 13, color: "var(--color-text-sub)" }}>
+              {authenticated
+                ? "Free plan (BYOK) — your own keys, $0 forever. Upgrade for managed models with exact token accounting: Starter $15 · Growth $49 · Scale $99 · Pro $199 /mo."
+                : "Not signed in. Sign in from the Models page to join — managed models, no API keys, exact token accounting."}
+            </p>
+          )}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <Link
+              href="/models"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "6px 12px",
+                borderRadius: 8,
+                border: "none",
+                background: "var(--color-purple-mid)",
+                color: "#fff",
+                fontSize: 12.5,
+                fontWeight: 600,
+                textDecoration: "none",
+              }}
+            >
+              {member ? "Manage membership" : "See plans"}
+            </Link>
+            <span style={{ fontSize: 11.5, color: "var(--color-text-muted)" }}>
+              Referral program: commission accrues per paid referral — payouts coming soon.
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Memory ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Memory</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <p style={{ margin: 0, fontSize: 14, color: "var(--color-text-sub)" }}>
+            What Zintus remembers across chats — stored by your local gateway on this
+            machine, never used to train anything. Review, pin, or forget any of it.
+          </p>
+          <Link
+            href="/memory"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              alignSelf: "flex-start",
+              fontSize: 13,
+              textDecoration: "none",
+              padding: "6px 12px",
+              borderRadius: 8,
+              border: "1px solid var(--color-border)",
+              background: "var(--color-elevated)",
+              color: "var(--color-text)",
+            }}
+          >
+            <Brain size={14} /> Manage memory
+          </Link>
+        </CardContent>
+      </Card>
+
+      {/* ── Cost ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Daily budget</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <p style={{ margin: 0, fontSize: 14, color: "var(--color-text-sub)" }}>
+            Soft cap on estimated BYOK spend per day — the top-bar meter turns amber past
+            it. Never blocks a request; it's a warning, not a wall.
+          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 13, color: "var(--color-text-sub)" }}>$</span>
+            <input
+              value={budgetDraft}
+              onChange={(e) => setBudgetDraft(e.target.value)}
+              onBlur={() => {
+                const value = Number(budgetDraft);
+                setBudgetUsd(Number.isFinite(value) && value > 0 ? value : null);
+              }}
+              placeholder="No budget set"
+              inputMode="decimal"
+              aria-label="Daily budget in USD"
+              style={{
+                width: 120,
+                padding: "6px 10px",
+                border: "1px solid var(--color-border)",
+                borderRadius: 8,
+                background: "var(--color-bg)",
+                color: "var(--color-text)",
+                fontSize: 13,
+                fontFamily: "var(--font-mono)",
+              }}
+            />
+            <span style={{ fontSize: 11.5, color: "var(--color-text-muted)" }}>
+              per day · leave empty for none
+            </span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Updates ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Updates</CardTitle>
+        </CardHeader>
+        <CardContent style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <p style={{ margin: 0, fontSize: 14, color: "var(--color-text-sub)" }}>
+            Version {APP_VERSION}. Checks the Zintus release feed; downloads open in your
+            browser. Silent in-app auto-update ships once release signing is live.
+          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() => void runUpdateCheck()}
+              disabled={updateState === "checking"}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 12px",
+                borderRadius: 8,
+                border: "1px solid var(--color-border)",
+                background: "var(--color-elevated)",
+                color: "var(--color-text)",
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              <RefreshCw size={13} />
+              {updateState === "checking" ? "Checking…" : "Check for updates"}
+            </button>
+            {updateState && updateState !== "checking" ? (
+              updateState.status === "current" ? (
+                <span style={{ fontSize: 12.5, color: "var(--color-green)" }}>
+                  You're on the latest version.
+                </span>
+              ) : updateState.status === "update" ? (
+                <button
+                  type="button"
+                  onClick={() => void openExternal(updateState.info.url)}
+                  style={{
+                    border: "none",
+                    background: "none",
+                    color: "var(--color-purple-bright)",
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                  }}
+                >
+                  {updateState.info.version} is available — download ↗
+                </button>
+              ) : (
+                <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>
+                  Release feed unreachable — try again later.
+                </span>
+              )
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

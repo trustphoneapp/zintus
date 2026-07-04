@@ -34,7 +34,7 @@ import { openExternal } from "@/lib/tauri";
 import { signOut } from "@/lib/cloud";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
-import { formatSpend, onSpendChange, todaySpendUsd } from "@/lib/spend";
+import { formatSpend, getBudgetUsd, onSpendChange, todaySpendUsd } from "@/lib/spend";
 import { OnboardingOverlay } from "./OnboardingOverlay";
 import { CommandPalette } from "./CommandPalette";
 import { Tooltip } from "./ui/tooltip";
@@ -944,7 +944,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           </Tooltip>
 
           <Tooltip
-            content="Estimated BYOK spend today (gateway estimates; managed replies bill plan tokens instead). Click for Usage."
+            content={
+              getBudgetUsd() != null && spend >= (getBudgetUsd() ?? Infinity)
+                ? `Over your $${getBudgetUsd()} daily budget (soft cap — nothing is blocked). Click for Usage.`
+                : "Estimated BYOK spend today (gateway estimates; managed replies bill plan tokens instead). Click for Usage."
+            }
             side="bottom"
           >
             <button
@@ -968,7 +972,10 @@ export function AppShell({ children }: { children: ReactNode }) {
               <span
                 style={{
                   fontWeight: 600,
-                  color: "var(--color-text)",
+                  color:
+                    getBudgetUsd() != null && spend >= (getBudgetUsd() ?? Infinity)
+                      ? "var(--c-warn)"
+                      : "var(--color-text)",
                   fontFamily: "var(--font-mono)",
                   fontSize: 11.5,
                 }}

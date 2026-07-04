@@ -44,3 +44,34 @@ export function formatSpend(usd: number): string {
   if (usd < 0.01) return "<$0.01";
   return `$${usd.toFixed(2)}`;
 }
+
+// ── Daily budget (soft cap) ─────────────────────────────────────────────────
+
+const BUDGET_KEY = "zintus:budget-usd";
+
+/** User-set soft daily budget in USD; null = no budget set. */
+export function getBudgetUsd(): number | null {
+  if (typeof localStorage === "undefined") return null;
+  const raw = localStorage.getItem(BUDGET_KEY);
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+export function setBudgetUsd(value: number | null): void {
+  if (typeof localStorage === "undefined") return;
+  if (value == null || !Number.isFinite(value) || value <= 0) {
+    localStorage.removeItem(BUDGET_KEY);
+  } else {
+    localStorage.setItem(BUDGET_KEY, String(value));
+  }
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(EVENT, { detail: todaySpendUsd() }));
+  }
+}
+
+/** True when today's estimated spend has crossed the soft budget. */
+export function overBudget(): boolean {
+  const budget = getBudgetUsd();
+  return budget != null && todaySpendUsd() >= budget;
+}
