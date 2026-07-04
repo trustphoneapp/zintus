@@ -40,6 +40,7 @@ import {
 } from "@/lib/store";
 import { ManagedChatFailure, streamManagedChat } from "@/lib/managed-chat";
 import { addSpendUsd, recordTurnUsage } from "@/lib/spend";
+import { transcribeAudio } from "@/lib/gateway";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -194,6 +195,63 @@ export function ChatPanel() {
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  // Mic recording state (voice input v1 — see the mic button for the flow).
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  async function toggleRecording() {
+    if (recording) {
+      recorderRef.current?.stop();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4"
+          : "";
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setRecording(false);
+        const blob = new Blob(chunksRef.current, { type: mime || "audio/webm" });
+        chunksRef.current = [];
+        if (blob.size === 0) return;
+        setTranscribing(true);
+        void transcribeAudio(blob)
+          .then((text) => {
+            if (text.trim()) {
+              setPrompt(`${prompt ? `${prompt} ` : ""}${text.trim()}`);
+            } else {
+              setNotice({ tone: "info", text: "Nothing transcribed — try a longer clip." });
+            }
+          })
+          .catch((error: unknown) => {
+            setNotice({
+              tone: "warn",
+              text: error instanceof Error ? error.message : "Transcription failed.",
+            });
+          })
+          .finally(() => setTranscribing(false));
+      };
+      recorder.start();
+      recorderRef.current = recorder;
+      setRecording(true);
+    } catch {
+      setNotice({
+        tone: "warn",
+        text: "Microphone unavailable — check the app's mic permission in System Settings.",
+      });
+    }
+  }
+
   // "+" attach menu (web-composer parity) — closes on outside click / Escape.
   const [plusOpen, setPlusOpen] = useState(false);
   const plusRef = useRef<HTMLDivElement>(null);
@@ -1329,26 +1387,21 @@ export function ChatPanel() {
                 ) : null}
               </div>
 
-              {/* Mic — v1 uses the OS's own on-device dictation (no audio ever
-                  leaves the machine via Zintus). The button focuses the box and
-                  reminds the user of the system shortcut. Gateway Whisper STT is
-                  a later release, per the voice plan. */}
+              {/* Mic — records locally, transcribes via the gateway's
+                  /v1/transcribe (Whisper on the user's own Groq key). Audio:
+                  this device → local gateway → Groq; never stored or logged.
+                  Click to start, click again to stop + transcribe. */}
               <button
                 type="button"
-                aria-label="Voice input"
-                title="Voice input — uses your OS dictation into this box"
-                onClick={() => {
-                  const isMac =
-                    typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
-                  setNotice({
-                    tone: "info",
-                    text: isMac
-                      ? "Dictate with macOS: press the 🎤/fn key twice (or Edit → Start Dictation). Processed on-device by macOS — Zintus never records audio."
-                      : "Dictate with Windows: press Win+H. Processed by your OS — Zintus never records audio.",
-                  });
-                  const box = document.getElementById("chat-composer-input");
-                  box?.focus();
-                }}
+                aria-label={recording ? "Stop recording and transcribe" : "Voice input"}
+                aria-pressed={recording}
+                title={
+                  recording
+                    ? "Recording — click to stop and transcribe"
+                    : "Voice input — records here, transcribed with your own Groq key via the local gateway"
+                }
+                onClick={() => void toggleRecording()}
+                disabled={transcribing}
                 className="app-icon-btn"
                 style={{
                   display: "flex",
@@ -1358,9 +1411,12 @@ export function ChatPanel() {
                   height: 30,
                   border: "none",
                   borderRadius: 8,
-                  color: "var(--color-text-sub)",
+                  color: recording ? "var(--color-red)" : "var(--color-text-sub)",
                   cursor: "pointer",
-                  background: "transparent",
+                  background: recording
+                    ? "color-mix(in srgb, var(--color-red) 12%, transparent)"
+                    : "transparent",
+                  opacity: transcribing ? 0.5 : 1,
                 }}
               >
                 <Mic size={15} />

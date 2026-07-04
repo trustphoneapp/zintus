@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Voice input v1: the composer mic records locally and transcribes via the
+       local gateway with the user's own Groq key. Required for getUserMedia in
+       the packaged webview. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Zintus uses the microphone for voice input — audio goes only to your local gateway and your own transcription key, never to Zintus servers.</string>
+</dict>
+</plist>

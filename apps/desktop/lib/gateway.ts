@@ -905,3 +905,28 @@ export async function streamGatewayChat(params: {
     toolEvents: toolEvents.length > 0 ? toolEvents : undefined,
   };
 }
+
+/**
+ * Voice input v1: send a recorded clip to the gateway's POST /v1/transcribe
+ * (Whisper on the user's own Groq key — see the endpoint for the privacy
+ * contract). Returns the text, or throws with the gateway's honest error
+ * message (e.g. no Groq key stored).
+ */
+export async function transcribeAudio(blob: Blob): Promise<string> {
+  const url = await resolveGatewayUrl();
+  if (!url) throw new Error("Gateway offline — voice input needs the local gateway.");
+  const form = new FormData();
+  form.append("file", blob, "clip.webm");
+  const response = await fetch(`${url}/v1/transcribe`, {
+    method: "POST",
+    headers: gatewayAuthHeaders(),
+    body: form,
+  });
+  const data = (await response.json().catch(() => null)) as
+    | { text?: string; error?: { message?: string } }
+    | null;
+  if (!response.ok) {
+    throw new Error(data?.error?.message ?? `transcription failed (${response.status})`);
+  }
+  return data?.text ?? "";
+}

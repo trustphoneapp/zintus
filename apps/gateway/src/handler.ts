@@ -10,6 +10,7 @@ import {
 } from "@zintus/providers";
 import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
 import { redactSecrets, type ProviderStats } from "@zintus/router";
+import { getKey as keychainGetKey } from "@zintus/keychain";
 import type { Engine } from "@zintus/engine";
 import {
   detectLocalRuntimes as defaultDetectLocalRuntimes,
@@ -597,6 +598,12 @@ export interface GatewayHandlerDeps {
    */
   detectLocalRuntimes?: () => Promise<LocalRuntimes>;
   /**
+   * Provider-key reader for POST /v1/transcribe (Whisper on the caller's own
+   * Groq key). Defaults to the OS keychain; injectable so tests can run
+   * without one.
+   */
+  readProviderKey?: (provider: ProviderId) => Promise<string | null>;
+  /**
    * Durable usage-history store (bun:sqlite, ~/.zintus/activity.db). When
    * provided, GET /v1/activity reads from it first (falling back to the
    * in-memory trace path when it is empty/unavailable) and each completed turn
@@ -643,6 +650,8 @@ export function createGatewayHandler(
   const getDraining = deps.getDraining;
   const rateLimiter = deps.rateLimiter;
   const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
+  const readProviderKey =
+    deps.readProviderKey ?? (async (provider: ProviderId) => (await keychainGetKey(provider)) ?? null);
   const activityStore = deps.activityStore;
   const mcpRegistry = deps.mcpRegistry ?? new MCPRegistry();
   // P2: gateway-hosted agent runtime (one manager per handler; tasks live for
@@ -2425,6 +2434,66 @@ export function createGatewayHandler(
     // this local gateway and then to the provider's own auth-check endpoint —
     // never logged, never stored, never to the relay. Lets GUI surfaces test a
     // key without embedding provider HTTP quirks (or fighting webview CORS).
+    // Voice input (deferred voice plan, v1): transcribe a short audio clip with
+    // Groq Whisper using the caller's own stored Groq key. Audio travels ONLY
+    // caller → this local gateway → Groq; never logged, never stored, never to
+    // the relay. Honest 422 when no Groq key exists — no fake dictation.
+    if (url.pathname === "/v1/transcribe" && request.method === "POST") {
+      const groqKey = await readProviderKey("groq");
+      if (!groqKey) {
+        return json(
+          request,
+          {
+            error: {
+              message:
+                "Voice input needs a Groq key (Whisper runs on your own key). Add one on the Models page.",
+              code: "no_transcription_key",
+            },
+          },
+          422,
+        );
+      }
+      let audio: Blob | null = null;
+      try {
+        const form = await request.formData();
+        const file = form.get("file");
+        if (file instanceof Blob && file.size > 0) audio = file;
+      } catch {
+        /* fall through to the 400 below */
+      }
+      if (!audio) {
+        return json(request, { error: { message: "multipart 'file' audio field is required" } }, 400);
+      }
+      if (audio.size > 20 * 1024 * 1024) {
+        return json(request, { error: { message: "audio too large (20MB max)" } }, 413);
+      }
+      try {
+        const upstream = new FormData();
+        upstream.append("file", audio, (audio as File).name || "audio.webm");
+        upstream.append("model", "whisper-large-v3-turbo");
+        upstream.append("response_format", "json");
+        const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+          method: "POST",
+          headers: { authorization: `Bearer ${groqKey}` },
+          body: upstream,
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => "");
+          log("warn", "transcribe.upstream_error", { requestId, status: res.status });
+          return json(
+            request,
+            { error: { message: `transcription failed (${res.status})`, detail: detail.slice(0, 200) } },
+            502,
+          );
+        }
+        const data = (await res.json()) as { text?: string };
+        return json(request, { object: "transcription", text: data.text ?? "" });
+      } catch {
+        return json(request, { error: { message: "transcription request failed (Groq unreachable?)" } }, 502);
+      }
+    }
+
     if (url.pathname === "/v1/keys/validate" && request.method === "POST") {
       let body: { providerId?: string; key?: string };
       try {

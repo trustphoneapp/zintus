@@ -658,6 +658,42 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /v1/transcribe:
+    post:
+      tags: [Operations]
+      operationId: transcribeAudio
+      summary: Transcribe a short audio clip with Whisper (auth-gated)
+      description: |
+        Voice input v1: transcribes a recorded clip with Groq Whisper using the
+        caller's OWN stored Groq key. Audio travels only caller → this local
+        gateway → Groq; it is never logged, stored, or sent to the relay.
+        Returns 422 with code `no_transcription_key` when no Groq key exists —
+        the UI shows that honestly instead of faking dictation. 413 over 20MB;
+        502 when Groq is unreachable (never conflated with a bad key).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The audio clip (webm/mp4/wav). Never persisted.
+      responses:
+        "200":
+          description: Transcription result.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object: { type: string, example: transcription }
+                  text: { type: string }
+        "422":
+          description: No Groq key stored — voice input unavailable.
   /v1/keys/validate:
     post:
       tags: [Operations]
