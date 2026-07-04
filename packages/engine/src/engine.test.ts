@@ -11,6 +11,12 @@ import { createEngine, envApiKey, type EngineConfig } from "./engine.js";
 // (which is slow/blocking and non-deterministic in CI).
 const NO_KEYS: EngineConfig["getApiKey"] = async () => null;
 
+// Point local runtimes at dead ports: several tests assert "routing fails with
+// no providers", which silently flips to success on any dev box running a real
+// Ollama/LM Studio (found the hard way — 4 fails with a live Ollama).
+process.env.OLLAMA_HOST = "http://localhost:59999";
+process.env.LM_STUDIO_HOST = "http://localhost:59998/v1";
+
 describe("envApiKey", () => {
   // The default key resolvers fall back to <PROVIDER>_API_KEY env vars when the
   // keychain has no key — this is what lets a gateway launched with
