@@ -30,9 +30,9 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${inter.variable} ${jetbrainsMono.variable}`}
-      // Set before hydration by THEME_INIT_SCRIPT; must match its fallback so
-      // SSR markup and the pre-paint script agree when storage is empty.
-      data-theme="dark"
+      // data-theme is OWNED by THEME_INIT_SCRIPT + lib/theme.ts (set pre-paint,
+      // toggled at runtime). Deliberately NOT a React prop: React would reconcile
+      // the attribute back on any client re-render and stomp the user's theme.
       suppressHydrationWarning
     >
       <head>

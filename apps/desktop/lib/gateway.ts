@@ -695,6 +695,10 @@ export async function streamGatewayChat(params: {
    *  syntactically-valid JSON; the gateway resolves the best level the chosen
    *  provider can actually serve (never claims more than it returns). */
   responseFormat?: ResponseFormat;
+  /** Web-search grounding: the gateway searches (tavily/serper or a native
+   *  provider strategy) BEFORE the model answers and injects the results as
+   *  compressed context. Mirrors the gateway's `search` body field. */
+  search?: { enabled: boolean; depth?: "quick" | "standard" | "deep" };
   /** Configured MCP servers for this turn. When present the gateway runs a
    *  SERVER-SIDE tool loop and streams `mcp_tool_call`/`mcp_tool_result` events;
    *  the desktop only displays them (it never executes these tools). */
@@ -742,6 +746,7 @@ export async function streamGatewayChat(params: {
       tools: params.tools,
       tool_choice: params.toolChoice,
       response_format: params.responseFormat,
+      search: params.search,
       // Present ONLY when the user has MCP servers enabled. The gateway connects
       // them and runs the tool loop server-side (the desktop never executes them).
       mcp: params.mcp,

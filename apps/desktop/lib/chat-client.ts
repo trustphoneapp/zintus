@@ -104,6 +104,8 @@ export async function streamChat(params: {
    *  resolves the best level the routed provider can serve; we only render what
    *  it actually returns. */
   responseFormat?: ResponseFormat;
+  /** Web-search grounding for this turn (gateway `search` body field). */
+  search?: { enabled: boolean; depth?: "quick" | "standard" | "deep" };
   /** Configured MCP servers for this turn. When present the gateway runs the
    *  tool loop SERVER-SIDE; the desktop only displays the streamed activity. */
   mcp?: ChatMcpConfig;
@@ -122,6 +124,7 @@ export async function streamChat(params: {
     tools: params.tools,
     toolChoice: params.toolChoice,
     responseFormat: params.responseFormat,
+    search: params.search,
     mcp: params.mcp,
     signal: params.signal,
     onChunk: params.onChunk,

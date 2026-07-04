@@ -2,15 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { ArrowUp, ImagePlus, Layers, MessageSquarePlus, Paperclip, Plus, Square, Wrench } from "lucide-react";
+import { ArrowUp, Braces, ChevronDown, Globe, ImagePlus, Layers, MessageSquarePlus, Mic, Paperclip, Plus, Square, Telescope, Wrench } from "lucide-react";
 import type {
   ContentBlock,
   ImageContentBlock,
-  ProviderId,
   ResponseFormat,
   RoutingStrategy,
 } from "@zintus/types";
-import { PROVIDER_IDS } from "@zintus/types";
 import { processImage, MediaError } from "@zintus/media";
 import {
   streamChat,
@@ -32,6 +30,7 @@ import {
 } from "@/lib/image-attachments";
 import {
   createChatMessage,
+  isActiveMember,
   useChatStore,
   useCloudStore,
   useProviderStatusStore,
@@ -51,6 +50,8 @@ import {
   hasProviderSendConsent,
 } from "@/lib/consent";
 import { getActiveProject, setActiveProjectId } from "@/lib/projects";
+import { streamResearch, type ResearchSource } from "@/lib/research";
+import { PROVIDER_METADATA, catalogModelsForProvider } from "@zintus/providers";
 import {
   extractArtifacts,
   foldArtifactVersions,
@@ -115,6 +116,39 @@ function activeMcpForChat(): { mcp: ChatMcpConfig | undefined; toolCount: number
   };
 }
 
+const STRATEGY_LABELS: Record<string, string> = {
+  fastest: "Fastest",
+  capability: "Capability",
+  economy: "Cheapest",
+};
+
+const pillMenuStyle: React.CSSProperties = {
+  position: "absolute",
+  bottom: 38,
+  left: 0,
+  minWidth: 210,
+  background: "var(--color-surface)",
+  border: "1px solid var(--color-border)",
+  borderRadius: 12,
+  padding: 4,
+  boxShadow: "var(--shadow-md)",
+  zIndex: 30,
+};
+
+const pillItemStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 9,
+  width: "100%",
+  padding: "8px 10px",
+  border: "none",
+  borderRadius: 8,
+  fontSize: 13,
+  cursor: "pointer",
+  textAlign: "left",
+  background: "transparent",
+};
+
 export function ChatPanel() {
   const { settings, hydrate, update } = useSettingsStore();
   const {
@@ -124,8 +158,20 @@ export function ChatPanel() {
     setActiveProvider,
     managedModel,
     setManagedModel,
+    providers,
     refresh,
   } = useProviderStatusStore();
+  const { billing, managedModels } = useCloudStore();
+
+  // Model-pill sources: managed models only for active members (they serve),
+  // BYOK providers only when actually connected (key present / local runtime up).
+  const memberModels = isActiveMember(billing) ? managedModels : [];
+  const connectedProviders = providers
+    .filter((entry) =>
+      entry.id === "ollama" || entry.id === "lmstudio" ? entry.enabled : entry.hasKey,
+    )
+    .map((entry) => ({ id: entry.id, name: entry.name }));
+
   const {
     prompt,
     threads,
@@ -139,6 +185,20 @@ export function ChatPanel() {
 
   const messages = threads.find((t) => t.id === activeThreadId)?.messages ?? [];
 
+  // Pre-send estimate (honest ≈): prompt chars/4 tokens; managed → plan tokens,
+  // BYOK → input-side $ at the pinned/first-catalog model price when known.
+  const sendEstimate = useMemo(() => {
+    const trimmedLength = prompt.trim().length;
+    if (trimmedLength === 0) return "";
+    const tokens = Math.max(1, Math.ceil(trimmedLength / 4));
+    if (managedModel) return `≈ ${tokens.toLocaleString()} plan tokens`;
+    const routeProvider = selectedProvider ?? "groq";
+    const price = catalogModelsForProvider(routeProvider)[0]?.inputPer1M ?? null;
+    if (price == null) return `≈ ${tokens.toLocaleString()} tokens`;
+    const usd = (tokens / 1_000_000) * price;
+    return `input ≈ ${usd < 0.0001 ? "<$0.0001" : `$${usd.toFixed(4)}`} at ${routeProvider}`;
+  }, [prompt, managedModel, selectedProvider]);
+
   const abortRef = useRef<AbortController | null>(null);
   const outputRef = useRef<HTMLDivElement>(null);
   const [consentOpen, setConsentOpen] = useState(false);
@@ -147,7 +207,7 @@ export function ChatPanel() {
   const [attachments, setAttachments] = useState<TextAttachment[]>([]);
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
   // Inline composer notice (image rejections, vision warnings). tone styles it.
-  const [notice, setNotice] = useState<{ tone: "error" | "warn"; text: string } | null>(
+  const [notice, setNotice] = useState<{ tone: "error" | "warn" | "info"; text: string } | null>(
     null,
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -172,6 +232,32 @@ export function ChatPanel() {
       document.removeEventListener("keydown", onKey);
     };
   }, [plusOpen]);
+  // Strategy / model pill popovers (Light.dc composer) — same outside-click
+  // close discipline as the "+" menu.
+  const [stratOpen, setStratOpen] = useState(false);
+  const stratRef = useRef<HTMLDivElement>(null);
+  const [modelOpen, setModelOpen] = useState(false);
+  const modelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!stratOpen && !modelOpen) return;
+    function onDown(e: MouseEvent) {
+      if (stratRef.current && !stratRef.current.contains(e.target as Node)) setStratOpen(false);
+      if (modelRef.current && !modelRef.current.contains(e.target as Node)) setModelOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setStratOpen(false);
+        setModelOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [stratOpen, modelOpen]);
+
   // Synchronous mirror of the image count so a multi-file pick honors the max-4 cap
   // (state is async; closing over it would read a stale count).
   const imageCountRef = useRef(0);
@@ -210,6 +296,24 @@ export function ChatPanel() {
   const [toolsEnabled, setToolsEnabled] = useState(() => {
     if (typeof localStorage !== "undefined") {
       return localStorage.getItem("zintus:desktop-tools") === "true";
+    }
+    return false;
+  });
+
+  // Web-search grounding toggle (persisted): the gateway searches the live web
+  // before the model answers and injects results as compressed context.
+  const [searchEnabled, setSearchEnabled] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:desktop-search") === "true";
+    }
+    return false;
+  });
+
+  // Deep-research mode (persisted): sends go to the gateway's /v1/research
+  // multi-stage pipeline instead of plain chat; the reply carries its sources.
+  const [researchMode, setResearchMode] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      return localStorage.getItem("zintus:desktop-research") === "true";
     }
     return false;
   });
@@ -400,6 +504,7 @@ export function ChatPanel() {
             mode: settings.contextMode,
             tools: toolsEnabled ? BUILTIN_TOOL_DEFINITIONS : undefined,
             responseFormat,
+            search: searchEnabled ? { enabled: true } : undefined,
             mcp,
             signal: controller.signal,
             onChunk: (text) => {
@@ -514,6 +619,7 @@ export function ChatPanel() {
       managedModel,
       toolsEnabled,
       jsonMode,
+      searchEnabled,
       setActiveProvider,
       setLoading,
       updateMessage,
@@ -524,6 +630,75 @@ export function ChatPanel() {
 
   const doSend = useCallback(
     async (trimmed: string) => {
+      // ── Deep-research mode ────────────────────────────────────────────
+      // The turn goes to the gateway's /v1/research multi-stage pipeline
+      // (plan → search → read → synthesize) instead of plain chat; progress
+      // streams into the reply, which ends with its sources. Attachments and
+      // tool modes don't apply here — research owns its own retrieval.
+      if (researchMode) {
+        appendMessage(createChatMessage("user", trimmed));
+        const assistant = createChatMessage("assistant", "");
+        appendMessage(assistant);
+        setPrompt("");
+        abortRef.current?.abort();
+        const controller = new AbortController();
+        abortRef.current = controller;
+        setLoading(true);
+        const startedAt = Date.now();
+        let answerText = "";
+        try {
+          updateMessage(assistant.id, { content: "_Planning research…_" });
+          await streamResearch({
+            query: trimmed,
+            depth: "standard",
+            signal: controller.signal,
+            events: {
+              onQueries: (queries) =>
+                updateMessage(assistant.id, {
+                  content:
+                    `_Searching ${queries.length} ${queries.length === 1 ? "query" : "queries"}…_\n\n` +
+                    queries.map((q) => `- ${q}`).join("\n"),
+                }),
+              onSynthesizing: (sourceCount) =>
+                updateMessage(assistant.id, {
+                  content: `_Synthesizing from ${sourceCount} sources…_`,
+                }),
+              onAnswerChunk: (cumulative) => {
+                answerText = cumulative;
+                updateMessage(assistant.id, { content: cumulative });
+              },
+              onDone: (sources: ResearchSource[]) => {
+                const sourceList = sources
+                  .slice(0, 10)
+                  .map((s, i) => `${i + 1}. [${s.title || s.url}](${s.url})`)
+                  .join("\n");
+                updateMessage(assistant.id, {
+                  content:
+                    answerText + (sourceList ? `\n\n**Sources**\n${sourceList}` : ""),
+                  meta: {
+                    latencyMs: Date.now() - startedAt,
+                    routeReason: `deep research · ${sources.length} sources · tavily/serper via gateway`,
+                  },
+                });
+              },
+              onError: (message) =>
+                updateMessage(assistant.id, {
+                  content: `Research failed: ${message}`,
+                }),
+            },
+          });
+        } catch (error) {
+          if (!(error instanceof Error && error.name === "AbortError")) {
+            updateMessage(assistant.id, {
+              content: error instanceof Error ? error.message : "Research failed",
+            });
+          }
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+
       // A project's instructions ride as a leading system message on a fresh
       // thread (the server owns context afterwards), mirroring web's presets.
       const project = getActiveProject();
@@ -578,7 +753,17 @@ export function ChatPanel() {
       imageCountRef.current = 0;
       await runTurn(history, assistant.id);
     },
-    [messages, attachments, imageAttachments, appendMessage, setPrompt, runTurn],
+    [
+      messages,
+      attachments,
+      imageAttachments,
+      appendMessage,
+      setPrompt,
+      runTurn,
+      researchMode,
+      setLoading,
+      updateMessage,
+    ],
   );
 
   const send = useCallback(() => {
@@ -868,7 +1053,24 @@ export function ChatPanel() {
                 </span>
               </div>
             ) : (
-              messages.map((message) => (
+              messages.map((message) =>
+                loading &&
+                message.role === "assistant" &&
+                message.id === lastAssistantId &&
+                message.content === "" ? (
+                  // Typing indicator (Light.dc zblink dots) between send and
+                  // the first streamed token.
+                  <div
+                    key={message.id}
+                    className="typing-dots"
+                    role="status"
+                    aria-label="Assistant is thinking"
+                  >
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                ) : (
                 <MessageBubble
                   key={message.id}
                   message={message}
@@ -880,7 +1082,8 @@ export function ChatPanel() {
                     message.id === lastAssistantId && !loading ? regenerate : undefined
                   }
                 />
-              ))
+                ),
+              )
             )}
           </div>
 
@@ -891,7 +1094,9 @@ export function ChatPanel() {
                 color:
                   notice.tone === "error"
                     ? "var(--color-bad, #f87171)"
-                    : "var(--color-warn, #f59e0b)",
+                    : notice.tone === "warn"
+                      ? "var(--color-warn, #f59e0b)"
+                      : "var(--color-text-sub)",
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
@@ -968,6 +1173,7 @@ export function ChatPanel() {
             }}
           >
             <Textarea
+              id="chat-composer-input"
               rows={2}
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -1020,6 +1226,93 @@ export function ChatPanel() {
                       zIndex: 30,
                     }}
                   >
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.07em",
+                        color: "var(--color-text-muted)",
+                        padding: "6px 10px 3px",
+                      }}
+                    >
+                      Abilities
+                    </div>
+                    <AbilityItem
+                      icon={<Globe size={14} />}
+                      label="Web search"
+                      hint="live grounding"
+                      active={searchEnabled}
+                      onClick={() => {
+                        setSearchEnabled((v) => {
+                          const next = !v;
+                          localStorage.setItem("zintus:desktop-search", String(next));
+                          return next;
+                        });
+                        setPlusOpen(false);
+                      }}
+                    />
+                    <AbilityItem
+                      icon={<Telescope size={14} />}
+                      label="Deep research"
+                      hint="multi-step · sourced"
+                      active={researchMode}
+                      onClick={() => {
+                        setResearchMode((v) => {
+                          const next = !v;
+                          localStorage.setItem("zintus:desktop-research", String(next));
+                          return next;
+                        });
+                        setPlusOpen(false);
+                      }}
+                    />
+                    <AbilityItem
+                      icon={<Braces size={14} />}
+                      label="Structured JSON"
+                      hint="response_format"
+                      active={jsonMode}
+                      onClick={() => {
+                        setJsonMode((v) => {
+                          const next = !v;
+                          localStorage.setItem("zintus:desktop-json", String(next));
+                          return next;
+                        });
+                        setPlusOpen(false);
+                      }}
+                    />
+                    <AbilityItem
+                      icon={<Wrench size={14} />}
+                      label="Local tools"
+                      hint="on-device"
+                      active={toolsEnabled}
+                      onClick={() => {
+                        setToolsEnabled((v) => {
+                          const next = !v;
+                          localStorage.setItem("zintus:desktop-tools", String(next));
+                          return next;
+                        });
+                        setPlusOpen(false);
+                      }}
+                    />
+                    <div
+                      style={{
+                        height: 1,
+                        background: "var(--color-border)",
+                        margin: "5px 8px",
+                      }}
+                    />
+                    <div
+                      style={{
+                        fontSize: 10,
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.07em",
+                        color: "var(--color-text-muted)",
+                        padding: "4px 10px 3px",
+                      }}
+                    >
+                      Attach
+                    </div>
                     <button
                       type="button"
                       role="menuitem"
@@ -1075,107 +1368,308 @@ export function ChatPanel() {
                 ) : null}
               </div>
 
-              {/* Mode chips */}
-              <ComposerChip
-                active={Boolean(settings.blockTrainingProviders)}
-                onClick={() =>
-                  update({ blockTrainingProviders: !settings.blockTrainingProviders })
-                }
-                title="Private Mode — refuse providers that train on your data (may reduce availability)"
+              {/* Mic — v1 uses the OS's own on-device dictation (no audio ever
+                  leaves the machine via Zintus). The button focuses the box and
+                  reminds the user of the system shortcut. Gateway Whisper STT is
+                  a later release, per the voice plan. */}
+              <button
+                type="button"
+                aria-label="Voice input"
+                title="Voice input — uses your OS dictation into this box"
+                onClick={() => {
+                  const isMac =
+                    typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+                  setNotice({
+                    tone: "info",
+                    text: isMac
+                      ? "Dictate with macOS: press the 🎤/fn key twice (or Edit → Start Dictation). Processed on-device by macOS — Zintus never records audio."
+                      : "Dictate with Windows: press Win+H. Processed by your OS — Zintus never records audio.",
+                  });
+                  const box = document.getElementById("chat-composer-input");
+                  box?.focus();
+                }}
+                className="app-icon-btn"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 30,
+                  height: 30,
+                  border: "none",
+                  borderRadius: 8,
+                  color: "var(--color-text-sub)",
+                  cursor: "pointer",
+                  background: "transparent",
+                }}
               >
-                Private
-              </ComposerChip>
-              <ComposerChip
-                active={toolsEnabled}
-                onClick={() =>
-                  setToolsEnabled((v) => {
-                    const next = !v;
-                    if (typeof localStorage !== "undefined") {
-                      localStorage.setItem("zintus:desktop-tools", String(next));
-                    }
-                    return next;
-                  })
-                }
-                title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally on this device; needs a tool-capable provider.`}
-              >
-                Tools
-              </ComposerChip>
-              <ComposerChip
-                active={jsonMode}
-                onClick={() =>
-                  setJsonMode((v) => {
-                    const next = !v;
-                    if (typeof localStorage !== "undefined") {
-                      localStorage.setItem("zintus:desktop-json", String(next));
-                    }
-                    return next;
-                  })
-                }
-                title="Structured output — request response_format: json_object. The gateway resolves the best level the routed provider can serve; only real JSON is rendered."
-              >
-                JSON
-              </ComposerChip>
+                <Mic size={15} />
+              </button>
 
-              {/* Route pulldowns — compact, borderless */}
-              <select
-                id="provider-select"
-                aria-label="Provider override"
-                value={managedModel ? `managed:${managedModel}` : (selectedProvider ?? "auto")}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  if (value.startsWith("managed:")) return; // already active
-                  if (value === "auto") {
-                    setManagedModel(null);
-                    setSelectedProvider(null);
-                    return;
-                  }
-                  setSelectedProvider(value as ProviderId);
-                }}
-                style={{
-                  height: 28,
-                  border: "none",
-                  background: "transparent",
-                  color: "var(--color-text-sub)",
-                  fontSize: 12,
-                  padding: "0 4px",
-                  cursor: "pointer",
-                }}
-              >
-                {managedModel ? (
-                  <option value={`managed:${managedModel}`}>
-                    zintus · {managedModel.replace(/^zintus\//, "")} (plan)
-                  </option>
+              {/* Active-ability chips — only what's ON is shown; ✕ turns it off.
+                  (Enable lives in the + menu; Private also has the top-bar shield.) */}
+              {Boolean(settings.blockTrainingProviders) && (
+                <ComposerChip
+                  active
+                  onClick={() => update({ blockTrainingProviders: false })}
+                  title="Private Mode is on — only no-training providers serve this chat. Click to turn off."
+                >
+                  Private ✕
+                </ComposerChip>
+              )}
+              {searchEnabled && (
+                <ComposerChip
+                  active
+                  onClick={() => {
+                    setSearchEnabled(false);
+                    localStorage.setItem("zintus:desktop-search", "false");
+                  }}
+                  title="Web search is on — the gateway grounds answers in live results. Click to turn off."
+                >
+                  Search ✕
+                </ComposerChip>
+              )}
+              {researchMode && (
+                <ComposerChip
+                  active
+                  onClick={() => {
+                    setResearchMode(false);
+                    localStorage.setItem("zintus:desktop-research", "false");
+                  }}
+                  title="Deep research is on — sends run the multi-stage research pipeline. Click to turn off."
+                >
+                  Research ✕
+                </ComposerChip>
+              )}
+              {jsonMode && (
+                <ComposerChip
+                  active
+                  onClick={() => {
+                    setJsonMode(false);
+                    localStorage.setItem("zintus:desktop-json", "false");
+                  }}
+                  title="Structured JSON is on. Click to turn off."
+                >
+                  JSON ✕
+                </ComposerChip>
+              )}
+              {toolsEnabled && (
+                <ComposerChip
+                  active
+                  onClick={() => {
+                    setToolsEnabled(false);
+                    localStorage.setItem("zintus:desktop-tools", "false");
+                  }}
+                  title={`Local tools are on (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Click to turn off.`}
+                >
+                  Tools ✕
+                </ComposerChip>
+              )}
+
+              {/* Strategy pill — green routing dot + Auto · <strategy> popover. */}
+              <div ref={stratRef} style={{ position: "relative" }}>
+                <button
+                  type="button"
+                  aria-label="Routing strategy"
+                  aria-expanded={stratOpen}
+                  onClick={() => setStratOpen((v) => !v)}
+                  className="app-icon-btn"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    height: 30,
+                    padding: "0 9px",
+                    border: "none",
+                    borderRadius: 8,
+                    background: "transparent",
+                    color: "var(--color-text-sub)",
+                    fontSize: 12.5,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      background: "var(--color-green)",
+                    }}
+                  />
+                  Auto · {STRATEGY_LABELS[settings.routingStrategy] ?? settings.routingStrategy}
+                  <ChevronDown size={13} />
+                </button>
+                {stratOpen ? (
+                  <div role="menu" style={pillMenuStyle}>
+                    {(
+                      [
+                        ["fastest", "Fastest", "lowest latency from your own p50s"],
+                        ["capability", "Capability", "best model that can do the job"],
+                        ["economy", "Cheapest", "lowest cost per token"],
+                      ] as const
+                    ).map(([value, label, hint]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          update({ routingStrategy: value as RoutingStrategy });
+                          setStratOpen(false);
+                        }}
+                        className="app-icon-btn"
+                        style={{
+                          ...pillItemStyle,
+                          color:
+                            settings.routingStrategy === value
+                              ? "var(--color-purple-bright)"
+                              : "var(--color-text)",
+                        }}
+                      >
+                        {label}
+                        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
+                          {hint}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 ) : null}
-                <option value="auto">Auto ({settings.routingStrategy})</option>
-                {PROVIDER_IDS.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-              <select
-                aria-label="Routing strategy"
-                value={settings.routingStrategy}
-                onChange={(e) =>
-                  update({ routingStrategy: e.target.value as RoutingStrategy })
-                }
-                title="Routing strategy (used in Auto mode)"
-                style={{
-                  height: 28,
-                  border: "none",
-                  background: "transparent",
-                  color: "var(--color-text-sub)",
-                  fontSize: 12,
-                  padding: "0 4px",
-                  cursor: "pointer",
-                }}
-              >
-                <option value="fastest">Fastest</option>
-                <option value="capability">Capability</option>
-                <option value="economy">Cheapest</option>
-              </select>
+              </div>
+
+              {/* Model pill — Auto / managed model / BYOK provider + browse. */}
+              <div ref={modelRef} style={{ position: "relative" }}>
+                <button
+                  type="button"
+                  aria-label="Model"
+                  aria-expanded={modelOpen}
+                  onClick={() => setModelOpen((v) => !v)}
+                  className="app-icon-btn"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    height: 30,
+                    padding: "0 9px",
+                    border: "none",
+                    borderRadius: 8,
+                    background: "transparent",
+                    color: "var(--color-text-sub)",
+                    fontSize: 12.5,
+                    fontWeight: 500,
+                    cursor: "pointer",
+                    maxWidth: 210,
+                  }}
+                >
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {managedModel
+                      ? `zintus · ${managedModel.replace(/^zintus\//, "")}`
+                      : selectedProvider
+                        ? PROVIDER_METADATA[selectedProvider].name
+                        : "Auto"}
+                  </span>
+                  <ChevronDown size={13} style={{ flexShrink: 0 }} />
+                </button>
+                {modelOpen ? (
+                  <div role="menu" style={{ ...pillMenuStyle, minWidth: 240, maxHeight: 320, overflowY: "auto" }}>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setManagedModel(null);
+                        setSelectedProvider(null);
+                        setModelOpen(false);
+                      }}
+                      className="app-icon-btn"
+                      style={{
+                        ...pillItemStyle,
+                        color: !managedModel && !selectedProvider ? "var(--color-purple-bright)" : "var(--color-text)",
+                      }}
+                    >
+                      Auto
+                      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
+                        router picks
+                      </span>
+                    </button>
+                    {memberModels.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setManagedModel(m.id);
+                          setModelOpen(false);
+                        }}
+                        className="app-icon-btn"
+                        style={{
+                          ...pillItemStyle,
+                          color: managedModel === m.id ? "var(--color-purple-bright)" : "var(--color-text)",
+                        }}
+                      >
+                        {m.display_name}
+                        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
+                          plan tokens
+                        </span>
+                      </button>
+                    ))}
+                    {connectedProviders.map((cp) => (
+                      <button
+                        key={cp.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setSelectedProvider(cp.id);
+                          setModelOpen(false);
+                        }}
+                        className="app-icon-btn"
+                        style={{
+                          ...pillItemStyle,
+                          color: selectedProvider === cp.id ? "var(--color-purple-bright)" : "var(--color-text)",
+                        }}
+                      >
+                        {cp.name}
+                        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
+                          your key
+                        </span>
+                      </button>
+                    ))}
+                    <div style={{ height: 1, background: "var(--color-border)", margin: "5px 8px" }} />
+                    <Link
+                      href="/models"
+                      role="menuitem"
+                      onClick={() => setModelOpen(false)}
+                      className="app-icon-btn"
+                      style={{ ...pillItemStyle, textDecoration: "none", color: "var(--color-text-sub)" }}
+                    >
+                      Browse all models…
+                    </Link>
+                  </div>
+                ) : null}
+              </div>
 
               <div style={{ flex: 1 }} />
+
+              {sendEstimate ? (
+                <span
+                  title="Estimate only — the receipt under the reply shows the real numbers."
+                  style={{
+                    fontSize: 10.5,
+                    color: "var(--color-text-muted)",
+                    fontFamily: "var(--font-mono)",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {sendEstimate}
+                </span>
+              ) : null}
+              <span
+                aria-hidden
+                style={{
+                  fontSize: 11,
+                  color: "var(--color-text-muted)",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                ⌘↵
+              </span>
 
               {loading ? (
                 <button
@@ -1277,6 +1771,52 @@ export function ChatPanel() {
 }
 
 /** Small pill toggle for the composer row (Private / Tools / JSON). */
+/** "+" menu ability row: icon · label · hint, with an active check state. */
+function AbilityItem({
+  icon,
+  label,
+  hint,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  hint: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemcheckbox"
+      aria-checked={active}
+      onClick={onClick}
+      className="app-icon-btn"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        width: "100%",
+        padding: "8px 10px",
+        border: "none",
+        borderRadius: 8,
+        color: active ? "var(--color-purple-bright)" : "var(--color-text)",
+        fontSize: 13,
+        cursor: "pointer",
+        textAlign: "left",
+        background: "transparent",
+      }}
+    >
+      <span style={{ color: active ? "var(--color-purple-bright)" : "var(--color-text-sub)", display: "inline-flex" }}>
+        {icon}
+      </span>
+      {label}
+      {active ? <span aria-hidden>✓</span> : null}
+      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>{hint}</span>
+    </button>
+  );
+}
+
 function ComposerChip({
   active,
   onClick,
