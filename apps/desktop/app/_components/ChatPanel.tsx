@@ -369,6 +369,13 @@ export function ChatPanel() {
     setActiveProjectName(getActiveProject()?.name ?? null);
   }, []);
 
+  // Provider inventory on mount — the model pill and regen-on-other-provider
+  // targets come from this store, and nothing else populates it on the chat
+  // page (found via E2E: both stayed empty until a first SUCCESSFUL send).
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
   useEffect(() => {
     const refresh = () => setMcpToolCount(activeMcpForChat().toolCount);
     refresh();

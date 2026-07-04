@@ -328,7 +328,7 @@ export interface OpenAiCompatConfig {
   priority: number;
   keyRegex: RegExp | null;
   defaultModel: string;
-  baseUrl: string;
+  baseUrl: string | (() => string);
   includeRateLimit?: boolean;
   validatePath?: string;
   /** Provider supports OpenRouter-style `openrouter:web_search` tool calls. */
@@ -352,12 +352,18 @@ export function createOpenAiCompatProvider(
     priority,
     keyRegex,
     defaultModel,
-    baseUrl,
+    baseUrl: baseUrlOption,
     includeRateLimit = false,
     validatePath = "/models",
     supportsNativeWebSearch = false,
     dynamicLocalDefault = false,
   } = config;
+
+  // Resolve per CALL so env overrides (tests, user config) apply after import —
+  // a captured-at-import URL made the engine suite depend on whatever happened
+  // to listen on the default port.
+  const baseUrl = () =>
+    typeof baseUrlOption === "function" ? baseUrlOption() : baseUrlOption;
 
   // 30s-cached first-loaded-model lookup for dynamicLocalDefault runtimes.
   let cachedLocalModel: { at: number; model: string | null } | null = null;
@@ -366,7 +372,7 @@ export function createOpenAiCompatProvider(
       return cachedLocalModel.model;
     }
     try {
-      const res = await fetch(`${baseUrl}/models`);
+      const res = await fetch(`${baseUrl()}/models`);
       if (!res.ok) return null;
       const data = (await res.json()) as { data?: Array<{ id?: string }> };
       const model = data.data?.find((m) => typeof m.id === "string" && m.id)?.id ?? null;
@@ -439,7 +445,7 @@ export function createOpenAiCompatProvider(
         }
       }
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
+      const response = await fetch(`${baseUrl()}/chat/completions`, {
         method: "POST",
         headers,
         signal: options.signal,
@@ -495,7 +501,7 @@ export function createOpenAiCompatProvider(
         return true;
       }
 
-      return validateWithFetch(`${baseUrl}${validatePath}`, {
+      return validateWithFetch(`${baseUrl()}${validatePath}`, {
         method: "GET",
         headers: { Authorization: `Bearer ${key}` },
       });
