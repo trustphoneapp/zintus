@@ -518,28 +518,23 @@ export function MessageBubble({
               {regenOpen ? (
                 <span
                   role="menu"
+                  className="pop-menu"
                   style={{
                     position: "absolute",
                     bottom: 24,
                     left: 0,
-                    minWidth: 200,
                     display: "flex",
                     flexDirection: "column",
-                    background: "var(--color-surface)",
-                    border: "1px solid var(--color-border)",
-                    borderRadius: 10,
-                    padding: 4,
-                    boxShadow: "var(--shadow-md)",
                     zIndex: 30,
                   }}
                 >
+                  <span className="pop-label">Regenerate on</span>
                   {regenTargets.map((target) => (
                     <button
                       key={target.key}
                       type="button"
                       role="menuitem"
-                      className="chat-bubble-action"
-                      style={{ textAlign: "left", padding: "7px 10px", borderRadius: 7 }}
+                      className="pop-item"
                       onClick={() => {
                         setRegenOpen(false);
                         target.run();
