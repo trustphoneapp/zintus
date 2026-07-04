@@ -140,6 +140,10 @@ body {
   font-family: var(--font-sans);
   background: var(--color-bg);
   color: var(--color-text);
+  /* Prototype parity: without this WKWebView uses subpixel AA, which reads as
+     fringed/blurry text on the dark theme (user-reported on the packaged app). */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 a {
