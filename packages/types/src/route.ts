@@ -334,6 +334,13 @@ export interface RouteStreamResult {
    */
   toolCalls?: ToolCallContentBlock[];
   /**
+   * LIVE holder for the model that ACTUALLY served the stream, when the provider
+   * reports one (Ollama does; a local runtime may substitute for a catalog
+   * placeholder). Same read-after-drain contract as `toolCalls` — the field is
+   * populated while `stream` drains. `undefined` model = provider didn't say.
+   */
+  served?: { model?: string };
+  /**
    * The structured-output level the winning provider+model ACTUALLY served this
    * turn — the resolved level from the router's `resolveResponseFormat`, not the
    * raw provider capability. `json_schema` means the provider guaranteed

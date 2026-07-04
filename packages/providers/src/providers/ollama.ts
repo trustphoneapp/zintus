@@ -98,6 +98,7 @@ export const ollamaProvider: Provider = {
       const reader = response.body!.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let servedModelEmitted = false;
 
       try {
         while (true) {
@@ -118,11 +119,16 @@ export const ollamaProvider: Provider = {
 
             try {
               const parsed = JSON.parse(trimmed) as {
+                model?: string;
                 message?: { content?: string };
                 done?: boolean;
                 prompt_eval_count?: number;
                 eval_count?: number;
               };
+              if (!servedModelEmitted && parsed.model) {
+                servedModelEmitted = true;
+                yield { servedModel: parsed.model };
+              }
               if (parsed.message?.content) {
                 yield { content: parsed.message.content };
               }

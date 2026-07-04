@@ -74,6 +74,10 @@ export interface TokenUsage {
 
 export interface StreamChunk {
   content?: string;
+  /** The model that ACTUALLY served this stream, when the provider reports it
+   *  (e.g. Ollama's per-line `model`). Lets receipts show the real model when
+   *  a local runtime substitutes for a catalog placeholder. */
+  servedModel?: string;
   done?: boolean;
   rateLimit?: RateLimitInfo;
   usage?: TokenUsage;

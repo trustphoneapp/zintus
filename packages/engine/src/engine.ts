@@ -1167,6 +1167,10 @@ export function createEngine(config: EngineConfig = {}): Engine {
         providerId: result.providerId,
         model: result.model,
         stream: wrappedStream(),
+        // Live served-model holder (read after drain) — forwarded by REFERENCE
+        // from the router so the gateway can label receipts with the model that
+        // actually served (local runtimes may substitute for catalog defaults).
+        served: result.served,
         // Forward the router's live tool-call channel by REFERENCE so the gateway
         // reads completed tool calls after draining the (text) stream. Populated as
         // `result.stream` drains via `wrappedStream`.

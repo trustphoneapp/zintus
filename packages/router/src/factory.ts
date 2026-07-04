@@ -867,6 +867,7 @@ export function createRouter(config: RouterConfig = {}): Router {
             // `stream` so the (string) text path is byte-identical for existing
             // consumers; the gateway/engine read this AFTER draining the stream.
             const collectedToolCalls: ToolCallContentBlock[] = [];
+            const served: { model?: string } = {};
             const textStream = async function* (): AsyncGenerator<string> {
               let reportedUsage: TokenUsage | undefined;
               let outputText = "";
@@ -882,6 +883,9 @@ export function createRouter(config: RouterConfig = {}): Router {
                   if (chunk.usage) {
                     reportedUsage = chunk.usage;
                   }
+                  if (chunk.servedModel) {
+                    served.model = chunk.servedModel;
+                  }
                   if (chunk.toolCall) {
                     collectedToolCalls.push(chunk.toolCall);
                   }
@@ -895,12 +899,17 @@ export function createRouter(config: RouterConfig = {}): Router {
                 const usage =
                   reportedUsage ?? estimateUsage(request.messages, outputText);
                 const completionLatencyMs = Date.now() - attemptStarted;
+                // Label usage with the model that ACTUALLY served when the
+                // provider reported one (local runtimes substitute for catalog
+                // placeholders) — receipts and metadata must never show a model
+                // that didn't run.
+                const servedModel = served.model ?? model;
                 ledger.recordUsage(provider.id, {
                   status: "success",
                   tokensIn: usage.inputTokens,
                   tokensOut: usage.outputTokens,
                   latencyMs: completionLatencyMs,
-                  model,
+                  model: servedModel,
                 });
                 if (vKey) {
                   ledger.recordVirtualKeyUsage(vKey, usage.inputTokens, usage.outputTokens);
@@ -908,7 +917,7 @@ export function createRouter(config: RouterConfig = {}): Router {
                 ledger.clearCooldown(provider.id);
                 request.onUsage?.({
                   providerId: provider.id,
-                  model,
+                  model: servedModel,
                   inputTokens: usage.inputTokens,
                   outputTokens: usage.outputTokens,
                   reasoningTokens: usage.reasoningTokens,
@@ -979,6 +988,8 @@ export function createRouter(config: RouterConfig = {}): Router {
               stream: textStream(),
               // Live tool-call channel — filled as `stream` drains, read after.
               toolCalls: collectedToolCalls,
+              // Live served-model holder — same read-after-drain contract.
+              served,
               // The level actually served this turn (json_schema/json_object/prompt
               // or undefined for text). The engine labels served_level/guaranteed
               // from THIS, never from the raw provider capability.
