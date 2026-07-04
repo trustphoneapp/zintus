@@ -40,6 +40,9 @@
     "createUpdaterArtifacts": false,
     "externalBin": [
       "binaries/zintus"
-    ]
+    ],
+    "macOS": {
+      "entitlements": "./Entitlements.plist"
+    }
   }
 }

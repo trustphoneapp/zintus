@@ -7,5 +7,10 @@
        the packaged webview. -->
   <key>NSMicrophoneUsageDescription</key>
   <string>Zintus uses the microphone for voice input — audio goes only to your local gateway and your own transcription key, never to Zintus servers.</string>
+  <!-- Loopback (our gateway/Ollama) is normally exempt from the Local Network
+       prompt, but macOS 26 has known bugs blocking localhost, and users may
+       point OLLAMA_HOST at another machine — honest text either way. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Zintus talks to your local AI gateway and local model runtimes (like Ollama) on this Mac or your network. Nothing is sent to Zintus servers.</string>
 </dict>
 </plist>
