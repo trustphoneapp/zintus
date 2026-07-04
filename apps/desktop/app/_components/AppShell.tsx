@@ -572,18 +572,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                           <span
                             id={`thread-menu-${thread.id}`}
                             role="menu"
+                            className="pop-menu"
                             style={{
                               position: "absolute",
                               right: 0,
                               top: 24,
-                              minWidth: 130,
+                              minWidth: 150,
                               display: "flex",
                               flexDirection: "column",
-                              background: "var(--color-surface)",
-                              border: "1px solid var(--color-border)",
-                              borderRadius: 9,
-                              padding: 3,
-                              boxShadow: "var(--shadow-md)",
                               zIndex: 40,
                             }}
                           >
@@ -749,17 +745,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           {accountOpen ? (
             <div
               role="menu"
+              className="pop-menu"
               style={{
                 position: "absolute",
                 bottom: "calc(100% + 6px)",
                 left: 8,
                 right: collapsed ? "auto" : 8,
-                minWidth: 210,
-                background: "var(--color-surface)",
-                border: "1px solid var(--color-border)",
-                borderRadius: 12,
-                padding: 4,
-                boxShadow: "var(--shadow-md)",
                 zIndex: 50,
               }}
             >

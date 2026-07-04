@@ -123,31 +123,12 @@ const STRATEGY_LABELS: Record<string, string> = {
   economy: "Cheapest",
 };
 
+/* Popover visuals live in globals.css (.pop-menu family); call sites only position. */
 const pillMenuStyle: React.CSSProperties = {
   position: "absolute",
   bottom: 38,
   left: 0,
-  minWidth: 210,
-  background: "var(--color-surface)",
-  border: "1px solid var(--color-border)",
-  borderRadius: 12,
-  padding: 4,
-  boxShadow: "var(--shadow-md)",
   zIndex: 30,
-};
-
-const pillItemStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 9,
-  width: "100%",
-  padding: "8px 10px",
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  cursor: "pointer",
-  textAlign: "left",
-  background: "transparent",
 };
 
 export function ChatPanel() {
@@ -1252,33 +1233,8 @@ export function ChatPanel() {
                   <Plus size={17} />
                 </button>
                 {plusOpen ? (
-                  <div
-                    role="menu"
-                    style={{
-                      position: "absolute",
-                      bottom: 38,
-                      left: 0,
-                      minWidth: 200,
-                      background: "var(--color-surface)",
-                      border: "1px solid var(--color-border)",
-                      borderRadius: 12,
-                      padding: 4,
-                      boxShadow: "var(--shadow-md)",
-                      zIndex: 30,
-                    }}
-                  >
-                    <div
-                      style={{
-                        fontSize: 10,
-                        fontWeight: 700,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.07em",
-                        color: "var(--color-text-muted)",
-                        padding: "6px 10px 3px",
-                      }}
-                    >
-                      Abilities
-                    </div>
+                  <div role="menu" className="pop-menu" style={pillMenuStyle}>
+                    <div className="pop-label">Abilities</div>
                     <AbilityItem
                       icon={<Globe size={14} />}
                       label="Web search"
@@ -1335,25 +1291,8 @@ export function ChatPanel() {
                         setPlusOpen(false);
                       }}
                     />
-                    <div
-                      style={{
-                        height: 1,
-                        background: "var(--color-border)",
-                        margin: "5px 8px",
-                      }}
-                    />
-                    <div
-                      style={{
-                        fontSize: 10,
-                        fontWeight: 700,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.07em",
-                        color: "var(--color-text-muted)",
-                        padding: "4px 10px 3px",
-                      }}
-                    >
-                      Attach
-                    </div>
+                    <div className="pop-sep" />
+                    <div className="pop-label">Attach</div>
                     <button
                       type="button"
                       role="menuitem"
@@ -1361,20 +1300,7 @@ export function ChatPanel() {
                         setPlusOpen(false);
                         fileInputRef.current?.click();
                       }}
-                      className="app-icon-btn"
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 9,
-                        width: "100%",
-                        padding: "8px 10px",
-                        border: "none",
-                        borderRadius: 8,
-                        color: "var(--color-text)",
-                        fontSize: 13,
-                        cursor: "pointer",
-                        textAlign: "left",
-                      }}
+                      className="pop-item"
                     >
                       <Paperclip size={14} style={{ color: "var(--color-text-sub)" }} />
                       Add files
@@ -1387,20 +1313,7 @@ export function ChatPanel() {
                         imageInputRef.current?.click();
                       }}
                       title="PNG/JPEG/WebP — decoded, resized and EXIF-stripped on this device; needs a vision-capable provider."
-                      className="app-icon-btn"
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 9,
-                        width: "100%",
-                        padding: "8px 10px",
-                        border: "none",
-                        borderRadius: 8,
-                        color: "var(--color-text)",
-                        fontSize: 13,
-                        cursor: "pointer",
-                        textAlign: "left",
-                      }}
+                      className="pop-item"
                     >
                       <ImagePlus size={14} style={{ color: "var(--color-text-sub)" }} />
                       Add photos
@@ -1541,12 +1454,13 @@ export function ChatPanel() {
                   <ChevronDown size={13} />
                 </button>
                 {stratOpen ? (
-                  <div role="menu" style={pillMenuStyle}>
+                  <div role="menu" className="pop-menu" style={pillMenuStyle}>
+                    <div className="pop-label">Routing strategy</div>
                     {(
                       [
-                        ["fastest", "Fastest", "lowest latency from your own p50s"],
+                        ["fastest", "Fastest", "ranks by your rolling p50"],
                         ["capability", "Capability", "best model that can do the job"],
-                        ["economy", "Cheapest", "lowest cost per token"],
+                        ["economy", "Cheapest", "lowest $ per token"],
                       ] as const
                     ).map(([value, label, hint]) => (
                       <button
@@ -1557,19 +1471,10 @@ export function ChatPanel() {
                           update({ routingStrategy: value as RoutingStrategy });
                           setStratOpen(false);
                         }}
-                        className="app-icon-btn"
-                        style={{
-                          ...pillItemStyle,
-                          color:
-                            settings.routingStrategy === value
-                              ? "var(--color-purple-bright)"
-                              : "var(--color-text)",
-                        }}
+                        className={`pop-item${settings.routingStrategy === value ? " on" : ""}`}
                       >
                         {label}
-                        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
-                          {hint}
-                        </span>
+                        <span className="pop-sub">{hint}</span>
                       </button>
                     ))}
                   </div>
@@ -1610,7 +1515,8 @@ export function ChatPanel() {
                   <ChevronDown size={13} style={{ flexShrink: 0 }} />
                 </button>
                 {modelOpen ? (
-                  <div role="menu" style={{ ...pillMenuStyle, minWidth: 240, maxHeight: 320, overflowY: "auto" }}>
+                  <div role="menu" className="pop-menu" style={{ ...pillMenuStyle, minWidth: 250, maxHeight: 320, overflowY: "auto" }}>
+                    <div className="pop-label">Model</div>
                     <button
                       type="button"
                       role="menuitem"
@@ -1619,16 +1525,10 @@ export function ChatPanel() {
                         setSelectedProvider(null);
                         setModelOpen(false);
                       }}
-                      className="app-icon-btn"
-                      style={{
-                        ...pillItemStyle,
-                        color: !managedModel && !selectedProvider ? "var(--color-purple-bright)" : "var(--color-text)",
-                      }}
+                      className={`pop-item${!managedModel && !selectedProvider ? " on" : ""}`}
                     >
                       Auto
-                      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
-                        router picks
-                      </span>
+                      <span className="pop-sub">router picks</span>
                     </button>
                     {memberModels.map((m) => (
                       <button
@@ -1639,16 +1539,10 @@ export function ChatPanel() {
                           setManagedModel(m.id);
                           setModelOpen(false);
                         }}
-                        className="app-icon-btn"
-                        style={{
-                          ...pillItemStyle,
-                          color: managedModel === m.id ? "var(--color-purple-bright)" : "var(--color-text)",
-                        }}
+                        className={`pop-item${managedModel === m.id ? " on" : ""}`}
                       >
                         {m.display_name}
-                        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
-                          plan tokens
-                        </span>
+                        <span className="pop-sub">plan tokens</span>
                       </button>
                     ))}
                     {connectedProviders.map((cp) => (
@@ -1660,25 +1554,19 @@ export function ChatPanel() {
                           setSelectedProvider(cp.id);
                           setModelOpen(false);
                         }}
-                        className="app-icon-btn"
-                        style={{
-                          ...pillItemStyle,
-                          color: selectedProvider === cp.id ? "var(--color-purple-bright)" : "var(--color-text)",
-                        }}
+                        className={`pop-item${selectedProvider === cp.id ? " on" : ""}`}
                       >
                         {cp.name}
-                        <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>
-                          your key
-                        </span>
+                        <span className="pop-sub">your key</span>
                       </button>
                     ))}
-                    <div style={{ height: 1, background: "var(--color-border)", margin: "5px 8px" }} />
+                    <div className="pop-sep" />
                     <Link
                       href="/models"
                       role="menuitem"
                       onClick={() => setModelOpen(false)}
-                      className="app-icon-btn"
-                      style={{ ...pillItemStyle, textDecoration: "none", color: "var(--color-text-sub)" }}
+                      className="pop-item"
+                      style={{ textDecoration: "none", color: "var(--color-text-sub)" }}
                     >
                       Browse all models…
                     </Link>
@@ -1833,28 +1721,14 @@ function AbilityItem({
       role="menuitemcheckbox"
       aria-checked={active}
       onClick={onClick}
-      className="app-icon-btn"
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 9,
-        width: "100%",
-        padding: "8px 10px",
-        border: "none",
-        borderRadius: 8,
-        color: active ? "var(--color-purple-bright)" : "var(--color-text)",
-        fontSize: 13,
-        cursor: "pointer",
-        textAlign: "left",
-        background: "transparent",
-      }}
+      className={`pop-item${active ? " on" : ""}`}
     >
       <span style={{ color: active ? "var(--color-purple-bright)" : "var(--color-text-sub)", display: "inline-flex" }}>
         {icon}
       </span>
       {label}
       {active ? <span aria-hidden>✓</span> : null}
-      <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--color-text-muted)" }}>{hint}</span>
+      <span className="pop-sub">{hint}</span>
     </button>
   );
 }
