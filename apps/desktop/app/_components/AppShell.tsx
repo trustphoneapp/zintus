@@ -12,6 +12,7 @@ import {
 import {
   ArrowRight,
   Bot,
+  Check,
   ChevronUp,
   Columns2,
   FolderOpen,
@@ -24,6 +25,7 @@ import {
   Pin,
   Plus,
   Search,
+  Share,
   ShieldCheck,
   Sun,
 } from "lucide-react";
@@ -153,6 +155,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [accountOpen, setAccountOpen] = useState(false);
   // Account-popover update check (same honest manifest check Settings uses).
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | "checking" | null>(null);
+  // Top-bar Share (chat only): copies the active thread as Markdown.
+  const [shareCopied, setShareCopied] = useState(false);
   const accountRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!accountOpen && !threadMenuId) return;
@@ -826,15 +830,6 @@ export function AppShell({ children }: { children: ReactNode }) {
                 role="menuitem"
                 className="app-icon-btn"
                 style={threadMenuItemStyle}
-                onClick={() => setTheme(toggleTheme())}
-              >
-                Toggle theme
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="app-icon-btn"
-                style={threadMenuItemStyle}
                 onClick={() => {
                   setAccountOpen(false);
                   window.dispatchEvent(new CustomEvent("zintus:shortcuts"));
@@ -985,6 +980,51 @@ export function AppShell({ children }: { children: ReactNode }) {
               </span>
             </button>
           </div>
+
+          {pathname.startsWith("/chat") ? (
+            <Tooltip
+              content={shareCopied ? "Copied as Markdown" : "Share — copy this chat as Markdown"}
+              side="bottom"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  const thread = useChatStore
+                    .getState()
+                    .threads.find((t) => t.id === useChatStore.getState().activeThreadId);
+                  if (!thread || thread.messages.length === 0) return;
+                  const md = [
+                    `# ${thread.title}`,
+                    "",
+                    ...thread.messages.map((m) =>
+                      m.role === "user"
+                        ? `**You:** ${typeof m.content === "string" ? m.content : "[attachments]"}`
+                        : `**Zintus${m.model ? ` (${m.model})` : ""}:** ${typeof m.content === "string" ? m.content : ""}`,
+                    ),
+                  ].join("\n\n");
+                  void navigator.clipboard?.writeText(md).then(() => {
+                    setShareCopied(true);
+                    window.setTimeout(() => setShareCopied(false), 1600);
+                  });
+                }}
+                aria-label="Share chat — copy as Markdown"
+                className="app-icon-btn"
+                style={{
+                  display: "grid",
+                  placeItems: "center",
+                  width: 32,
+                  height: 32,
+                  border: "none",
+                  borderRadius: 8,
+                  background: "transparent",
+                  color: shareCopied ? "var(--color-green)" : "var(--color-text-sub)",
+                  cursor: "pointer",
+                }}
+              >
+                {shareCopied ? <Check size={16} /> : <Share size={15} />}
+              </button>
+            </Tooltip>
+          ) : null}
 
           <Tooltip
             content={

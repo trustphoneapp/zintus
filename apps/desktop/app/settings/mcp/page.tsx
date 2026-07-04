@@ -183,7 +183,8 @@ export default function McpSettingsPage() {
   const offline = online === false;
 
   return (
-    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16, maxWidth: 760 }}>
+    <div className="scroll" style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+    <div style={{ maxWidth: 760, margin: "0 auto", width: "100%", padding: "22px 24px 60px", display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         <Link
           href="/settings"
@@ -472,5 +473,6 @@ export default function McpSettingsPage() {
         </CardContent>
       </Card>
     </div>
+</div>
   );
 }

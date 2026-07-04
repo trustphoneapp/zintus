@@ -83,10 +83,11 @@ export default function SettingsPage() {
   }
 
   return (
-    <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="scroll" style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+    <div style={{ maxWidth: 760, margin: "0 auto", width: "100%", padding: "22px 24px 60px", display: "flex", flexDirection: "column", gap: 14 }}>
       <div>
-        <h1 style={{ fontSize: 20, fontWeight: 700 }}>Settings</h1>
-        <p style={{ fontSize: 14, color: "var(--color-text-sub)" }}>
+        <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Settings</h1>
+        <p style={{ fontSize: 12.5, color: "var(--color-text-sub)", margin: "2px 0 0" }}>
           Routing strategy and defaults — applied to chat auto-routing.
         </p>
       </div>
@@ -486,5 +487,6 @@ export default function SettingsPage() {
         Changes are saved automatically and applied to chat auto-routing.
       </p>
     </div>
+</div>
   );
 }
