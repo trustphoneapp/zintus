@@ -36,6 +36,7 @@ import { openExternal } from "@/lib/tauri";
 import { signOut } from "@/lib/cloud";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
+import { useShortcutGlyphs } from "@/lib/platform";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
 import { formatSpend, getBudgetUsd, onSpendChange, todaySpendUsd } from "@/lib/spend";
 import { OnboardingOverlay } from "./OnboardingOverlay";
@@ -157,6 +158,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | "checking" | null>(null);
   // Top-bar Share (chat only): copies the active thread as Markdown.
   const [shareCopied, setShareCopied] = useState(false);
+  const { mod } = useShortcutGlyphs();
   const accountRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!accountOpen && !threadMenuId) return;
@@ -380,7 +382,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                     fontFamily: "var(--font-mono)",
                   }}
                 >
-                  ⌘N
+                  {mod("N")}
                 </span>
               </>
             ) : null}
@@ -798,7 +800,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 Settings
                 <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--color-text-muted)" }}>
-                  ⌘,
+                  {mod(",")}
                 </span>
               </button>
               <button
@@ -837,7 +839,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 Keyboard shortcuts
                 <span style={{ marginLeft: "auto", fontSize: 10, fontFamily: "var(--font-mono)", color: "var(--color-text-muted)" }}>
-                  ⌘/
+                  {mod("/")}
                 </span>
               </button>
               <div style={{ height: 1, background: "var(--color-border)", margin: "4px 8px" }} />
@@ -976,7 +978,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   fontSize: 11,
                 }}
               >
-                ⌘K
+                {mod("K")}
               </span>
             </button>
           </div>

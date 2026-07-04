@@ -41,6 +41,7 @@ import {
 import { ManagedChatFailure, streamManagedChat } from "@/lib/managed-chat";
 import { addSpendUsd, recordTurnUsage } from "@/lib/spend";
 import { transcribeAudio } from "@/lib/gateway";
+import { useShortcutGlyphs } from "@/lib/platform";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -145,6 +146,7 @@ export function ChatPanel() {
     refresh,
   } = useProviderStatusStore();
   const { billing, managedModels } = useCloudStore();
+  const { send: sendChord } = useShortcutGlyphs();
 
   // Model-pill sources: managed models only for active members (they serve),
   // BYOK providers only when actually connected (key present / local runtime up).
@@ -1110,7 +1112,7 @@ export function ChatPanel() {
                   Ask anything
                 </span>
                 <span style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 300 }}>
-                  Responses stream in here. Press ⌘↵ to send — auto-routes via the{" "}
+                  Responses stream in here. Press {sendChord} to send — auto-routes via the{" "}
                   {settings.routingStrategy} strategy.
                 </span>
               </div>
@@ -1660,7 +1662,7 @@ export function ChatPanel() {
                   fontFamily: "var(--font-mono)",
                 }}
               >
-                ⌘↵
+                {sendChord}
               </span>
 
               {loading ? (

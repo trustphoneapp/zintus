@@ -9,6 +9,7 @@ import { isActiveMember, useCloudStore, useSettingsStore } from "@/lib/store";
 import { getBudgetUsd, setBudgetUsd } from "@/lib/spend";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
 import { getThemePreference, setThemePreference, type ThemePreference } from "@/lib/theme";
+import { useShortcutGlyphs } from "@/lib/platform";
 import { openExternal } from "@/lib/tauri";
 import { Card, CardContent, CardHeader, CardTitle } from "../_components/ui/card";
 
@@ -64,6 +65,7 @@ export default function SettingsPage() {
   const [budgetDraft, setBudgetDraft] = useState("");
   const [updateState, setUpdateState] = useState<UpdateCheck | "checking" | null>(null);
   const [themePref, setThemePref] = useState<ThemePreference>("system");
+  const { mod } = useShortcutGlyphs();
 
   useEffect(() => {
     hydrate();
@@ -349,7 +351,7 @@ export default function SettingsPage() {
               style={{ marginLeft: "auto", flexShrink: 0 }}
               onClick={() => window.dispatchEvent(new CustomEvent("zintus:shortcuts"))}
             >
-              View · ⌘/
+              View · {mod("/")}
             </button>
           </div>
         </CardContent>

@@ -62,3 +62,30 @@ mkdirSync(BIN_DIR, { recursive: true });
 const dest = join(BIN_DIR, `zintus-${triple}${ext}`);
 copyFileSync(sourcePath, dest);
 console.log(`staged sidecar → ${dest}`);
+
+// macOS universal builds (`tauri build --target universal-apple-darwin`, the
+// CI release target) resolve externalBin as zintus-universal-apple-darwin —
+// the host triple alone fails the release build. Stage it too whenever both
+// darwin slices exist (bun cross-compiles them; build the missing one here).
+if (process.platform === "darwin") {
+  const armSrc = join(CLI_DIR, "dist-bin", "zintus-darwin-arm64");
+  const x64Src = join(CLI_DIR, "dist-bin", "zintus-darwin-x64");
+  if (!existsSync(armSrc) || !existsSync(x64Src)) {
+    const r = spawnSync(
+      "bun",
+      ["scripts/build-binaries.ts", "--targets", "darwin-arm64,darwin-x64"],
+      { cwd: CLI_DIR, stdio: "inherit" },
+    );
+    if (r.status !== 0) {
+      throw new Error("could not build both darwin CLI slices for the universal sidecar");
+    }
+  }
+  const universalDest = join(BIN_DIR, "zintus-universal-apple-darwin");
+  const lipo = spawnSync("lipo", ["-create", armSrc, x64Src, "-output", universalDest], {
+    stdio: "inherit",
+  });
+  if (lipo.status !== 0) {
+    throw new Error("lipo failed to produce the universal sidecar");
+  }
+  console.log(`staged universal sidecar → ${universalDest}`);
+}

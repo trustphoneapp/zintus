@@ -1,22 +1,26 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useShortcutGlyphs } from "@/lib/platform";
 
 /**
  * Keyboard-shortcuts overlay (Light.dc prototype). Opened with ⌘/ (or from the
  * account popover / Settings). Lists only shortcuts the app actually handles.
  */
-const ROWS: Array<[string, string]> = [
-  ["New chat", "⌘N"],
-  ["Command palette", "⌘K"],
-  ["Search chat history", "⌘⇧F"],
-  ["Send message", "⌘↵"],
-  ["Settings", "⌘,"],
-  ["This overlay", "⌘/"],
-];
+function rows(mod: (k: string) => string, send: string, shiftMod: (k: string) => string): Array<[string, string]> {
+  return [
+    ["New chat", mod("N")],
+    ["Command palette", mod("K")],
+    ["Search chat history", shiftMod("F")],
+    ["Send message", send],
+    ["Settings", mod(",")],
+    ["This overlay", mod("/")],
+  ];
+}
 
 export function ShortcutsOverlay() {
   const [open, setOpen] = useState(false);
+  const { mod, send, shiftMod } = useShortcutGlyphs();
 
   useEffect(() => {
     function onOpen() {
@@ -68,7 +72,7 @@ export function ShortcutsOverlay() {
         <h2 style={{ fontSize: 16, fontWeight: 700, margin: "0 0 12px", color: "var(--color-text)" }}>
           Keyboard shortcuts
         </h2>
-        {ROWS.map(([label, keys], i) => (
+        {rows(mod, send, shiftMod).map(([label, keys], i) => (
           <div
             key={label}
             style={{
