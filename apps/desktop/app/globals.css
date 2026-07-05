@@ -60,9 +60,11 @@
   --radius-md: 10px;
   --radius-lg: 16px;
   --radius-xl: 24px;
-  /* Hairline ring width for button/card edges. 0.5px = exactly one device
-     pixel on Retina; on 1x displays there is no half pixel and WebKit paints
-     it as a ~50%-alpha smear, so a media query below bumps it to 1px. */
+  /* Hairline ring width for button/card edges — exactly one device pixel.
+     Owned at runtime by HAIRLINE_INIT_SCRIPT (lib/hairline.ts): 1/dPR CSS px,
+     covering fractional Windows scales (0.8px @125%, 0.6667px @150%, …).
+     This value + the media query below are only the no-JS/first-frame
+     fallback (0.5px Retina / 1px at 1x). */
   --hairline: 0.5px;
   --t-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --t-reveal: 300ms cubic-bezier(0.4, 0, 0.2, 1);

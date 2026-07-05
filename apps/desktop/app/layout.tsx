@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { AppShell } from "./_components/AppShell";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
+import { HAIRLINE_INIT_SCRIPT } from "@/lib/hairline";
 import "./globals.css";
 
 const inter = Inter({
@@ -38,6 +39,9 @@ export default function RootLayout({
       <head>
         {/* Applies the persisted/system theme before first paint (no flash). */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+        {/* Sets --hairline to exactly one device pixel before first paint and
+            tracks monitor/scale changes (fractional Windows dPRs — R2). */}
+        <script dangerouslySetInnerHTML={{ __html: HAIRLINE_INIT_SCRIPT }} />
       </head>
       <body>
         <AppShell>{children}</AppShell>
