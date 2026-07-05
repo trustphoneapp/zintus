@@ -236,6 +236,18 @@ pub fn run() {
     ])
     .setup(|app| {
       spawn_gateway(&app.handle().clone());
+      // Debug/CI hook: ZINTUS_WINDOW_SIZE=WxH resizes the main window at
+      // startup (logical px) — used by the responsive-layout screenshot
+      // sweep (docs/desktop/RESPONSIVE-LAYOUT.md). No-op when unset.
+      if let Ok(size) = std::env::var("ZINTUS_WINDOW_SIZE") {
+        if let Some((w, h)) = size.split_once('x') {
+          if let (Ok(w), Ok(h)) = (w.parse::<f64>(), h.parse::<f64>()) {
+            if let Some(window) = app.get_webview_window("main") {
+              let _ = window.set_size(tauri::LogicalSize::new(w, h));
+            }
+          }
+        }
+      }
       if let Ok(report_path) = std::env::var("ZINTUS_UI_SELFTEST") {
         let handle = app.handle().clone();
         std::thread::spawn(move || {

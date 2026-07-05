@@ -237,6 +237,50 @@ body {
   background: #c42b1c;
   color: #ffffff;
 }
+/* Sidebar toggle beside the traffic lights (macOS only — Claude/Codex
+   grammar). Fixed inside the 44px titlebar strip: lights end ≈72px in. On
+   Windows/Linux the toggle stays first in the top bar (.topbar-toggle). */
+.strip-toggle {
+  display: none;
+}
+:root[data-platform="mac"] .strip-toggle {
+  /* Claude-tight: lights end ≈60px in. The overlay titlebar keeps the
+     lights on the DEFAULT title-bar axis — center ≈14px, not the strip's
+     midline (user-measured) — so a 28px button starts at top 0. */
+  position: fixed;
+  top: 2px;
+  left: 68px;
+  z-index: 210;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-sub);
+  cursor: pointer;
+}
+:root[data-platform="mac"] .strip-toggle:hover {
+  background: var(--color-elevated);
+  color: var(--color-text);
+}
+:root[data-platform="mac"] .topbar-toggle {
+  display: none !important;
+}
+/* ⌘K pill alignment lives HERE (not inline — inline would beat the media
+   override). Drawer-width windows (<720): the fixed mac strip toggle owns
+   the top-left corner, so the pill hugs the right (Share/shield) cluster
+   instead of centering underneath it (user-reported collision). */
+.topbar-center {
+  justify-content: center;
+}
+@media (max-width: 719px) {
+  :root[data-platform="mac"] .topbar-center {
+    justify-content: flex-end;
+  }
+}
 
 a {
   color: var(--color-purple-bright);
