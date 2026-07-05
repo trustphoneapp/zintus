@@ -8,6 +8,11 @@ export const ALLOWED_ORIGINS = [
   "https://relay.zintus.ai",
   "http://localhost:3000",
   "http://localhost:3001",
+  // Packaged desktop webviews (Tauri): macOS/Linux + Windows origins. These
+  // clients authenticate with Authorization: Bearer (no cookies), so allowing
+  // their fixed origins adds no cookie-CSRF surface.
+  "tauri://localhost",
+  "http://tauri.localhost",
 ];
 
 export const ALLOWED_REDIRECT_ORIGINS = [
