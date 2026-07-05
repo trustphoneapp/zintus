@@ -155,6 +155,62 @@ fn spawn_gateway(app: &tauri::AppHandle) {
   }
 }
 
+/// UI self-test for CI (S6, docs/launch/PLATFORM-PARITY.md): measures the
+/// live DOM — platform stamp, device-pixel hairline, chrome + button
+/// geometry, gateway liveness — and reports back via `selftest_report`.
+/// Injected only when ZINTUS_UI_SELFTEST=<output path> is set.
+/// `scripts/check-ui-metrics.ts` asserts the values per platform.
+const SELFTEST_JS: &str = r#"(async () => {
+  // Report channel: the URL fragment. The native side polls window.url() —
+  // document.title does NOT propagate to the native window title and the
+  // invoke bridge is not guaranteed inside eval'd scripts, but a hash write
+  // is plain web platform and identical on all three webviews. Hash-only
+  // changes do not navigate the Next.js app router.
+  const send = (report) => {
+    try {
+      location.hash = "zintus-selftest=" + btoa(unescape(encodeURIComponent(JSON.stringify(report))));
+    } catch (e) {}
+  };
+  try {
+    await document.fonts.ready;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const measure = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { w: Math.round(rect.width * 100) / 100, h: Math.round(rect.height * 100) / 100 };
+    };
+    const probe = document.createElement("button");
+    probe.textContent = "Probe";
+    document.body.appendChild(probe);
+    const probeRect = probe.getBoundingClientRect();
+    let gateway = null;
+    for (let i = 0; i < 30 && !gateway; i++) {
+      try {
+        const res = await fetch("http://localhost:8788/health", { cache: "no-store" });
+        gateway = await res.json();
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+    const report = {
+      platform: document.documentElement.dataset.platform || null,
+      dpr: window.devicePixelRatio,
+      hairline: getComputedStyle(document.documentElement).getPropertyValue("--hairline").trim(),
+      topbar: measure(".app-topbar"),
+      titlebarStrip: measure(".titlebar-strip"),
+      iconBtn: measure(".app-topbar .app-icon-btn"),
+      winControls: measure(".win-controls"),
+      probeButton: { w: Math.round(probeRect.width * 100) / 100, h: Math.round(probeRect.height * 100) / 100 },
+      gateway,
+    };
+    probe.remove();
+    send(report);
+  } catch (error) {
+    send({ error: String(error) });
+  }
+})();"#;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let app = tauri::Builder::default()
@@ -180,6 +236,51 @@ pub fn run() {
     ])
     .setup(|app| {
       spawn_gateway(&app.handle().clone());
+      if let Ok(report_path) = std::env::var("ZINTUS_UI_SELFTEST") {
+        let handle = app.handle().clone();
+        std::thread::spawn(move || {
+          // Give the webview time to boot + hydrate before measuring.
+          std::thread::sleep(Duration::from_secs(8));
+          let window = match handle.get_webview_window("main") {
+            Some(window) => window,
+            None => {
+              eprintln!("[selftest] no main window");
+              std::process::exit(2);
+            }
+          };
+          if let Err(error) = window.eval(SELFTEST_JS) {
+            eprintln!("[selftest] eval failed: {error}");
+            std::process::exit(2);
+          }
+          // The script publishes base64 JSON through the URL fragment; poll it.
+          use base64::Engine as _;
+          const PREFIX: &str = "zintus-selftest=";
+          for _ in 0..90 {
+            std::thread::sleep(Duration::from_secs(1));
+            let fragment = match window.url() {
+              Ok(url) => url.fragment().map(str::to_owned),
+              Err(_) => None,
+            };
+            if let Some(encoded) = fragment.as_deref().and_then(|f| f.strip_prefix(PREFIX)) {
+              let json = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                  eprintln!("[selftest] undecodable report fragment: {error}");
+                  std::process::exit(4);
+                }
+              };
+              if let Err(error) = std::fs::write(&report_path, &json) {
+                eprintln!("[selftest] failed to write {report_path}: {error}");
+                std::process::exit(4);
+              }
+              println!("[selftest] report written to {report_path}");
+              std::process::exit(0);
+            }
+          }
+          eprintln!("[selftest] report never arrived — timing out");
+          std::process::exit(3);
+        });
+      }
       Ok(())
     })
     .build(tauri::generate_context!())

@@ -1,0 +1,77 @@
+name: Desktop Verify
+
+# S6 (docs/launch/PLATFORM-PARITY.md): build the desktop app on all three
+# OSes, LAUNCH it, and assert the parity contract from inside the live
+# webview — platform stamp, device-pixel hairline, identical button/chrome
+# geometry, gateway sidecar liveness. This is the check that "same buttons,
+# same dimensions, same CSS" actually holds outside macOS.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/desktop-xplat-parity]
+    paths:
+      - "apps/desktop/**"
+      - ".github/workflows/desktop-verify.yml"
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bin: apps/desktop/src-tauri/target/debug/zintus-desktop
+          - os: windows-latest
+            bin: apps/desktop/src-tauri/target/debug/zintus-desktop.exe
+          # 22.04 to match the release floor (R5)
+          - os: ubuntu-22.04
+            bin: apps/desktop/src-tauri/target/debug/zintus-desktop
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+      - run: bun install
+      - name: Build app (debug, no bundle)
+        run: cd apps/desktop && bunx tauri build --debug --no-bundle
+      - name: Launch app and capture UI metrics
+        env:
+          ZINTUS_UI_SELFTEST: ${{ github.workspace }}/selftest.json
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            xvfb-run -a "${{ matrix.bin }}" &
+          else
+            "${{ matrix.bin }}" &
+          fi
+          for i in $(seq 1 150); do
+            [ -f "$ZINTUS_UI_SELFTEST" ] && break
+            sleep 1
+          done
+          if [ ! -f "$ZINTUS_UI_SELFTEST" ]; then
+            echo "::error::selftest report never appeared (app failed to boot or hook failed)"
+            exit 1
+          fi
+          cat "$ZINTUS_UI_SELFTEST"
+      - name: Assert parity spec
+        run: bun apps/desktop/scripts/check-ui-metrics.ts "${{ github.workspace }}/selftest.json"
+      - name: Upload metrics report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-metrics-${{ matrix.os }}
+          path: selftest.json
+          if-no-files-found: ignore

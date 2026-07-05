@@ -4,8 +4,9 @@
  * every display — 0.5px on Retina, 1px at 100%, 0.8px at Windows 125%,
  * 0.6667px at 150%, 0.5714px at 175% (R2 decision, docs/launch/research/).
  * globals.css keeps a 2-bucket media-query fallback for the pre-JS first
- * frame; this module overrides it immediately and re-applies when the window
- * moves to a monitor with a different scale factor.
+ * frames; lib/boot.ts applies this module before hydration paints and
+ * re-applies when the window moves to a monitor with a different scale
+ * factor.
  */
 
 /** One device pixel in CSS px for a given devicePixelRatio, 4-decimal fixed. */
@@ -46,11 +47,3 @@ export function watchHairline(): () => void {
   };
 }
 
-/**
- * Inline pre-hydration script (layout.tsx <head>): sets the device-pixel
- * hairline before first paint, then keeps it correct across monitor changes.
- * Same contract as THEME_INIT_SCRIPT — dependency-free and tiny. Kept as a
- * string mirror of applyHairline/watchHairline above (unit test pins them
- * together).
- */
-export const HAIRLINE_INIT_SCRIPT = `(function(){try{var a=function(){var d=window.devicePixelRatio||1;document.documentElement.style.setProperty("--hairline",Math.round(10000/d)/10000+"px")};var w=function(){var d=window.devicePixelRatio||1;var m=matchMedia("(resolution: "+d+"dppx)");var h=function(){a();w()};m.addEventListener("change",h,{once:true})};a();w()}catch(e){}})();`;

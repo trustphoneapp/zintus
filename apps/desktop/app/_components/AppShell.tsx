@@ -37,8 +37,10 @@ import { signOut } from "@/lib/cloud";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { listProjects } from "@/lib/projects";
 import { saveTextFile } from "@/lib/download";
-import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
-import { isMacPlatform, useShortcutGlyphs } from "@/lib/platform";
+import { applyTheme, getThemePreference, resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
+import "@/lib/boot";
+import { applyHairline } from "@/lib/hairline";
+import { isMacPlatform, stampPlatform, useShortcutGlyphs } from "@/lib/platform";
 import { WindowControls } from "./WindowControls";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
 import { formatSpend, getBudgetUsd, onSpendChange, todaySpendUsd } from "@/lib/spend";
@@ -117,6 +119,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   const privateMode = Boolean(settings.blockTrainingProviders);
 
   useEffect(() => {
+    // Re-apply the lib/boot.ts stamps: React 19's hydration of <html> stomps
+    // attributes/styles set before it commits (observed live via the S6
+    // selftest — data-platform and --hairline were wiped). All idempotent;
+    // boot's module-scope pass still covers the pre-hydration frames.
+    stampPlatform();
+    applyHairline();
+    applyTheme(getThemePreference());
     hydrateSettings();
     setCollapsed(localStorage.getItem(COLLAPSE_KEY) === "1");
     setTheme(resolvedTheme());
