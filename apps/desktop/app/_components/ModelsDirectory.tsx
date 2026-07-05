@@ -125,6 +125,31 @@ export default function ModelsDirectory() {
     if (dockId) dockInputRef.current?.focus();
   }, [dockId]);
 
+  // After checkout opens in the browser, poll billing until the Stripe webhook
+  // lands so the plan flips live without a restart. The AppShell focus refresh
+  // usually wins the race; this covers the webhook arriving a few seconds after
+  // the user tabs back. Stops on activation or after 5 minutes.
+  const upgradePollRef = useRef<number | null>(null);
+  function pollForUpgrade() {
+    if (upgradePollRef.current) window.clearInterval(upgradePollRef.current);
+    const startedAt = Date.now();
+    upgradePollRef.current = window.setInterval(() => {
+      const state = useCloudStore.getState();
+      if (isActiveMember(state.billing) || Date.now() - startedAt > 5 * 60_000) {
+        if (upgradePollRef.current) window.clearInterval(upgradePollRef.current);
+        upgradePollRef.current = null;
+        return;
+      }
+      void state.refreshCloud();
+    }, 5_000);
+  }
+  useEffect(
+    () => () => {
+      if (upgradePollRef.current) window.clearInterval(upgradePollRef.current);
+    },
+    [],
+  );
+
   const statusById = useMemo(
     () => new Map(providers.map((p) => [p.id, p])),
     [providers],
@@ -234,7 +259,8 @@ export default function ModelsDirectory() {
       const result = await createCheckout(tier);
       if (result.ok) {
         await openExternal(result.url);
-        setNotice("Complete the checkout in your browser, then come back here.");
+        setNotice("Complete the checkout in your browser — your plan activates here automatically.");
+        pollForUpgrade();
         return;
       }
       if (result.code === "unauthorized") {

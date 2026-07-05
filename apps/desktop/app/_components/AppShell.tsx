@@ -185,8 +185,23 @@ export function AppShell({ children }: { children: ReactNode }) {
       document.removeEventListener("keydown", onKey);
     };
   }, [accountOpen, threadMenuId]);
+  // Cloud/billing state stays live without a restart: re-pull on window focus
+  // (the user comes back from browser checkout/sign-in) and on a slow interval
+  // as a fallback. refreshCloud self-guards against overlapping calls.
   useEffect(() => {
     void refreshCloud();
+    const onFocus = () => void refreshCloud();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshCloud();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    const interval = window.setInterval(() => void refreshCloud(), 60_000);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(interval);
+    };
   }, [refreshCloud]);
 
   // Loaded after mount (localStorage is client-only) to avoid an SSR flash.

@@ -197,6 +197,11 @@ export function ChatPanel() {
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  // Drag-and-drop onto the composer (Tauri's native drag-drop is disabled in
+  // tauri.conf.json, so standard HTML5 file drops reach us). Depth counter
+  // because dragenter/dragleave also fire on child elements.
+  const [dragActive, setDragActive] = useState(false);
+  const dragDepthRef = useRef(0);
   // Mic recording state (voice input v1 — see the mic button for the flow).
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
@@ -383,6 +388,18 @@ export function ChatPanel() {
     return () => window.removeEventListener("focus", refresh);
   }, []);
 
+  // A file drop that misses the composer must not make the webview navigate to
+  // the dropped file (default browser behavior) and dump the chat.
+  useEffect(() => {
+    const prevent = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", prevent);
+    window.addEventListener("drop", prevent);
+    return () => {
+      window.removeEventListener("dragover", prevent);
+      window.removeEventListener("drop", prevent);
+    };
+  }, []);
+
   const handleFiles = useCallback(async (files: FileList | null) => {
     if (!files) return;
     for (const file of Array.from(files)) {
@@ -493,6 +510,19 @@ export function ChatPanel() {
         ? null
         : (override?.managed ?? managedModel);
       if (managedTarget) {
+        // Regenerate-with-plan on an image turn: same text-only limit as the
+        // composer guard, answered honestly instead of a relay size/vision error.
+        const hasImageBlocks = convo.some(
+          (m) => Array.isArray(m.content) && m.content.some((b) => b.type === "image"),
+        );
+        if (hasImageBlocks) {
+          updateMessage(currentAssistantId, {
+            content:
+              "Plan models can't read images yet — regenerate with a vision-capable provider (e.g. Gemini) instead.",
+          });
+          setLoading(false);
+          return;
+        }
         try {
           let streamedText = "";
           const result = await streamManagedChat({
@@ -835,6 +865,16 @@ export function ChatPanel() {
     if ((!trimmed && attachments.length === 0 && imageAttachments.length === 0) || loading) {
       return;
     }
+    // Vision guard, managed path: v1 plan models are text-only and the relay caps
+    // the request body well below one base64 image — warn and hold instead of
+    // letting the send bounce off the relay's "request too large" limit.
+    if (imageAttachments.length > 0 && managedModel) {
+      setNotice({
+        tone: "warn",
+        text: "Plan models can't read images yet — switch to a vision provider (e.g. Gemini) or remove the image.",
+      });
+      return;
+    }
     // Vision guard: a concrete non-vision provider can't read images — warn and
     // hold (don't waste a request, don't drop the image). Auto routing (no explicit
     // provider) is allowed; the gateway returns an honest 422 if it can't be served.
@@ -863,6 +903,7 @@ export function ChatPanel() {
     attachments,
     imageAttachments,
     selectedProvider,
+    managedModel,
     settings,
     loading,
     doSend,
@@ -1258,10 +1299,32 @@ export function ChatPanel() {
           />
           {/* Composer — web-app parity: one rounded container, "+" attach
               menu bottom-left, compact mode chips + route pulldowns, round
-              accent send arrow bottom-right. */}
+              accent send arrow bottom-right. Accepts image/text file drops. */}
           <div
+            onDragEnter={(e) => {
+              if (!e.dataTransfer.types.includes("Files")) return;
+              e.preventDefault();
+              dragDepthRef.current += 1;
+              setDragActive(true);
+            }}
+            onDragOver={(e) => {
+              if (!e.dataTransfer.types.includes("Files")) return;
+              e.preventDefault();
+            }}
+            onDragLeave={() => {
+              dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+              if (dragDepthRef.current === 0) setDragActive(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              dragDepthRef.current = 0;
+              setDragActive(false);
+              void handleFiles(e.dataTransfer.files);
+            }}
             style={{
-              border: "1px solid var(--color-border)",
+              border: dragActive
+                ? "1px dashed var(--color-accent, #6366f1)"
+                : "1px solid var(--color-border)",
               background: "var(--color-elevated)",
               borderRadius: 16,
               padding: "10px 12px 8px",
