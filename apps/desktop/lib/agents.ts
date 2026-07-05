@@ -55,6 +55,42 @@ export async function createAgentTask(body: CreateAgentTask): Promise<string> {
   return parsed.id;
 }
 
+export interface AgentSummary {
+  id: string;
+  task: string;
+  root: string;
+  status: string;
+  created_at: number;
+  rounds: number;
+}
+
+/** P6 — list agent sessions (the gateway recovers non-terminal runs from disk
+ *  on startup as status "interrupted"). */
+export async function listAgents(): Promise<AgentSummary[]> {
+  const res = await fetch(`${getGatewayUrl()}/v1/agents`, {
+    headers: gatewayAuthHeaders(),
+  });
+  const parsed = (await res.json().catch(() => null)) as
+    | { agents?: AgentSummary[] }
+    | null;
+  if (!res.ok || !Array.isArray(parsed?.agents)) return [];
+  return parsed.agents;
+}
+
+/** P6 — resume an interrupted session from its last round-boundary checkpoint. */
+export async function resumeAgent(agentId: string): Promise<void> {
+  const res = await fetch(`${getGatewayUrl()}/v1/agents/${agentId}/resume`, {
+    method: "POST",
+    headers: gatewayAuthHeaders(),
+  });
+  if (!res.ok) {
+    const parsed = (await res.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    throw new Error(parsed?.error?.message ?? `Gateway error ${res.status}`);
+  }
+}
+
 /** P2 — continue a completed session conversationally: same sandbox root, full
  *  prior context; the new exchange's events append to the same SSE backlog. */
 export async function followUpAgent(agentId: string, message: string): Promise<void> {

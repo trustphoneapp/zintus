@@ -1026,6 +1026,20 @@ a.ghostbtn:hover {
   color: var(--color-text-muted);
   user-select: none;
 }
+.agent-resume {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 14px 20px 0;
+  padding: 10px 14px;
+  border: 0.5px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-elevated);
+  font-size: 13px;
+  color: var(--color-text-sub);
+}
+.agent-resume-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-resume-text code { color: var(--color-text); }
 .agent-followup {
   display: flex;
   gap: 10px;

@@ -7,10 +7,13 @@ import { useProviderStatusStore } from "@/lib/store";
 import {
   createAgentTask,
   followUpAgent,
+  listAgents,
   resolveApproval,
+  resumeAgent,
   stopAgent,
   streamAgentEvents,
   type AgentEvent,
+  type AgentSummary,
 } from "@/lib/agents";
 
 /**
@@ -171,6 +174,50 @@ export default function AgentPage() {
     if (agentId) void stopAgent(agentId);
   }, [agentId]);
 
+  // P6 — session resume: the gateway recovers non-terminal runs from
+  // ~/.zintus/agents on startup as "interrupted". Offer the newest one from
+  // the last 24h; Resume re-enters the loop from its checkpoint and the full
+  // backlog replay reconstructs the panel.
+  const [resumable, setResumable] = useState<AgentSummary | null>(null);
+  useEffect(() => {
+    void listAgents().then((all) => {
+      const candidate = all
+        .filter(
+          (a) =>
+            a.status === "interrupted" &&
+            Date.now() - a.created_at < 24 * 60 * 60 * 1000,
+        )
+        .sort((a, b) => b.created_at - a.created_at)[0];
+      setResumable(candidate ?? null);
+    });
+  }, []);
+  const resume = useCallback(async () => {
+    if (!resumable || running) return;
+    setResumable(null);
+    setError(null);
+    setEvents([]);
+    setTask(resumable.task);
+    setAgentId(resumable.id);
+    setRunning(true);
+    try {
+      await resumeAgent(resumable.id);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      await streamAgentEvents(
+        resumable.id,
+        (e) => setEvents((prev) => [...prev, e]),
+        controller.signal,
+      );
+    } catch (err) {
+      if (!abortRef.current?.signal.aborted) {
+        setError(err instanceof Error ? err.message : "Resume failed");
+      }
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  }, [resumable, running]);
+
   // P2 — follow-up in the SAME session (default after done/stopped). The panel
   // never clears: we re-subscribe and the gateway replays the FULL multi-
   // exchange backlog (exchange-stamped), which reconstructs history + streams
@@ -232,6 +279,23 @@ export default function AgentPage() {
       ) : null}
 
       <div className="agent-body">
+        {resumable && runState === "idle" ? (
+          <div className="agent-resume">
+            <span className="agent-resume-text">
+              Resume last session? <code>{resumable.task}</code>
+            </span>
+            <button type="button" className="agent-launch-btn" onClick={() => void resume()}>
+              Resume
+            </button>
+            <button
+              type="button"
+              className="agent-relaunch"
+              onClick={() => setResumable(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {launchOpen ? (
           <section className="agent-launch">
             <label className="agent-field">
