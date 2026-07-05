@@ -244,16 +244,17 @@ body {
   display: none;
 }
 :root[data-platform="mac"] .strip-toggle {
-  /* Claude-tight: lights end ≈64px in; button hugs them, vertically centered
-     on the lights' axis (lights center ≈21px; 30px button → top 6px). */
+  /* Claude-tight: lights end ≈60px in. The overlay titlebar keeps the
+     lights on the DEFAULT title-bar axis — center ≈14px, not the strip's
+     midline (user-measured) — so a 28px button starts at top 0. */
   position: fixed;
-  top: 6px;
-  left: 70px;
+  top: 0;
+  left: 68px;
   z-index: 210;
   display: grid;
   place-items: center;
   width: 32px;
-  height: 30px;
+  height: 28px;
   padding: 0;
   border: none;
   border-radius: 7px;
