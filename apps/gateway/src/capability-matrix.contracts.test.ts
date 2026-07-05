@@ -145,4 +145,29 @@ describe("capability contract matrix — gating mirrors the registry for all pro
     // The resolved vision model was pinned into the request.
     expect(body.model).toBe("moondream:latest");
   });
+
+  // AUTO image routing falls back to the installed local vision model when no
+  // static vision candidate is eligible (e.g. no Gemini key): the router's
+  // unsupported_capability is retried once via ollama before any 422. Without
+  // an installed local vision model the honest 422 stands (matrix loop above +
+  // handler tests cover that via the null default).
+  test("auto: image request with no vision candidate falls back to local vision", async () => {
+    const gw = await createTestGateway({
+      providers: [
+        createMockProvider({
+          id: "ollama",
+          content: '{"ok":true}',
+          defaultModel: MODEL_CAPABILITIES.ollama.model,
+        }),
+      ],
+      localVisionModel: async () => "moondream:latest",
+    });
+    cleanup = gw.cleanup;
+    // No `provider` → auto routing; the only candidate (ollama) is statically
+    // non-vision, so the router throws and the gateway retries via local vision.
+    const res = await gw.handler(chatRequest({ messages: IMAGE_MESSAGES }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { model?: string };
+    expect(body.model).toBe("moondream:latest");
+  });
 });

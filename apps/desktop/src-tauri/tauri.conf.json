@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; connect-src 'self' https://relay.zintus.ai https://releases.zintus.ai http://localhost:8788 http://localhost:8787 https://*.groq.com https://*.googleapis.com https://api.cohere.ai https://api.mistral.ai https://api.deepseek.com https://openrouter.ai https://api.cerebras.ai https://api.fireworks.ai https://api.x.ai"
+      "csp": "default-src 'self'; script-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://relay.zintus.ai https://releases.zintus.ai http://localhost:8788 http://localhost:8787 https://*.groq.com https://*.googleapis.com https://api.cohere.ai https://api.mistral.ai https://api.deepseek.com https://openrouter.ai https://api.cerebras.ai https://api.fireworks.ai https://api.x.ai"
     }
   },
   "bundle": {

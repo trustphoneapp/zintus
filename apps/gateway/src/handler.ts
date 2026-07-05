@@ -1454,8 +1454,10 @@ export function createGatewayHandler(
     let capturedUsage: RouteUsage | undefined;
 
     let result: Awaited<ReturnType<Engine["routeAndStream"]>>;
-    try {
-      result = await withTimeout(
+    // One routing attempt. `overrides` lets the local-vision fallback below
+    // retry the SAME request pinned to an installed multimodal Ollama model.
+    const routeOnce = (overrides?: { provider?: ProviderId; model?: string }) =>
+      withTimeout(
         engine.routeAndStream({
           signal: upstreamAbort.signal,
           onUsage: (usage) => {
@@ -1471,8 +1473,8 @@ export function createGatewayHandler(
                     content: body.message.content,
                   }
                 : undefined,
-          model: effectiveModel,
-          provider: routing.provider,
+          model: overrides?.model ?? effectiveModel,
+          provider: overrides?.provider ?? routing.provider,
           mode: body.mode,
           threadId: body.thread_id,
           webSearch: nativeWebSearch,
@@ -1498,17 +1500,22 @@ export function createGatewayHandler(
         }),
         requestTimeoutMs,
       );
+    const timeout408 = (error: RequestTimeoutError) => {
+      // Abort the (still-pending) upstream connect so the socket and the
+      // in-flight reservation are released rather than leaked.
+      upstreamAbort.abort();
+      log("warn", "chat.timeout", { requestId });
+      return json(
+        request,
+        { error: { message: redactSecrets(error.message) } },
+        408,
+      );
+    };
+    try {
+      result = await routeOnce();
     } catch (error) {
       if (error instanceof RequestTimeoutError) {
-        // Abort the (still-pending) upstream connect so the socket and the
-        // in-flight reservation are released rather than leaked.
-        upstreamAbort.abort();
-        log("warn", "chat.timeout", { requestId });
-        return json(
-          request,
-          { error: { message: redactSecrets(error.message) } },
-          408,
-        );
+        return timeout408(error);
       }
       // The router rejected the request because no candidate had the required
       // capability (auto-routing case). The same "unsupported_capability" Error
@@ -1517,15 +1524,37 @@ export function createGatewayHandler(
       // the structured error; a tools-only request (tools present, no images) maps
       // to the tools error; anything involving an image maps to the vision error.
       if (error instanceof Error && error.message === "unsupported_capability") {
-        const body422 =
-          wantsStrictSchema && !hasImages && !wantsTools
-            ? UNSUPPORTED_STRUCTURED_ERROR
-            : wantsTools && !hasImages
-              ? UNSUPPORTED_TOOLS_ERROR
-              : UNSUPPORTED_VISION_ERROR;
-        return json(request, body422, 422);
+        // Auto-routed image request with no eligible vision candidate: before
+        // giving up, resolve an INSTALLED local vision model (the same runtime
+        // resolution the explicit-ollama gate uses) and retry once via ollama.
+        // A machine with llava/moondream serves "Auto + image" locally with
+        // zero vision API keys; without one, the honest 422 below stands.
+        if (hasImages && !routing.provider) {
+          const vision = await localVisionModel();
+          if (vision) {
+            try {
+              result = await routeOnce({ provider: "ollama", model: vision });
+            } catch (retryError) {
+              if (retryError instanceof RequestTimeoutError) {
+                return timeout408(retryError);
+              }
+              return json(request, UNSUPPORTED_VISION_ERROR, 422);
+            }
+          } else {
+            return json(request, UNSUPPORTED_VISION_ERROR, 422);
+          }
+        } else {
+          const body422 =
+            wantsStrictSchema && !hasImages && !wantsTools
+              ? UNSUPPORTED_STRUCTURED_ERROR
+              : wantsTools && !hasImages
+                ? UNSUPPORTED_TOOLS_ERROR
+                : UNSUPPORTED_VISION_ERROR;
+          return json(request, body422, 422);
+        }
+      } else {
+        throw error;
       }
-      throw error;
     }
 
     const metaHeaders: Record<string, string> = {
