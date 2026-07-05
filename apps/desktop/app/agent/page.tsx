@@ -92,6 +92,39 @@ export default function AgentPage() {
     return typeof r?.round === "number" ? r.round + 1 : 0;
   }, [events]);
 
+  // One-line live activity while running (P3): the most recent tool_call that
+  // has no matching tool_result yet, phrased as a present-tense action;
+  // otherwise the model is generating. Disappears when the run ends.
+  const activity = useMemo(() => {
+    if (runState !== "running") return null;
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const e = events[i]!;
+      if (e.type === "tool_result") break; // last call resolved → model's turn
+      if (e.type === "tool_call") {
+        const args = (e.arguments ?? {}) as Record<string, unknown>;
+        const p = typeof args.path === "string" ? args.path : "";
+        switch (e.tool) {
+          case "read_file":
+            return `Reading ${p || "a file"}…`;
+          case "write_file":
+          case "edit_file":
+            return `Writing ${p || "a file"}…`;
+          case "list_directory":
+            return `Listing ${p || "the workspace"}…`;
+          case "search_code":
+            return `Searching for ${typeof args.query === "string" ? `"${args.query}"` : "code"}…`;
+          case "run_command":
+            return `Running: ${typeof args.command === "string" ? args.command : "a command"}…`;
+          case "browse":
+            return `Browsing ${typeof args.url === "string" ? args.url : "the web"}…`;
+          default:
+            return `Waiting for ${String(e.tool)} result…`;
+        }
+      }
+    }
+    return "Thinking…";
+  }, [events, runState]);
+
   const start = useCallback(async () => {
     if (!task.trim() || running) return;
     // Tool-capability gate: block the launch outright on a non-tool model —
@@ -160,6 +193,11 @@ export default function AgentPage() {
           </button>
         ) : null}
       </div>
+      {activity ? (
+        <p className="agent-activity" aria-live="polite">
+          {activity}
+        </p>
+      ) : null}
 
       <div className="agent-body">
         {launchOpen ? (
