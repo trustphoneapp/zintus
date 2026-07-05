@@ -35,6 +35,9 @@ export interface CreateAgentTask {
   sandbox?: boolean;
   /** Offer the read-only browser tool (needs Playwright on the gateway host). */
   browse?: boolean;
+  /** Explicit provider pin from the model picker; undefined = Auto (router
+   *  picks among tool-capable providers). */
+  provider?: string;
 }
 
 export async function createAgentTask(body: CreateAgentTask): Promise<string> {

@@ -1,6 +1,7 @@
 import type {
   ChatMessage,
   ContextMode,
+  ProviderId,
   RoutingStrategy,
   ToolDefinition,
 } from "@zintus/types";
@@ -22,16 +23,21 @@ export function buildAgentRouteRequest(opts: {
   mode: ContextMode;
   tools: ToolDefinition[];
   strategy: RoutingStrategy | "weighted";
+  /** Explicit provider pin (agent UI model picker); undefined = router picks
+   *  among tool-capable candidates. */
+  provider?: ProviderId;
 }): {
   messages: ChatMessage[];
   mode: ContextMode;
   tools: ToolDefinition[];
   strategy: RoutingStrategy | "weighted";
+  provider?: ProviderId;
 } {
   return {
     messages: opts.messages,
     mode: opts.mode,
     tools: opts.tools,
     strategy: opts.strategy,
+    ...(opts.provider ? { provider: opts.provider } : {}),
   };
 }

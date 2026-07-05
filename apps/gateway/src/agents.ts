@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import type { ChatMessage, RoutingStrategy, ContextMode } from "@zintus/types";
+import type { ChatMessage, ProviderId, RoutingStrategy, ContextMode } from "@zintus/types";
 import {
   AGENT_TOOL_DEFINITIONS,
   DEFAULT_AGENT_ROUNDS,
@@ -142,6 +142,9 @@ export interface CreateAgentTaskBody {
   browseAllowPrivate?: boolean;
   strategy?: RoutingStrategy | "weighted";
   mode?: ContextMode;
+  /** Explicit provider pin from the agent UI's model picker. The router still
+   *  hard-errors (unsupported_capability) if the pin can't serve tools. */
+  provider?: ProviderId;
 }
 
 /** The minimal engine surface the agent host needs (structural, test-friendly). */
@@ -151,6 +154,7 @@ export interface AgentEngine {
     mode?: ContextMode;
     tools?: unknown;
     strategy?: RoutingStrategy | "weighted";
+    provider?: ProviderId;
   }): Promise<ToolLoopTurn & { threadId?: string }>;
 }
 
@@ -507,6 +511,7 @@ export class AgentTaskManager {
             mode: body.mode ?? "smart",
             tools: toolDefinitions,
             strategy: body.strategy ?? "balanced",
+            provider: body.provider,
           }),
         );
       },

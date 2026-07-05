@@ -1,6 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ProviderId } from "@zintus/types";
+import { PROVIDER_METADATA, supportsTools } from "@zintus/providers";
+import { useProviderStatusStore } from "@/lib/store";
 import {
   createAgentTask,
   resolveApproval,
@@ -34,6 +37,19 @@ export default function AgentPage() {
   const [sandbox, setSandbox] = useState(false);
   const [browse, setBrowse] = useState(false);
   const [autoApprove, setAutoApprove] = useState(false);
+  // Model picker: "" = Auto (router picks among TOOL-CAPABLE providers only).
+  // Non-tool providers are listed but disabled — agent turns are tool loops,
+  // and a model that can't call tools just narrates pseudocode.
+  const [agentProvider, setAgentProvider] = useState<ProviderId | "">("");
+  const { providers, refresh: refreshProviders } = useProviderStatusStore();
+  useEffect(() => {
+    void refreshProviders();
+  }, [refreshProviders]);
+  const connectedProviders = providers.filter((entry) =>
+    entry.id === "ollama" || entry.id === "lmstudio" ? entry.enabled : entry.hasKey,
+  );
+  const providerToolBlocked =
+    agentProvider !== "" && !supportsTools(agentProvider);
   const [agentId, setAgentId] = useState<string | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [running, setRunning] = useState(false);
@@ -78,6 +94,14 @@ export default function AgentPage() {
 
   const start = useCallback(async () => {
     if (!task.trim() || running) return;
+    // Tool-capability gate: block the launch outright on a non-tool model —
+    // the run would produce narration, not work (live-tested failure mode).
+    if (agentProvider !== "" && !supportsTools(agentProvider)) {
+      setError(
+        "This model can't use tools. Agent tasks need a tool-capable model. Switch to Gemini, Claude, or a cloud model.",
+      );
+      return;
+    }
     setEvents([]);
     setError(null);
     setRunning(true);
@@ -89,6 +113,7 @@ export default function AgentPage() {
         autoApprove,
         sandbox: allowRun ? sandbox : false,
         browse,
+        provider: agentProvider || undefined,
       });
       setAgentId(id);
       const controller = new AbortController();
@@ -106,7 +131,7 @@ export default function AgentPage() {
       setRunning(false);
       abortRef.current = null;
     }
-  }, [task, root, allowRun, sandbox, browse, autoApprove, running]);
+  }, [task, root, allowRun, sandbox, browse, autoApprove, running, agentProvider]);
 
   const stop = useCallback(() => {
     if (agentId) void stopAgent(agentId);
@@ -159,6 +184,32 @@ export default function AgentPage() {
               />
             </label>
 
+            <label className="agent-field">
+              <span className="agent-field-label">Model</span>
+              <select
+                className="agent-root-input"
+                value={agentProvider}
+                onChange={(e) => setAgentProvider(e.target.value as ProviderId | "")}
+              >
+                <option value="">Auto — router picks a tool-capable model</option>
+                {connectedProviders.map((p) => {
+                  const toolCapable = supportsTools(p.id);
+                  return (
+                    <option key={p.id} value={p.id} disabled={!toolCapable}>
+                      {PROVIDER_METADATA[p.id]?.name ?? p.id}
+                      {toolCapable ? "" : " — not compatible with agent mode (no tool use)"}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
+            {providerToolBlocked ? (
+              <p className="agent-error">
+                This model can&apos;t use tools. Agent tasks need a tool-capable
+                model. Switch to Gemini, Claude, or a cloud model.
+              </p>
+            ) : null}
+
             <div className="agent-switches">
               <Switch checked={allowRun} onChange={setAllowRun} label="Run verify commands" hint="bun test / typecheck" />
               <Switch checked={sandbox} onChange={setSandbox} disabled={!allowRun} label="Docker sandbox" hint="isolate commands" />
@@ -171,9 +222,13 @@ export default function AgentPage() {
                 type="button"
                 className="agent-launch-btn"
                 onClick={() => void start()}
-                disabled={!armed}
+                disabled={!armed || providerToolBlocked}
               >
-                {armed ? "Launch agent" : "Enter a task to launch"}
+                {providerToolBlocked
+                  ? "Switch to a tool-capable model"
+                  : armed
+                    ? "Launch agent"
+                    : "Enter a task to launch"}
               </button>
               <p className="agent-launch-note">
                 Runs on this machine, sandboxed to the root above. Docker and the

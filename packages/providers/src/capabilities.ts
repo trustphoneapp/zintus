@@ -80,7 +80,12 @@ export const MODEL_CAPABILITIES: Record<ProviderId, ModelCapabilities> = {
   cerebras:    { model: "llama-3.3-70b",                                     contextWindow: 128_000,   vision: false, tools: true,  json: true,  structuredOutput: "json_object", capabilityTier: 9 },
   groq:        { model: "llama-3.3-70b-versatile",                           contextWindow: 128_000,   vision: false, tools: true,  json: true,  structuredOutput: "json_object", capabilityTier: 10 },
   lmstudio:    { model: "local-model",                                       contextWindow: 32_000,    vision: false, tools: false, json: false, structuredOutput: "none",        capabilityTier: 98 },
-  ollama:      { model: "llama3.3",                                          contextWindow: 128_000,   vision: false, tools: true,  json: true,  structuredOutput: "json_object", capabilityTier: 99 },
+  // ollama `tools: false` is deliberate HONESTY, not a model limitation: the
+  // adapter (providers/ollama.ts) does not forward a `tools` field to /api/chat,
+  // so a tools-bearing request routed here silently drops its tools and the
+  // model narrates pseudocode instead of calling anything (bit the agent in
+  // live testing). Flip back only WITH tool passthrough + tool_call parsing.
+  ollama:      { model: "llama3.3",                                          contextWindow: 128_000,   vision: false, tools: false, json: true,  structuredOutput: "json_object", capabilityTier: 99 },
 };
 
 /** Default-model capabilities for a provider (undefined for an unknown id). */
