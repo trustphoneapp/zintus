@@ -195,7 +195,10 @@ const SEEDS: ReadonlyArray<readonly [ProviderId, CatalogSeed]> = [
 
   // ── Local runtimes (no per-token price; flags fail closed for specific ids) ──
   ["lmstudio", { id: "local-model", displayName: "Local Model (LM Studio)", contextWindow: 32_000, vision: false, tools: false, structuredOutput: "none", free: true }],
-  ["ollama", { id: "llama3.3", displayName: "Llama 3.3", contextWindow: 128_000, vision: false, tools: true, structuredOutput: "json_object", free: true }],
+  // tools:false mirrors capabilities.ts — deliberate honesty: the ollama
+  // adapter does not forward tool schemas, so advertising tools here would
+  // sell a silent no-op. Flip both sides together WITH adapter passthrough.
+  ["ollama", { id: "llama3.3", displayName: "Llama 3.3", contextWindow: 128_000, vision: false, tools: false, structuredOutput: "json_object", free: true }],
 
   // Providers added after 2026-07-02 declare seeds in manifest.ts; the same
   // conservative-flag contract applies and catalog.test.ts enforces it.
