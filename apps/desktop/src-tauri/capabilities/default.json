@@ -7,6 +7,14 @@
   ],
   "permissions": [
     "core:default",
+    {
+      "identifier": "core:window:allow-minimize",
+      "comment": "Custom caption buttons on the undecorated Windows build (WindowControls.tsx); Tauri's Overlay titlebar is macOS-only."
+    },
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
     "pty:default",
     "dialog:allow-save",
     {

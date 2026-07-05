@@ -38,7 +38,8 @@ import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { listProjects } from "@/lib/projects";
 import { saveTextFile } from "@/lib/download";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
-import { useShortcutGlyphs } from "@/lib/platform";
+import { isMacPlatform, useShortcutGlyphs } from "@/lib/platform";
+import { WindowControls } from "./WindowControls";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
 import { formatSpend, getBudgetUsd, onSpendChange, todaySpendUsd } from "@/lib/spend";
 import { OnboardingOverlay } from "./OnboardingOverlay";
@@ -103,14 +104,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [online, setOnline] = useState(true);
   const [checked, setChecked] = useState(false);
 
-  // Platform chrome: macOS overlays traffic lights over the sidebar top-left;
-  // Windows/Linux overlay native caption buttons top-RIGHT instead, so the
-  // top bar reserves space there and the lights strip shrinks. Detected after
-  // mount (SSR renders the macOS layout; the swap is a benign reflow).
-  const [isMac, setIsMac] = useState(true);
-  useEffect(() => {
-    setIsMac(/Mac/i.test(navigator.platform));
-  }, []);
+  // Platform chrome (strip height, caption buttons, top-bar padding) is pure
+  // CSS keyed on <html data-platform> — stamped pre-paint by
+  // PLATFORM_INIT_SCRIPT, so every OS's first frame is already correct.
+  // (The old isMac state defaulted true and reflowed on Windows/Linux.)
 
   // Top-bar state: sidebar collapse (persisted), theme, Private Mode, spend.
   const [collapsed, setCollapsed] = useState(false);
@@ -304,6 +301,18 @@ export function AppShell({ children }: { children: ReactNode }) {
       } else if (e.key === "/") {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent("zintus:shortcuts"));
+      } else if ((e.key === "w" || e.key === "W") && !isMacPlatform()) {
+        // macOS gets Cmd+W from the native menu; the undecorated Windows
+        // build (and Linux) needs the chord wired by hand (R6 item 4).
+        e.preventDefault();
+        void (async () => {
+          try {
+            const { getCurrentWindow } = await import("@tauri-apps/api/window");
+            await getCurrentWindow().close();
+          } catch {
+            /* plain-browser dev — nothing to close */
+          }
+        })();
       }
     }
     window.addEventListener("keydown", onKey);
@@ -331,12 +340,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           minHeight: 0,
         }}
       >
-        {/* Titlebar zone: traffic lights float here (overlay titlebar); the
-            strip is the window drag region. */}
-        <div
-          data-tauri-drag-region
-          style={{ height: isMac ? 44 : 12, flexShrink: 0 }}
-        />
+        {/* Titlebar zone: mac traffic lights float here (overlay titlebar);
+            on the undecorated Windows build it is part of the drag surface.
+            Height is CSS per data-platform (.titlebar-strip). */}
+        <div data-tauri-drag-region className="titlebar-strip" />
 
         {/* Brand + gateway heartbeat */}
         <div
@@ -998,17 +1005,19 @@ export function AppShell({ children }: { children: ReactNode }) {
       {/* ── Main pane ──────────────────────────────────────────────────── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
         {/* Top bar (Light.dc): collapse · [⌘K trigger lands in S3] · privacy
-            shield · spend · theme. Doubles as the window drag region. */}
+            shield · spend · theme. Doubles as the window drag region. The
+            custom Windows caption buttons are fixed top-right; .app-topbar
+            reserves their room per data-platform (globals.css). */}
+        <WindowControls />
         <div
           data-tauri-drag-region
+          className="app-topbar"
           style={{
             height: 52,
             flexShrink: 0,
             display: "flex",
             alignItems: "center",
             gap: 8,
-            // Non-mac: leave room for the OS caption buttons overlaid top-right.
-            padding: isMac ? "0 14px" : "0 150px 0 14px",
             borderBottom: "1px solid var(--color-border)",
           }}
         >

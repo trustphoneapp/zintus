@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono } from "next/font/google";
 import { AppShell } from "./_components/AppShell";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import { HAIRLINE_INIT_SCRIPT } from "@/lib/hairline";
+import { PLATFORM_INIT_SCRIPT } from "@/lib/platform-init";
 import "./globals.css";
 
 const inter = Inter({
@@ -42,6 +43,9 @@ export default function RootLayout({
         {/* Sets --hairline to exactly one device pixel before first paint and
             tracks monitor/scale changes (fractional Windows dPRs — R2). */}
         <script dangerouslySetInnerHTML={{ __html: HAIRLINE_INIT_SCRIPT }} />
+        {/* Stamps data-platform (mac|windows|linux) pre-paint; platform chrome
+            is CSS keyed on it — no wrong-OS first frame (R6 item 1). */}
+        <script dangerouslySetInnerHTML={{ __html: PLATFORM_INIT_SCRIPT }} />
       </head>
       <body>
         <AppShell>{children}</AppShell>

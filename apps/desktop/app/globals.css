@@ -166,6 +166,61 @@ body {
   }
 }
 
+/* ── Platform chrome ─────────────────────────────────────────────────────────
+   data-platform is stamped on <html> pre-paint by PLATFORM_INIT_SCRIPT
+   (lib/platform-init.ts). Layout that differs per OS lives HERE, not in JS
+   state — first paint is already correct on every platform (R1/R6).
+   mac: 44px strip under the overlay traffic lights. windows: undecorated
+   window (tauri.windows.conf.json) → 12px drag strip + custom caption buttons
+   top-right (Fluent 46×32 targets, Zintus colors). linux: native titlebar
+   kept (R1 decision) → 12px strip, no reserved corners. */
+.titlebar-strip {
+  height: 12px;
+  flex-shrink: 0;
+}
+:root[data-platform="mac"] .titlebar-strip {
+  height: 44px;
+}
+.app-topbar {
+  padding: 0 14px;
+}
+:root[data-platform="windows"] .app-topbar {
+  /* keep the top bar's own controls clear of the fixed caption buttons */
+  padding-right: 152px;
+}
+.win-controls {
+  display: none;
+}
+:root[data-platform="windows"] .win-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+}
+.win-control {
+  width: 46px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text-sub);
+  cursor: default;
+}
+.win-control:hover {
+  background: var(--color-elevated);
+  color: var(--color-text);
+  filter: none;
+}
+.win-control-close:hover {
+  /* the one conventional deviation: Windows users expect the red close */
+  background: #c42b1c;
+  color: #ffffff;
+}
+
 a {
   color: var(--color-purple-bright);
 }
