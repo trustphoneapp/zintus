@@ -736,9 +736,15 @@ export class AgentTaskManager {
         this.emit(t, { type: "stopped", rounds: t.rounds });
       } else {
         t.status = "error";
+        const raw = error instanceof Error ? error.message : String(error);
         this.emit(t, {
           type: "error",
-          message: error instanceof Error ? error.message : String(error),
+          // The router's capability rejection is jargon to a user — say what
+          // to actually do (agents are tool loops; they need a tool provider).
+          message:
+            raw === "unsupported_capability"
+              ? "No connected model can use tools. Agent tasks need a tool-capable provider — add a Groq or Gemini key on the Models page."
+              : raw,
         });
       }
     } finally {
