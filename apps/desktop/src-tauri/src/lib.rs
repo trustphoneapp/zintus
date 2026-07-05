@@ -29,7 +29,23 @@ const GATEWAY_PORT: u16 = 8788;
 struct GatewaySidecar(Mutex<Option<CommandChild>>);
 
 fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
-  Entry::new(SERVICE, provider_id).map_err(|error| error.to_string())
+  Entry::new(SERVICE, provider_id).map_err(keyring_error)
+}
+
+/// Human-readable keyring failures. On Linux the common real-world failure is
+/// no Secret Service on the bus (minimal WMs, headless sessions) — say what to
+/// install instead of surfacing a D-Bus error string (R6 item 11).
+fn keyring_error(error: keyring::Error) -> String {
+  #[cfg(all(unix, not(target_os = "macos")))]
+  if matches!(
+    error,
+    keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
+  ) {
+    return format!(
+      "no secure key storage available — enable GNOME Keyring or KWallet (Secret Service) and retry ({error})"
+    );
+  }
+  error.to_string()
 }
 
 #[tauri::command]
@@ -37,7 +53,7 @@ fn keyring_get(provider_id: String) -> Result<Option<String>, String> {
   match keyring_entry(&provider_id)?.get_password() {
     Ok(value) => Ok(Some(value)),
     Err(keyring::Error::NoEntry) => Ok(None),
-    Err(error) => Err(error.to_string()),
+    Err(error) => Err(keyring_error(error)),
   }
 }
 
@@ -45,7 +61,7 @@ fn keyring_get(provider_id: String) -> Result<Option<String>, String> {
 fn keyring_set(provider_id: String, key: String) -> Result<(), String> {
   keyring_entry(&provider_id)?
     .set_password(&key)
-    .map_err(|error| error.to_string())
+    .map_err(keyring_error)
 }
 
 #[tauri::command]
@@ -53,27 +69,22 @@ fn keyring_delete(provider_id: String) -> Result<(), String> {
   match keyring_entry(&provider_id)?.delete_credential() {
     Ok(()) => Ok(()),
     Err(keyring::Error::NoEntry) => Ok(()),
-    Err(error) => Err(error.to_string()),
+    Err(error) => Err(keyring_error(error)),
   }
 }
 
 /// Open an external URL in the user's default browser (cloud sign-in, Stripe
-/// checkout, provider key consoles). https-only, passed as a single argv (no
-/// shell interpolation) — the webview can never launch arbitrary programs.
+/// checkout, provider key consoles). https-only — the webview can never launch
+/// arbitrary programs; this command is the only opener the frontend gets.
+/// Delegates to the official opener plugin (ShellExecuteW on Windows — the old
+/// hand-rolled `rundll32 url.dll` path was legacy and breaks on hardened
+/// systems; `open`/`xdg-open` equivalents elsewhere — R6 item 9).
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
   if !url.starts_with("https://") {
     return Err("only https URLs can be opened".to_string());
   }
-  #[cfg(target_os = "macos")]
-  let result = std::process::Command::new("open").arg(&url).spawn();
-  #[cfg(target_os = "windows")]
-  let result = std::process::Command::new("rundll32")
-    .args(["url.dll,FileProtocolHandler", &url])
-    .spawn();
-  #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-  let result = std::process::Command::new("xdg-open").arg(&url).spawn();
-  result.map(|_| ()).map_err(|error| error.to_string())
+  tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|error| error.to_string())
 }
 
 /// Resolve a sensible default shell per OS for the embedded terminal. The
@@ -84,7 +95,13 @@ fn open_external(url: String) -> Result<(), String> {
 fn default_shell() -> String {
   #[cfg(target_os = "windows")]
   {
-    std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
+    // NOT %COMSPEC%: it always points at cmd.exe, a poor default terminal.
+    // Windows PowerShell ships at a fixed path on every supported Windows;
+    // cmd stays the last-resort fallback (R6 item 8).
+    match std::env::var("SystemRoot") {
+      Ok(root) => format!("{root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+      Err(_) => std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into()),
+    }
   }
   #[cfg(target_os = "macos")]
   {
@@ -150,6 +167,9 @@ pub fn run() {
     // signing keys, and createUpdaterArtifacts: true.
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
+    // Only reachable through the https-gated open_external command below —
+    // no JS-side opener capability is granted.
+    .plugin(tauri_plugin_opener::init())
     .manage(GatewaySidecar(Mutex::new(None)))
     .invoke_handler(tauri::generate_handler![
       keyring_get,
