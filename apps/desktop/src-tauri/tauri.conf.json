@@ -15,8 +15,8 @@
         "title": "Zintus",
         "width": 1280,
         "height": 840,
-        "minWidth": 960,
-        "minHeight": 640,
+        "minWidth": 520,
+        "minHeight": 560,
         "dragDropEnabled": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true

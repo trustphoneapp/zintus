@@ -113,6 +113,27 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   // Top-bar state: sidebar collapse (persisted), theme, Private Mode, spend.
   const [collapsed, setCollapsed] = useState(false);
+
+  // Responsive shell (docs/desktop/RESPONSIVE-LAYOUT.md): window width picks
+  // the sidebar mode — full (≥1024, user pref honored), icon rail (user-
+  // collapsed or 720-1023), drawer (<720: hidden until the toggle opens it as
+  // a fixed overlay). `collapsed` stays the persisted USER preference;
+  // `compact` is what the rail actually renders right now.
+  const [winW, setWinW] = useState(1280);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  useEffect(() => {
+    const measure = () => setWinW(window.innerWidth);
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  const drawer = winW < 720;
+  const compact = !drawer && (collapsed || winW < 1024);
+  useEffect(() => {
+    // Leaving drawer territory always closes the overlay.
+    if (!drawer) setDrawerOpen(false);
+  }, [drawer]);
+
   const [theme, setTheme] = useState<"light" | "dark">("dark");
   const [spend, setSpend] = useState(0);
   const { settings, update: updateSettings, hydrate: hydrateSettings } = useSettingsStore();
@@ -144,6 +165,13 @@ export function AppShell({ children }: { children: ReactNode }) {
       localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
       return next;
     });
+  }
+
+  /** One toggle, mode-aware: drawer windows open/close the overlay; larger
+   * windows flip the persisted collapse preference. */
+  function toggleSidebar() {
+    if (drawer) setDrawerOpen((open) => !open);
+    else toggleCollapsed();
   }
 
   const {
@@ -336,14 +364,27 @@ export function AppShell({ children }: { children: ReactNode }) {
       <CommandPalette />
       <ShortcutsOverlay />
 
-      {/* ── Sidebar: the app frame ─────────────────────────────────────── */}
+      {/* ── Sidebar: the app frame ──────────────────────────────────────
+          full ≥1024 (pref honored) · icon rail 720-1023 or user-collapsed ·
+          drawer <720 (hidden; toggle opens a fixed overlay, Claude-style). */}
+      {!drawer || drawerOpen ? (
       <aside
         style={{
-          width: collapsed ? 56 : 236,
+          width: drawer ? 236 : compact ? 56 : 236,
           transition: "width 180ms ease",
           flexShrink: 0,
           display: "flex",
           flexDirection: "column",
+          ...(drawer
+            ? {
+                position: "fixed",
+                top: 0,
+                bottom: 0,
+                left: 0,
+                zIndex: 150,
+                boxShadow: "var(--shadow-float)",
+              }
+            : null),
           background: "var(--color-surface)",
           borderRight: "1px solid var(--color-border)",
           minHeight: 0,
@@ -360,13 +401,13 @@ export function AppShell({ children }: { children: ReactNode }) {
           style={{
             display: "flex",
             alignItems: "center",
-            justifyContent: collapsed ? "center" : "flex-start",
+            justifyContent: compact ? "center" : "flex-start",
             gap: 8,
-            padding: collapsed ? "0 0 10px" : "0 14px 10px",
+            padding: compact ? "0 0 10px" : "0 14px 10px",
           }}
         >
           <ZintusLogo size={26} />
-          {!collapsed ? (
+          {!compact ? (
           <span
             style={{
               fontSize: 16,
@@ -427,7 +468,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             }}
           >
             <Plus size={14} />
-            {!collapsed ? (
+            {!compact ? (
               <>
                 New chat
                 <span
@@ -446,7 +487,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         {/* Primary nav */}
-        {!collapsed ? (
+        {!compact ? (
           <div
             style={{
               fontSize: 10,
@@ -474,9 +515,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  justifyContent: collapsed ? "center" : "flex-start",
+                  justifyContent: compact ? "center" : "flex-start",
                   gap: 10,
-                  padding: collapsed ? "8px 0" : "7px 10px",
+                  padding: compact ? "8px 0" : "7px 10px",
                   borderRadius: 7,
                   fontSize: 13,
                   fontWeight: active ? 600 : 500,
@@ -493,10 +534,10 @@ export function AppShell({ children }: { children: ReactNode }) {
                       : "var(--color-text-muted)",
                   }}
                 />
-                {!collapsed ? item.label : null}
+                {!compact ? item.label : null}
               </Link>
             );
-            return collapsed ? (
+            return compact ? (
               <Tooltip key={item.href} content={item.label} side="right">
                 {link}
               </Tooltip>
@@ -506,12 +547,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           })}
         </nav>
 
-        {/* History (hidden in the collapsed icon rail) */}
+        {/* History (hidden in the compact icon rail) */}
         <div
           style={{
             flex: 1,
             minHeight: 0,
-            display: collapsed ? "none" : "flex",
+            display: compact ? "none" : "flex",
             flexDirection: "column",
             padding: "2px 10px 6px",
             borderTop: "1px solid var(--color-border)",
@@ -730,7 +771,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         {/* Rail mode: keep the footer pinned to the bottom while History is hidden. */}
-        {collapsed ? <div style={{ flex: 1 }} /> : null}
+        {compact ? <div style={{ flex: 1 }} /> : null}
 
         {/* Account footer — avatar, name/plan, gateway heartbeat, popover menu. */}
         <div
@@ -739,7 +780,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             position: "relative",
             flexShrink: 0,
             borderTop: "1px solid var(--color-border)",
-            padding: collapsed ? "10px 0" : "10px 11px",
+            padding: compact ? "10px 0" : "10px 11px",
           }}
         >
           <button
@@ -751,7 +792,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             style={{
               display: "flex",
               alignItems: "center",
-              justifyContent: collapsed ? "center" : "flex-start",
+              justifyContent: compact ? "center" : "flex-start",
               gap: 9,
               width: "100%",
               padding: 4,
@@ -780,7 +821,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             >
               {authenticated && email ? email.slice(0, 2).toUpperCase() : "·"}
             </span>
-            {!collapsed ? (
+            {!compact ? (
               <>
                 <span
                   style={{
@@ -848,7 +889,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 position: "absolute",
                 bottom: "calc(100% + 6px)",
                 left: 8,
-                right: collapsed ? "auto" : 8,
+                right: compact ? "auto" : 8,
                 zIndex: 50,
               }}
             >
@@ -997,6 +1038,26 @@ export function AppShell({ children }: { children: ReactNode }) {
           ) : null}
         </div>
       </aside>
+      ) : null}
+      {drawer && drawerOpen ? (
+        <div
+          aria-hidden
+          onClick={() => setDrawerOpen(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 140, background: "rgba(0, 0, 0, 0.35)" }}
+        />
+      ) : null}
+
+      {/* macOS: the sidebar toggle sits beside the traffic lights (fixed in
+          the titlebar strip zone; CSS shows it only under data-platform=mac).
+          Windows/Linux keep the toggle first in the top bar. */}
+      <button
+        type="button"
+        className="strip-toggle app-icon-btn"
+        aria-label="Toggle sidebar"
+        onClick={toggleSidebar}
+      >
+        <PanelLeft size={16} />
+      </button>
 
       {/* ── Main pane ──────────────────────────────────────────────────── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
@@ -1017,12 +1078,14 @@ export function AppShell({ children }: { children: ReactNode }) {
             borderBottom: "1px solid var(--color-border)",
           }}
         >
-          <Tooltip content={collapsed ? "Expand sidebar" : "Collapse sidebar"} side="bottom">
+          {/* Hidden on macOS (CSS) — there the toggle sits beside the
+              traffic lights instead, like Claude/Codex desktop. */}
+          <Tooltip content="Toggle sidebar" side="bottom">
             <button
               type="button"
-              onClick={toggleCollapsed}
-              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              className="app-icon-btn"
+              onClick={toggleSidebar}
+              aria-label="Toggle sidebar"
+              className="app-icon-btn topbar-toggle"
               style={{
                 display: "grid",
                 placeItems: "center",
