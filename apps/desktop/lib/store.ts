@@ -46,10 +46,12 @@ export interface ToolCall {
   arguments?: Record<string, unknown>;
 }
 
-/** Image METADATA shown on a sent user bubble. Never carries base64 — the bytes
- *  ride only in the gateway request `content`, never in thread history. The
- *  `previewUrl` is a local object URL of the original picked file (thumbnail only).
- *  Mirrors web's UiImageMeta. */
+/** Image METADATA shown on a sent user bubble. The FULL bytes ride only in the
+ *  gateway request `content`, never in thread history. The `previewUrl` is a
+ *  local object URL of the original picked file — session-scoped, dead after a
+ *  relaunch. `thumb` is the one deliberate exception to "no base64 in history":
+ *  a ≤96px JPEG data URI (a few KB, see lib/thumb.ts) so restored threads keep
+ *  a real preview instead of a broken image. Mirrors web's UiImageMeta. */
 export interface UiImageMeta {
   name: string;
   mimeType: string;
@@ -58,6 +60,7 @@ export interface UiImageMeta {
   height?: number;
   exifStripped: boolean;
   previewUrl?: string;
+  thumb?: string;
 }
 
 export interface ChatMessageUi {

@@ -129,17 +129,47 @@ const VISION_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
   mistral: new Set(["pixtral-large-latest"]),
 };
 
+// Ollama model families verified to accept image input via the native
+// `/api/chat` `images: [base64]` field. Matched against the BASE name (the part
+// before the `:tag`), so `llava:13b` and `moondream:latest` both qualify.
+// Deliberately conservative — a family is added only when Ollama's library
+// documents it as multimodal. Whether such a model is INSTALLED stays a
+// runtime question (the gateway resolves it against `/api/tags`); this list
+// only answers "IF installed, can it see images?".
+const OLLAMA_VISION_FAMILIES = [
+  "llava",
+  "llava-llama3",
+  "llava-phi3",
+  "bakllava",
+  "moondream",
+  "llama3.2-vision",
+  "minicpm-v",
+  "qwen2-vl",
+  "qwen2.5vl",
+  "granite3.2-vision",
+  "gemma3",
+] as const;
+
+/** True when an Ollama model NAME (e.g. "llava:13b") belongs to a documented
+ *  multimodal family. Purely name-based — installation is checked at runtime. */
+export function isOllamaVisionModel(model: string): boolean {
+  const base = model.split(":")[0]?.toLowerCase() ?? "";
+  return (OLLAMA_VISION_FAMILIES as readonly string[]).includes(base);
+}
+
 /**
  * Model-aware vision check.
  * - With a `model`: true ONLY if that specific model is known to accept image
- *   input (never a whole-provider assumption).
+ *   input (never a whole-provider assumption). For ollama the check is
+ *   family-name-based (see OLLAMA_VISION_FAMILIES) — the gateway only pins an
+ *   ollama model here after resolving it against the installed `/api/tags`.
  * - Without a `model` (the provider's default): the default model's `vision`
- *   flag from the registry.
- * Local providers (ollama/lmstudio) return false here — they require a
- * runtime-detected local vision model, decided at the gateway, not statically.
+ *   flag from the registry. Local providers stay false here — a bare provider
+ *   pick needs the runtime-detected vision model, decided at the gateway.
  */
 export function supportsVision(providerId: ProviderId, model?: string): boolean {
   if (model) {
+    if (providerId === "ollama") return isOllamaVisionModel(model);
     return VISION_MODELS[providerId]?.has(model) ?? false;
   }
   return MODEL_CAPABILITIES[providerId]?.vision ?? false;

@@ -113,6 +113,14 @@ describe("providerCanSeeImages — unsupported-provider predicate", () => {
     // an unmapped model id is not assumed vision-capable
     expect(providerCanSeeImages("openrouter", "meta-llama/llama-3.3-70b-instruct:free")).toBe(false);
   });
+
+  test("ollama is allowed through — vision is runtime-resolved at the gateway", () => {
+    // The gateway serves via an installed llava/moondream/… or 422s with a
+    // "what to pull" suggestion; a static false here would block users who DO
+    // have a local vision model. lmstudio has no such runtime path — stays out.
+    expect(providerCanSeeImages("ollama")).toBe(true);
+    expect(providerCanSeeImages("lmstudio")).toBe(false);
+  });
 });
 
 describe("formatImageBytes", () => {

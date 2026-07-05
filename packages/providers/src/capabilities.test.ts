@@ -7,6 +7,7 @@ import {
   supportsVision,
   supportsTools,
   structuredOutputLevel,
+  isOllamaVisionModel,
 } from "./capabilities.js";
 import { DATA_POLICIES } from "./data-policies.js";
 
@@ -54,10 +55,28 @@ describe("model capability registry", () => {
     expect(supportsVision("openrouter", "some-unlisted-model")).toBe(false);
     // xai vision is model-specific and currently UNMAPPED → false
     expect(supportsVision("xai", "grok-2-vision")).toBe(false);
-    // local providers are never globally vision (need runtime detection)
+    // local providers are never GLOBALLY vision — a bare provider pick still
+    // needs the gateway's runtime-resolved installed model
     expect(supportsVision("ollama")).toBe(false);
-    expect(supportsVision("ollama", "llava")).toBe(false);
     expect(supportsVision("lmstudio")).toBe(false);
+    // ollama WITH a model is family-name-based: documented multimodal families
+    // pass, text families fail (installation stays a runtime question)
+    expect(supportsVision("ollama", "llava")).toBe(true);
+    expect(supportsVision("ollama", "llava:13b")).toBe(true);
+    expect(supportsVision("ollama", "moondream:latest")).toBe(true);
+    expect(supportsVision("ollama", "llama3.2-vision")).toBe(true);
+    expect(supportsVision("ollama", "llama3.3")).toBe(false);
+    expect(supportsVision("ollama", "qwen2.5:0.5b")).toBe(false);
+  });
+
+  test("isOllamaVisionModel matches base names case-insensitively, never tags", () => {
+    expect(isOllamaVisionModel("LLaVA:7b")).toBe(true);
+    expect(isOllamaVisionModel("bakllava")).toBe(true);
+    expect(isOllamaVisionModel("gemma3:4b")).toBe(true);
+    expect(isOllamaVisionModel("minicpm-v:8b")).toBe(true);
+    expect(isOllamaVisionModel("llama3.3:latest")).toBe(false);
+    expect(isOllamaVisionModel("mistral")).toBe(false);
+    expect(isOllamaVisionModel("")).toBe(false);
   });
 
   test("supportsTools defaults to the registry tools flag per provider", () => {

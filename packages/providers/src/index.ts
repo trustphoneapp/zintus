@@ -45,9 +45,11 @@ export {
   supportsVision,
   supportsTools,
   structuredOutputLevel,
+  isOllamaVisionModel,
   type ModelCapabilities,
   type StructuredLevel,
 } from "./capabilities.js";
+export { installedLocalVisionModel, toOllamaMessages } from "./providers/ollama.js";
 export {
   PRICING_CATALOG,
   getModelPricing,

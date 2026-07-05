@@ -35,6 +35,10 @@ export interface TestGatewayOptions {
   /** API key resolver (default returns "test-key"; return null to simulate a
    *  provider with no key, i.e. ineligible). */
   getApiKey?: (id: string) => Promise<string | null>;
+  /** Installed-local-vision-model resolver for the gateway's ollama image gate.
+   *  Defaults to `null` (no local vision model) so tests NEVER depend on a live
+   *  Ollama on the host — override to exercise the runtime-resolved path. */
+  localVisionModel?: () => Promise<string | null>;
 }
 
 /**
@@ -71,6 +75,7 @@ export async function createTestGateway(options: TestGatewayOptions): Promise<{
   const handler = createGatewayHandler({
     engine,
     config: { port: 8788, host: "127.0.0.1", token: "", corsOrigins: "*" },
+    localVisionModel: options.localVisionModel ?? (async () => null),
   });
   return {
     handler,

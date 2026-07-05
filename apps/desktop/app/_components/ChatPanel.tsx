@@ -39,6 +39,7 @@ import {
   type UiImageMeta,
 } from "@/lib/store";
 import { ManagedChatFailure, streamManagedChat } from "@/lib/managed-chat";
+import { fileToThumb } from "@/lib/thumb";
 import { addSpendUsd, recordTurnUsage } from "@/lib/spend";
 import { transcribeAudio } from "@/lib/gateway";
 import { useShortcutGlyphs } from "@/lib/platform";
@@ -79,12 +80,14 @@ interface TextAttachment {
 }
 
 /** An attached image is processed by @zintus/media into the `block` we SEND;
- *  `previewUrl` is a local object URL of the ORIGINAL file (thumbnail only — never
- *  sent, never logged). Mirrors web's ImageAttachment. */
+ *  `previewUrl` is a local object URL of the ORIGINAL file (session-scoped) and
+ *  `thumb` a ≤96px data-URI that survives relaunch on the sent bubble (see
+ *  lib/thumb.ts). Neither is ever sent or logged. Mirrors web's ImageAttachment. */
 interface ImageAttachment {
   id: string;
   name: string;
   previewUrl: string;
+  thumb?: string;
   block: ImageContentBlock;
 }
 
@@ -421,8 +424,14 @@ export function ChatPanel() {
           const block = await processImage(file, { name: file.name });
           const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           const previewUrl = URL.createObjectURL(file);
+          // Persistent mini-thumb for the sent bubble (survives relaunch, unlike
+          // the object URL). null on failure — the bubble falls back to metadata.
+          const thumb = (await fileToThumb(file)) ?? undefined;
           imageCountRef.current += 1;
-          setImageAttachments((prev) => [...prev, { id, name: file.name, previewUrl, block }]);
+          setImageAttachments((prev) => [
+            ...prev,
+            { id, name: file.name, previewUrl, thumb, block },
+          ]);
           setNotice(null);
         } catch (error) {
           // MediaError messages are safe (sizes/dimensions/mime only — no bytes).
@@ -835,6 +844,7 @@ export function ChatPanel() {
         height: a.block.height,
         exifStripped: a.block.exifStripped,
         previewUrl: a.previewUrl,
+        thumb: a.thumb,
       }));
       appendMessage(createChatMessage("user", userText, sentImageMeta));
       const assistant = createChatMessage("assistant", "");

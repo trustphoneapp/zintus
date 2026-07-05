@@ -281,20 +281,39 @@ export function MessageBubble({
                 title={`${img.name} · ${img.width}×${img.height}${img.exifStripped ? " · EXIF stripped" : ""}`}
                 style={{ display: "inline-flex", alignItems: "center" }}
               >
-                {img.previewUrl ? (
+                {img.thumb || img.previewUrl ? (
+                  // Prefer the persisted data-URI thumb (survives relaunch); the
+                  // object URL only works within the session it was created in.
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={img.previewUrl}
+                    src={img.thumb ?? img.previewUrl}
                     alt={img.name}
                     width={120}
                     height={120}
                     style={{ maxWidth: 120, maxHeight: 120, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(255,255,255,0.18)" }}
+                    onError={(e) => {
+                      // Dead blob URL from a previous session (threads saved
+                      // before thumbs existed): swap to the metadata fallback
+                      // instead of a broken-image box.
+                      const el = e.currentTarget;
+                      el.style.display = "none";
+                      const fallback = el.nextElementSibling as HTMLElement | null;
+                      if (fallback) fallback.style.display = "inline";
+                    }}
                   />
-                ) : (
-                  // Object URL didn't survive (e.g. after reload): show metadata only,
-                  // never base64 — the bytes are not kept in history.
-                  <span style={{ fontSize: 12, opacity: 0.85 }}>🖼 {img.name}</span>
-                )}
+                ) : null}
+                <span
+                  style={{
+                    fontSize: 12,
+                    opacity: 0.85,
+                    // Hidden while an image renders; shown when there is nothing
+                    // to render or onError reveals it. Never base64 — the full
+                    // bytes are not kept in history.
+                    display: img.thumb || img.previewUrl ? "none" : "inline",
+                  }}
+                >
+                  🖼 {img.name}
+                </span>
               </span>
             ))}
           </div>

@@ -8,7 +8,12 @@ import {
   listCatalogModels,
   type CatalogModel,
 } from "@zintus/providers";
-import { supportsVision, supportsTools, structuredOutputLevel } from "@zintus/providers";
+import {
+  supportsVision,
+  supportsTools,
+  structuredOutputLevel,
+  installedLocalVisionModel,
+} from "@zintus/providers";
 import { redactSecrets, type ProviderStats } from "@zintus/router";
 import { getKey as keychainGetKey } from "@zintus/keychain";
 import type { Engine } from "@zintus/engine";
@@ -598,6 +603,13 @@ export interface GatewayHandlerDeps {
    */
   detectLocalRuntimes?: () => Promise<LocalRuntimes>;
   /**
+   * Resolver for the first INSTALLED local (Ollama) vision model, used to
+   * serve image requests explicitly routed to ollama. Defaults to the live
+   * `/api/tags` probe in @zintus/providers; injectable so tests can assert the
+   * vision gate without a running Ollama.
+   */
+  localVisionModel?: () => Promise<string | null>;
+  /**
    * Provider-key reader for POST /v1/transcribe (Whisper on the caller's own
    * Groq key). Defaults to the OS keychain; injectable so tests can run
    * without one.
@@ -650,6 +662,7 @@ export function createGatewayHandler(
   const getDraining = deps.getDraining;
   const rateLimiter = deps.rateLimiter;
   const detectLocal = deps.detectLocalRuntimes ?? defaultDetectLocalRuntimes;
+  const localVisionModel = deps.localVisionModel ?? installedLocalVisionModel;
   const readProviderKey =
     deps.readProviderKey ?? (async (provider: ProviderId) => (await keychainGetKey(provider)) ?? null);
   const activityStore = deps.activityStore;
@@ -1274,8 +1287,18 @@ export function createGatewayHandler(
     const mcpRequested = (body.mcp?.servers?.length ?? 0) > 0;
     // Explicit-provider gate: if the user PICKED a provider, never silently send
     // their image elsewhere — fail clearly if that provider/model can't see it.
+    // Ollama is runtime-resolved: an image turn without a pinned vision model is
+    // answered by the first INSTALLED multimodal model (llava/moondream/…) —
+    // pinned into body.model so the router's static vision filter agrees — and
+    // 422s honestly when none is installed (the error suggests what to pull).
     if (hasImages && routing.provider && !supportsVision(routing.provider, body.model)) {
-      return json(request, UNSUPPORTED_VISION_ERROR, 422);
+      if (routing.provider === "ollama" && !body.model) {
+        const vision = await localVisionModel();
+        if (!vision) return json(request, UNSUPPORTED_VISION_ERROR, 422);
+        body.model = vision;
+      } else {
+        return json(request, UNSUPPORTED_VISION_ERROR, 422);
+      }
     }
     // Same explicit-provider gate for tools: a tools-bearing request against a
     // provider/model that can't call tools hard-errors rather than silently

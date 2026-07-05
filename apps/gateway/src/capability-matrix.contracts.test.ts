@@ -119,4 +119,30 @@ describe("capability contract matrix — gating mirrors the registry for all pro
       await expectGate(res, strict, "json_schema");
     });
   }
+
+  // Ollama local vision is RUNTIME-resolved, not registry-static: an explicit
+  // ollama image request serves when an installed multimodal model resolves
+  // (the gateway pins it as the request model) and 422s when none does. The
+  // matrix loop above covers the none-installed default (localVisionModel →
+  // null); this covers the installed path deterministically.
+  test("ollama: image request routes via the runtime-resolved local vision model", async () => {
+    const gw = await createTestGateway({
+      providers: [
+        createMockProvider({
+          id: "ollama",
+          content: '{"ok":true}',
+          defaultModel: MODEL_CAPABILITIES.ollama.model,
+        }),
+      ],
+      localVisionModel: async () => "moondream:latest",
+    });
+    cleanup = gw.cleanup;
+    const res = await gw.handler(
+      chatRequest({ provider: "ollama", messages: IMAGE_MESSAGES }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { model?: string };
+    // The resolved vision model was pinned into the request.
+    expect(body.model).toBe("moondream:latest");
+  });
 });

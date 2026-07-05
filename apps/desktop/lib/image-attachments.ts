@@ -59,14 +59,19 @@ export function buildImageMessageContent(
  * Whether an explicitly-selected provider can accept image input.
  * - No explicit provider (auto routing) → `true`: the router picks a
  *   vision-capable provider, or the gateway returns a handled 422.
- * - A concrete non-vision provider → `false`: the UI warns before sending so we
- *   don't waste a request the provider can't serve.
+ * - Ollama → `true`: vision is RUNTIME-resolved at the gateway against the
+ *   installed models (llava/moondream/…); it serves when one exists and 422s
+ *   with a "what to pull" suggestion when none does. A static `false` here
+ *   would block users who DO have a local vision model installed.
+ * - Any other concrete non-vision provider → `false`: the UI warns before
+ *   sending so we don't waste a request the provider can't serve.
  */
 export function providerCanSeeImages(
   provider: ProviderId | null | undefined,
   model?: string,
 ): boolean {
   if (!provider) return true;
+  if (provider === "ollama") return true;
   return supportsVision(provider, model);
 }
 
