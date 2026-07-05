@@ -10,7 +10,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  ArrowRight,
   Bot,
   Check,
   ChevronUp,
@@ -42,6 +41,7 @@ import "@/lib/boot";
 import { applyHairline } from "@/lib/hairline";
 import { isMacPlatform, stampPlatform, useShortcutGlyphs } from "@/lib/platform";
 import { WindowControls } from "./WindowControls";
+import { ZintusLogo } from "./ZintusLogo";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
 import { formatSpend, getBudgetUsd, onSpendChange, todaySpendUsd } from "@/lib/spend";
 import { OnboardingOverlay } from "./OnboardingOverlay";
@@ -365,20 +365,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             padding: collapsed ? "0 0 10px" : "0 14px 10px",
           }}
         >
-          <span
-            aria-hidden
-            style={{
-              width: 26,
-              height: 26,
-              borderRadius: 8,
-              flexShrink: 0,
-              display: "grid",
-              placeItems: "center",
-              background: "linear-gradient(135deg, var(--color-purple-mid), #8b7bf7)",
-            }}
-          >
-            <ArrowRight size={14} color="#fff" strokeWidth={2.6} />
-          </span>
+          <ZintusLogo size={26} />
           {!collapsed ? (
           <span
             style={{

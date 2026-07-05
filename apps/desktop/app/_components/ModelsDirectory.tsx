@@ -24,6 +24,7 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronRight, Search, X } from "lucide-react";
+import { ZintusLogo } from "./ZintusLogo";
 import type { ProviderId } from "@zintus/types";
 import {
   MODEL_CATALOG,
@@ -373,23 +374,7 @@ export default function ModelsDirectory() {
                 cursor: "pointer",
               }}
             >
-              <span
-                aria-hidden
-                style={{
-                  width: 25,
-                  height: 25,
-                  borderRadius: 7,
-                  flexShrink: 0,
-                  display: "grid",
-                  placeItems: "center",
-                  fontSize: 11,
-                  fontWeight: 700,
-                  color: "#fff",
-                  background: "linear-gradient(135deg, var(--color-purple-bright), #8b7bf7)",
-                }}
-              >
-                Z
-              </span>
+              <ZintusLogo size={25} />
               <span style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text)", flexShrink: 0 }}>
                 Zintus
               </span>
@@ -991,22 +976,7 @@ function ZintusPanel(props: {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span
-          aria-hidden
-          style={{
-            width: 25,
-            height: 25,
-            borderRadius: 7,
-            display: "grid",
-            placeItems: "center",
-            fontSize: 11,
-            fontWeight: 700,
-            color: "#fff",
-            background: "linear-gradient(135deg, var(--color-purple-bright), #8b7bf7)",
-          }}
-        >
-          Z
-        </span>
+        <ZintusLogo size={25} />
         <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>Zintus membership</h2>
         <span style={{ flex: 1 }} />
         <button
