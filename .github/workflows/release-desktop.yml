@@ -19,7 +19,10 @@ jobs:
             target: universal-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
+          # Pinned to 22.04, NOT ubuntu-latest: AppImage/deb inherit the build
+          # host's glibc + webkit floor; building on 24.04 silently drops
+          # support for the declared Ubuntu 22.04 baseline (R5/R3).
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
@@ -86,3 +89,19 @@ jobs:
           # createUpdaterArtifacts produces .sig files, so this is belt-and-braces.
           includeUpdaterJson: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
           args: --target ${{ matrix.target }}
+
+      # Integrity for unsigned/linux artifacts (R5): per-target checksum file
+      # attached to the same release. Verify with `sha256sum -c`.
+      - name: Upload SHA256SUMS
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd apps/desktop/src-tauri/target/${{ matrix.target }}/release/bundle
+          if command -v sha256sum >/dev/null 2>&1; then SUM="sha256sum"; else SUM="shasum -a 256"; fi
+          out="SHA256SUMS-${{ matrix.target }}.txt"
+          find . -type f \( -name "*.dmg" -o -name "*.exe" -o -name "*.msi" -o -name "*.deb" -o -name "*.AppImage" -o -name "*.rpm" \) -print0 \
+            | while IFS= read -r -d '' f; do $SUM "$f" >> "$out"; done
+          [ -s "$out" ] || { echo "no bundles found for checksums"; exit 1; }
+          cat "$out"
+          gh release upload "${{ github.ref_name }}" "$out" --clobber
