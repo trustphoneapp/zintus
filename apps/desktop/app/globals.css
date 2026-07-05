@@ -60,19 +60,35 @@
   --radius-md: 10px;
   --radius-lg: 16px;
   --radius-xl: 24px;
+  /* Hairline ring width for button/card edges — exactly one device pixel.
+     Owned at runtime by HAIRLINE_INIT_SCRIPT (lib/hairline.ts): 1/dPR CSS px,
+     covering fractional Windows scales (0.8px @125%, 0.6667px @150%, …).
+     This value + the media query below are only the no-JS/first-frame
+     fallback (0.5px Retina / 1px at 1x). */
+  --hairline: 0.5px;
   --t-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --t-reveal: 300ms cubic-bezier(0.4, 0, 0.2, 1);
-  --shadow-xs: 0 0 0 0.5px var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-sm: 0 0 0 0.5px var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.3),
+  --shadow-xs: 0 0 0 var(--hairline) var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 0 0 var(--hairline) var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.3),
     0 4px 12px -4px rgba(0, 0, 0, 0.45);
-  --shadow-md: 0 0 0 0.5px var(--c-border), 0 2px 4px rgba(0, 0, 0, 0.35),
+  --shadow-md: 0 0 0 var(--hairline) var(--c-border), 0 2px 4px rgba(0, 0, 0, 0.35),
     0 12px 28px -8px rgba(0, 0, 0, 0.55);
-  --shadow-lg: 0 0 0 0.5px var(--c-border), 0 8px 28px -6px rgba(0, 0, 0, 0.55);
-  --shadow-float: 0 0 0 0.5px var(--c-border), 0 16px 64px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 0 0 var(--hairline) var(--c-border), 0 8px 28px -6px rgba(0, 0, 0, 0.55);
+  --shadow-float: 0 0 0 var(--hairline) var(--c-border), 0 16px 64px rgba(0, 0, 0, 0.6);
   --c-inset: inset 0 1px 2px rgba(0, 0, 0, 0.4);
   --c-ok: #2fbf71;
   --c-warn: #e8964a;
   --c-danger: #f06a8a;
+
+  /* Precomputed stand-ins for the load-bearing color-mix() uses (R3): engines
+     below the support floor ignore the color-mix line and keep these; at
+     floor the color-mix line wins. Alpha-on-transparent mixes are exact. */
+  --mix-surface-90: rgba(35, 34, 32, 0.9);
+  --mix-red-15: rgba(240, 106, 138, 0.15);
+  --mix-green-18: rgba(47, 191, 113, 0.18);
+  --mix-green-35: rgba(47, 191, 113, 0.35);
+  --mix-green-12: rgba(47, 191, 113, 0.12);
+  --mix-warn-8: rgba(232, 150, 74, 0.08);
 
   /* Font roles. next/font (layout.tsx) provides --font-inter / --font-jetbrains-mono;
      these map them to the role names the components consume. Without this mapping
@@ -117,17 +133,24 @@
   --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(99, 102, 241, 0.35);
   --c-border: rgba(0, 0, 0, 0.07);
   --c-border-strong: rgba(0, 0, 0, 0.13);
-  --shadow-xs: 0 0 0 0.5px var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.06);
-  --shadow-sm: 0 0 0 0.5px var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.06),
+  --shadow-xs: 0 0 0 var(--hairline) var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-sm: 0 0 0 var(--hairline) var(--c-border), 0 1px 2px rgba(0, 0, 0, 0.06),
     0 4px 12px -4px rgba(0, 0, 0, 0.1);
-  --shadow-md: 0 0 0 0.5px var(--c-border), 0 2px 4px rgba(0, 0, 0, 0.07),
+  --shadow-md: 0 0 0 var(--hairline) var(--c-border), 0 2px 4px rgba(0, 0, 0, 0.07),
     0 12px 28px -8px rgba(0, 0, 0, 0.14);
-  --shadow-lg: 0 0 0 0.5px var(--c-border), 0 8px 28px -6px rgba(0, 0, 0, 0.16);
-  --shadow-float: 0 0 0 0.5px var(--c-border), 0 16px 64px rgba(0, 0, 0, 0.18);
+  --shadow-lg: 0 0 0 var(--hairline) var(--c-border), 0 8px 28px -6px rgba(0, 0, 0, 0.16);
+  --shadow-float: 0 0 0 var(--hairline) var(--c-border), 0 16px 64px rgba(0, 0, 0, 0.18);
   --c-inset: inset 0 1px 2px rgba(0, 0, 0, 0.05);
   --c-ok: #12a150;
   --c-warn: #b45309;
   --c-danger: #d6365e;
+
+  --mix-surface-90: rgba(251, 251, 250, 0.9);
+  --mix-red-15: rgba(214, 54, 94, 0.15);
+  --mix-green-18: rgba(18, 161, 80, 0.18);
+  --mix-green-35: rgba(18, 161, 80, 0.35);
+  --mix-green-12: rgba(18, 161, 80, 0.12);
+  --mix-warn-8: rgba(180, 83, 9, 0.08);
 }
 
 
@@ -144,6 +167,75 @@ body {
      fringed/blurry text on the dark theme (user-reported on the packaged app). */
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* 1x (non-Retina) displays: forced grayscale `antialiased` renders thin,
+   washed-out glyphs, and half-pixel rings cannot map to a device pixel —
+   together they read as an overall blur (user-reported vs the web app on an
+   external monitor, 2026-07-05). Restore engine-default smoothing and full-
+   pixel edges; Retina (2x+) keeps the block above and 0.5px hairlines. */
+@media (max-resolution: 1.5dppx) {
+  :root {
+    --hairline: 1px;
+  }
+  body {
+    -webkit-font-smoothing: auto;
+  }
+}
+
+/* ── Platform chrome ─────────────────────────────────────────────────────────
+   data-platform is stamped on <html> pre-paint by PLATFORM_INIT_SCRIPT
+   (lib/platform-init.ts). Layout that differs per OS lives HERE, not in JS
+   state — first paint is already correct on every platform (R1/R6).
+   mac: 44px strip under the overlay traffic lights. windows: undecorated
+   window (tauri.windows.conf.json) → 12px drag strip + custom caption buttons
+   top-right (Fluent 46×32 targets, Zintus colors). linux: native titlebar
+   kept (R1 decision) → 12px strip, no reserved corners. */
+.titlebar-strip {
+  height: 12px;
+  flex-shrink: 0;
+}
+:root[data-platform="mac"] .titlebar-strip {
+  height: 44px;
+}
+.app-topbar {
+  padding: 0 14px;
+}
+:root[data-platform="windows"] .app-topbar {
+  /* keep the top bar's own controls clear of the fixed caption buttons */
+  padding-right: 152px;
+}
+.win-controls {
+  display: none;
+}
+:root[data-platform="windows"] .win-controls {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+}
+.win-control {
+  width: 46px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text-sub);
+  cursor: default;
+}
+.win-control:hover {
+  background: var(--color-elevated);
+  color: var(--color-text);
+  filter: none;
+}
+.win-control-close:hover {
+  /* the one conventional deviation: Windows users expect the red close */
+  background: #c42b1c;
+  color: #ffffff;
 }
 
 a {
@@ -174,7 +266,7 @@ main {
   gap: 1rem;
   padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--color-border);
-  background: color-mix(in oklch, var(--color-surface) 90%, transparent);
+  background: var(--mix-surface-90);
   position: sticky;
   top: 0;
   z-index: 10;
@@ -529,7 +621,7 @@ a.ghostbtn:hover {
 }
 
 .status.error {
-  background: color-mix(in oklch, var(--color-red) 15%, transparent);
+  background: var(--mix-red-15);
   color: var(--color-red);
 }
 
@@ -565,7 +657,7 @@ a.ghostbtn:hover {
 }
 
 .badge.ok {
-  background: color-mix(in oklch, var(--color-green) 18%, transparent);
+  background: var(--mix-green-18);
   color: var(--color-green);
 }
 
@@ -694,8 +786,8 @@ a.ghostbtn:hover {
   margin: 6px 0 0;
   padding: 4px 9px;
   border-radius: 999px;
-  border: 0.5px solid color-mix(in oklch, var(--color-green) 35%, transparent);
-  background: color-mix(in oklch, var(--color-green) 12%, transparent);
+  border: var(--hairline) solid var(--mix-green-35);
+  background: var(--mix-green-12);
   color: var(--color-green);
   font-family: var(--font-mono);
   font-size: 11px;
@@ -713,8 +805,8 @@ a.ghostbtn:hover {
   margin-top: 8px;
   padding: 8px 10px;
   border-radius: 8px;
-  border: 0.5px solid var(--color-border);
-  background: color-mix(in oklch, var(--c-warn) 8%, transparent);
+  border: var(--hairline) solid var(--color-border);
+  background: var(--mix-warn-8);
   text-align: left;
 }
 
@@ -947,7 +1039,7 @@ a.ghostbtn:hover {
   justify-content: center;
   gap: 8px;
   padding: 6px 12px;
-  border-bottom: 0.5px solid var(--color-border, rgba(148, 163, 184, 0.2));
+  border-bottom: var(--hairline) solid var(--color-border, rgba(148, 163, 184, 0.2));
 }
 .artifact-version-nav {
   display: inline-flex;
@@ -957,7 +1049,7 @@ a.ghostbtn:hover {
   height: 22px;
   color: var(--color-text-sub, #9aa5b1);
   background: none;
-  border: 0.5px solid var(--color-border, rgba(148, 163, 184, 0.2));
+  border: var(--hairline) solid var(--color-border, rgba(148, 163, 184, 0.2));
   border-radius: 6px;
   cursor: pointer;
 }
@@ -999,7 +1091,7 @@ a.ghostbtn:hover {
   tab-size: 2;
   color: var(--color-text, #e8eef5);
   background: var(--color-bg, #0a0e13);
-  border: 0.5px solid var(--color-border, rgba(148, 163, 184, 0.2));
+  border: var(--hairline) solid var(--color-border, rgba(148, 163, 184, 0.2));
   border-radius: 8px;
   padding: 12px;
 }
@@ -1037,7 +1129,7 @@ a.ghostbtn:hover {
   align-items: center;
   gap: 10px;
   padding: 10px 20px;
-  border-bottom: 0.5px solid var(--color-border);
+  border-bottom: var(--hairline) solid var(--color-border);
   background: var(--color-surface);
   font-size: 13px;
   color: var(--color-text-sub);
@@ -1060,7 +1152,7 @@ a.ghostbtn:hover {
   gap: 12px;
   margin: 14px 20px 0;
   padding: 10px 14px;
-  border: 0.5px solid var(--color-border);
+  border: var(--hairline) solid var(--color-border);
   border-radius: 10px;
   background: var(--color-elevated);
   font-size: 13px;
@@ -1073,14 +1165,14 @@ a.ghostbtn:hover {
   gap: 10px;
   align-items: flex-end;
   padding: 12px 20px;
-  border-top: 0.5px solid var(--color-border);
+  border-top: var(--hairline) solid var(--color-border);
   background: var(--color-surface);
 }
 .agent-followup .agent-task-input { flex: 1; }
 .agent-activity {
   margin: 0;
   padding: 6px 20px;
-  border-bottom: 0.5px solid var(--color-border);
+  border-bottom: var(--hairline) solid var(--color-border);
   background: var(--color-surface);
   font-family: var(--font-mono);
   font-size: 11.5px;
@@ -1105,7 +1197,7 @@ a.ghostbtn:hover {
 }
 
 .agent-stop {
-  border: 0.5px solid var(--agent-bad);
+  border: var(--hairline) solid var(--agent-bad);
   color: var(--agent-bad);
   background: transparent;
   border-radius: var(--radius-sm);
@@ -1136,7 +1228,7 @@ a.ghostbtn:hover {
 }
 .agent-task-input, .agent-root-input {
   width: 100%;
-  border: 0.5px solid var(--color-border);
+  border: var(--hairline) solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
   color: var(--color-text);
@@ -1154,7 +1246,7 @@ a.ghostbtn:hover {
 .agent-switch {
   display: flex; align-items: center; gap: 10px;
   padding: 10px 12px;
-  border: 0.5px solid var(--color-border);
+  border: var(--hairline) solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface);
   cursor: pointer; text-align: left;
@@ -1196,22 +1288,22 @@ a.ghostbtn:hover {
 .agent-run-summary {
   display: flex; align-items: center; gap: 12px;
   padding: 10px 14px;
-  border: 0.5px solid var(--color-border);
+  border: var(--hairline) solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-elevated);
 }
 .agent-run-task { flex: 1; font-size: 14px; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-relaunch {
-  border: 0.5px solid var(--color-border); background: var(--color-surface);
+  border: var(--hairline) solid var(--color-border); background: var(--color-surface);
   border-radius: var(--radius-sm); padding: 5px 12px;
   font-size: 12px; font-weight: 600; color: var(--color-text-sub); cursor: pointer;
 }
 .agent-relaunch:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .agent-gate {
-  border: 0.5px solid var(--agent-wait);
+  border: var(--hairline) solid var(--agent-wait);
   border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--agent-wait) 7%, var(--color-surface));
+  background: var(--color-surface);
   box-shadow: var(--shadow-md);
   overflow: hidden;
 }
@@ -1227,7 +1319,7 @@ a.ghostbtn:hover {
   margin: 0; padding: 12px 16px; max-height: 260px; overflow: auto;
   font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
   white-space: pre-wrap; color: var(--color-text-sub);
-  border-top: 0.5px solid color-mix(in srgb, var(--agent-wait) 20%, var(--color-border));
+  border-top: var(--hairline) solid var(--color-border);
 }
 .agent-gate-actions { display: flex; gap: 8px; padding: 12px 16px; }
 .agent-approve {
@@ -1238,14 +1330,14 @@ a.ghostbtn:hover {
 .agent-approve:hover { filter: brightness(1.06); }
 .agent-decline {
   background: var(--color-surface); color: var(--color-text-sub);
-  border: 0.5px solid var(--color-border); border-radius: var(--radius-sm);
+  border: var(--hairline) solid var(--color-border); border-radius: var(--radius-sm);
   padding: 8px 18px; font-weight: 600; font-size: 13px; cursor: pointer;
 }
 .agent-approve:focus-visible, .agent-decline:focus-visible { outline: none; box-shadow: var(--c-focus); }
 
 .agent-log {
   flex: 1; min-height: 220px;
-  border: 0.5px solid var(--color-border);
+  border: var(--hairline) solid var(--color-border);
   border-radius: var(--radius-lg);
   background: var(--color-elevated);
   padding: 14px 16px; overflow-y: auto;
@@ -1301,7 +1393,7 @@ a.ghostbtn:hover {
   width: 100%;
   max-width: 600px;
   border-radius: var(--radius-xl);
-  border: 0.5px solid var(--c-border);
+  border: var(--hairline) solid var(--c-border);
   background: var(--color-surface);
   overflow: hidden;
   box-shadow: var(--shadow-float);
@@ -1310,7 +1402,7 @@ a.ghostbtn:hover {
   width: 100%;
   padding: 16px 18px;
   border: none;
-  border-bottom: 0.5px solid var(--c-border);
+  border-bottom: var(--hairline) solid var(--c-border);
   background: transparent;
   color: var(--color-text);
   font-size: 15px;
@@ -1356,7 +1448,7 @@ a.ghostbtn:hover {
 .cmdk-item kbd {
   padding: 1px 6px;
   border-radius: var(--radius-sm);
-  border: 0.5px solid var(--c-border);
+  border: var(--hairline) solid var(--c-border);
   background: var(--c-bg);
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1397,5 +1489,38 @@ a.ghostbtn:hover {
   .typing-dots span {
     animation: none;
     opacity: 0.6;
+  }
+}
+
+/* ── Support-floor progressive enhancement (R3) ──────────────────────────────
+   Exact oklch/srgb mixes for engines at the declared floor (Chrome/WebView2
+   111+, Safari/WKWebView 16.2+, WebKitGTK ≥2.40); the base rules above carry
+   precomputed --mix-* literals for anything older. Kept in ONE explicit
+   @supports block because the build's CSS minifier lowers bare color-mix()
+   declarations with an auto-fallback that collapses to a SOLID color (e.g.
+   .status.error became solid red) — inside this guard its lowering can never
+   reach a below-floor engine. */
+@supports (color: color-mix(in oklch, red 50%, transparent)) {
+  .nav {
+    background: color-mix(in oklch, var(--color-surface) 90%, transparent);
+  }
+  .status.error {
+    background: color-mix(in oklch, var(--color-red) 15%, transparent);
+  }
+  .badge.ok {
+    background: color-mix(in oklch, var(--color-green) 18%, transparent);
+  }
+  .compression-badge {
+    border-color: color-mix(in oklch, var(--color-green) 35%, transparent);
+    background: color-mix(in oklch, var(--color-green) 12%, transparent);
+  }
+  .route-options {
+    background: color-mix(in oklch, var(--c-warn) 8%, transparent);
+  }
+  .agent-gate {
+    background: color-mix(in srgb, var(--agent-wait) 7%, var(--color-surface));
+  }
+  .agent-gate-diff {
+    border-top-color: color-mix(in srgb, var(--agent-wait) 20%, var(--color-border));
   }
 }

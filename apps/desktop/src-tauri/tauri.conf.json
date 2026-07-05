@@ -43,6 +43,21 @@
     ],
     "macOS": {
       "entitlements": "./Entitlements.plist"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "linux": {
+      "deb": {
+        "recommends": [
+          "gnome-keyring"
+        ]
+      }
     }
   }
 }

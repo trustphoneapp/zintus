@@ -29,7 +29,23 @@ const GATEWAY_PORT: u16 = 8788;
 struct GatewaySidecar(Mutex<Option<CommandChild>>);
 
 fn keyring_entry(provider_id: &str) -> Result<Entry, String> {
-  Entry::new(SERVICE, provider_id).map_err(|error| error.to_string())
+  Entry::new(SERVICE, provider_id).map_err(keyring_error)
+}
+
+/// Human-readable keyring failures. On Linux the common real-world failure is
+/// no Secret Service on the bus (minimal WMs, headless sessions) — say what to
+/// install instead of surfacing a D-Bus error string (R6 item 11).
+fn keyring_error(error: keyring::Error) -> String {
+  #[cfg(all(unix, not(target_os = "macos")))]
+  if matches!(
+    error,
+    keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
+  ) {
+    return format!(
+      "no secure key storage available — enable GNOME Keyring or KWallet (Secret Service) and retry ({error})"
+    );
+  }
+  error.to_string()
 }
 
 #[tauri::command]
@@ -37,7 +53,7 @@ fn keyring_get(provider_id: String) -> Result<Option<String>, String> {
   match keyring_entry(&provider_id)?.get_password() {
     Ok(value) => Ok(Some(value)),
     Err(keyring::Error::NoEntry) => Ok(None),
-    Err(error) => Err(error.to_string()),
+    Err(error) => Err(keyring_error(error)),
   }
 }
 
@@ -45,7 +61,7 @@ fn keyring_get(provider_id: String) -> Result<Option<String>, String> {
 fn keyring_set(provider_id: String, key: String) -> Result<(), String> {
   keyring_entry(&provider_id)?
     .set_password(&key)
-    .map_err(|error| error.to_string())
+    .map_err(keyring_error)
 }
 
 #[tauri::command]
@@ -53,27 +69,22 @@ fn keyring_delete(provider_id: String) -> Result<(), String> {
   match keyring_entry(&provider_id)?.delete_credential() {
     Ok(()) => Ok(()),
     Err(keyring::Error::NoEntry) => Ok(()),
-    Err(error) => Err(error.to_string()),
+    Err(error) => Err(keyring_error(error)),
   }
 }
 
 /// Open an external URL in the user's default browser (cloud sign-in, Stripe
-/// checkout, provider key consoles). https-only, passed as a single argv (no
-/// shell interpolation) — the webview can never launch arbitrary programs.
+/// checkout, provider key consoles). https-only — the webview can never launch
+/// arbitrary programs; this command is the only opener the frontend gets.
+/// Delegates to the official opener plugin (ShellExecuteW on Windows — the old
+/// hand-rolled `rundll32 url.dll` path was legacy and breaks on hardened
+/// systems; `open`/`xdg-open` equivalents elsewhere — R6 item 9).
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
   if !url.starts_with("https://") {
     return Err("only https URLs can be opened".to_string());
   }
-  #[cfg(target_os = "macos")]
-  let result = std::process::Command::new("open").arg(&url).spawn();
-  #[cfg(target_os = "windows")]
-  let result = std::process::Command::new("rundll32")
-    .args(["url.dll,FileProtocolHandler", &url])
-    .spawn();
-  #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-  let result = std::process::Command::new("xdg-open").arg(&url).spawn();
-  result.map(|_| ()).map_err(|error| error.to_string())
+  tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|error| error.to_string())
 }
 
 /// Resolve a sensible default shell per OS for the embedded terminal. The
@@ -84,7 +95,13 @@ fn open_external(url: String) -> Result<(), String> {
 fn default_shell() -> String {
   #[cfg(target_os = "windows")]
   {
-    std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
+    // NOT %COMSPEC%: it always points at cmd.exe, a poor default terminal.
+    // Windows PowerShell ships at a fixed path on every supported Windows;
+    // cmd stays the last-resort fallback (R6 item 8).
+    match std::env::var("SystemRoot") {
+      Ok(root) => format!("{root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+      Err(_) => std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into()),
+    }
   }
   #[cfg(target_os = "macos")]
   {
@@ -138,6 +155,62 @@ fn spawn_gateway(app: &tauri::AppHandle) {
   }
 }
 
+/// UI self-test for CI (S6, docs/launch/PLATFORM-PARITY.md): measures the
+/// live DOM — platform stamp, device-pixel hairline, chrome + button
+/// geometry, gateway liveness — and reports back via `selftest_report`.
+/// Injected only when ZINTUS_UI_SELFTEST=<output path> is set.
+/// `scripts/check-ui-metrics.ts` asserts the values per platform.
+const SELFTEST_JS: &str = r#"(async () => {
+  // Report channel: the URL fragment. The native side polls window.url() —
+  // document.title does NOT propagate to the native window title and the
+  // invoke bridge is not guaranteed inside eval'd scripts, but a hash write
+  // is plain web platform and identical on all three webviews. Hash-only
+  // changes do not navigate the Next.js app router.
+  const send = (report) => {
+    try {
+      location.hash = "zintus-selftest=" + btoa(unescape(encodeURIComponent(JSON.stringify(report))));
+    } catch (e) {}
+  };
+  try {
+    await document.fonts.ready;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const measure = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      const rect = el.getBoundingClientRect();
+      return { w: Math.round(rect.width * 100) / 100, h: Math.round(rect.height * 100) / 100 };
+    };
+    const probe = document.createElement("button");
+    probe.textContent = "Probe";
+    document.body.appendChild(probe);
+    const probeRect = probe.getBoundingClientRect();
+    let gateway = null;
+    for (let i = 0; i < 30 && !gateway; i++) {
+      try {
+        const res = await fetch("http://localhost:8788/health", { cache: "no-store" });
+        gateway = await res.json();
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+    const report = {
+      platform: document.documentElement.dataset.platform || null,
+      dpr: window.devicePixelRatio,
+      hairline: getComputedStyle(document.documentElement).getPropertyValue("--hairline").trim(),
+      topbar: measure(".app-topbar"),
+      titlebarStrip: measure(".titlebar-strip"),
+      iconBtn: measure(".app-topbar .app-icon-btn"),
+      winControls: measure(".win-controls"),
+      probeButton: { w: Math.round(probeRect.width * 100) / 100, h: Math.round(probeRect.height * 100) / 100 },
+      gateway,
+    };
+    probe.remove();
+    send(report);
+  } catch (error) {
+    send({ error: String(error) });
+  }
+})();"#;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   let app = tauri::Builder::default()
@@ -150,6 +223,9 @@ pub fn run() {
     // signing keys, and createUpdaterArtifacts: true.
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_fs::init())
+    // Only reachable through the https-gated open_external command below —
+    // no JS-side opener capability is granted.
+    .plugin(tauri_plugin_opener::init())
     .manage(GatewaySidecar(Mutex::new(None)))
     .invoke_handler(tauri::generate_handler![
       keyring_get,
@@ -160,6 +236,51 @@ pub fn run() {
     ])
     .setup(|app| {
       spawn_gateway(&app.handle().clone());
+      if let Ok(report_path) = std::env::var("ZINTUS_UI_SELFTEST") {
+        let handle = app.handle().clone();
+        std::thread::spawn(move || {
+          // Give the webview time to boot + hydrate before measuring.
+          std::thread::sleep(Duration::from_secs(8));
+          let window = match handle.get_webview_window("main") {
+            Some(window) => window,
+            None => {
+              eprintln!("[selftest] no main window");
+              std::process::exit(2);
+            }
+          };
+          if let Err(error) = window.eval(SELFTEST_JS) {
+            eprintln!("[selftest] eval failed: {error}");
+            std::process::exit(2);
+          }
+          // The script publishes base64 JSON through the URL fragment; poll it.
+          use base64::Engine as _;
+          const PREFIX: &str = "zintus-selftest=";
+          for _ in 0..90 {
+            std::thread::sleep(Duration::from_secs(1));
+            let fragment = match window.url() {
+              Ok(url) => url.fragment().map(str::to_owned),
+              Err(_) => None,
+            };
+            if let Some(encoded) = fragment.as_deref().and_then(|f| f.strip_prefix(PREFIX)) {
+              let json = match base64::engine::general_purpose::STANDARD.decode(encoded) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                  eprintln!("[selftest] undecodable report fragment: {error}");
+                  std::process::exit(4);
+                }
+              };
+              if let Err(error) = std::fs::write(&report_path, &json) {
+                eprintln!("[selftest] failed to write {report_path}: {error}");
+                std::process::exit(4);
+              }
+              println!("[selftest] report written to {report_path}");
+              std::process::exit(0);
+            }
+          }
+          eprintln!("[selftest] report never arrived — timing out");
+          std::process::exit(3);
+        });
+      }
       Ok(())
     })
     .build(tauri::generate_context!())

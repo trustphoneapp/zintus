@@ -2,9 +2,42 @@
 
 import { useEffect, useState } from "react";
 
+export type DesktopPlatform = "mac" | "windows" | "linux";
+
+/**
+ * Which desktop OS the webview runs on. UA-based (navigator.platform is
+ * deprecated): WebView2 carries "Windows NT", WKWebView "Macintosh",
+ * WebKitGTK "X11; Linux"/"Wayland".
+ */
+export function desktopPlatform(
+  ua: string | undefined = typeof navigator === "undefined" ? undefined : navigator.userAgent,
+): DesktopPlatform {
+  if (ua === undefined) return "mac";
+  if (/Windows/i.test(ua)) return "windows";
+  if (/Mac/i.test(ua)) return "mac";
+  return "linux";
+}
+
+/**
+ * Stamps `data-platform` on <html>. Platform chrome (titlebar strip height,
+ * Windows caption buttons, top-bar padding) is pure CSS keyed on this
+ * attribute (globals.css). Runs from lib/boot.ts before hydration paints
+ * interactive UI; until then the CSS defaults are platform-neutral.
+ */
+export function stampPlatform(
+  root: { dataset: Record<string, string | undefined> } | undefined = typeof document ===
+  "undefined"
+    ? undefined
+    : document.documentElement,
+  ua?: string,
+): void {
+  if (!root) return;
+  root.dataset["platform"] = desktopPlatform(ua);
+}
+
 /** True on macOS (webview). SSR has no navigator — callers use the hook below. */
 export function isMacPlatform(): boolean {
-  return typeof navigator !== "undefined" && /Mac/i.test(navigator.platform);
+  return typeof navigator !== "undefined" && desktopPlatform() === "mac";
 }
 
 /**

@@ -35,7 +35,7 @@ function privacyPillStyle(honored: boolean): React.CSSProperties {
     gap: 4,
     padding: "0 7px",
     borderRadius: 999,
-    border: `0.5px solid color-mix(in oklch, ${tone} 40%, transparent)`,
+    border: `var(--hairline) solid color-mix(in oklch, ${tone} 40%, transparent)`,
     background: `color-mix(in oklch, ${tone} 12%, transparent)`,
     color: tone,
     fontWeight: 600,
