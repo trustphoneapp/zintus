@@ -20,7 +20,6 @@ import {
   type McpToolEvent,
 } from "@/lib/chat-client";
 import { activeMcpServersForChat, loadMcpServers } from "@/lib/mcp-config";
-import { saveTextFile } from "@/lib/download";
 import {
   acceptImageFile,
   buildImageMessageContent,
@@ -42,7 +41,6 @@ import { ManagedChatFailure, streamManagedChat } from "@/lib/managed-chat";
 import { fileToThumb } from "@/lib/thumb";
 import { addSpendUsd, recordTurnUsage } from "@/lib/spend";
 import { transcribeAudio } from "@/lib/gateway";
-import { useShortcutGlyphs } from "@/lib/platform";
 import {
   BUILTIN_TOOL_DEFINITIONS,
   BUILTIN_WEB_TOOLS,
@@ -149,7 +147,6 @@ export function ChatPanel() {
     refresh,
   } = useProviderStatusStore();
   const { billing, managedModels } = useCloudStore();
-  const { send: sendChord } = useShortcutGlyphs();
 
   // Model-pill sources: managed models only for active members (they serve),
   // BYOK providers only when actually connected (key present / local runtime up).
@@ -235,6 +232,15 @@ export function ChatPanel() {
   }, [micMenuOpen]);
 
   async function openMicMenu() {
+    // Pre-flight: transcription runs on the user's own Groq key — say so
+    // BEFORE recording instead of dead-ending after they've spoken.
+    if (!providers.some((p) => p.id === "groq" && p.hasKey)) {
+      setNotice({
+        tone: "warn",
+        text: "Voice input needs a (free) Groq key — Whisper transcribes on your key. Add it on the Models page, then the mic works.",
+      });
+      return;
+    }
     try {
       // Device LABELS are only exposed after a granted audio permission —
       // prime it with a throwaway stream, then enumerate.
@@ -291,10 +297,12 @@ export function ChatPanel() {
         chunksRef.current = [];
         if (blob.size === 0) return;
         setTranscribing(true);
+        setNotice({ tone: "info", text: "Transcribing…" });
         void transcribeAudio(blob)
           .then((text) => {
             if (text.trim()) {
               setPrompt(`${prompt ? `${prompt} ` : ""}${text.trim()}`);
+              setNotice(null);
             } else {
               setNotice({ tone: "info", text: "Nothing transcribed — try a longer clip." });
             }
@@ -310,6 +318,12 @@ export function ChatPanel() {
       recorder.start();
       recorderRef.current = recorder;
       setRecording(true);
+      // The mic is record→stop→transcribe, NOT live dictation — say it so
+      // "nothing is typing while I talk" reads as by-design, not broken.
+      setNotice({
+        tone: "info",
+        text: "Listening… click the mic again to stop — your words are typed after transcription.",
+      });
     } catch {
       setNotice({
         tone: "warn",
@@ -1046,21 +1060,15 @@ export function ChatPanel() {
 
   const stop = () => {
     abortRef.current?.abort();
+    // Finalize the pending bubble: an assistant message left with "" used to
+    // render as the ••• typing indicator FOREVER (user report). Stamp an
+    // honest stopped marker instead.
+    const pending = [...messages].reverse().find((m) => m.role === "assistant");
+    if (pending && pending.content === "") {
+      updateMessage(pending.id, { content: "⏹ Stopped." });
+    }
     setLoading(false);
   };
-
-  const exportThread = useCallback(() => {
-    if (messages.length === 0) return;
-    const md = messages
-      .map(
-        (m) =>
-          `**${m.role === "user" ? "You" : (m.providerId ?? "Assistant")}:**\n\n${m.content}`,
-      )
-      .join("\n\n---\n\n");
-    // Route through saveTextFile so the export uses the native OS save dialog in
-    // a Tauri build (the raw anchor path silently failed in the packaged app).
-    void saveTextFile("zintus-chat.md", md, "text/markdown");
-  }, [messages]);
 
   const lastAssistantId = [...messages]
     .reverse()
@@ -1180,11 +1188,6 @@ export function ChatPanel() {
                 Artifacts ({artifactList.length})
               </Button>
             )}
-            {messages.length > 0 && (
-              <Button type="button" variant="secondary" onClick={exportThread}>
-                Export
-              </Button>
-            )}
           </div>
         </CardHeader>
         <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-0">
@@ -1226,8 +1229,8 @@ export function ChatPanel() {
                   Ask anything
                 </span>
                 <span style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 300 }}>
-                  Responses stream in here. Press {sendChord} to send — auto-routes via the{" "}
-                  {settings.routingStrategy} strategy.
+                  Responses stream in here. Press ↩ to send (⇧↩ for a new
+                  line) — auto-routes via the {settings.routingStrategy} strategy.
                 </span>
               </div>
             ) : (
@@ -1248,6 +1251,13 @@ export function ChatPanel() {
                     <span />
                     <span />
                   </div>
+                ) : message.role === "assistant" && message.content === "" &&
+                  message.toolCalls === undefined && message.mcpToolEvents === undefined ? (
+                  // A bubble abandoned empty (stopped/aborted run, incl. old
+                  // persisted threads): an honest marker, never permanent dots.
+                  <p key={message.id} className="agent-ev agent-ev--muted" style={{ margin: "4px 0" }}>
+                    ⏹ stopped
+                  </p>
                 ) : (
                 <MessageBubble
                   key={message.id}
@@ -1405,7 +1415,9 @@ export function ChatPanel() {
               className="border-0 bg-transparent px-1 shadow-none focus-visible:ring-0"
               style={{ resize: "none" }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                // Enter sends (standard chat behavior — user-requested);
+                // Shift+Enter inserts the newline.
+                if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   void send();
                 }
@@ -1839,7 +1851,7 @@ export function ChatPanel() {
                   fontFamily: "var(--font-mono)",
                 }}
               >
-                {sendChord}
+                ↩
               </span>
 
               {loading ? (

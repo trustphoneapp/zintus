@@ -36,6 +36,7 @@ import { openExternal } from "@/lib/tauri";
 import { signOut } from "@/lib/cloud";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
 import { listProjects } from "@/lib/projects";
+import { saveTextFile } from "@/lib/download";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
 import { useShortcutGlyphs } from "@/lib/platform";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
@@ -160,6 +161,41 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | "checking" | null>(null);
   // Top-bar Share (chat only): copies the active thread as Markdown.
   const [shareCopied, setShareCopied] = useState(false);
+  // Share menu (copy / save-as-file) — the chat's single export surface.
+  const [shareOpen, setShareOpen] = useState(false);
+  const shareRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!shareOpen) return;
+    function onDown(e: MouseEvent) {
+      if (shareRef.current && !shareRef.current.contains(e.target as Node)) {
+        setShareOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setShareOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [shareOpen]);
+  /** The active thread rendered as shareable Markdown ("" when empty). */
+  function activeThreadMarkdown(): string {
+    const s = useChatStore.getState();
+    const thread = s.threads.find((t) => t.id === s.activeThreadId);
+    if (!thread || thread.messages.length === 0) return "";
+    return [
+      `# ${thread.title}`,
+      "",
+      ...thread.messages.map((m) =>
+        m.role === "user"
+          ? `**You:** ${typeof m.content === "string" ? m.content : "[attachments]"}`
+          : `**Zintus${m.model ? ` (${m.model})` : ""}:** ${typeof m.content === "string" ? m.content : ""}`,
+      ),
+    ].join("\n\n");
+  }
   const { mod } = useShortcutGlyphs();
   const accountRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1037,48 +1073,73 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
 
           {pathname.startsWith("/chat") ? (
-            <Tooltip
-              content={shareCopied ? "Copied as Markdown" : "Share — copy this chat as Markdown"}
-              side="bottom"
-            >
-              <button
-                type="button"
-                onClick={() => {
-                  const thread = useChatStore
-                    .getState()
-                    .threads.find((t) => t.id === useChatStore.getState().activeThreadId);
-                  if (!thread || thread.messages.length === 0) return;
-                  const md = [
-                    `# ${thread.title}`,
-                    "",
-                    ...thread.messages.map((m) =>
-                      m.role === "user"
-                        ? `**You:** ${typeof m.content === "string" ? m.content : "[attachments]"}`
-                        : `**Zintus${m.model ? ` (${m.model})` : ""}:** ${typeof m.content === "string" ? m.content : ""}`,
-                    ),
-                  ].join("\n\n");
-                  void navigator.clipboard?.writeText(md).then(() => {
-                    setShareCopied(true);
-                    window.setTimeout(() => setShareCopied(false), 1600);
-                  });
-                }}
-                aria-label="Share chat — copy as Markdown"
-                className="app-icon-btn"
-                style={{
-                  display: "grid",
-                  placeItems: "center",
-                  width: 32,
-                  height: 32,
-                  border: "none",
-                  borderRadius: 8,
-                  background: "transparent",
-                  color: shareCopied ? "var(--color-green)" : "var(--color-text-sub)",
-                  cursor: "pointer",
-                }}
+            // Share = the ONE export surface (the per-chat Export button is
+            // gone): copy the chat as Markdown or save it as a .md file.
+            <div ref={shareRef} style={{ position: "relative" }}>
+              <Tooltip
+                content={shareCopied ? "Copied as Markdown" : "Share this chat"}
+                side="bottom"
               >
-                {shareCopied ? <Check size={16} /> : <Share size={15} />}
-              </button>
-            </Tooltip>
+                <button
+                  type="button"
+                  onClick={() => setShareOpen((v) => !v)}
+                  aria-label="Share chat"
+                  aria-expanded={shareOpen}
+                  className="app-icon-btn"
+                  style={{
+                    display: "grid",
+                    placeItems: "center",
+                    width: 32,
+                    height: 32,
+                    border: "none",
+                    borderRadius: 8,
+                    background: "transparent",
+                    color: shareCopied ? "var(--color-green)" : "var(--color-text-sub)",
+                    cursor: "pointer",
+                  }}
+                >
+                  {shareCopied ? <Check size={16} /> : <Share size={15} />}
+                </button>
+              </Tooltip>
+              {shareOpen ? (
+                <div
+                  role="menu"
+                  className="pop-menu"
+                  style={{ position: "absolute", top: 38, right: 0, zIndex: 40 }}
+                >
+                  <div className="pop-label">Share</div>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pop-item"
+                    onClick={() => {
+                      setShareOpen(false);
+                      const md = activeThreadMarkdown();
+                      if (!md) return;
+                      void navigator.clipboard?.writeText(md).then(() => {
+                        setShareCopied(true);
+                        window.setTimeout(() => setShareCopied(false), 1600);
+                      });
+                    }}
+                  >
+                    Copy as Markdown
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="pop-item"
+                    onClick={() => {
+                      setShareOpen(false);
+                      const md = activeThreadMarkdown();
+                      if (!md) return;
+                      void saveTextFile("zintus-chat.md", md, "text/markdown");
+                    }}
+                  >
+                    Save as .md file
+                  </button>
+                </div>
+              ) : null}
+            </div>
           ) : null}
 
           <Tooltip

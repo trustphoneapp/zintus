@@ -225,11 +225,22 @@ export const useChatStore = create<ChatState>()(
           ),
         })),
       newChat: () => {
+        // Idempotent: an untouched chat IS the new chat — never stack empty
+        // "New chat" rows in Recents (user report). Reuse the active one when
+        // it has no usage, else adopt any other existing empty thread.
+        const state = get();
+        const active = state.threads.find((t) => t.id === state.activeThreadId);
+        if (active && active.messages.length === 0) return;
+        const existingEmpty = state.threads.find((t) => t.messages.length === 0);
+        if (existingEmpty) {
+          set({ activeThreadId: existingEmpty.id });
+          return;
+        }
         const id = createThreadId();
-        set((state) => ({
+        set((s) => ({
           threads: [
             { id, title: "New chat", messages: [], updatedAt: Date.now() },
-            ...state.threads,
+            ...s.threads,
           ],
           activeThreadId: id,
         }));
