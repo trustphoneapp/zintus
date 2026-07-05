@@ -337,7 +337,7 @@ function LogLine({ event }: { event: AgentEvent }) {
       return (
         <p className="agent-ev agent-ev--done">
           <span className="agent-ev-rail" />✓ done · {String(event.rounds)} round(s) ·{" "}
-          {String(event.mutations)} change(s)
+          {Number(event.mutations) === 0 ? "read only" : `${String(event.mutations)} change(s)`}
         </p>
       );
     case "stopped":
