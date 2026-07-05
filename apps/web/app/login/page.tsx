@@ -20,7 +20,13 @@ export default function LoginPage() {
   // post-OAuth deep-link redirect resolves instead of 404ing on www.
   const redirectTo = isMobile
     ? `${RELAY_URL}/api/auth/mobile-redirect`
-    : "https://www.zintus.ai/dashboard";
+    : isCli && cliState
+      ? // Device flow (desktop/CLI): OAuth must land on the cli-callback page,
+        // which mints the gateway session and POSTs cli-complete — landing on
+        // the plain dashboard strands the app on "Waiting for browser sign-in"
+        // forever (the state never gets approved).
+        `https://www.zintus.ai/dashboard/cli-callback?state=${encodeURIComponent(cliState)}`
+      : "https://www.zintus.ai/dashboard";
 
   async function handleMagicLink(event: React.FormEvent) {
     event.preventDefault();
