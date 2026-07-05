@@ -113,6 +113,18 @@ interface AgentTask {
   /** Latest replay-safe conversation (updated each round boundary); the resume
    *  seed. Undefined until the first round completes. */
   checkpoint?: ChatMessage[];
+  /** Real tool calls executed across the whole session (all exchanges). A
+   *  session that never called a single tool did no verifiable work — its
+   *  completion is reported as a failure, never "done" (P4). */
+  toolCallsTotal?: number;
+}
+
+/** Heuristic for the "model narrated pseudocode instead of calling tools"
+ *  failure (non-tool models write ```python import search_code…``` blocks).
+ *  Only consulted when a run made ZERO tool calls, so a false positive cannot
+ *  mislabel a working run. Exported for tests. */
+export function looksLikePseudocode(text: string): boolean {
+  return /```[\s\S]{0,400}?\b(import\s+\w|def\s+\w|from\s+\w+\s+import)/.test(text);
 }
 
 /** How long an un-answered approval waits before it is DECLINED (fail closed). */
@@ -208,6 +220,7 @@ export class AgentTaskManager {
           rounds: raw.rounds ?? 0,
           body: raw.body ?? { task: raw.task ?? "" },
           checkpoint: raw.checkpoint,
+          toolCallsTotal: raw.toolCallsTotal ?? 0,
         });
       } catch {
         // skip a malformed record
@@ -432,6 +445,8 @@ export class AgentTaskManager {
       Math.max(1, body.maxRounds ?? DEFAULT_AGENT_ROUNDS),
       MAX_AGENT_ROUNDS_CAP,
     );
+    // This run's streamed text (capped in onChunk) for the P4 pseudocode check.
+    let runText = "";
     const allowRun = body.allowRun ?? false;
     const fileTools = allowRun
       ? AGENT_TOOL_DEFINITIONS
@@ -537,9 +552,15 @@ export class AgentTaskManager {
           trace_id: meta.traceId,
         });
       },
-      onChunk: (chunk) => this.emit(t, { type: "text", text: chunk }),
+      onChunk: (chunk) => {
+        // Capped transcript of this run's streamed text, for the pseudocode
+        // heuristic on a zero-tool completion (P4). Never persisted.
+        if (runText.length < 16_000) runText += chunk;
+        this.emit(t, { type: "text", text: chunk });
+      },
       onTurnEnd: () => this.emit(t, { type: "turn_end" }),
       onToolCalls: (calls) => {
+        t.toolCallsTotal = (t.toolCallsTotal ?? 0) + calls.length;
         for (const c of calls) {
           this.emit(t, {
             type: "tool_call",
@@ -578,6 +599,20 @@ export class AgentTaskManager {
     try {
       const { rounds } = await runAgentToolLoop(initialMessages, handlers);
       t.rounds = rounds;
+      // P4 — a session that never executed a single real tool call did no
+      // verifiable work: report failure, never "done". (Checked across the
+      // whole session so a context-only FOLLOW-UP after tool-using exchanges —
+      // "summarize what you learned" — still completes honestly.)
+      if (!t.stopRequested && (t.toolCallsTotal ?? 0) === 0) {
+        t.status = "error";
+        this.emit(t, {
+          type: "error",
+          message: looksLikePseudocode(runText)
+            ? "The selected model produced code instead of tool calls. Switch to a tool-capable model and try again."
+            : "failed: no tools used — the model answered without calling any tools. Agent tasks need a tool-capable model.",
+        });
+        return;
+      }
       t.status = t.stopRequested ? "stopped" : "done";
       this.emit(t, {
         type: t.stopRequested ? "stopped" : "done",
@@ -626,6 +661,7 @@ export class AgentTaskManager {
             events: t.events,
             body: t.body,
             checkpoint: t.checkpoint,
+            toolCallsTotal: t.toolCallsTotal ?? 0,
           },
           null,
           2,

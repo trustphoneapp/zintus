@@ -187,8 +187,18 @@ describe("gateway agent runtime", () => {
   test("SSE subscribe replays the backlog and terminates with [DONE]", async () => {
     const root = tmpRoot();
     process.env.ZINTUS_AGENT_RECORDS = path.join(root, ".records");
-    const mgr = new AgentTaskManager(scriptedEngine([() => turn("hi there")]));
-    const { id } = mgr.create({ task: "say hi", root });
+    // Round 0 reads a file (a REAL tool call — a zero-tool run is a P4
+    // failure, not "done"), round 1 answers.
+    const mgr = new AgentTaskManager(
+      scriptedEngine([
+        () =>
+          turn("looking…", [
+            { type: "tool_call", id: "c1", name: "read_file", arguments: { path: "x.txt" } },
+          ]),
+        () => turn("hi there"),
+      ]),
+    );
+    const { id } = mgr.create({ task: "say hi", root, autoApprove: true });
     await waitFor(() => (mgr.get(id) as { status: string }).status === "done");
 
     const stream = mgr.subscribe(id)!;
@@ -198,6 +208,32 @@ describe("gateway agent runtime", () => {
     expect(text).toContain('"type":"done"');
     expect(text.trimEnd().endsWith("data: [DONE]")).toBe(true);
     expect(mgr.subscribe("nope")).toBeNull();
+  });
+
+  test("zero-tool run reports failure, never done (P4)", async () => {
+    const root = tmpRoot();
+    process.env.ZINTUS_AGENT_RECORDS = path.join(root, ".records");
+    const mgr = new AgentTaskManager(scriptedEngine([() => turn("all set, no tools needed!")]));
+    const { id } = mgr.create({ task: "do work", root });
+    await waitFor(() => (mgr.get(id) as { status: string }).status === "error");
+    const task = (mgr as unknown as { tasks: Map<string, { events: AgentEvent[] }> }).tasks.get(id)!;
+    const err = task.events.find((e) => e.type === "error");
+    expect(String(err?.message)).toContain("no tools used");
+  });
+
+  test("pseudocode narration gets the tailored model-switch error (P4)", async () => {
+    const root = tmpRoot();
+    process.env.ZINTUS_AGENT_RECORDS = path.join(root, ".records");
+    const mgr = new AgentTaskManager(
+      scriptedEngine([
+        () => turn("I will do this:\n```python\nimport search_code\nfor f in files:\n  pass\n```"),
+      ]),
+    );
+    const { id } = mgr.create({ task: "refactor", root });
+    await waitFor(() => (mgr.get(id) as { status: string }).status === "error");
+    const task = (mgr as unknown as { tasks: Map<string, { events: AgentEvent[] }> }).tasks.get(id)!;
+    const err = task.events.find((e) => e.type === "error");
+    expect(String(err?.message)).toContain("produced code instead of tool calls");
   });
 
   test("interrupted run is recovered on startup and resumes to completion", async () => {
