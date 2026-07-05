@@ -7,7 +7,7 @@ import type {
 } from "@zintus/types";
 import { assertOkResponse } from "../utils.js";
 import { usageFromProviderFields } from "../token-estimate.js";
-import { isOllamaVisionModel } from "../capabilities.js";
+import { isOllamaVisionModel, ollamaVisionRank } from "../capabilities.js";
 
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 
@@ -26,17 +26,22 @@ async function installedModelNames(baseUrl: string): Promise<string[] | null> {
 }
 
 /**
- * The first INSTALLED multimodal model (llava/moondream/… — see
- * OLLAMA_VISION_FAMILIES), or null when none is installed or Ollama is down.
- * This is the runtime half of local vision: the gateway calls it to resolve an
- * image request against what the user actually pulled, then pins that model so
- * the router's static `supportsVision("ollama", model)` check agrees.
+ * The BEST-ranked INSTALLED multimodal model (see OLLAMA_VISION_FAMILIES —
+ * minicpm-v beats llava beats moondream), or null when none is installed or
+ * Ollama is down. This is the runtime half of local vision: the gateway calls
+ * it to resolve an image request against what the user actually pulled, then
+ * pins that model so the router's static `supportsVision("ollama", model)`
+ * check agrees.
  */
 export async function installedLocalVisionModel(
   baseUrl = process.env.OLLAMA_HOST ?? DEFAULT_OLLAMA_URL,
 ): Promise<string | null> {
   const names = await installedModelNames(baseUrl);
-  return names?.find((n) => isOllamaVisionModel(n)) ?? null;
+  const vision = (names ?? []).filter((n) => isOllamaVisionModel(n));
+  if (vision.length === 0) return null;
+  return vision.reduce((best, n) =>
+    ollamaVisionRank(n) < ollamaVisionRank(best) ? n : best,
+  );
 }
 
 /**

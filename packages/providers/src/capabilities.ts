@@ -133,21 +133,24 @@ const VISION_MODELS: Partial<Record<ProviderId, ReadonlySet<string>>> = {
 // `/api/chat` `images: [base64]` field. Matched against the BASE name (the part
 // before the `:tag`), so `llava:13b` and `moondream:latest` both qualify.
 // Deliberately conservative — a family is added only when Ollama's library
-// documents it as multimodal. Whether such a model is INSTALLED stays a
-// runtime question (the gateway resolves it against `/api/tags`); this list
-// only answers "IF installed, can it see images?".
+// documents it as multimodal. Whether such a family is INSTALLED stays a
+// runtime question (the gateway resolves it against `/api/tags`).
+//
+// ORDERED strongest → weakest at dense/OCR-ish inputs (screenshots, documents):
+// the runtime resolver picks the best-ranked INSTALLED model, so pulling
+// minicpm-v upgrades every image turn even while moondream stays installed.
 const OLLAMA_VISION_FAMILIES = [
-  "llava",
-  "llava-llama3",
-  "llava-phi3",
-  "bakllava",
-  "moondream",
-  "llama3.2-vision",
   "minicpm-v",
-  "qwen2-vl",
   "qwen2.5vl",
+  "qwen2-vl",
+  "llama3.2-vision",
+  "llava-llama3",
+  "llava",
+  "bakllava",
+  "llava-phi3",
   "granite3.2-vision",
   "gemma3",
+  "moondream",
 ] as const;
 
 /** True when an Ollama model NAME (e.g. "llava:13b") belongs to a documented
@@ -155,6 +158,15 @@ const OLLAMA_VISION_FAMILIES = [
 export function isOllamaVisionModel(model: string): boolean {
   const base = model.split(":")[0]?.toLowerCase() ?? "";
   return (OLLAMA_VISION_FAMILIES as readonly string[]).includes(base);
+}
+
+/** Quality rank of a vision model name within OLLAMA_VISION_FAMILIES
+ *  (lower = stronger); Infinity for non-vision names. Used by the runtime
+ *  resolver to prefer the BEST installed model, not the first listed. */
+export function ollamaVisionRank(model: string): number {
+  const base = model.split(":")[0]?.toLowerCase() ?? "";
+  const idx = (OLLAMA_VISION_FAMILIES as readonly string[]).indexOf(base);
+  return idx === -1 ? Infinity : idx;
 }
 
 /**

@@ -282,20 +282,26 @@ export function MessageBubble({
                 style={{ display: "inline-flex", alignItems: "center" }}
               >
                 {img.thumb || img.previewUrl ? (
-                  // Prefer the persisted data-URI thumb (survives relaunch); the
-                  // object URL only works within the session it was created in.
+                  // Sharpness order: the ORIGINAL object URL first (full-res,
+                  // valid within the session it was created in), then the
+                  // persisted 320px thumb after a relaunch. onError walks the
+                  // same chain when a restored blob URL turns out dead.
                   // eslint-disable-next-line @next/next/no-img-element
                   <img
-                    src={img.thumb ?? img.previewUrl}
+                    src={img.previewUrl ?? img.thumb}
                     alt={img.name}
                     width={120}
                     height={120}
                     style={{ maxWidth: 120, maxHeight: 120, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(255,255,255,0.18)" }}
                     onError={(e) => {
-                      // Dead blob URL from a previous session (threads saved
-                      // before thumbs existed): swap to the metadata fallback
-                      // instead of a broken-image box.
+                      // Dead blob URL from a previous session: fall back to the
+                      // persisted thumb; with no thumb (threads saved before
+                      // thumbs existed) show the metadata line, never a broken box.
                       const el = e.currentTarget;
+                      if (img.thumb && el.src !== img.thumb) {
+                        el.src = img.thumb;
+                        return;
+                      }
                       el.style.display = "none";
                       const fallback = el.nextElementSibling as HTMLElement | null;
                       if (fallback) fallback.style.display = "inline";

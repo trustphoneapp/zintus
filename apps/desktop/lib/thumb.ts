@@ -7,7 +7,10 @@
  * image-attachments.ts so that module stays unit-testable under bun.
  */
 
-export const THUMB_PX = 96;
+// 320px covers the bubble's 120 CSS px at 2x retina (240 device px) with room
+// to spare — the persisted fallback stays sharp instead of upscaled mush.
+// ~15-25 KB JPEG per image, ≤4 per message.
+export const THUMB_PX = 320;
 
 export async function fileToThumb(
   file: Blob,

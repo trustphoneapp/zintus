@@ -58,14 +58,29 @@ describe("toOllamaMessages", () => {
 });
 
 describe("installedLocalVisionModel", () => {
-  test("returns the first installed multimodal family, skipping text models", async () => {
+  test("returns the BEST-ranked installed multimodal model, skipping text models", async () => {
     globalThis.fetch = (async () =>
       new Response(
         JSON.stringify({
           models: [{ name: "qwen2.5:0.5b" }, { name: "moondream:latest" }, { name: "llava:7b" }],
         }),
       )) as typeof fetch;
-    expect(await installedLocalVisionModel("http://stub")).toBe("moondream:latest");
+    // llava outranks moondream regardless of install/listing order.
+    expect(await installedLocalVisionModel("http://stub")).toBe("llava:7b");
+  });
+
+  test("minicpm-v outranks llava and moondream when all are installed", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          models: [
+            { name: "moondream:latest" },
+            { name: "llava:7b" },
+            { name: "minicpm-v:latest" },
+          ],
+        }),
+      )) as typeof fetch;
+    expect(await installedLocalVisionModel("http://stub")).toBe("minicpm-v:latest");
   });
 
   test("null when only text models are installed", async () => {
