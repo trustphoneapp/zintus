@@ -210,7 +210,7 @@ export function CommandPalette() {
     minWidth: 18,
     padding: "1px 5px",
     borderRadius: "var(--radius-sm)",
-    border: "0.5px solid var(--c-border)",
+    border: "var(--hairline) solid var(--c-border)",
     background: "var(--c-bg)",
     fontFamily: "var(--font-mono)",
     fontSize: 10,
@@ -293,7 +293,7 @@ export function CommandPalette() {
             alignItems: "center",
             gap: 14,
             padding: "9px 14px",
-            borderTop: "0.5px solid var(--c-border)",
+            borderTop: "var(--hairline) solid var(--c-border)",
             fontSize: 11,
             color: "var(--color-text-muted)",
           }}
