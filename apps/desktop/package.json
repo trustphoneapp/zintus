@@ -12,6 +12,10 @@
     "typecheck": "tsc --noEmit",
     "stage:sidecar": "bun scripts/stage-sidecar.ts"
   },
+  "browserslist": [
+    "Chrome >= 111",
+    "Safari >= 16.2"
+  ],
   "dependencies": {
     "@radix-ui/react-tooltip": "^1.2.10",
     "@tauri-apps/api": "^2.2.0",
