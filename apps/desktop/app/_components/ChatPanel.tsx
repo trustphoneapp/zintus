@@ -210,14 +210,70 @@ export function ChatPanel() {
   const [transcribing, setTranscribing] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
-
-  async function toggleRecording() {
-    if (recording) {
-      recorderRef.current?.stop();
-      return;
+  // Mic-source picker: macOS surfaces Continuity devices (e.g. "iPhone
+  // Microphone") as inputs — pressing the mic opens a chooser instead of
+  // silently grabbing the OS default. The choice persists.
+  const [micMenuOpen, setMicMenuOpen] = useState(false);
+  const [micDevices, setMicDevices] = useState<Array<{ id: string; label: string }>>([]);
+  const micRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!micMenuOpen) return;
+    function onDown(e: MouseEvent) {
+      if (micRef.current && !micRef.current.contains(e.target as Node)) {
+        setMicMenuOpen(false);
+      }
     }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMicMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [micMenuOpen]);
+
+  async function openMicMenu() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Device LABELS are only exposed after a granted audio permission —
+      // prime it with a throwaway stream, then enumerate.
+      let devices = (await navigator.mediaDevices.enumerateDevices()).filter(
+        (d) => d.kind === "audioinput",
+      );
+      if (devices.every((d) => !d.label)) {
+        const prime = await navigator.mediaDevices.getUserMedia({ audio: true });
+        prime.getTracks().forEach((t) => t.stop());
+        devices = (await navigator.mediaDevices.enumerateDevices()).filter(
+          (d) => d.kind === "audioinput",
+        );
+      }
+      setMicDevices(
+        devices
+          .filter((d) => d.deviceId && d.deviceId !== "default")
+          .map((d) => ({ id: d.deviceId, label: d.label || "Microphone" })),
+      );
+      setMicMenuOpen(true);
+    } catch {
+      setNotice({
+        tone: "warn",
+        text: "Microphone unavailable — check the app's mic permission in System Settings.",
+      });
+    }
+  }
+
+  async function startRecording(deviceId?: string) {
+    setMicMenuOpen(false);
+    if (deviceId) localStorage.setItem("zintus.micDevice", deviceId);
+    else localStorage.removeItem("zintus.micDevice");
+    try {
+      const stream = await navigator.mediaDevices
+        .getUserMedia({
+          audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+        })
+        // The remembered device may be gone (iPhone walked away) — fall back
+        // to the OS default rather than failing the recording.
+        .catch(() => navigator.mediaDevices.getUserMedia({ audio: true }));
       const mime = MediaRecorder.isTypeSupported("audio/webm")
         ? "audio/webm"
         : MediaRecorder.isTypeSupported("audio/mp4")
@@ -1472,37 +1528,78 @@ export function ChatPanel() {
               {/* Mic — records locally, transcribes via the gateway's
                   /v1/transcribe (Whisper on the user's own Groq key). Audio:
                   this device → local gateway → Groq; never stored or logged.
-                  Click to start, click again to stop + transcribe. */}
-              <button
-                type="button"
-                aria-label={recording ? "Stop recording and transcribe" : "Voice input"}
-                aria-pressed={recording}
-                title={
-                  recording
-                    ? "Recording — click to stop and transcribe"
-                    : "Voice input — records here, transcribed with your own Groq key via the local gateway"
-                }
-                onClick={() => void toggleRecording()}
-                disabled={transcribing}
-                className="app-icon-btn"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 30,
-                  height: 30,
-                  border: "none",
-                  borderRadius: 8,
-                  color: recording ? "var(--color-red)" : "var(--color-text-sub)",
-                  cursor: "pointer",
-                  background: recording
-                    ? "color-mix(in srgb, var(--color-red) 12%, transparent)"
-                    : "transparent",
-                  opacity: transcribing ? 0.5 : 1,
-                }}
-              >
-                <Mic size={15} />
-              </button>
+                  Click opens the SOURCE picker (Continuity iPhone mics show up
+                  here); picking a source starts recording; click again stops. */}
+              <div ref={micRef} style={{ position: "relative" }}>
+                <button
+                  type="button"
+                  aria-label={recording ? "Stop recording and transcribe" : "Voice input"}
+                  aria-pressed={recording}
+                  aria-expanded={micMenuOpen}
+                  title={
+                    recording
+                      ? "Recording — click to stop and transcribe"
+                      : "Voice input — pick a microphone; transcribed with your own Groq key via the local gateway"
+                  }
+                  onClick={() => {
+                    if (recording) recorderRef.current?.stop();
+                    else if (micMenuOpen) setMicMenuOpen(false);
+                    else void openMicMenu();
+                  }}
+                  disabled={transcribing}
+                  className="app-icon-btn"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 30,
+                    height: 30,
+                    border: "none",
+                    borderRadius: 8,
+                    color: recording ? "var(--color-red)" : "var(--color-text-sub)",
+                    cursor: "pointer",
+                    background: recording
+                      ? "color-mix(in srgb, var(--color-red) 12%, transparent)"
+                      : "transparent",
+                    opacity: transcribing ? 0.5 : 1,
+                  }}
+                >
+                  <Mic size={15} />
+                </button>
+                {micMenuOpen ? (
+                  <div role="menu" className="pop-menu" style={{ ...pillMenuStyle, minWidth: 240 }}>
+                    <div className="pop-label">Microphone</div>
+                    {(() => {
+                      const saved = localStorage.getItem("zintus.micDevice");
+                      return (
+                        <>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className={`pop-item${!saved ? " on" : ""}`}
+                            onClick={() => void startRecording()}
+                          >
+                            System default
+                            <span className="pop-sub">record</span>
+                          </button>
+                          {micDevices.map((d) => (
+                            <button
+                              key={d.id}
+                              type="button"
+                              role="menuitem"
+                              className={`pop-item${saved === d.id ? " on" : ""}`}
+                              onClick={() => void startRecording(d.id)}
+                            >
+                              {d.label}
+                              <span className="pop-sub">record</span>
+                            </button>
+                          ))}
+                        </>
+                      );
+                    })()}
+                  </div>
+                ) : null}
+              </div>
 
               {/* Active-ability chips — only what's ON is shown; ✕ turns it off.
                   (Enable lives in the + menu; Private also has the top-bar shield.) */}
@@ -1746,6 +1843,9 @@ export function ChatPanel() {
               </span>
 
               {loading ? (
+                // Same visual weight as Send (primary fill) so "you can stop
+                // this" is unmissable while the model streams — Claude-style
+                // square-in-a-button.
                 <button
                   type="button"
                   onClick={stop}
@@ -1757,14 +1857,15 @@ export function ChatPanel() {
                     justifyContent: "center",
                     width: 32,
                     height: 32,
-                    borderRadius: "50%",
-                    border: "1px solid var(--color-border)",
-                    background: "var(--color-surface)",
-                    color: "var(--color-text)",
+                    borderRadius: 9,
+                    border: "none",
+                    padding: 0,
+                    background: "var(--color-primary)",
+                    color: "var(--color-primary-contrast)",
                     cursor: "pointer",
                   }}
                 >
-                  <Square size={12} fill="currentColor" />
+                  <Square size={13} fill="currentColor" />
                 </button>
               ) : (
                 <button

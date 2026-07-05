@@ -35,6 +35,7 @@ import { useChatStore, useCloudStore, useSettingsStore } from "@/lib/store";
 import { openExternal } from "@/lib/tauri";
 import { signOut } from "@/lib/cloud";
 import { hasCompletedOnboarding } from "@/lib/onboarding";
+import { listProjects } from "@/lib/projects";
 import { resolvedTheme, toggleTheme, watchSystemTheme } from "@/lib/theme";
 import { useShortcutGlyphs } from "@/lib/platform";
 import { APP_VERSION, checkForUpdate, type UpdateCheck } from "@/lib/updates";
@@ -146,6 +147,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     deleteThread,
     renameThread,
     togglePinThread,
+    setThreadProject,
   } = useChatStore();
   const { authenticated, email, billing, refreshCloud } = useCloudStore();
   // Which thread row is being renamed inline, and the draft title.
@@ -629,6 +631,42 @@ export function AppShell({ children }: { children: ReactNode }) {
                             >
                               Rename
                             </button>
+                            {/* Add to project — flat list (minimal, no submenu):
+                                one item per project, ✓ on the current one;
+                                choosing the current project detaches. */}
+                            {listProjects().length > 0 ? (
+                              listProjects().map((project) => (
+                                <button
+                                  key={project.id}
+                                  type="button"
+                                  role="menuitem"
+                                  className="app-icon-btn"
+                                  style={threadMenuItemStyle}
+                                  onClick={() => {
+                                    setThreadProject(
+                                      thread.id,
+                                      thread.projectId === project.id ? null : project.id,
+                                    );
+                                    setThreadMenuId(null);
+                                  }}
+                                >
+                                  {thread.projectId === project.id ? "✓ " : ""}
+                                  {thread.projectId === project.id
+                                    ? `In ${project.name}`
+                                    : `Add to ${project.name}`}
+                                </button>
+                              ))
+                            ) : (
+                              <Link
+                                href="/projects"
+                                role="menuitem"
+                                className="app-icon-btn"
+                                style={{ ...threadMenuItemStyle, textDecoration: "none" }}
+                                onClick={() => setThreadMenuId(null)}
+                              >
+                                Add to project… (create one)
+                              </Link>
+                            )}
                             <button
                               type="button"
                               role="menuitem"

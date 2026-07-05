@@ -89,6 +89,8 @@ export interface Thread {
   updatedAt: number;
   /** Pinned chats sort above the rest in Recents. */
   pinned?: boolean;
+  /** Project this chat belongs to (lib/projects id); undefined/null = none. */
+  projectId?: string | null;
 }
 
 interface ChatState {
@@ -106,6 +108,8 @@ interface ChatState {
   deleteThread: (id: string) => void;
   renameThread: (id: string, title: string) => void;
   togglePinThread: (id: string) => void;
+  /** Attach/detach a chat to a project (null clears). */
+  setThreadProject: (id: string, projectId: string | null) => void;
 }
 
 function createMessageId(): string {
@@ -235,6 +239,12 @@ export const useChatStore = create<ChatState>()(
         set((state) => ({
           threads: state.threads.map((thread) =>
             thread.id === id ? { ...thread, pinned: !thread.pinned } : thread,
+          ),
+        })),
+      setThreadProject: (id, projectId) =>
+        set((state) => ({
+          threads: state.threads.map((thread) =>
+            thread.id === id ? { ...thread, projectId } : thread,
           ),
         })),
       renameThread: (id, title) =>
