@@ -1102,9 +1102,12 @@ export function AppShell({ children }: { children: ReactNode }) {
             </button>
           </Tooltip>
 
+          {/* Drawer-width windows: CSS shifts this toward the right cluster
+              so the pill never sits under the fixed mac strip toggle. */}
           <div
             data-tauri-drag-region
-            style={{ flex: 1, display: "flex", justifyContent: "center" }}
+            className="topbar-center"
+            style={{ flex: 1, display: "flex" }}
           >
             <button
               type="button"

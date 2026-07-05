@@ -244,14 +244,16 @@ body {
   display: none;
 }
 :root[data-platform="mac"] .strip-toggle {
+  /* Claude-tight: lights end ≈64px in; button hugs them, vertically centered
+     on the lights' axis (lights center ≈21px; 30px button → top 6px). */
   position: fixed;
-  top: 8px;
-  left: 78px;
+  top: 6px;
+  left: 70px;
   z-index: 210;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 28px;
+  width: 32px;
+  height: 30px;
   padding: 0;
   border: none;
   border-radius: 7px;
@@ -265,6 +267,18 @@ body {
 }
 :root[data-platform="mac"] .topbar-toggle {
   display: none !important;
+}
+/* ⌘K pill alignment lives HERE (not inline — inline would beat the media
+   override). Drawer-width windows (<720): the fixed mac strip toggle owns
+   the top-left corner, so the pill hugs the right (Share/shield) cluster
+   instead of centering underneath it (user-reported collision). */
+.topbar-center {
+  justify-content: center;
+}
+@media (max-width: 719px) {
+  :root[data-platform="mac"] .topbar-center {
+    justify-content: flex-end;
+  }
 }
 
 a {
