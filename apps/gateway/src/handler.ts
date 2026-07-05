@@ -2803,6 +2803,21 @@ export function createGatewayHandler(
           ? json(request, { resuming: true })
           : json(request, { error: { message: res.reason } }, 409);
       }
+      // P2 — conversational follow-up on a completed session (same sandbox
+      // root, full prior context; the new exchange's events append to the same
+      // backlog, stamped with the bumped `exchange` index).
+      if (parts[4] === "messages") {
+        const body = (await request.json().catch(() => null)) as {
+          message?: unknown;
+        } | null;
+        if (!body || typeof body.message !== "string" || !body.message.trim()) {
+          return json(request, { error: { message: "message (string) is required" } }, 400);
+        }
+        const res = agents.followUp(agentId, body.message);
+        return res.ok
+          ? json(request, { continued: true, exchange: res.exchange })
+          : json(request, { error: { message: res.reason } }, res.status);
+      }
       return json(request, { error: { message: "unknown agent action" } }, 404);
     }
 

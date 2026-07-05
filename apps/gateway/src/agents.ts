@@ -117,6 +117,9 @@ interface AgentTask {
    *  session that never called a single tool did no verifiable work — its
    *  completion is reported as a failure, never "done" (P4). */
   toolCallsTotal?: number;
+  /** 0-based index of the current conversational exchange (P2 multi-turn).
+   *  Every event is stamped with it so clients can group the run panel. */
+  exchange?: number;
 }
 
 /** Heuristic for the "model narrated pseudocode instead of calling tools"
@@ -221,6 +224,7 @@ export class AgentTaskManager {
           body: raw.body ?? { task: raw.task ?? "" },
           checkpoint: raw.checkpoint,
           toolCallsTotal: raw.toolCallsTotal ?? 0,
+          exchange: raw.exchange ?? 0,
         });
       } catch {
         // skip a malformed record
@@ -258,7 +262,12 @@ export class AgentTaskManager {
     t: AgentTask,
     event: { type: AgentEvent["type"] } & Record<string, unknown>,
   ): void {
-    const e: AgentEvent = { ...event, seq: t.events.length, ts: Date.now() };
+    const e: AgentEvent = {
+      exchange: t.exchange ?? 0,
+      ...event,
+      seq: t.events.length,
+      ts: Date.now(),
+    };
     t.events.push(e);
     if (t.events.length > MAX_EVENTS) {
       // Drop oldest text deltas first; structural events are kept.
@@ -276,19 +285,43 @@ export class AgentTaskManager {
     let listener: ((e: AgentEvent) => void) | null = null;
     return new ReadableStream<Uint8Array>({
       start: (controller) => {
+        let closed = false;
+        const finish = () => {
+          if (closed) return;
+          closed = true;
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          if (listener) t.listeners.delete(listener);
+          controller.close();
+        };
         const send = (e: AgentEvent) => {
+          if (closed) return;
           controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
-          if (e.type === "done" || e.type === "error" || e.type === "stopped") {
-            controller.enqueue(enc.encode("data: [DONE]\n\n"));
-            if (listener) t.listeners.delete(listener);
-            controller.close();
+          // Terminate only when the TASK is terminal, not merely on a terminal
+          // event: a multi-turn backlog contains one done per past exchange
+          // (P2), and a follow-up flips status back to running before its
+          // events land — closing on the first replayed done would truncate
+          // every later exchange.
+          if (
+            (e.type === "done" || e.type === "error" || e.type === "stopped") &&
+            t.status !== "running" &&
+            t.status !== "awaiting_approval"
+          ) {
+            finish();
           }
         };
-        for (const e of [...t.events]) send(e);
-        if (
-          t.status === "running" ||
-          t.status === "awaiting_approval"
-        ) {
+        const backlog = [...t.events];
+        for (let i = 0; i < backlog.length; i += 1) {
+          const e = backlog[i]!;
+          if (closed) break;
+          // During replay, only the LAST backlog event may terminate the
+          // stream — intermediate per-exchange done events must flow through.
+          if (i < backlog.length - 1) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+          } else {
+            send(e);
+          }
+        }
+        if (!closed) {
           listener = send;
           t.listeners.add(listener);
         }
@@ -392,6 +425,70 @@ export class AgentTaskManager {
     return { ok: true };
   }
 
+  /**
+   * P2 — conversational follow-up: continue a COMPLETED (done/stopped) session
+   * with a new user message. Re-creates the sandbox from the SAME root, seeds
+   * the loop with the full checkpointed conversation + the new turn, bumps the
+   * exchange index (every event is stamped with it), and re-enters the same
+   * hardened loop — per-exchange mutation/run budgets are fresh because run()
+   * builds a new tool context each invocation. Approval gates apply anew.
+   */
+  followUp(
+    id: string,
+    message: string,
+  ): { ok: true; exchange: number } | { ok: false; status: number; reason: string } {
+    const t = this.tasks.get(id);
+    if (!t) return { ok: false, status: 404, reason: "agent not found" };
+    if (t.status === "running" || t.status === "awaiting_approval") {
+      return {
+        ok: false,
+        status: 409,
+        reason:
+          "The agent is still working — wait for the current exchange to finish (or stop it) before following up.",
+      };
+    }
+    if (t.status === "interrupted") {
+      return { ok: false, status: 409, reason: "This session was interrupted — resume it first." };
+    }
+    if (!t.checkpoint || t.checkpoint.length === 0) {
+      return {
+        ok: false,
+        status: 409,
+        reason: "No conversation to continue — the run never completed a round.",
+      };
+    }
+    let sandbox: ReturnType<typeof createSandbox>;
+    try {
+      sandbox = createSandbox(t.root);
+    } catch (error) {
+      return {
+        ok: false,
+        status: 400,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    t.exchange = (t.exchange ?? 0) + 1;
+    t.status = "running";
+    t.stopRequested = false;
+    const seed: ChatMessage[] = [...t.checkpoint, { role: "user", content: message }];
+    t.checkpoint = seed;
+    this.emit(t, {
+      type: "started",
+      follow_up: true,
+      exchange: t.exchange,
+      task: message,
+      root: t.root,
+    });
+    void this.run(t, sandbox, t.body, seed).catch((error) => {
+      t.status = "error";
+      this.emit(t, {
+        type: "error",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return { ok: true, exchange: t.exchange };
+  }
+
   private confirmGate(t: AgentTask, autoApprove: boolean): ConfirmWrite {
     if (autoApprove) {
       return async ({ toolName, path: p }) => {
@@ -447,6 +544,10 @@ export class AgentTaskManager {
     );
     // This run's streamed text (capped in onChunk) for the P4 pseudocode check.
     let runText = "";
+    // The CURRENT turn's text (reset per routed turn): the loop returns without
+    // pushing the final answer into the conversation, so we append it to the
+    // done-checkpoint ourselves — follow-up exchanges need the answer as context.
+    let lastTurnText = "";
     const allowRun = body.allowRun ?? false;
     const fileTools = allowRun
       ? AGENT_TOOL_DEFINITIONS
@@ -543,6 +644,7 @@ export class AgentTaskManager {
             ),
       onRouted: async (turn, round) => {
         t.rounds = round + 1;
+        lastTurnText = ""; // fresh turn — only the FINAL turn's text is appended to the checkpoint
         const meta = turn as { providerId?: string; model?: string; traceId?: string };
         this.emit(t, {
           type: "routed",
@@ -556,6 +658,7 @@ export class AgentTaskManager {
         // Capped transcript of this run's streamed text, for the pseudocode
         // heuristic on a zero-tool completion (P4). Never persisted.
         if (runText.length < 16_000) runText += chunk;
+        if (lastTurnText.length < 32_000) lastTurnText += chunk;
         this.emit(t, { type: "text", text: chunk });
       },
       onTurnEnd: () => this.emit(t, { type: "turn_end" }),
@@ -597,8 +700,15 @@ export class AgentTaskManager {
     };
 
     try {
-      const { rounds } = await runAgentToolLoop(initialMessages, handlers);
+      const { rounds, convo } = await runAgentToolLoop(initialMessages, handlers);
       t.rounds = rounds;
+      // Done-checkpoint (P2): the loop's final answer is NOT in `convo` (it
+      // returns on a no-tool-call turn before pushing it) — append it so a
+      // follow-up exchange sees what was concluded, then keep the whole
+      // conversation as the continuation seed.
+      t.checkpoint = lastTurnText.trim()
+        ? [...convo, { role: "assistant", content: lastTurnText }]
+        : [...convo];
       // P4 — a session that never executed a single real tool call did no
       // verifiable work: report failure, never "done". (Checked across the
       // whole session so a context-only FOLLOW-UP after tool-using exchanges —
@@ -662,6 +772,7 @@ export class AgentTaskManager {
             body: t.body,
             checkpoint: t.checkpoint,
             toolCallsTotal: t.toolCallsTotal ?? 0,
+            exchange: t.exchange ?? 0,
           },
           null,
           2,

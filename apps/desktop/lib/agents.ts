@@ -55,6 +55,22 @@ export async function createAgentTask(body: CreateAgentTask): Promise<string> {
   return parsed.id;
 }
 
+/** P2 — continue a completed session conversationally: same sandbox root, full
+ *  prior context; the new exchange's events append to the same SSE backlog. */
+export async function followUpAgent(agentId: string, message: string): Promise<void> {
+  const res = await fetch(`${getGatewayUrl()}/v1/agents/${agentId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...gatewayAuthHeaders() },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok) {
+    const parsed = (await res.json().catch(() => null)) as
+      | { error?: { message?: string } }
+      | null;
+    throw new Error(parsed?.error?.message ?? `Gateway error ${res.status}`);
+  }
+}
+
 export async function resolveApproval(
   agentId: string,
   approvalId: string,

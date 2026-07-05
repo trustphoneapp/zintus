@@ -1018,6 +1018,23 @@ a.ghostbtn:hover {
 .agent-strip-state { font-weight: 650; color: var(--color-text); }
 .agent-strip-meta { font-family: var(--font-mono); font-size: 11px; color: var(--color-text-muted); }
 .agent-strip-spacer { flex: 1; }
+.agent-ev--divider {
+  margin: 14px 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+.agent-followup {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  padding: 12px 20px;
+  border-top: 0.5px solid var(--color-border);
+  background: var(--color-surface);
+}
+.agent-followup .agent-task-input { flex: 1; }
 .agent-activity {
   margin: 0;
   padding: 6px 20px;

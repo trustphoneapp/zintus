@@ -6,6 +6,7 @@ import { PROVIDER_METADATA, supportsTools } from "@zintus/providers";
 import { useProviderStatusStore } from "@/lib/store";
 import {
   createAgentTask,
+  followUpAgent,
   resolveApproval,
   stopAgent,
   streamAgentEvents,
@@ -170,6 +171,37 @@ export default function AgentPage() {
     if (agentId) void stopAgent(agentId);
   }, [agentId]);
 
+  // P2 — follow-up in the SAME session (default after done/stopped). The panel
+  // never clears: we re-subscribe and the gateway replays the FULL multi-
+  // exchange backlog (exchange-stamped), which reconstructs history + streams
+  // the new exchange live.
+  const [followUpText, setFollowUpText] = useState("");
+  const sendFollowUp = useCallback(async () => {
+    const message = followUpText.trim();
+    if (!message || !agentId || running) return;
+    setError(null);
+    setRunning(true);
+    setFollowUpText("");
+    try {
+      await followUpAgent(agentId, message);
+      setEvents([]); // repopulated by the full backlog replay below
+      const controller = new AbortController();
+      abortRef.current = controller;
+      await streamAgentEvents(
+        agentId,
+        (e) => setEvents((prev) => [...prev, e]),
+        controller.signal,
+      );
+    } catch (err) {
+      if (!abortRef.current?.signal.aborted) {
+        setError(err instanceof Error ? err.message : "Follow-up failed");
+      }
+    } finally {
+      setRunning(false);
+      abortRef.current = null;
+    }
+  }, [agentId, followUpText, running]);
+
   const approve = useCallback(
     (approvalId: string, approved: boolean) => {
       if (agentId) void resolveApproval(agentId, approvalId, approved);
@@ -286,8 +318,12 @@ export default function AgentPage() {
               type="button"
               className="agent-relaunch"
               onClick={() => {
+                // Explicit fresh start — continuing below is the default.
                 setEvents([]);
                 setError(null);
+                setAgentId(null);
+                setTask("");
+                setFollowUpText("");
               }}
               disabled={running}
             >
@@ -295,6 +331,35 @@ export default function AgentPage() {
             </button>
           </div>
         )}
+
+        {/* P2 — the session stays conversational: after done/stopped the input
+            stays open and Enter continues the SAME session (same sandbox root,
+            full context). "New task" above is the explicit fresh start. */}
+        {agentId && (runState === "done" || runState === "stopped") ? (
+          <div className="agent-followup">
+            <textarea
+              className="agent-task-input"
+              placeholder="Follow up — same workspace, same context…"
+              value={followUpText}
+              onChange={(e) => setFollowUpText(e.target.value)}
+              rows={2}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendFollowUp();
+                }
+              }}
+            />
+            <button
+              type="button"
+              className="agent-launch-btn"
+              onClick={() => void sendFollowUp()}
+              disabled={!followUpText.trim() || running}
+            >
+              Continue session
+            </button>
+          </div>
+        ) : null}
 
         {pending.map((p) => (
           <div className="agent-gate" key={String(p.approval_id)}>
@@ -378,12 +443,26 @@ function Switch({
 
 function LogLine({ event }: { event: AgentEvent }) {
   switch (event.type) {
-    case "started":
+    case "started": {
+      // Every exchange opens with a divider so multi-turn history reads as
+      // Exchange 1 / Exchange 2 / … (exchange is 0-based on the wire).
+      const exchangeNo = (typeof event.exchange === "number" ? event.exchange : 0) + 1;
       return (
-        <p className="agent-ev agent-ev--start">
-          <span className="agent-ev-rail" />▶ sandbox <code>{String(event.root)}</code>
-        </p>
+        <>
+          <p className="agent-ev agent-ev--divider" aria-hidden>
+            ── Exchange {exchangeNo} ──────────────────
+          </p>
+          <p className="agent-ev agent-ev--start">
+            <span className="agent-ev-rail" />
+            {event.follow_up ? (
+              <>↩ follow-up <code>{String(event.task ?? "")}</code></>
+            ) : (
+              <>▶ sandbox <code>{String(event.root)}</code></>
+            )}
+          </p>
+        </>
       );
+    }
     case "routed":
       return (
         <p className="agent-ev agent-ev--muted">

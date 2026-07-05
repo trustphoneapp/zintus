@@ -221,6 +221,90 @@ describe("gateway agent runtime", () => {
     expect(String(err?.message)).toContain("no tools used");
   });
 
+  test("3-exchange follow-up keeps root + full context; events are exchange-tagged (P2)", async () => {
+    const root = tmpRoot();
+    process.env.ZINTUS_AGENT_RECORDS = path.join(root, ".records");
+    // Capture every route call's seed so context retention is PROVEN, not assumed.
+    const routedMessages: unknown[][] = [];
+    let call = 0;
+    const engine: AgentEngine = {
+      async routeAndStream(req) {
+        routedMessages.push(req.messages as unknown[]);
+        call += 1;
+        // Each exchange: round 0 = a real tool call, round 1 = the text answer.
+        if (call % 2 === 1) {
+          return turn(`working ${call}`, [
+            { type: "tool_call", id: `c${call}`, name: "read_file", arguments: { path: "x.txt" } },
+          ]) as ToolLoopTurn & { threadId?: string };
+        }
+        return turn(`answer-${call}`) as ToolLoopTurn & { threadId?: string };
+      },
+    };
+    const mgr = new AgentTaskManager(engine);
+    const { id } = mgr.create({
+      task: "Read package.json and tell me the project name",
+      root,
+      autoApprove: true,
+    });
+    const status = () => (mgr.get(id) as { status: string }).status;
+    await waitFor(() => status() === "done");
+
+    const res1 = mgr.followUp(id, "Now read tsconfig.json and tell me the target");
+    expect(res1.ok).toBe(true);
+    await waitFor(() => status() === "done");
+
+    const res2 = mgr.followUp(id, "Summarize what you learned from both files");
+    expect(res2.ok).toBe(true);
+    if (res2.ok) expect(res2.exchange).toBe(2);
+    await waitFor(() => status() === "done");
+
+    // Exchange 3's seed must contain the whole session: both prior tasks,
+    // exchange 1's FINAL ANSWER (appended at checkpoint time), and the new turn.
+    const finalSeed = JSON.stringify(routedMessages.at(-1));
+    expect(finalSeed).toContain("Read package.json and tell me the project name");
+    expect(finalSeed).toContain("answer-2");
+    expect(finalSeed).toContain("Now read tsconfig.json and tell me the target");
+    expect(finalSeed).toContain("answer-4");
+    expect(finalSeed).toContain("Summarize what you learned from both files");
+
+    // Same sandbox root all the way through; events tagged by exchange 0/1/2.
+    const t = (mgr as unknown as { tasks: Map<string, { root: string; events: AgentEvent[] }> }).tasks.get(id)!;
+    expect(t.root).toBe((mgr.get(id) as { root: string }).root);
+    const startedExchanges = t.events
+      .filter((e) => e.type === "started")
+      .map((e) => e.exchange);
+    expect(startedExchanges).toEqual([0, 1, 2]);
+    const doneExchanges = t.events.filter((e) => e.type === "done").map((e) => e.exchange);
+    expect(doneExchanges).toEqual([0, 1, 2]);
+  });
+
+  test("follow-up while running is rejected with a clear reason (P2)", async () => {
+    const root = tmpRoot();
+    process.env.ZINTUS_AGENT_RECORDS = path.join(root, ".records");
+    let release: (() => void) | null = null;
+    const engine: AgentEngine = {
+      async routeAndStream() {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return turn("done now", [
+          { type: "tool_call", id: "c1", name: "read_file", arguments: { path: "x" } },
+        ]) as ToolLoopTurn & { threadId?: string };
+      },
+    };
+    const mgr = new AgentTaskManager(engine);
+    const { id } = mgr.create({ task: "slow", root, autoApprove: true });
+    await waitFor(() => release !== null);
+    const res = mgr.followUp(id, "too early");
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.status).toBe(409);
+      expect(res.reason).toContain("still working");
+    }
+    mgr.stop(id);
+    release!();
+  });
+
   test("pseudocode narration gets the tailored model-switch error (P4)", async () => {
     const root = tmpRoot();
     process.env.ZINTUS_AGENT_RECORDS = path.join(root, ".records");
