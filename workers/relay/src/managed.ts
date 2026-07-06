@@ -430,9 +430,12 @@ export async function handleManagedChat(
       model: up.model,
       messages: body.messages,
       stream,
+      // Always send max_tokens: Anthropic's OpenAI-compat endpoint REQUIRES
+      // it (400 without it — hit live 2026-07-06), and every other upstream
+      // accepts it. Client value wins when provided.
+      max_tokens: typeof body.max_tokens === 'number' ? body.max_tokens : 8192,
     };
     if (typeof body.temperature === 'number') payload['temperature'] = body.temperature;
-    if (typeof body.max_tokens === 'number') payload['max_tokens'] = body.max_tokens;
     if (body.response_format?.type === 'json_object') payload['response_format'] = { type: 'json_object' };
     if (stream && STREAM_USAGE[up.provider]) payload['stream_options'] = { include_usage: true };
 
@@ -451,6 +454,11 @@ export async function handleManagedChat(
         break;
       }
       lastError = `${up.provider} ${res.status}`;
+      // Log the upstream error body (truncated, redacted by the platform's
+      // error path) so provider 4xx/5xx causes are diagnosable via
+      // `wrangler tail` instead of guessing from a bare status code.
+      const errBody = await res.text().catch(() => '');
+      console.error('managed.upstream_error', up.provider, res.status, errBody.slice(0, 300));
       // 4xx that isn't rate-limit is OUR bug (bad payload/model id) — surface,
       // don't burn the other upstream too.
       if (res.status !== 429 && res.status < 500) break;
