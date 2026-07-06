@@ -478,11 +478,22 @@ export function MessageBubble({
               {message.meta.inputTokens ?? "?"} in / {message.meta.outputTokens ?? "?"} out tok
             </span>
           ) : null}
-          {message.model?.startsWith("zintus/") &&
-          message.meta.inputTokens != null &&
-          message.meta.outputTokens != null ? (
+          {message.meta.planTokensDebited != null ? (
+            // PRICING-FINAL Part 6 receipt: the EXACT plan-token debit the
+            // relay computed for this member's tier and model class.
             <span
-              title="Deducted from your monthly plan tokens (1× — every multiplier is always shown)"
+              title="Deducted from your monthly plan tokens — the exact debit for this model on your plan, always shown"
+              style={{ color: "var(--color-purple-bright)", fontWeight: 600 }}
+            >
+              plan −{message.meta.planTokensDebited.toLocaleString()} tok
+            </span>
+          ) : message.model?.startsWith("zintus/") &&
+            message.meta.inputTokens != null &&
+            message.meta.outputTokens != null ? (
+            // Legacy fallback (relay without the plan-debit header): real
+            // token count is the best honest number available.
+            <span
+              title="Deducted from your monthly plan tokens"
               style={{ color: "var(--color-purple-bright)", fontWeight: 600 }}
             >
               plan −{(message.meta.inputTokens + message.meta.outputTokens).toLocaleString()} tok

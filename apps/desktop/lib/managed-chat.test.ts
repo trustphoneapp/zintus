@@ -126,6 +126,52 @@ describe("streamManagedChat", () => {
     expect(result.model).toBe("zintus/llama-3.3-70b");
     expect(result.usage).toEqual({ inputTokens: 7, outputTokens: 2 });
     expect(result.latencyMs).toBeGreaterThanOrEqual(0);
+    // No plan-debit header on this response → honest null, never a guess.
+    expect(result.planTokensDebited).toBeNull();
+  });
+
+  test("computes the plan-token debit from X-Zintus-Plan-Per-1k", async () => {
+    // Premium model on a Pro member: relay advertises 1,429 plan tokens per
+    // 1K real tokens (burn 5 × Pro's 285.7 tok/cr). 900 real tokens →
+    // round(900 × 1429 / 1000) = 1,286 plan tokens (PRICING-FINAL Part 6).
+    globalThis.fetch = (async () =>
+      sseResponse(
+        [
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n',
+          'data: {"usage":{"prompt_tokens":600,"completion_tokens":300},"choices":[]}\n\n',
+          "data: [DONE]\n\n",
+        ],
+        {
+          "X-Zintus-Served-By": "groq",
+          "X-Zintus-Model": "zintus/llama-3.3-70b",
+          "X-Zintus-Class": "premium",
+          "X-Zintus-Plan-Per-1k": "1429",
+        },
+      )) as unknown as typeof fetch;
+
+    const result = await streamManagedChat({
+      model: "zintus/llama-3.3-70b",
+      messages: [{ role: "user", content: "hi" }],
+      onChunk: () => {},
+    });
+    expect(result.modelClass).toBe("premium");
+    expect(result.planTokensDebited).toBe(1286);
+  });
+
+  test("no usage chunk → planTokensDebited stays null even with the header", async () => {
+    globalThis.fetch = (async () =>
+      sseResponse(
+        ['data: {"choices":[{"delta":{"content":"ok"}}]}\n\n', "data: [DONE]\n\n"],
+        { "X-Zintus-Plan-Per-1k": "1429" },
+      )) as unknown as typeof fetch;
+
+    const result = await streamManagedChat({
+      model: "zintus/llama-3.3-70b",
+      messages: [{ role: "user", content: "hi" }],
+      onChunk: () => {},
+    });
+    expect(result.usage).toBeNull();
+    expect(result.planTokensDebited).toBeNull();
   });
 
   test("throws a typed failure on a membership gate", async () => {

@@ -392,6 +392,13 @@ export interface ResponseMeta {
   costUsd?: number;
   /** Estimate-only USD this turn would have cost on a Claude Sonnet baseline. */
   savedVsBaselineUsd?: number;
+  /**
+   * Managed-membership turns only: the exact plan-token debit for this turn,
+   * as the relay computed it for THIS member's tier (real tokens × the model
+   * class's burn, converted to the sold allowance units — PRICING-FINAL
+   * Part 6). Undefined on BYOK/local turns. Never expressed in credits.
+   */
+  planTokensDebited?: number;
   /** Routing strategy the gateway actually used (e.g. "fastest"). */
   routingStrategy?: string;
   /**

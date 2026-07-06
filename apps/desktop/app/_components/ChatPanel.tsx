@@ -626,6 +626,9 @@ export function ChatPanel() {
                     outputTokens: result.usage.outputTokens,
                   }
                 : {}),
+              ...(result.planTokensDebited != null
+                ? { planTokensDebited: result.planTokensDebited }
+                : {}),
               routeReason: result.servedBy
                 ? `Zintus membership — served by ${result.servedBy}, billed from plan tokens`
                 : "Zintus membership — billed from plan tokens",

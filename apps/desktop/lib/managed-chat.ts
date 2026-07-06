@@ -19,6 +19,15 @@ export interface ManagedStreamResult {
   servedBy: string | null;
   /** Provider-reported usage from the final SSE chunk, when present. */
   usage: { inputTokens: number; outputTokens: number } | null;
+  /**
+   * Plan tokens this turn debited, for THIS member's tier — computed from the
+   * relay's X-Zintus-Plan-Per-1k header (plan tokens per 1K real tokens for
+   * the served model's class) × the reported usage. Null when the relay
+   * predates the header or usage was never reported. PRICING-FINAL Part 6.
+   */
+  planTokensDebited: number | null;
+  /** Pricing class of the served model (X-Zintus-Class), e.g. "premium". */
+  modelClass: string | null;
   latencyMs: number;
 }
 
@@ -142,10 +151,21 @@ export async function streamManagedChat(params: {
     usage = u;
   });
 
+  const planPer1kRaw = res.headers.get("X-Zintus-Plan-Per-1k");
+  const planPer1k = planPer1kRaw != null ? Number(planPer1kRaw) : NaN;
+  // TS can't see the closure assignments above; re-widen from the declaration.
+  const finalUsage = usage as { inputTokens: number; outputTokens: number } | null;
+  const planTokensDebited =
+    finalUsage && Number.isFinite(planPer1k)
+      ? Math.round(((finalUsage.inputTokens + finalUsage.outputTokens) * planPer1k) / 1000)
+      : null;
+
   return {
     model: res.headers.get("X-Zintus-Model") ?? params.model,
     servedBy: res.headers.get("X-Zintus-Served-By"),
     usage,
+    planTokensDebited,
+    modelClass: res.headers.get("X-Zintus-Class"),
     latencyMs: Date.now() - startedAt,
   };
 }
