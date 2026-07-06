@@ -98,8 +98,9 @@ like today's PUBLIC_MARKUP): **gift 0 · cheap 4× · mid 3× · premium 2.5× �
 frontier 2×** — cheap models fund the platform, frontier stays sellable.
 
 Grants & access: Starter 15,000 cr (≤mid) · Pro 35,000 cr (≤premium) ·
-Max 60,000 cr (all) · Ultra 120,000 cr (all). Marketing: "Max = 4× Pro,
-Ultra = 8× Pro." Overflow: buy credits at retail (never below cost+15%).
+Max 60,000 cr (all) · Ultra 120,000 cr (all). Marketing: "Max = 4× Starter,
+Ultra = 8× Starter" (vs Pro it's only 1.7×/3.4× — never anchor to Pro).
+Overflow: buy credits at retail (never below cost+15%).
 Pacing: rolling 4-hour bar on Starter/Pro instead of hard rpm walls.
 
 | Tier | Worst net | Typical net | Post-referral (40%) worst/typical | Hard-100% worst |
@@ -139,7 +140,7 @@ class table to maintain (already exists in @zintus/burn).
 | Criterion | A Flat | B Multipliers | C Hybrid |
 |---|---|---|---|
 | Meets 50/60% post-referral floors (40% referred) | ✅ barely | ✅ | ✅ comfortably |
-| Survives 100%-referred stress | ❌ Starter 43% | ✅ mostly | ⚠ ~47–50% |
+| Survives 100%-referred stress | ❌ Starter 40% | ✅ mostly | ⚠ ~47–50% |
 | Typical-blend profitability | lowest | highest | high |
 | Marketing story | weak | big token numbers | multiplier rungs + honest ledger |
 | Meter honesty optics | best | riskiest (40×) | good |
