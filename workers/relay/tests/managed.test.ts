@@ -163,6 +163,13 @@ describe("availableManagedModels", () => {
     expect(byId["zintus/gpt-4o-mini"]).toBe("mid");
     expect(byId["zintus/llama-3.3-70b"]).toBe("premium");
     expect(byId["zintus/kimi-k2"]).toBe("premium");
+    // 2026-07-06 roster expansion (PRICING-FINAL Part 3 verified):
+    expect(byId["zintus/claude-haiku-4-5"]).toBe("premium");
+    expect(byId["zintus/gemini-2.5-flash"]).toBe("mid");
+    expect(byId["zintus/glm-4.7-flash"]).toBe("free");
+    expect(byId["zintus/glm-4.5-flash"]).toBe("free");
+    expect(byId["zintus/mistral-small"]).toBe("mid");
+    expect(byId["zintus/grok-4.1-fast"]).toBe("premium");
   });
 
   test("managedKey trims and defaults to empty", () => {
@@ -219,18 +226,24 @@ const VALID_BODY = {
 };
 
 describe("handleManagedChat gating", () => {
-  test("free tier → 403 membership_required", async () => {
+  test("free tier asking a paid-class model → 403 model_requires_upgrade", async () => {
+    // Class gate now fires BEFORE the membership gate, so a free user hears
+    // "requires the Pro plan" instead of a generic membership error.
     const { c } = fakeContext(fakeEnv({ MANAGED_KEY_GROQ: "k" }), VALID_BODY);
     const res = await handleManagedChat(c, SESSION);
     expect(res.status).toBe(403);
-    const json = (await res.json()) as { code: string };
-    expect(json.code).toBe("membership_required");
+    const json = (await res.json()) as { code: string; min_tier: string };
+    expect(json.code).toBe("model_requires_upgrade");
+    expect(json.min_tier).toBe("pro");
   });
+
 
   test("member with exhausted plan tokens → 429 plan_tokens_exhausted", async () => {
     // Counter stores millicredits: Starter grant = 15,000 cr = 15M mc.
+    // Must use a model Starter's classes can reach (8B is cheap) — the class
+    // gate fires before the balance check.
     const env = memberEnv("starter", { MANAGED_KEY_GROQ: "k" }, 15_000_000);
-    const { c } = fakeContext(env, VALID_BODY);
+    const { c } = fakeContext(env, { ...VALID_BODY, model: "zintus/llama-3.1-8b" });
     const res = await handleManagedChat(c, SESSION);
     expect(res.status).toBe(429);
     const json = (await res.json()) as { code: string; limit: number };
@@ -338,5 +351,69 @@ describe("handleManagedChat gating", () => {
     expect(text).toBe(sse.join(""));
     expect(waited.length).toBe(1);
     await Promise.all(waited);
+  });
+});
+
+// ── gift class (free models, PRICING-FINAL free tier) ──────────────────────
+
+describe("gift-class models for non-members", () => {
+  const GIFT_BODY = {
+    model: "zintus/glm-4.7-flash",
+    messages: [{ role: "user", content: "hi" }],
+    stream: false,
+  };
+
+  /** Free-tier env (no sub) with a working KV for the daily-cap limiter. */
+  function freeUserEnv(giftUsedToday = 0): Env {
+    const kv = new Map<string, string>();
+    if (giftUsedToday > 0) {
+      // kvRateLimitOk stores a plain integer counter string.
+      kv.set("rl:gift:u1", String(giftUsedToday));
+    }
+    const base = fakeEnv({ MANAGED_KEY_ZAI: "zk" });
+    (base as { KV: unknown }).KV = {
+      get: async (k: string) => kv.get(k) ?? null,
+      put: async (k: string, v: string) => void kv.set(k, v),
+      delete: async (k: string) => void kv.delete(k),
+    };
+    return base;
+  }
+
+  test("free-tier user chats a gift model with NO subscription", async () => {
+    const { c, waited } = fakeContext(freeUserEnv(), GIFT_BODY);
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { content: "hello" } }],
+          usage: { prompt_tokens: 3, completion_tokens: 2 },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+
+    const res = await handleManagedChat(c, SESSION);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { zintus: { class: string; plan_tokens_debited: number } };
+    expect(json.zintus.class).toBe("free");
+    expect(json.zintus.plan_tokens_debited).toBe(0); // gift burn is 0
+    await Promise.all(waited);
+  });
+
+  test("free-tier user over the daily cap → 429 gift_daily_cap", async () => {
+    const { c } = fakeContext(freeUserEnv(200), GIFT_BODY);
+    const res = await handleManagedChat(c, SESSION);
+    expect(res.status).toBe(429);
+    const json = (await res.json()) as { code: string };
+    expect(json.code).toBe("gift_daily_cap");
+  });
+
+  test("free-tier user asking a MID model still gets the upgrade error", async () => {
+    const { c } = fakeContext(freeUserEnv(), { ...GIFT_BODY, model: "zintus/gemini-2.5-flash" });
+    const env = c.env as Env;
+    (env as { MANAGED_KEY_GEMINI?: string }).MANAGED_KEY_GEMINI = "gk";
+    const res = await handleManagedChat(c, SESSION);
+    expect(res.status).toBe(403);
+    const json = (await res.json()) as { code: string; min_tier: string };
+    expect(json.code).toBe("model_requires_upgrade");
+    expect(json.min_tier).toBe("starter");
   });
 });

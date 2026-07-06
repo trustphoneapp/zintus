@@ -65,6 +65,18 @@ export function verifyCodeKey(email: string): string {
   return `rl:vc:${email.toLowerCase()}`;
 }
 
+// ── Gift-model daily cap (PRICING-FINAL: "free tier: gift models with daily
+// cap (abuse fence)"). Applies only to users WITHOUT an active paid
+// subscription — members use gift models uncapped (they cost 0 to serve and
+// 0 to debit). 200/day is generous for a human, hostile to a scraper.
+
+export const GIFT_DAILY_LIMIT = 200;
+export const GIFT_DAILY_WINDOW_SECS = 86_400;
+
+export function giftDailyKey(userId: string): string {
+  return `rl:gift:${userId}`;
+}
+
 // ── Self-reported usage limit ───────────────────────────────────────────────
 // POST /api/usage/report is the gateway's self-reported token usage (cookie
 // auth) — the documented BYOK trust boundary. It performs one write per LLM

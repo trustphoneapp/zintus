@@ -3,6 +3,12 @@ import type { Env } from './types.js';
 import type { SessionPayload } from './auth.js';
 import { enforceQuota, recordUsage } from './middleware/quota.js';
 import {
+  kvRateLimitOk,
+  giftDailyKey,
+  GIFT_DAILY_LIMIT,
+  GIFT_DAILY_WINDOW_SECS,
+} from './rate-limit.js';
+import {
   MANAGED_KEY_TIERS,
   CLASS_BURN,
   TIER_CLASS_ACCESS,
@@ -39,7 +45,9 @@ import {
  */
 
 interface ManagedUpstream {
-  provider: 'groq' | 'cerebras' | 'openai' | 'deepseek' | 'moonshot';
+  provider:
+    | 'groq' | 'cerebras' | 'openai' | 'deepseek' | 'moonshot'
+    | 'anthropic' | 'gemini' | 'zai' | 'mistral' | 'xai';
   model: string;
 }
 
@@ -55,21 +63,36 @@ export interface ManagedModel {
   upstreams: ManagedUpstream[];
 }
 
+// All bases are OpenAI-chat-completions dialect. Anthropic and Google expose
+// official OpenAI-compat endpoints, so the single code path holds.
 const PROVIDER_BASE: Record<ManagedUpstream['provider'], string> = {
   groq: 'https://api.groq.com/openai/v1',
   cerebras: 'https://api.cerebras.ai/v1',
   openai: 'https://api.openai.com/v1',
   deepseek: 'https://api.deepseek.com/v1',
   moonshot: 'https://api.moonshot.ai/v1',
+  anthropic: 'https://api.anthropic.com/v1',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai',
+  zai: 'https://api.z.ai/api/paas/v4',
+  mistral: 'https://api.mistral.ai/v1',
+  xai: 'https://api.x.ai/v1',
 };
 
 /** Providers whose streaming responses honor `stream_options.include_usage`. */
+// Conservative for the compat endpoints: false only skips the REQUEST param;
+// the SSE scanner still captures a usage chunk whenever the provider sends
+// one unprompted (Gemini/xAI do), and the estimate fallback stays ~est-flagged.
 const STREAM_USAGE: Record<ManagedUpstream['provider'], boolean> = {
   groq: true,
   cerebras: true,
   openai: true,
   deepseek: true,
   moonshot: false,
+  anthropic: false,
+  gemini: false,
+  zai: false,
+  mistral: false,
+  xai: false,
 };
 
 // Class assignments follow PRICING-FINAL Part 3 by the owner's explicit
@@ -119,6 +142,60 @@ export const MANAGED_MODELS: ManagedModel[] = [
     capabilities: { tools: true, json: true, vision: false },
     upstreams: [{ provider: 'moonshot', model: 'kimi-k2-0711-preview' }],
   },
+  // ── 2026-07-06 roster expansion: five already-provisioned operator keys ──
+  // Classes per PRICING-FINAL Part 3 (economics re-verified per model):
+  // Haiku $2.20 blended = premium ceiling; Gemini Flash $0.96 = mid (the
+  // priced-in Starter worst case); Mistral Small $0.285 = mid; Grok premium
+  // per owner gating call (margin-safe even at grok-4.3 pricing); GLM flash
+  // models are the free gift class (daily-capped for non-members).
+  {
+    id: 'zintus/claude-haiku-4-5',
+    displayName: 'Claude Haiku 4.5',
+    contextWindow: 200_000,
+    class: 'premium',
+    capabilities: { tools: true, json: true, vision: true },
+    upstreams: [{ provider: 'anthropic', model: 'claude-haiku-4-5' }],
+  },
+  {
+    id: 'zintus/gemini-2.5-flash',
+    displayName: 'Gemini 2.5 Flash',
+    contextWindow: 1_048_576,
+    class: 'mid',
+    capabilities: { tools: true, json: true, vision: true },
+    upstreams: [{ provider: 'gemini', model: 'gemini-2.5-flash' }],
+  },
+  {
+    id: 'zintus/glm-4.7-flash',
+    displayName: 'GLM 4.7 Flash (free)',
+    contextWindow: 128_000,
+    class: 'free',
+    capabilities: { tools: true, json: true, vision: false },
+    upstreams: [{ provider: 'zai', model: 'glm-4.7-flash' }],
+  },
+  {
+    id: 'zintus/glm-4.5-flash',
+    displayName: 'GLM 4.5 Flash (free)',
+    contextWindow: 128_000,
+    class: 'free',
+    capabilities: { tools: true, json: true, vision: false },
+    upstreams: [{ provider: 'zai', model: 'glm-4.5-flash' }],
+  },
+  {
+    id: 'zintus/mistral-small',
+    displayName: 'Mistral Small',
+    contextWindow: 128_000,
+    class: 'mid',
+    capabilities: { tools: true, json: true, vision: true },
+    upstreams: [{ provider: 'mistral', model: 'mistral-small-latest' }],
+  },
+  {
+    id: 'zintus/grok-4.1-fast',
+    displayName: 'Grok 4.1 Fast',
+    contextWindow: 2_000_000,
+    class: 'premium',
+    capabilities: { tools: true, json: true, vision: false },
+    upstreams: [{ provider: 'xai', model: 'grok-4.1-fast' }],
+  },
 ];
 
 /** Operator key for an upstream provider, or "" when not configured. */
@@ -129,6 +206,11 @@ export function managedKey(env: Env, provider: ManagedUpstream['provider']): str
     openai: env.MANAGED_KEY_OPENAI,
     deepseek: env.MANAGED_KEY_DEEPSEEK,
     moonshot: env.MANAGED_KEY_MOONSHOT,
+    anthropic: env.MANAGED_KEY_ANTHROPIC,
+    gemini: env.MANAGED_KEY_GEMINI,
+    zai: env.MANAGED_KEY_ZAI,
+    mistral: env.MANAGED_KEY_MISTRAL,
+    xai: env.MANAGED_KEY_XAI,
   };
   return map[provider]?.trim() ?? '';
 }
@@ -274,28 +356,7 @@ export async function handleManagedChat(
   const invalid = validateBody(body);
   if (invalid) return c.json({ error: invalid }, 400);
 
-  // Membership gate: an ACTIVE managed-tier subscription. past_due keeps its
-  // data but does not get served — Stripe retries payment, the UI says why.
   const quota = await enforceQuota(session.user_id, c.env);
-  const managedTier = (MANAGED_KEY_TIERS as readonly string[]).includes(quota.tier);
-  if (!managedTier || quota.sub?.status !== 'active') {
-    return c.json(
-      { error: 'Zintus membership required for managed models', code: 'membership_required' },
-      403,
-    );
-  }
-  if (!quota.allowed) {
-    return c.json(
-      {
-        error: 'Monthly plan tokens exhausted',
-        code: 'plan_tokens_exhausted',
-        used: quota.used,
-        limit: quota.limit,
-        reset: quota.reset,
-      },
-      429,
-    );
-  }
 
   const model = MANAGED_MODELS.find((m) => m.id === body.model);
   const upstreams = model ? configuredUpstreams(c.env, model) : [];
@@ -304,7 +365,9 @@ export async function handleManagedChat(
   }
 
   // Tier class gating (PRICING-FINAL Part 5): honest 403 naming the required
-  // plan — never a silent downgrade to a cheaper model.
+  // plan — never a silent downgrade to a cheaper model. Checked BEFORE the
+  // membership gate so a free-tier user asking for a paid class hears
+  // "requires the Pro plan", not a generic membership error.
   if (!TIER_CLASS_ACCESS[quota.tier].includes(model.class)) {
     const minTier = minTierForClass(model.class);
     return c.json(
@@ -316,6 +379,39 @@ export async function handleManagedChat(
       },
       403,
     );
+  }
+
+  if (model.class !== 'free') {
+    // Paid classes: an ACTIVE managed-tier subscription. past_due keeps its
+    // data but does not get served — Stripe retries payment, the UI says why.
+    const managedTier = (MANAGED_KEY_TIERS as readonly string[]).includes(quota.tier);
+    if (!managedTier || quota.sub?.status !== 'active') {
+      return c.json(
+        { error: 'Zintus membership required for managed models', code: 'membership_required' },
+        403,
+      );
+    }
+    if (!quota.allowed) {
+      return c.json(
+        {
+          error: 'Monthly plan tokens exhausted',
+          code: 'plan_tokens_exhausted',
+          used: quota.used,
+          limit: quota.limit,
+          reset: quota.reset,
+        },
+        429,
+      );
+    }
+  } else if (quota.sub?.status !== 'active') {
+    // Gift class for non-members (free tier / lapsed sub): served free of
+    // charge behind the daily abuse fence. Members skip the cap entirely.
+    if (!(await kvRateLimitOk(c.env.KV, giftDailyKey(session.user_id), GIFT_DAILY_LIMIT, GIFT_DAILY_WINDOW_SECS))) {
+      return c.json(
+        { error: 'Daily free-model limit reached — resets tomorrow, or upgrade for unlimited use', code: 'gift_daily_cap' },
+        429,
+      );
+    }
   }
 
   const stream = body.stream !== false;

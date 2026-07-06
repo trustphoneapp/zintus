@@ -25,6 +25,11 @@ export interface Env {
   MANAGED_KEY_MOONSHOT?: string;
   /** Together AI — serves FLUX-schnell image generation (flat-fee service). */
   MANAGED_KEY_TOGETHER?: string;
+  MANAGED_KEY_ANTHROPIC?: string;
+  MANAGED_KEY_GEMINI?: string;
+  MANAGED_KEY_ZAI?: string;
+  MANAGED_KEY_MISTRAL?: string;
+  MANAGED_KEY_XAI?: string;
 }
 
 /** Attached to every accepted WebSocket (survives DO hibernation). */
