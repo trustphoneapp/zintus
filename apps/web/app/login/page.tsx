@@ -1,18 +1,22 @@
 "use client";
 
 import { useState } from "react";
-import { sendMagicLink, googleSignInUrl, RELAY_URL } from "@/lib/cloud";
+import { sendMagicLink, verifyEmailCode, googleSignInUrl, RELAY_URL } from "@/lib/cloud";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState("");
+  const [code, setCode] = useState("");
+  const [codeStatus, setCodeStatus] = useState<"idle" | "checking" | "error">("idle");
+  const [codeError, setCodeError] = useState("");
 
   const searchParams =
     typeof window !== "undefined"
       ? new URLSearchParams(window.location.search)
       : new URLSearchParams();
   const isCli = searchParams.get("cli") === "true";
+  const linkExpired = searchParams.get("error") === "link_expired";
   const isMobile = searchParams.get("mobile") === "true";
   const cliState = searchParams.get("state") ?? undefined;
   // The mobile-redirect handler lives on the relay worker, not the Next.js web
@@ -31,7 +35,7 @@ export default function LoginPage() {
   async function handleMagicLink(event: React.FormEvent) {
     event.preventDefault();
     setStatus("sending");
-    const result = await sendMagicLink(email);
+    const result = await sendMagicLink(email, redirectTo);
     if (result.ok) {
       setStatus("sent");
     } else {
@@ -49,6 +53,19 @@ export default function LoginPage() {
     return base;
   }
 
+  async function handleCodeSubmit(event: React.FormEvent) {
+    event.preventDefault();
+    setCodeStatus("checking");
+    const result = await verifyEmailCode(email, code.trim());
+    if (result.ok) {
+      // Session cookie is set; same navigation the magic link would perform.
+      window.location.href = result.redirectTo ?? redirectTo;
+    } else {
+      setCodeError(result.error ?? "Invalid or expired code");
+      setCodeStatus("error");
+    }
+  }
+
   if (status === "sent") {
     return (
       <div className="auth-container">
@@ -56,6 +73,31 @@ export default function LoginPage() {
         <p className="auth-sub">
           We sent a sign-in link to <strong>{email}</strong>. It expires in 15 minutes.
         </p>
+        <p className="auth-sub">
+          Opening the email on another device? Enter the 6-digit code from it here:
+        </p>
+        <form onSubmit={handleCodeSubmit} className="auth-form">
+          <label htmlFor="code">6-digit code</label>
+          <input
+            id="code"
+            type="text"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            value={code}
+            onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
+            placeholder="123456"
+          />
+          {codeStatus === "error" && <p className="auth-error">{codeError}</p>}
+          <button
+            type="submit"
+            className="auth-submit-btn"
+            disabled={codeStatus === "checking" || code.length !== 6}
+          >
+            {codeStatus === "checking" ? "Checking…" : "Sign in with code"}
+          </button>
+        </form>
         <button className="auth-link-btn" onClick={() => setStatus("idle")}>
           Use a different email
         </button>
@@ -78,6 +120,12 @@ export default function LoginPage() {
 
       <div className="auth-container">
       <h1 className="auth-title">Sign in to Zintus</h1>
+      {linkExpired && (
+        <p className="auth-error">
+          That sign-in link has expired or was replaced. Enter your email below
+          and we&apos;ll send a fresh one.
+        </p>
+      )}
       {isCli && (
         <p className="auth-badge">CLI login — complete in your browser, then return to the terminal</p>
       )}

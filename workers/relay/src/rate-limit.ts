@@ -53,6 +53,18 @@ export function magicLinkIpKey(ip: string): string {
   return `rl:ml:ip:${ip}`;
 }
 
+// ── Fallback-code entry attempts ────────────────────────────────────────────
+// A 6-digit code has 10^6 combinations and a 15-minute life; 5 attempts per
+// email per window keeps brute-force success probability ~5×10⁻⁶ per artifact
+// (NIST 800-63B requires effective throttling for low-entropy authenticators).
+
+export const VERIFY_CODE_LIMIT = 5;
+export const VERIFY_CODE_WINDOW_SECS = 900; // 15 min — matches the artifact TTL
+
+export function verifyCodeKey(email: string): string {
+  return `rl:vc:${email.toLowerCase()}`;
+}
+
 // ── Self-reported usage limit ───────────────────────────────────────────────
 // POST /api/usage/report is the gateway's self-reported token usage (cookie
 // auth) — the documented BYOK trust boundary. It performs one write per LLM

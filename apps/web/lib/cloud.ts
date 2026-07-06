@@ -19,17 +19,46 @@ function relayFetch(
 
 // ── Auth ──────────────────────────────────────────────────────────────────
 
-export async function sendMagicLink(email: string): Promise<{ ok: boolean; error?: string }> {
+export async function sendMagicLink(
+  email: string,
+  redirectTo?: string,
+): Promise<{ ok: boolean; error?: string }> {
+  // redirectTo matters for the desktop/CLI device flow: without it the email
+  // link lands on the dashboard and cli-callback never runs, so the app polls
+  // until its state expires. The relay validates it against an allow-list.
   const res = await relayFetch("/api/auth/magic-link", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, ...(redirectTo ? { redirectTo } : {}) }),
   });
   if (!res.ok) {
     const { error } = (await res.json().catch(() => ({}))) as { error?: string };
     return { ok: false, error: error ?? "Failed to send magic link" };
   }
   return { ok: true };
+}
+
+/** Sign in with the 6-digit code from the sign-in email (wrong-device path).
+ *  On success the relay sets the session cookie; caller navigates to
+ *  the returned redirect target. */
+export async function verifyEmailCode(
+  email: string,
+  code: string,
+): Promise<{ ok: boolean; redirectTo?: string; error?: string }> {
+  const res = await relayFetch("/api/auth/verify-code", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, code }),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    redirect_to?: string;
+    error?: string;
+  };
+  if (!res.ok || !body.ok) {
+    return { ok: false, error: body.error ?? "Invalid or expired code" };
+  }
+  return { ok: true, redirectTo: body.redirect_to };
 }
 
 export function googleSignInUrl(redirectTo?: string): string {

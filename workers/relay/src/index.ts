@@ -33,7 +33,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { cors } from "hono/cors";
-import { MagicLinkRequestSchema } from "@zintus/schemas";
+import { MagicLinkRequestSchema, VerifyCodeRequestSchema } from "@zintus/schemas";
 import { redactSecrets } from "./redact.js";
 import type { Env, GatewaySessionRow, UserRow, SubscriptionRow } from "./types.js";
 import {
@@ -66,6 +66,9 @@ import {
   MAGIC_LINK_EMAIL_WINDOW_SECS,
   MAGIC_LINK_IP_LIMIT,
   MAGIC_LINK_IP_WINDOW_SECS,
+  verifyCodeKey,
+  VERIFY_CODE_LIMIT,
+  VERIFY_CODE_WINDOW_SECS,
   usageReportKey,
   USAGE_REPORT_LIMIT,
   USAGE_REPORT_WINDOW_SECS,
@@ -352,6 +355,44 @@ app.get("/health", (c) => c.json({ ok: true }));
 
 // ── AUTH — magic link ─────────────────────────────────────────────────────
 
+/** Uniform 6-digit code via rejection sampling (no modulo bias). */
+function randomSixDigitCode(): string {
+  const limit = 4_294_000_000; // largest multiple of 1e6 ≤ 2^32
+  let v: number;
+  do {
+    v = crypto.getRandomValues(new Uint32Array(1))[0]!;
+  } while (v >= limit);
+  return String(v % 1_000_000).padStart(6, "0");
+}
+
+/** KV pointer to the newest link+code pair for an email (latest-wins). */
+function latestArtifactKey(email: string): string {
+  return `mlatest:${email.toLowerCase()}`;
+}
+
+/** Single-use consumption: redeeming EITHER artifact deletes the whole
+ *  family (link, code, latest pointer) so nothing outlives a successful
+ *  sign-in. Pass whichever hash was presented; the other is resolved from
+ *  the latest pointer. */
+async function consumeArtifactFamily(
+  kv: KVNamespace,
+  email: string,
+  tokenHash: string | null,
+  codeHash: string | null,
+): Promise<void> {
+  const raw = await kv.get(latestArtifactKey(email));
+  if (raw) {
+    try {
+      const latest = JSON.parse(raw) as { tokenHash?: string; codeHash?: string };
+      tokenHash = tokenHash ?? latest.tokenHash ?? null;
+      codeHash = codeHash ?? latest.codeHash ?? null;
+    } catch { /* stale pointer */ }
+  }
+  if (tokenHash) await kv.delete(`ml:${tokenHash}`);
+  if (codeHash) await kv.delete(`mlcode:${codeHash}`);
+  await kv.delete(latestArtifactKey(email));
+}
+
 app.post("/api/auth/magic-link", async (c) => {
   // Validate the public email input with a shared schema (RFC-ish email, length
   // bound) instead of a bare `.includes("@")` check on an untyped cast.
@@ -390,13 +431,37 @@ app.post("/api/auth/magic-link", async (c) => {
     return c.json({ error: "Too many magic link requests (10/hour per IP)" }, 429);
   }
 
-  // Store a short-lived token in KV (15 min).
+  // One email carries BOTH artifacts (the canonical passwordless pattern —
+  // see docs/auth: Anthropic's same-device link + cross-device code):
+  //   • magic link — same-device happy path, one click
+  //   • 6-digit code — typed on the ORIGINAL device when the email is opened
+  //     elsewhere (the desktop device-flow case a bare link cannot complete)
+  // Both are single-use, share the 15-min TTL, and are invalidated together.
   const token = crypto.randomUUID() + "-" + crypto.randomUUID();
-  const hash = await sha256Hex(token);
-  const redirectTo = validateRedirectTo(c.req.query("redirect_to"));
+  const tokenHash = await sha256Hex(token);
+  const code = randomSixDigitCode();
+  const codeHash = await sha256Hex(`${email.toLowerCase()}:${code}`);
+  const redirectTo = validateRedirectTo(
+    c.req.query("redirect_to") ?? parsed.data.redirectTo,
+  );
+
+  // Latest-artifact-wins (Auth0/NIST pattern): requesting a new email kills
+  // the previous link AND code, so only the newest email ever signs in.
+  const prevRaw = await c.env.KV.get(latestArtifactKey(email));
+  if (prevRaw) {
+    try {
+      const prev = JSON.parse(prevRaw) as { tokenHash?: string; codeHash?: string };
+      if (prev.tokenHash) await c.env.KV.delete(`ml:${prev.tokenHash}`);
+      if (prev.codeHash) await c.env.KV.delete(`mlcode:${prev.codeHash}`);
+    } catch { /* stale pointer — nothing to revoke */ }
+  }
+
+  const artifactPayload = JSON.stringify({ email, redirect_to: redirectTo });
+  await c.env.KV.put(`ml:${tokenHash}`, artifactPayload, { expirationTtl: 900 });
+  await c.env.KV.put(`mlcode:${codeHash}`, artifactPayload, { expirationTtl: 900 });
   await c.env.KV.put(
-    `ml:${hash}`,
-    JSON.stringify({ email, redirect_to: redirectTo }),
+    latestArtifactKey(email),
+    JSON.stringify({ tokenHash, codeHash }),
     { expirationTtl: 900 },
   );
 
@@ -415,7 +480,9 @@ app.post("/api/auth/magic-link", async (c) => {
       html: `
         <p>Click to sign in to Zintus — expires in 15 minutes.</p>
         <a href="${verifyUrl}" style="display:inline-block;padding:12px 24px;background:#111;color:#fff;text-decoration:none;border-radius:6px;">Sign in</a>
-        <p style="color:#888;font-size:13px;">If you didn't request this, you can ignore this email.</p>
+        <p style="margin-top:20px;">Reading this on a different device? Enter this code on the sign-in screen instead:</p>
+        <p style="font-size:28px;letter-spacing:6px;font-weight:700;font-family:monospace;">${code}</p>
+        <p style="color:#888;font-size:13px;">If you didn't request this, you can ignore this email. Requesting a new email invalidates this one.</p>
       `,
     }),
   });
@@ -430,18 +497,26 @@ app.post("/api/auth/magic-link", async (c) => {
 // ── AUTH — verify magic link ──────────────────────────────────────────────
 
 app.get("/api/auth/verify", async (c) => {
+  // Browser-facing endpoint: failures REDIRECT to the login page with a
+  // reason (the page shows "link expired — get a new one" and preserves the
+  // flow) instead of dead-ending the user on raw JSON.
+  const failRedirect = new Response(null, {
+    status: 302,
+    headers: { Location: "https://www.zintus.ai/login?error=link_expired" },
+  });
+
   const token = c.req.query("token");
-  if (!token) return c.json({ error: "Missing token" }, 400);
+  if (!token) return failRedirect;
 
   const hash = await sha256Hex(token);
   const raw = await c.env.KV.get(`ml:${hash}`);
-  if (!raw) return c.json({ error: "Invalid or expired link" }, 400);
+  if (!raw) return failRedirect;
 
   const { email, redirect_to } = JSON.parse(raw) as {
     email: string;
     redirect_to: string;
   };
-  await c.env.KV.delete(`ml:${hash}`);
+  await consumeArtifactFamily(c.env.KV, email, hash, null);
 
   const user = await findOrCreateUser(c.env.DB, email);
   const cookieValue = await createUserSession(c.env.KV, c.env.DB, user, c.env.COOKIE_DOMAIN);
@@ -453,6 +528,38 @@ app.get("/api/auth/verify", async (c) => {
       "Set-Cookie": cookieValue,
     },
   });
+});
+
+// ── AUTH — verify fallback code (wrong-device recovery) ──────────────────
+
+app.post("/api/auth/verify-code", async (c) => {
+  const parsed = VerifyCodeRequestSchema.safeParse(
+    await c.req.json().catch(() => null),
+  );
+  if (!parsed.success) return c.json({ error: "Valid email and 6-digit code required" }, 400);
+  const { email, code } = parsed.data;
+
+  // Attempt throttle BEFORE any lookup — 6 digits is low entropy by design;
+  // the limiter is what makes it safe (see rate-limit.ts for the math).
+  if (!(await kvRateLimitOk(c.env.KV, verifyCodeKey(email), VERIFY_CODE_LIMIT, VERIFY_CODE_WINDOW_SECS))) {
+    return c.json({ error: "Too many code attempts — request a new email" }, 429);
+  }
+
+  const codeHash = await sha256Hex(`${email.toLowerCase()}:${code}`);
+  const raw = await c.env.KV.get(`mlcode:${codeHash}`);
+  if (!raw) return c.json({ error: "Invalid or expired code", code: "code_invalid" }, 400);
+
+  const { redirect_to } = JSON.parse(raw) as { email: string; redirect_to: string };
+  await consumeArtifactFamily(c.env.KV, email, null, codeHash);
+
+  const user = await findOrCreateUser(c.env.DB, email);
+  const cookieValue = await createUserSession(c.env.KV, c.env.DB, user, c.env.COOKIE_DOMAIN);
+
+  // fetch()-based caller (login page) — JSON + Set-Cookie, client navigates.
+  return new Response(
+    JSON.stringify({ ok: true, redirect_to: validateRedirectTo(redirect_to) }),
+    { status: 200, headers: { "Content-Type": "application/json", "Set-Cookie": cookieValue } },
+  );
 });
 
 // ── AUTH — Google OAuth ───────────────────────────────────────────────────

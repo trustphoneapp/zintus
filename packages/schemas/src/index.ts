@@ -325,6 +325,15 @@ export const MagicLinkRequestSchema = z.object({
 
 export type MagicLinkRequest = z.infer<typeof MagicLinkRequestSchema>;
 
+/** Fallback-code sign-in: the 6-digit code from the same sign-in email,
+ *  entered on the ORIGINAL device (fixes the wrong-device magic-link case). */
+export const VerifyCodeRequestSchema = z.object({
+  email: z.string().email().max(320),
+  code: z.string().regex(/^\d{6}$/),
+});
+
+export type VerifyCodeRequest = z.infer<typeof VerifyCodeRequestSchema>;
+
 /**
  * Format a ZodError into a compact, client-safe issues array (path + message),
  * suitable for a 400 response body.
