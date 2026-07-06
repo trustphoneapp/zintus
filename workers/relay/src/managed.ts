@@ -410,28 +410,56 @@ export async function handleManagedChat(
     });
   }
 
-  // Streaming: pass provider SSE through untouched while scanning for usage.
-  // The transform's flush() fires when the upstream stream ends — that is the
-  // metering trigger. waitUntil keeps the worker alive until metering lands
-  // even if the client disconnects right at end-of-stream.
+  // Streaming: manually pump provider SSE to the client while scanning for
+  // usage. Metering fires in the pump's `finally`, so it runs on BOTH normal
+  // completion AND mid-stream client disconnect. This replaced a
+  // pipeThrough(TransformStream{flush}) design after a workerd probe
+  // (2026-07-06) proved two runtime facts:
+  //   • flush() never fires when the CLIENT cancels — the old version never
+  //     metered a disconnected stream, i.e. free tokens on every abort;
+  //   • a JS TransformStream leaves the pending writer.write() hanging on
+  //     client cancel, while workerd's native IdentityTransformStream
+  //     rejects it promptly — which is what lets us detect the disconnect,
+  //     cancel the upstream (stop paying for unseen tokens), and meter what
+  //     WAS generated (estimate-flagged when the usage chunk never arrived).
+  // Bun tests have no IdentityTransformStream; the fallback keeps the
+  // completion path testable (disconnect semantics are workerd-only — see
+  // workers/relay/scripts/verify-stream-disconnect/).
   const scanner = new SseUsageScanner();
   const decoder = new TextDecoder();
-  let resolveDone!: () => void;
-  const streamDone = new Promise<void>((r) => (resolveDone = r));
-  const metered = new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      scanner.scan(decoder.decode(chunk, { stream: true }));
-      controller.enqueue(chunk);
-    },
-    flush() {
-      resolveDone();
-    },
-  });
-  c.executionCtx.waitUntil(
-    streamDone.then(() => meter(scanner.totals(inputChars))).catch(() => {}),
-  );
+  const IdentityStream =
+    (globalThis as { IdentityTransformStream?: typeof TransformStream })
+      .IdentityTransformStream ?? TransformStream;
+  const { readable, writable } = new IdentityStream();
+  const writer = writable.getWriter();
+  const upstreamBody = upstreamRes.body!;
+  const pump = (async () => {
+    const reader = upstreamBody.getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        scanner.scan(decoder.decode(value, { stream: true }));
+        try {
+          await writer.write(value);
+        } catch {
+          // Client disconnected mid-stream.
+          await reader.cancel().catch(() => {});
+          break;
+        }
+      }
+    } finally {
+      try {
+        await writer.close();
+      } catch {
+        // Client already gone — nothing to close toward.
+      }
+      await meter(scanner.totals(inputChars));
+    }
+  })();
+  c.executionCtx.waitUntil(pump.catch(() => {}));
 
-  return new Response(upstreamRes.body!.pipeThrough(metered), {
+  return new Response(readable, {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
