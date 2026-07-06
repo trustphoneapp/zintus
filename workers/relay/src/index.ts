@@ -52,6 +52,7 @@ import {
 import { createCheckoutSession, createPortalSession, handleStripeWebhook, cancelStripeSubscription } from "./billing.js";
 import { checkoutAvailability } from "./tiers.js";
 import { handleManagedChat, handleManagedModels } from "./managed.js";
+import { handleResearchSession } from "./research.js";
 import { corsOrigin, validateRedirectTo } from "./http-security.js";
 import { enforceQuota, recordUsage, getQuotaUsed, resetQuota } from "./middleware/quota.js";
 import { createErrorSink } from "./observability.js";
@@ -1133,6 +1134,14 @@ app.post('/v1/managed/chat/completions', async (c) => {
   const session = await requireSession(c);
   if (!session) return c.json({ error: 'Unauthorized' }, 401);
   return handleManagedChat(c, session);
+});
+
+// Research session reservation (PRICING-FINAL Part 8) — the gateway calls
+// this before starting a deep-research run; see research.ts.
+app.post('/v1/managed/research-session', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+  return handleResearchSession(c, session);
 });
 
 // ── Referral routes ───────────────────────────────────────────────────────

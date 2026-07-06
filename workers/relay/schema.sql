@@ -91,3 +91,15 @@ CREATE TABLE IF NOT EXISTS referral_codes (
   created_at INTEGER DEFAULT (unixepoch()),
   UNIQUE(user_id)
 );
+
+-- Research session counter (PRICING-FINAL Part 8) — separate from token burn.
+-- Keyed on the calendar-UTC-month period (billingPeriod() in middleware/
+-- quota.ts), so a new month IS the reset — same contract as the QuotaCounter
+-- DO, no cron/reset job. Increments use a single atomic UPSERT statement.
+-- [HUMAN] remote apply required after deploy: wrangler d1 execute --remote --file schema.sql
+CREATE TABLE IF NOT EXISTS research_sessions (
+  user_id TEXT NOT NULL REFERENCES zintus_users(id) ON DELETE CASCADE,
+  period  TEXT NOT NULL,
+  used    INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, period)
+);
