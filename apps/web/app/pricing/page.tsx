@@ -1,7 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Navbar } from "@/components/marketing/Navbar";
 import { Footer } from "@/components/marketing/Footer";
+import { createCheckout } from "@/lib/billing";
+import { getMe } from "@/lib/cloud";
 
 /* ─── palette ────────────────────────────────────────────── */
 const VIOLET = "var(--marketing-accent)"; // #7C3AED brand glow
@@ -11,7 +14,7 @@ const RED = "#EF4444";
 /* ─── tier data ──────────────────────────────────────────── */
 type Cta =
   | { kind: "link"; label: string; href: string }
-  | { kind: "todo"; label: string };
+  | { kind: "checkout"; label: string };
 
 type TierCard = {
   id: string;
@@ -56,7 +59,7 @@ const TIERS: TierCard[] = [
       "Token balance resets on billing date",
       "BYOK frontier on top (your key)",
     ],
-    cta: { kind: "todo", label: "Get started" },
+    cta: { kind: "checkout", label: "Get started" },
     borderColor: GREEN,
     ribbon: "Most popular",
     ribbonColor: GREEN,
@@ -74,7 +77,7 @@ const TIERS: TierCard[] = [
       "Usage history dashboard",
       "BYOK frontier on top (your key)",
     ],
-    cta: { kind: "todo", label: "Get started" },
+    cta: { kind: "checkout", label: "Get started" },
     borderColor: VIOLET,
   },
   {
@@ -90,7 +93,7 @@ const TIERS: TierCard[] = [
       "Priority support",
       "BYOK any frontier model",
     ],
-    cta: { kind: "todo", label: "Get started" },
+    cta: { kind: "checkout", label: "Get started" },
     borderColor: "var(--marketing-accent-dim)",
   },
   {
@@ -106,7 +109,7 @@ const TIERS: TierCard[] = [
       "Referral program (20% recurring)",
       "BYOK any frontier model",
     ],
-    cta: { kind: "todo", label: "Get started" },
+    cta: { kind: "checkout", label: "Get started" },
     borderColor: "var(--marketing-accent-dim)",
   },
 ];
@@ -212,13 +215,54 @@ function StatusBadge({ kind, children }: { kind: Transparency; children: string 
 }
 
 /* ─── page ───────────────────────────────────────────────── */
+type PaidTier = "starter" | "pro" | "max" | "ultra";
+const PAID_TIERS: readonly string[] = ["starter", "pro", "max", "ultra"];
+
+/** Referral code for this visit: ?ref= wins, else the 30-day zintus_ref
+ *  cookie set by /r/<code>. */
+function currentRef(): string | undefined {
+  const fromQuery = new URLSearchParams(window.location.search).get("ref");
+  if (fromQuery) return fromQuery;
+  const m = /(?:^|;\s*)zintus_ref=([^;]+)/.exec(document.cookie);
+  return m ? decodeURIComponent(m[1]!) : undefined;
+}
+
 export default function PricingPage() {
-  // Payments are not live yet. Stripe checkout is not wired, so paid-tier
-  // CTAs are intentional placeholders. Do not point these at a live redirect.
-  function handleCheckout(tierId: string) {
-    void tierId;
-    // TODO: Stripe checkout — wire to the checkout session once payments are live.
+  const [busyTier, setBusyTier] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState("");
+
+  async function handleCheckout(tierId: string) {
+    if (!PAID_TIERS.includes(tierId) || busyTier) return;
+    setBusyTier(tierId);
+    setCheckoutError("");
+    const ref = currentRef();
+
+    // Signed out → login, then bounce straight back into this checkout via
+    // the ?checkout= resume param (see useEffect below).
+    const me = await getMe();
+    if (!me.authenticated) {
+      const resume = `/pricing?checkout=${tierId}${ref ? `&ref=${encodeURIComponent(ref)}` : ""}`;
+      window.location.href = `/login?next=${encodeURIComponent(resume)}`;
+      return;
+    }
+
+    const url = await createCheckout(tierId as PaidTier, ref);
+    if (url) {
+      window.location.href = url; // Stripe-hosted checkout
+      return;
+    }
+    setCheckoutError(
+      "Could not start checkout — please try again in a moment. If this keeps happening, billing may not be enabled yet.",
+    );
+    setBusyTier(null);
   }
+
+  // Resume a checkout the user started before signing in.
+  useEffect(() => {
+    const tier = new URLSearchParams(window.location.search).get("checkout");
+    if (tier && PAID_TIERS.includes(tier)) void handleCheckout(tier);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const cardBase: React.CSSProperties = {
     background: "var(--marketing-surface)",
@@ -343,18 +387,22 @@ export default function PricingPage() {
               ) : (
                 <button
                   type="button"
-                  className="m-ghost-btn"
-                  style={{ width: "100%", cursor: "not-allowed" }}
+                  className="m-primary-btn"
+                  style={{ width: "100%" }}
                   onClick={() => handleCheckout(tier.id)}
-                  title="Checkout coming soon"
-                  disabled
+                  disabled={busyTier !== null}
                 >
-                  {tier.cta.label}
+                  {busyTier === tier.id ? "Opening checkout…" : tier.cta.label}
                 </button>
               )}
             </div>
           ))}
         </div>
+        {checkoutError ? (
+          <div className="m-shell" style={{ marginTop: "0.75rem" }}>
+            <p style={{ color: RED, fontSize: "0.9rem", margin: 0 }}>{checkoutError}</p>
+          </div>
+        ) : null}
       </section>
 
       {/* Trust callouts */}

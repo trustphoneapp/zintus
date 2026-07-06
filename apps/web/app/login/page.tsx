@@ -22,6 +22,13 @@ export default function LoginPage() {
   // The mobile-redirect handler lives on the relay worker, not the Next.js web
   // app — point the mobile branch there (default https://relay.zintus.ai) so the
   // post-OAuth deep-link redirect resolves instead of 404ing on www.
+  // ?next=/path — same-origin RELATIVE path only (open-redirect guard); lets
+  // flows like pricing-checkout resume exactly where the user left off.
+  const nextParam = searchParams.get("next");
+  const nextPath =
+    nextParam && nextParam.startsWith("/") && !nextParam.startsWith("//")
+      ? nextParam
+      : null;
   const redirectTo = isMobile
     ? `${RELAY_URL}/api/auth/mobile-redirect`
     : isCli && cliState
@@ -30,7 +37,9 @@ export default function LoginPage() {
         // the plain dashboard strands the app on "Waiting for browser sign-in"
         // forever (the state never gets approved).
         `https://www.zintus.ai/dashboard/cli-callback?state=${encodeURIComponent(cliState)}`
-      : "https://www.zintus.ai/dashboard";
+      : nextPath
+        ? `https://www.zintus.ai${nextPath}`
+        : "https://www.zintus.ai/dashboard";
 
   async function handleMagicLink(event: React.FormEvent) {
     event.preventDefault();
