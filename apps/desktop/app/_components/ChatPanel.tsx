@@ -608,6 +608,7 @@ export function ChatPanel() {
             model: managedTarget,
             messages: convo,
             responseFormat,
+            ...(searchEnabled ? { search: { enabled: true } } : {}),
             signal: controller.signal,
             onChunk: (delta) => {
               if (!controller.signal.aborted) {

@@ -1376,6 +1376,21 @@ export function createGatewayHandler(
               },
             );
             searchMessages = injectSearchResults(messages, outcome.results);
+            if (outcome.results.length === 0) {
+              // Honest degradation: without this note the model improvises
+              // ("I can't search") or worse, fabricates. servedBy === "none"
+              // means no Tavily/Serper key is configured on this gateway.
+              searchMessages = [
+                ...searchMessages,
+                {
+                  role: "system" as const,
+                  content:
+                    outcome.servedBy === "none"
+                      ? "The user enabled web search, but no search provider (TAVILY_API_KEY / SERPER_API_KEY) is configured on this gateway. Tell the user search is unavailable until a key is added in settings, then answer from your knowledge."
+                      : "Web search was requested but returned no results this turn. Answer from your knowledge and say so honestly - do not fabricate search citations.",
+                },
+              ];
+            }
             log("info", "search.fallback", {
               requestId,
               servedBy: outcome.servedBy,

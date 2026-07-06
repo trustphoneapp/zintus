@@ -30,6 +30,8 @@ export interface Env {
   MANAGED_KEY_ZAI?: string;
   MANAGED_KEY_MISTRAL?: string;
   MANAGED_KEY_XAI?: string;
+  /** Tavily — external web-search fallback for managed chat (see managed.ts). */
+  TAVILY_API_KEY?: string;
 }
 
 /** Attached to every accepted WebSocket (survives DO hibernation). */

@@ -108,6 +108,9 @@ export async function streamManagedChat(params: {
   model: string;
   messages: ChatMessage[];
   responseFormat?: { type: string };
+  /** Web search toggle — the relay fetches and injects results server-side,
+   *  so every managed model honors it regardless of native capability. */
+  search?: { enabled: boolean };
   signal?: AbortSignal;
   onChunk: (text: string) => void;
 }): Promise<ManagedStreamResult> {
@@ -119,6 +122,7 @@ export async function streamManagedChat(params: {
       model: params.model,
       messages: params.messages,
       stream: true,
+      ...(params.search?.enabled ? { search: { enabled: true } } : {}),
       ...(params.responseFormat?.type === "json_object"
         ? { response_format: { type: "json_object" } }
         : {}),

@@ -9,6 +9,12 @@ import {
   GIFT_DAILY_WINDOW_SECS,
 } from './rate-limit.js';
 import {
+  tavilySearch,
+  extractSearchQuery,
+  injectSearchResults,
+  type SearchResult,
+} from '@zintus/search';
+import {
   MANAGED_KEY_TIERS,
   CLASS_BURN,
   TIER_CLASS_ACCESS,
@@ -239,6 +245,10 @@ interface ManagedChatBody {
   temperature?: number;
   max_tokens?: number;
   response_format?: { type: string };
+  /** Web search: results are fetched relay-side (Tavily) and injected as
+   *  context, so EVERY managed model supports the search toggle regardless
+   *  of native capability — mirroring the gateway's fallback strategy. */
+  search?: { enabled?: boolean; maxResults?: number };
 }
 
 /** Hard caps so one request can't monopolize the worker. */
@@ -414,8 +424,51 @@ export async function handleManagedChat(
     }
   }
 
+  // Managed web search: fetch results relay-side and inject as a system
+  // context block (same pattern as the gateway's external fallback). Fails
+  // soft — a search outage degrades to an honest no-results note rather than
+  // failing the chat. No plan-token fee: upstream cost is ~1 cr equivalent
+  // and PRICING-FINAL prices only images/STT/research as flat fees.
+  let chatMessages = body.messages!;
+  if (body.search?.enabled) {
+    const tavilyKey = c.env.TAVILY_API_KEY?.trim() ?? '';
+    const query = extractSearchQuery(chatMessages as never);
+    if (tavilyKey && query) {
+      let results: SearchResult[] = [];
+      try {
+        results = await tavilySearch(
+          query,
+          { maxResults: Math.min(body.search.maxResults ?? 5, 10) },
+          tavilyKey,
+        );
+      } catch (err) {
+        console.error('managed.search_failed', err instanceof Error ? err.message : String(err));
+      }
+      chatMessages = injectSearchResults(chatMessages as never, results) as typeof chatMessages;
+      if (results.length === 0) {
+        chatMessages = [
+          ...chatMessages,
+          {
+            role: 'system',
+            content:
+              'Web search was requested but returned no results this turn. Answer from your knowledge and say so honestly — do not fabricate search citations.',
+          } as ChatMessage,
+        ];
+      }
+    } else if (!tavilyKey) {
+      chatMessages = [
+        ...chatMessages,
+        {
+          role: 'system',
+          content:
+            'The user enabled web search, but no search provider is configured. Tell them search is temporarily unavailable and answer from your knowledge.',
+        } as ChatMessage,
+      ];
+    }
+  }
+
   const stream = body.stream !== false;
-  const inputChars = body.messages!.reduce(
+  const inputChars = chatMessages.reduce(
     (n, m) => n + (typeof m.content === 'string' ? m.content.length : JSON.stringify(m.content).length),
     0,
   );
@@ -428,7 +481,7 @@ export async function handleManagedChat(
   for (const up of upstreams) {
     const payload: Record<string, unknown> = {
       model: up.model,
-      messages: body.messages,
+      messages: chatMessages,
       stream,
       // Always send max_tokens: Anthropic's OpenAI-compat endpoint REQUIRES
       // it (400 without it — hit live 2026-07-06), and every other upstream

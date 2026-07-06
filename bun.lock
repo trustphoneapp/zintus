@@ -453,6 +453,7 @@
       "version": "0.0.1",
       "dependencies": {
         "@zintus/schemas": "workspace:*",
+        "@zintus/search": "workspace:*",
         "hono": "^4.12.23",
       },
       "devDependencies": {

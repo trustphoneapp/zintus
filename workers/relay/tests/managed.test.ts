@@ -417,3 +417,97 @@ describe("gift-class models for non-members", () => {
     expect(json.min_tier).toBe("starter");
   });
 });
+
+// ── managed web search (relay-side Tavily inject) ───────────────────────────
+
+describe("managed chat web search", () => {
+  const SEARCH_BODY = {
+    model: "zintus/glm-4.7-flash",
+    messages: [{ role: "user", content: "what is zintus.ai" }],
+    stream: false,
+    search: { enabled: true },
+  };
+
+  function searchWorld(withTavilyKey: boolean) {
+    const kv = new Map<string, string>();
+    const base = fakeEnv({
+      MANAGED_KEY_ZAI: "zk",
+      ...(withTavilyKey ? { TAVILY_API_KEY: "tvly_x" } : {}),
+    } as Partial<Env>);
+    (base as { KV: unknown }).KV = {
+      get: async (k: string) => kv.get(k) ?? null,
+      put: async (k: string, v: string) => void kv.set(k, v),
+      delete: async (k: string) => void kv.delete(k),
+    };
+    return base;
+  }
+
+  test("search results are fetched and injected before the upstream call", async () => {
+    const { c } = fakeContext(searchWorld(true), SEARCH_BODY);
+    let upstreamMessages: Array<{ role: string; content: string }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes("api.tavily.com")) {
+        return new Response(
+          JSON.stringify({
+            results: [{ title: "Zintus", url: "https://zintus.ai", content: "AI router", score: 0.9 }],
+          }),
+          { status: 200 },
+        );
+      }
+      upstreamMessages = (JSON.parse(String(init?.body)) as { messages: typeof upstreamMessages }).messages;
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const res = await handleManagedChat(c, SESSION);
+    expect(res.status).toBe(200);
+    const injected = upstreamMessages.find(
+      (m) => m.role === "system" && String(m.content).includes("web_search_results"),
+    );
+    expect(injected).toBeDefined();
+    expect(String(injected!.content)).toContain("zintus.ai");
+  });
+
+  test("no Tavily key → honest unavailable note instead of silent no-op", async () => {
+    const { c } = fakeContext(searchWorld(false), SEARCH_BODY);
+    let upstreamMessages: Array<{ role: string; content: string }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      upstreamMessages = (JSON.parse(String(init?.body)) as { messages: typeof upstreamMessages }).messages;
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const res = await handleManagedChat(c, SESSION);
+    expect(res.status).toBe(200);
+    const note = upstreamMessages.find(
+      (m) => m.role === "system" && String(m.content).includes("search is temporarily unavailable"),
+    );
+    expect(note).toBeDefined();
+  });
+
+  test("tavily outage → honest no-results note, chat still served", async () => {
+    const { c } = fakeContext(searchWorld(true), SEARCH_BODY);
+    let upstreamMessages: Array<{ role: string; content: string }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes("api.tavily.com")) {
+        return new Response("boom", { status: 500 });
+      }
+      upstreamMessages = (JSON.parse(String(init?.body)) as { messages: typeof upstreamMessages }).messages;
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+
+    const res = await handleManagedChat(c, SESSION);
+    expect(res.status).toBe(200);
+    const note = upstreamMessages.find(
+      (m) => m.role === "system" && String(m.content).includes("returned no results"),
+    );
+    expect(note).toBeDefined();
+  });
+});
