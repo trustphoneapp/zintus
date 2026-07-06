@@ -173,6 +173,26 @@ interface StripeEvent {
 //   https://docs.stripe.com/webhooks#retries
 export const STRIPE_EVENT_DEDUP_TTL_SECS = 60 * 60 * 24 * 7;
 
+/**
+ * Subscription id from an invoice webhook object, across Stripe API versions:
+ * ≤2025-02 exposes top-level `invoice.subscription`; 2025-03+ ("basil" and
+ * later, incl. 2026 "dahlia") moved it to
+ * `invoice.parent.subscription_details.subscription`. Webhook payload shape
+ * follows the ENDPOINT's pinned API version, so accept both — otherwise a
+ * newer-pinned endpoint silently no-ops invoice.paid/payment_failed (no
+ * monthly reset, no referral accrual, no past_due marking).
+ */
+export function invoiceSubscriptionId(obj: Record<string, unknown>): string | null {
+  const direct = obj['subscription'];
+  if (typeof direct === 'string') return direct;
+  const parent = obj['parent'] as
+    | { subscription_details?: { subscription?: unknown } }
+    | null
+    | undefined;
+  const nested = parent?.subscription_details?.subscription;
+  return typeof nested === 'string' ? nested : null;
+}
+
 export async function handleStripeWebhook(request: Request, env: Env): Promise<Response> {
   const body = await request.text();
   const sig = request.headers.get('stripe-signature') ?? '';
@@ -265,7 +285,7 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
       }
 
       case 'invoice.paid': {
-        const subscriptionId = obj['subscription'] as string | null;
+        const subscriptionId = invoiceSubscriptionId(obj);
         if (!subscriptionId) break;
 
         const sub = await env.DB.prepare(
@@ -341,7 +361,7 @@ export async function handleStripeWebhook(request: Request, env: Env): Promise<R
       }
 
       case 'invoice.payment_failed': {
-        const subscriptionId = obj['subscription'] as string | null;
+        const subscriptionId = invoiceSubscriptionId(obj);
         if (subscriptionId) {
           await env.DB.prepare(
             'UPDATE subscriptions SET status=\'past_due\', updated_at=unixepoch() WHERE stripe_subscription_id=?'
