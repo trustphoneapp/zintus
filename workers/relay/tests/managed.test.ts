@@ -8,7 +8,7 @@ import {
   SseUsageScanner,
   usageFromSseChunk,
 } from "../src/managed.js";
-import { MANAGED_KEYS_AVAILABLE, MANAGED_KEY_TIERS, TIERS, checkoutAvailability } from "../src/tiers.js";
+import { MANAGED_KEYS_AVAILABLE, MANAGED_KEY_TIERS, TIERS, CLASS_BURN, checkoutAvailability } from "../src/tiers.js";
 import type { Env } from "../src/types.js";
 import type { SessionPayload } from "../src/auth.js";
 import type { Context } from "hono";
@@ -150,8 +150,19 @@ describe("availableManagedModels", () => {
     expect(ids).toEqual(["zintus/llama-3.3-70b"]);
   });
 
-  test("every model debits plan tokens 1:1 in v1", () => {
-    for (const m of MANAGED_MODELS) expect(m.multiplier).toBe(1);
+  test("every model has a pricing class with a defined burn rate", () => {
+    for (const m of MANAGED_MODELS) {
+      expect(m.class).toBeDefined();
+      expect(CLASS_BURN[m.class]).toBeGreaterThanOrEqual(0);
+    }
+    // Spot-pin the PRICING-FINAL Part 3 assignments so a silent re-class
+    // (which changes what members are charged) fails loudly.
+    const byId = Object.fromEntries(MANAGED_MODELS.map((m) => [m.id, m.class]));
+    expect(byId["zintus/llama-3.1-8b"]).toBe("cheap");
+    expect(byId["zintus/deepseek-chat"]).toBe("cheap");
+    expect(byId["zintus/gpt-4o-mini"]).toBe("mid");
+    expect(byId["zintus/llama-3.3-70b"]).toBe("premium");
+    expect(byId["zintus/kimi-k2"]).toBe("premium");
   });
 
   test("managedKey trims and defaults to empty", () => {
@@ -217,7 +228,8 @@ describe("handleManagedChat gating", () => {
   });
 
   test("member with exhausted plan tokens → 429 plan_tokens_exhausted", async () => {
-    const env = memberEnv("starter", { MANAGED_KEY_GROQ: "k" }, 1_000_000);
+    // Counter stores millicredits: Starter grant = 15,000 cr = 15M mc.
+    const env = memberEnv("starter", { MANAGED_KEY_GROQ: "k" }, 15_000_000);
     const { c } = fakeContext(env, VALID_BODY);
     const res = await handleManagedChat(c, SESSION);
     expect(res.status).toBe(429);
@@ -274,7 +286,8 @@ describe("handleManagedChat gating", () => {
   });
 
   test("failover: groq 500 → cerebras serves", async () => {
-    const env = memberEnv("starter", {
+    // pro: llama-3.3-70b is premium class — starter would (correctly) 403.
+    const env = memberEnv("pro", {
       MANAGED_KEY_GROQ: "gsk",
       MANAGED_KEY_CEREBRAS: "csk",
     });
@@ -298,7 +311,7 @@ describe("handleManagedChat gating", () => {
   });
 
   test("streaming response passes SSE through and meters after flush", async () => {
-    const env = memberEnv("starter", { MANAGED_KEY_GROQ: "gsk" });
+    const env = memberEnv("pro", { MANAGED_KEY_GROQ: "gsk" });
     const { c, waited } = fakeContext(env, { ...VALID_BODY, stream: true });
 
     const sse = [

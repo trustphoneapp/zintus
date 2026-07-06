@@ -93,7 +93,7 @@ async function buildEnvWithCookie() {
   const env = {
     KV: kv,
     DB: fakeDb(starterSub),
-    QUOTA_COUNTER: fakeCounter(1_100_000), // starter cap is 1M → over budget
+    QUOTA_COUNTER: fakeCounter(15_100_000), // starter grant is 15M millicredits → over budget
     GATEWAY_SESSION: fakeGateway,
   } as unknown as Env;
   return { env, cookie: `zintus_session=${token}` };

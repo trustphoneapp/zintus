@@ -1115,7 +1115,11 @@ app.post('/api/usage/report', async (c) => {
     provider: string; model: string; input_tokens: number; output_tokens: number;
   }>();
 
-  await recordUsage(session.user_id, provider, model, input_tokens, output_tokens, c.env);
+  // BYOK self-report: burn 0 — the member pays their own provider, so this
+  // is dashboard analytics only and must never debit plan balance. (Before
+  // the economics change this path silently consumed paid members' plan
+  // tokens at 1:1.) Tier 'free' keeps the display conversion a no-op.
+  await recordUsage(session.user_id, provider, model, input_tokens, output_tokens, c.env, 0, 'free');
   return c.json({ ok: true });
 });
 

@@ -2,7 +2,16 @@ import type { Context } from 'hono';
 import type { Env } from './types.js';
 import type { SessionPayload } from './auth.js';
 import { enforceQuota, recordUsage } from './middleware/quota.js';
-import { MANAGED_KEY_TIERS } from './tiers.js';
+import {
+  MANAGED_KEY_TIERS,
+  CLASS_BURN,
+  TIER_CLASS_ACCESS,
+  minTierForClass,
+  displayPlanTokens,
+  planTokensPer1kByTier,
+  type ModelClass,
+  type Tier,
+} from './tiers.js';
 
 /**
  * Managed-membership LLM backend — the feature MANAGED_KEYS_AVAILABLE gates.
@@ -16,8 +25,11 @@ import { MANAGED_KEY_TIERS } from './tiers.js';
  * Honesty rules (product non-negotiables):
  *  - `/v1/managed/models` lists ONLY models whose operator key is actually
  *    configured — nothing purchasable-but-unservable is ever shown.
- *  - Every model in v1 debits plan tokens 1:1 (`multiplier: 1`). Premium
- *    multipliers ship only together with UI that displays them per-reply.
+ *  - Every model belongs to a class (PRICING-FINAL Part 3) whose burn rate
+ *    sets its plan-token debit; the per-reply `zintus` block reports the
+ *    debit in user-facing plan tokens so no charge is ever invisible.
+ *  - Models above the member's tier return the honest 403 upgrade error
+ *    (`model_requires_upgrade`), never a silent downgrade to a cheaper model.
  *  - Usage is metered from the PROVIDER's own usage block when present; the
  *    estimate fallback is flagged in the usage_log model suffix (`~est`).
  *
@@ -36,8 +48,8 @@ export interface ManagedModel {
   id: string;
   displayName: string;
   contextWindow: number;
-  /** Plan-token debit multiplier. v1: always 1 (see honesty rules above). */
-  multiplier: 1;
+  /** Pricing class — sets the CLASS_BURN debit rate and tier gating. */
+  class: ModelClass;
   capabilities: { tools: boolean; json: boolean; vision: boolean };
   /** Ordered upstreams — first configured+healthy one serves the request. */
   upstreams: ManagedUpstream[];
@@ -60,12 +72,15 @@ const STREAM_USAGE: Record<ManagedUpstream['provider'], boolean> = {
   moonshot: false,
 };
 
+// Class assignments follow PRICING-FINAL Part 3 by the owner's explicit
+// listing (not raw cost bands): Groq 70B is premium there despite mid-band
+// cost. Cost-safety was verified per class in the Part 9 margin table.
 export const MANAGED_MODELS: ManagedModel[] = [
   {
     id: 'zintus/llama-3.3-70b',
     displayName: 'Llama 3.3 70B',
     contextWindow: 128_000,
-    multiplier: 1,
+    class: 'premium',
     capabilities: { tools: true, json: true, vision: false },
     upstreams: [
       { provider: 'groq', model: 'llama-3.3-70b-versatile' },
@@ -76,7 +91,7 @@ export const MANAGED_MODELS: ManagedModel[] = [
     id: 'zintus/llama-3.1-8b',
     displayName: 'Llama 3.1 8B (fast)',
     contextWindow: 128_000,
-    multiplier: 1,
+    class: 'cheap',
     capabilities: { tools: true, json: true, vision: false },
     upstreams: [{ provider: 'groq', model: 'llama-3.1-8b-instant' }],
   },
@@ -84,7 +99,7 @@ export const MANAGED_MODELS: ManagedModel[] = [
     id: 'zintus/gpt-4o-mini',
     displayName: 'GPT-4o mini',
     contextWindow: 128_000,
-    multiplier: 1,
+    class: 'mid',
     capabilities: { tools: true, json: true, vision: true },
     upstreams: [{ provider: 'openai', model: 'gpt-4o-mini' }],
   },
@@ -92,7 +107,7 @@ export const MANAGED_MODELS: ManagedModel[] = [
     id: 'zintus/deepseek-chat',
     displayName: 'DeepSeek Chat',
     contextWindow: 64_000,
-    multiplier: 1,
+    class: 'cheap',
     capabilities: { tools: true, json: true, vision: false },
     upstreams: [{ provider: 'deepseek', model: 'deepseek-chat' }],
   },
@@ -100,7 +115,7 @@ export const MANAGED_MODELS: ManagedModel[] = [
     id: 'zintus/kimi-k2',
     displayName: 'Kimi K2',
     contextWindow: 131_072,
-    multiplier: 1,
+    class: 'premium',
     capabilities: { tools: true, json: true, vision: false },
     upstreams: [{ provider: 'moonshot', model: 'kimi-k2-0711-preview' }],
   },
@@ -235,7 +250,13 @@ export function handleManagedModels(c: Context<{ Bindings: Env }>): Response {
     id: m.id,
     display_name: m.displayName,
     context_window: m.contextWindow,
-    multiplier: m.multiplier,
+    class: m.class,
+    // USER-FACING plan tokens debited per 1K real tokens, per tier (the
+    // display conversion differs per tier by design — PRICING-FINAL Part 6).
+    // Clients render "uses ~N plan tokens per 1K" for the member's own tier.
+    // Internal credit units are never exposed.
+    plan_tokens_per_1k: planTokensPer1kByTier(m.class),
+    min_tier: minTierForClass(m.class),
     capabilities: m.capabilities,
   }));
   return c.json({ models, managed_tiers: MANAGED_KEY_TIERS });
@@ -280,6 +301,21 @@ export async function handleManagedChat(
   const upstreams = model ? configuredUpstreams(c.env, model) : [];
   if (!model || upstreams.length === 0) {
     return c.json({ error: `Unknown or unavailable model: ${body.model}`, code: 'model_unavailable' }, 404);
+  }
+
+  // Tier class gating (PRICING-FINAL Part 5): honest 403 naming the required
+  // plan — never a silent downgrade to a cheaper model.
+  if (!TIER_CLASS_ACCESS[quota.tier].includes(model.class)) {
+    const minTier = minTierForClass(model.class);
+    return c.json(
+      {
+        error: `${model.displayName} requires the ${minTier[0]!.toUpperCase()}${minTier.slice(1)} plan or higher. Upgrade at zintus.ai/pricing`,
+        code: 'model_requires_upgrade',
+        model: model.id,
+        min_tier: minTier,
+      },
+      403,
+    );
   }
 
   const stream = body.stream !== false;
@@ -331,6 +367,7 @@ export async function handleManagedChat(
   }
   const servedUp = served;
 
+  const burn = CLASS_BURN[model.class];
   const meter = (totals: UsageTotals) =>
     recordUsage(
       session.user_id,
@@ -339,6 +376,8 @@ export async function handleManagedChat(
       totals.input,
       totals.output,
       c.env,
+      burn,
+      quota.tier,
     );
 
   if (!stream) {
@@ -354,9 +393,20 @@ export async function handleManagedChat(
           reported: false,
         };
     c.executionCtx.waitUntil(meter(totals));
+    // Receipt data (PRICING-FINAL Part 6): real tokens + the user-facing
+    // plan-token debit for THIS member's tier. Clients render
+    // "DeepSeek Flash · 847 tok · plan −N tok" from these fields.
+    const realTotal = totals.input + totals.output;
     return c.json({
       ...json,
-      zintus: { served_by: servedUp.provider, model: model.id, multiplier: model.multiplier, usage_reported: totals.reported },
+      zintus: {
+        served_by: servedUp.provider,
+        model: model.id,
+        class: model.class,
+        tokens: realTotal,
+        plan_tokens_debited: displayPlanTokens(realTotal * burn, quota.tier),
+        usage_reported: totals.reported,
+      },
     });
   }
 
@@ -388,6 +438,10 @@ export async function handleManagedChat(
       Connection: 'keep-alive',
       'X-Zintus-Served-By': servedUp.provider,
       'X-Zintus-Model': model.id,
+      'X-Zintus-Class': model.class,
+      // Plan tokens per 1K real tokens for THIS member's tier — lets streaming
+      // clients render the running plan debit without knowing internal units.
+      'X-Zintus-Plan-Per-1k': String(planTokensPer1kByTier(model.class)[quota.tier] ?? 0),
     },
   });
 }

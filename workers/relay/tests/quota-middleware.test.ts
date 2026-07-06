@@ -68,23 +68,28 @@ describe("enforceQuota", () => {
     expect(r.limit).toBeNull();
   });
 
+  // The counter stores MILLICREDITS (1 credit = 1,000 mc; debit = real tokens
+  // × CLASS_BURN). Starter's internal cap is 15,000 credits = 15,000,000 mc;
+  // `used`/`limit` in the result are converted to USER-FACING plan tokens
+  // (Starter allowance 1M), so clients never see internal units.
   test("paid tier under the monthly cap is allowed", async () => {
     const counter = fakeQuotaCounter();
-    counter.totals.set(counterKey("u1"), 100_000);
+    counter.totals.set(counterKey("u1"), 1_500_000); // 1,500 cr of 15,000
     const { env } = fakeEnv(sub("starter"), counter);
     const r = await enforceQuota("u1", env);
     expect(r.tier).toBe("starter");
-    expect(r.allowed).toBe(true); // 100k < 1M
-    expect(r.limit).toBe(1_000_000);
-    expect(r.used).toBe(100_000);
+    expect(r.allowed).toBe(true); // 1.5M mc < 15M mc
+    expect(r.limit).toBe(1_000_000); // displayed: the SOLD allowance
+    expect(r.used).toBe(100_000); // 1.5M mc × 1M/15M = 10% of the allowance
   });
 
   test("paid tier at/over the cap is blocked (429 path)", async () => {
     const counter = fakeQuotaCounter();
-    counter.totals.set(counterKey("u1"), 1_000_000);
+    counter.totals.set(counterKey("u1"), 15_000_000); // full 15,000-cr grant
     const { env } = fakeEnv(sub("starter"), counter);
     const r = await enforceQuota("u1", env);
-    expect(r.allowed).toBe(false); // 1M not < 1M
+    expect(r.allowed).toBe(false); // 15M mc not < 15M mc
+    expect(r.used).toBe(1_000_000); // displays as the full sold allowance
     expect(r.reset).toBeGreaterThan(Math.floor(Date.now() / 1000));
   });
 });
@@ -112,10 +117,22 @@ describe("billing period boundary (calendar UTC month)", () => {
 });
 
 describe("recordUsage", () => {
-  test("increments the counter by input+output tokens", async () => {
+  test("debits (input+output) × burn millicredits for a managed model", async () => {
     const { env, counter } = fakeEnv(sub("starter"));
-    await recordUsage("u1", "groq", "llama", 300, 200, env);
+    // cheap class: burn 1 → 500 real tokens = 500 mc
+    await recordUsage("u1", "zintus:groq", "zintus/llama-3.1-8b", 300, 200, env, 1, "starter");
     expect(counter.totals.get(counterKey("u1"))).toBe(500);
+    // premium class: burn 5 → 500 real tokens = 2,500 mc more
+    await recordUsage("u1", "zintus:groq", "zintus/llama-3.3-70b", 300, 200, env, 5, "starter");
+    expect(counter.totals.get(counterKey("u1"))).toBe(3_000);
+  });
+
+  test("BYOK self-report (burn 0) logs but never debits plan balance", async () => {
+    // Pre-economics this path consumed paid members' plan tokens at 1:1 —
+    // wrong, the member pays their own provider for BYOK usage.
+    const { env, counter } = fakeEnv(sub("pro"));
+    await recordUsage("u1", "groq", "llama", 300, 200, env, 0, "free");
+    expect(counter.totals.get(counterKey("u1"))).toBeUndefined();
   });
 
   test("concurrent recordUsage is now ATOMIC — no increments lost (DO counter)", async () => {
@@ -124,7 +141,7 @@ describe("recordUsage", () => {
     // exactly 500. This pins the B3 atomicity fix.
     const { env, counter } = fakeEnv(sub("pro"));
     await Promise.all(
-      Array.from({ length: 5 }, () => recordUsage("u1", "groq", "llama", 100, 0, env)),
+      Array.from({ length: 5 }, () => recordUsage("u1", "groq", "llama", 100, 0, env, 1, "pro")),
     );
     expect(counter.totals.get(counterKey("u1"))).toBe(500);
   });
