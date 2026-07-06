@@ -53,6 +53,11 @@ import { createCheckoutSession, createPortalSession, handleStripeWebhook, cancel
 import { checkoutAvailability } from "./tiers.js";
 import { handleManagedChat, handleManagedModels } from "./managed.js";
 import { handleResearchSession } from "./research.js";
+import {
+  handleManagedServices,
+  handleManagedImage,
+  handleManagedTranscribe,
+} from "./services.js";
 import { corsOrigin, validateRedirectTo } from "./http-security.js";
 import { enforceQuota, recordUsage, getQuotaUsed, resetQuota } from "./middleware/quota.js";
 import { createErrorSink } from "./observability.js";
@@ -1249,6 +1254,21 @@ app.post('/v1/managed/research-session', async (c) => {
   const session = await requireSession(c);
   if (!session) return c.json({ error: 'Unauthorized' }, 401);
   return handleResearchSession(c, session);
+});
+
+// Flat-fee managed services (PRICING-FINAL Part 4) — see services.ts.
+app.get('/v1/managed/services', (c) => handleManagedServices(c));
+
+app.post('/v1/managed/images', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+  return handleManagedImage(c, session);
+});
+
+app.post('/v1/managed/transcribe', async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: 'Unauthorized' }, 401);
+  return handleManagedTranscribe(c, session);
 });
 
 // ── Referral routes ───────────────────────────────────────────────────────
