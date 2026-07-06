@@ -146,6 +146,33 @@ const COMPARISON: Array<{
   { plan: "Zintus Ultra", price: "$199", tokens: "200,000,000 exact", transparency: "shown", zintus: true },
 ];
 
+/* ─── per-model plan-token rates ─────────────────────────── */
+// MUST mirror workers/relay/src/tiers.ts (CLASS_BURN + TIERS): burn = credits
+// per 1K model tokens; a plan token displays as allowance/(credits×1000) of a
+// credit. Rate shown = plan tokens debited per 1K model tokens — the exact
+// number the app's receipts use. Relay tests pin the server side; if tiers.ts
+// changes, regenerate these rows. Only classes with LIVE managed models are
+// listed (no aspirational rows for unservable models).
+const RATE_TIERS = [
+  { id: "starter", label: "Starter", allowance: 1_000_000, credits: 15_000 },
+  { id: "pro", label: "Pro", allowance: 10_000_000, credits: 35_000 },
+  { id: "max", label: "Max", allowance: 50_000_000, credits: 60_000 },
+  { id: "ultra", label: "Ultra", allowance: 200_000_000, credits: 120_000 },
+] as const;
+
+const RATE_CLASSES = [
+  { label: "Fast models", examples: "Llama 8B, DeepSeek Flash", burn: 1, minTier: "starter" },
+  { label: "Everyday models", examples: "GPT-4o mini", burn: 2, minTier: "starter" },
+  { label: "Advanced models", examples: "Llama 70B, Kimi K2", burn: 5, minTier: "pro" },
+] as const;
+
+const TIER_ORDER = ["starter", "pro", "max", "ultra"] as const;
+
+/** Plan tokens debited per 1K model tokens for a class on a tier. */
+function planPer1k(burn: number, tier: (typeof RATE_TIERS)[number]): number {
+  return Math.round((burn * 1000 * tier.allowance) / (tier.credits * 1000));
+}
+
 /* ─── referral rows ──────────────────────────────────────── */
 const REFERRALS: Array<{ tier: string; price: string; reward: string }> = [
   { tier: "Starter", price: "$15", reward: "$15 one-time per referral" },
@@ -353,6 +380,78 @@ export default function PricingPage() {
               </p>
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* Per-model plan-token rates */}
+      <section className="m-section">
+        <div className="m-shell">
+          <h2 className="m-title" style={{ marginBottom: "0.75rem" }}>
+            What each model costs in plan tokens
+          </h2>
+          <p className="m-subtitle" style={{ maxWidth: "680px", marginBottom: "1.5rem" }}>
+            The exact debit per 1,000 model tokens — the same number every
+            receipt in the app shows. Faster models debit less, advanced models
+            debit more. No hidden multipliers.
+          </p>
+          <div style={{ overflowX: "auto" }}>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontSize: "0.9rem",
+                minWidth: "560px",
+              }}
+            >
+              <thead>
+                <tr style={{ borderBottom: "1px solid var(--marketing-accent-dim)" }}>
+                  <th style={{ textAlign: "left", padding: "0.6rem 0.75rem", color: "var(--marketing-muted)" }}>
+                    Model class
+                  </th>
+                  {RATE_TIERS.map((t) => (
+                    <th key={t.id} style={{ textAlign: "right", padding: "0.6rem 0.75rem", color: "var(--marketing-muted)" }}>
+                      {t.label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {RATE_CLASSES.map((cls) => (
+                  <tr key={cls.label} style={{ borderBottom: "1px solid var(--marketing-accent-dim)" }}>
+                    <td style={{ padding: "0.6rem 0.75rem" }}>
+                      <span style={{ fontWeight: 600, color: "var(--marketing-text)" }}>{cls.label}</span>
+                      <span style={{ color: "var(--marketing-muted)", display: "block", fontSize: "0.8rem" }}>
+                        {cls.examples}
+                      </span>
+                    </td>
+                    {RATE_TIERS.map((t) => {
+                      const locked =
+                        TIER_ORDER.indexOf(t.id) < TIER_ORDER.indexOf(cls.minTier);
+                      return (
+                        <td
+                          key={t.id}
+                          style={{
+                            textAlign: "right",
+                            padding: "0.6rem 0.75rem",
+                            color: locked ? "var(--marketing-muted)" : "var(--marketing-text)",
+                            fontVariantNumeric: "tabular-nums",
+                          }}
+                        >
+                          {locked ? "Upgrade" : `−${planPer1k(cls.burn, t).toLocaleString()} / 1K`}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p style={{ color: "var(--marketing-muted)", fontSize: "0.8rem", marginTop: "0.75rem" }}>
+            Rates differ per plan because each plan carries a different token
+            allowance for the same underlying capacity. Your in-app receipt
+            shows this exact debit on every reply. More model classes are added
+            as they go live — never listed before they are servable.
+          </p>
         </div>
       </section>
 
