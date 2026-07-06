@@ -103,19 +103,18 @@ export const RESEARCH_SESSIONS_PER_MONTH: Record<Tier, number> = {
   free: 0, starter: 20, pro: 50, max: 100, ultra: 300,
 };
 
-// ── STRIPE TEST MODE (sandbox, livemode:false — no real money) ─────────────
-// Set 2026-07-04 for the membership smoke. Tier keys were renamed 2026-07-04
-// to match the Stripe products 1:1: starter(1M) / pro(10M) / max(50M) /
-// ultra(200M). Before go-live, replace each id with the LIVE price id:
-//   starter_monthly: 'price_FILL_FROM_STRIPE_LIVE'
-//   pro_monthly:     'price_FILL_FROM_STRIPE_LIVE'
-//   max_monthly:     'price_FILL_FROM_STRIPE_LIVE'
-//   ultra_monthly:   'price_FILL_FROM_STRIPE_LIVE'
+// ── STRIPE LIVE MODE (real money) ──────────────────────────────────────────
+// Live price ids set 2026-07-06 from the owner's live product catalogue
+// (livemode:true verified on each product JSON). Requires the LIVE
+// STRIPE_SECRET_KEY + STRIPE_WEBHOOK_SECRET Cloudflare secrets — with a test
+// key still set, checkout fails with "No such price" (mode mismatch).
+// Products: Starter prod_Uoq37rOJOGFewC · Pro prod_Uoq68Ajw0RJp7W ·
+// Max prod_Uoq7pOaOy4awwt · Ultra prod_Uoq7DbkGAwY9ns.
 export const STRIPE_PRICES: Record<string, string> = {
-  starter_monthly: 'price_1TpWqECHHqmpXopk9caifs35', // TEST · starter · 1M
-  pro_monthly:  'price_1TpWqWCHHqmpXopklq1i3yaD', // TEST · pro · 10M
-  max_monthly:   'price_1TpWqjCHHqmpXopkzifgFXRG', // TEST · max · 50M
-  ultra_monthly:     'price_1TpWqsCHHqmpXopk6VRtHegV', // TEST · ultra · 200M
+  starter_monthly: 'price_1TpCN8CHHqmpXopk4REWKrO6', // LIVE · starter · $15 · 1M
+  pro_monthly:  'price_1TpCQUCHHqmpXopk3pdi0Foc', // LIVE · pro · $49 · 10M
+  max_monthly:   'price_1TpCQqCHHqmpXopk5zwn7Q8C', // LIVE · max · $99 · 50M
+  ultra_monthly:     'price_1TpCRNCHHqmpXopkhxtYHkA2', // LIVE · ultra · $199 · 200M
 };
 
 /** True when a real Stripe price (not a `price_FILL…` placeholder) is configured. */
