@@ -193,7 +193,11 @@ describe("availableManagedModels", () => {
     expect(byId["zintus/glm-4.7-flash"]).toBe("free");
     expect(byId["zintus/glm-4.5-flash"]).toBe("free");
     expect(byId["zintus/mistral-small"]).toBe("mid");
-    expect(byId["zintus/grok-4.1-fast"]).toBe("premium");
+    // 2026-07-07 xAI fix: 4.1-fast retired (console-confirmed); build =
+    // premium ($1.30/M blended), 4.3 = frontier per PRICING-FINAL §2.
+    expect(byId["zintus/grok-4.1-fast"]).toBeUndefined();
+    expect(byId["zintus/grok-build"]).toBe("premium");
+    expect(byId["zintus/grok-4.3"]).toBe("frontier");
     // 2026-07-06 Together expansion: $0.32/M blended ⇒ mid band.
     expect(byId["zintus/qwen3-235b"]).toBe("mid");
     // Scout on Groq: $0.179/M blended ⇒ cheap band (PRICING-FINAL §2 names it).

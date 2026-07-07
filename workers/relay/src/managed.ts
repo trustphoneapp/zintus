@@ -196,13 +196,32 @@ export const MANAGED_MODELS: ManagedModel[] = [
     capabilities: { tools: true, json: true, vision: true },
     upstreams: [{ provider: 'mistral', model: 'mistral-small-latest' }],
   },
+  // ── 2026-07-07 xAI roster fix: grok-4.1-fast is RETIRED (absent from the
+  // owner's console model list; the survey's third-party retirement report is
+  // now confirmed) — the old entry was vaporware that would 404 on first use.
+  // Replaced with the two models the account actually serves. Blended 70/30:
+  // grok-build-0.1 $1.00/$2.00 ⇒ $1.30/M = premium (COGS $0.26/1k cr, under
+  // the $0.44 Haiku anchor); grok-4.3 $1.25/$2.50 ⇒ $1.625/M = FRONTIER per
+  // PRICING-FINAL §2's explicit listing (COGS $0.108/1k cr — the roster's
+  // first frontier model, so Max+ now unlocks something real). Vision stays
+  // false: xAI docs describe image input at the endpoint level only, no
+  // per-model confirmation. grok-4.20 variants skipped (same price as 4.3,
+  // redundant SKUs, multi-agent has 4x lower rate limits).
   {
-    id: 'zintus/grok-4.1-fast',
-    displayName: 'Grok 4.1 Fast',
-    contextWindow: 2_000_000,
+    id: 'zintus/grok-build',
+    displayName: 'Grok Build (code)',
+    contextWindow: 256_000,
     class: 'premium',
     capabilities: { tools: true, json: true, vision: false },
-    upstreams: [{ provider: 'xai', model: 'grok-4.1-fast' }],
+    upstreams: [{ provider: 'xai', model: 'grok-build-0.1' }],
+  },
+  {
+    id: 'zintus/grok-4.3',
+    displayName: 'Grok 4.3',
+    contextWindow: 1_000_000,
+    class: 'frontier',
+    capabilities: { tools: true, json: true, vision: false },
+    upstreams: [{ provider: 'xai', model: 'grok-4.3' }],
   },
   // ── 2026-07-06 Together expansion: 3 models requested, 1 servable ──
   // Llama-4 Scout + Maverick were requested but are NOT in Together's
