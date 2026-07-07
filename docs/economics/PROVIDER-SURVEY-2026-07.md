@@ -55,6 +55,13 @@ large < medium). Batch −50%.
 0.32/1.28 · llama-3.3-70b 1.04/1.04 · kimi-k2.6 1.20/4.50 · qwen3.7-max
 1.25/3.75 (cache 0.13) · deepseek-v4-pro 1.74/3.48. Llama-4 scout/maverick
 delisted from official page (UNVERIFIED third-party: 0.08/0.30, 0.27/0.85).
+VERIFIED 2026-07-06 (pricing page + docs serverless catalog + model pages):
+scout/maverick are DEDICATED-ENDPOINTS-ONLY — no serverless inference at any
+price (scout model page: On-Demand Dedicated/Monthly Reserved, 1M ctx served,
+"will be increased to 10M"). Serverless Qwen3-235B exists ONLY as
+`Qwen/Qwen3-235B-A22B-Instruct-2507-tput`: 0.20/0.60 ($0.32/M blended),
+262K ctx, catalog row shows NO function-calling / vision / structured
+outputs. Wired as managed `zintus/qwen3-235b`, class mid.
 
 **Fireworks** (fireworks.ai/pricing): gpt-oss-20b 0.07/0.30 · deepseek-v4-flash
 0.14/0.28 · gpt-oss-120b 0.15/0.60 · minimax-m3/m2.7 0.30/1.20 (cache 0.06) ·

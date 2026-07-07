@@ -53,7 +53,7 @@ import {
 interface ManagedUpstream {
   provider:
     | 'groq' | 'cerebras' | 'openai' | 'deepseek' | 'moonshot'
-    | 'anthropic' | 'gemini' | 'zai' | 'mistral' | 'xai';
+    | 'anthropic' | 'gemini' | 'zai' | 'mistral' | 'xai' | 'together';
   model: string;
 }
 
@@ -82,6 +82,7 @@ const PROVIDER_BASE: Record<ManagedUpstream['provider'], string> = {
   zai: 'https://api.z.ai/api/paas/v4',
   mistral: 'https://api.mistral.ai/v1',
   xai: 'https://api.x.ai/v1',
+  together: 'https://api.together.xyz/v1',
 };
 
 /** Providers whose streaming responses honor `stream_options.include_usage`. */
@@ -99,6 +100,7 @@ const STREAM_USAGE: Record<ManagedUpstream['provider'], boolean> = {
   zai: false,
   mistral: false,
   xai: false,
+  together: false,
 };
 
 // Class assignments follow PRICING-FINAL Part 3 by the owner's explicit
@@ -202,6 +204,26 @@ export const MANAGED_MODELS: ManagedModel[] = [
     capabilities: { tools: true, json: true, vision: false },
     upstreams: [{ provider: 'xai', model: 'grok-4.1-fast' }],
   },
+  // ── 2026-07-06 Together expansion: 3 models requested, 1 servable ──
+  // Llama-4 Scout + Maverick were requested but are NOT in Together's
+  // serverless catalog (dedicated endpoints only — official pricing page and
+  // docs.together.ai/docs/serverless/models verified 2026-07-06), so a
+  // /chat/completions call with the operator key would fail; listing them
+  // violates the never-vaporware rule. The plain Qwen/Qwen3-235B-A22B id is
+  // likewise not serverless — the servable variant is Instruct-2507-tput,
+  // 262K ctx at $0.20/$0.60 ⇒ $0.32/M blended (70/30) = mid band. COGS
+  // $0.16/1k cr vs the $0.48/1k cr mid worst case already priced into
+  // PRICING-FINAL §7 — margin-safe at every tier. Capabilities are honest:
+  // the -tput catalog row lists NO function-calling, vision, or structured
+  // outputs, so all three flags stay false.
+  {
+    id: 'zintus/qwen3-235b',
+    displayName: 'Qwen3 235B',
+    contextWindow: 262_144,
+    class: 'mid',
+    capabilities: { tools: false, json: false, vision: false },
+    upstreams: [{ provider: 'together', model: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput' }],
+  },
 ];
 
 /** Operator key for an upstream provider, or "" when not configured. */
@@ -217,6 +239,7 @@ export function managedKey(env: Env, provider: ManagedUpstream['provider']): str
     zai: env.MANAGED_KEY_ZAI,
     mistral: env.MANAGED_KEY_MISTRAL,
     xai: env.MANAGED_KEY_XAI,
+    together: env.MANAGED_KEY_TOGETHER,
   };
   return map[provider]?.trim() ?? '';
 }

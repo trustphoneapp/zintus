@@ -150,6 +150,20 @@ describe("availableManagedModels", () => {
     expect(ids).toEqual(["zintus/llama-3.3-70b"]);
   });
 
+  test("together key gates qwen3-235b and lists nothing else", () => {
+    const env = fakeEnv({ MANAGED_KEY_TOGETHER: "tk_x" });
+    const ids = availableManagedModels(env).map((m) => m.id);
+    expect(ids).toEqual(["zintus/qwen3-235b"]);
+    // Honest capabilities: Together's -tput catalog row lists no
+    // function-calling / vision / structured outputs (verified 2026-07-06).
+    const m = MANAGED_MODELS.find((x) => x.id === "zintus/qwen3-235b")!;
+    expect(m.capabilities).toEqual({ tools: false, json: false, vision: false });
+    expect(m.contextWindow).toBe(262_144);
+    expect(m.upstreams).toEqual([
+      { provider: "together", model: "Qwen/Qwen3-235B-A22B-Instruct-2507-tput" },
+    ]);
+  });
+
   test("every model has a pricing class with a defined burn rate", () => {
     for (const m of MANAGED_MODELS) {
       expect(m.class).toBeDefined();
@@ -170,6 +184,8 @@ describe("availableManagedModels", () => {
     expect(byId["zintus/glm-4.5-flash"]).toBe("free");
     expect(byId["zintus/mistral-small"]).toBe("mid");
     expect(byId["zintus/grok-4.1-fast"]).toBe("premium");
+    // 2026-07-06 Together expansion: $0.32/M blended ⇒ mid band.
+    expect(byId["zintus/qwen3-235b"]).toBe("mid");
   });
 
   test("managedKey trims and defaults to empty", () => {

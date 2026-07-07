@@ -36,7 +36,7 @@ real token count on lower tiers.
 |---|---|---|
 | Free | 0 | GLM-4.7-Flash, GLM-4.5-Flash |
 | Cheap (T0) | 1 | DeepSeek Flash, Groq 8B, GLM-FlashX, Llama 4 Scout |
-| Mid (T0+) | 2 | Gemini Flash, GPT-4o-mini, Mistral Small |
+| Mid (T0+) | 2 | Gemini Flash, GPT-4o-mini, Mistral Small, Qwen3 235B (Together -tput, $0.32/M blended) |
 | Premium (T1) | 5 | Claude Haiku, Groq 70B, Mistral Large, MiniMax M3, Kimi |
 | Frontier (T2) | 15 | Claude Sonnet, GPT-5.4, GLM-5.2, Grok 4.3 |
 | Ultra | 46 | Claude Opus, GPT-5.5 |
