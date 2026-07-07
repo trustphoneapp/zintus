@@ -224,6 +224,21 @@ export const MANAGED_MODELS: ManagedModel[] = [
     capabilities: { tools: false, json: false, vision: false },
     upstreams: [{ provider: 'together', model: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput' }],
   },
+  // Scout via GROQ (the Together route above was unservable). Verified on
+  // console.groq.com/docs/models 2026-07-06: 131,072 ctx, $0.11/$0.34 ⇒
+  // $0.179/M blended (70/30) = cheap band, exactly the survey's row 9; tool
+  // use is on Groq's official supported list. COGS $0.179/1k cr — the
+  // referred-Starter all-Scout worst case nets ~57%, safer than the accepted
+  // mid worst case. CAVEAT: Groq lists it as a PREVIEW model (may be retired
+  // on short notice) — if it 404s in tail logs, drop this entry.
+  {
+    id: 'zintus/llama-4-scout',
+    displayName: 'Llama 4 Scout',
+    contextWindow: 131_072,
+    class: 'cheap',
+    capabilities: { tools: true, json: true, vision: false },
+    upstreams: [{ provider: 'groq', model: 'meta-llama/llama-4-scout-17b-16e-instruct' }],
+  },
 ];
 
 /** Operator key for an upstream provider, or "" when not configured. */

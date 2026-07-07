@@ -140,8 +140,18 @@ describe("availableManagedModels", () => {
     const ids = availableManagedModels(env).map((m) => m.id);
     expect(ids).toContain("zintus/llama-3.3-70b");
     expect(ids).toContain("zintus/llama-3.1-8b");
+    expect(ids).toContain("zintus/llama-4-scout");
     expect(ids).not.toContain("zintus/gpt-4o-mini");
     expect(ids).not.toContain("zintus/deepseek-chat");
+  });
+
+  test("scout serves via groq with the full catalog id (Together route was unservable)", () => {
+    const m = MANAGED_MODELS.find((x) => x.id === "zintus/llama-4-scout")!;
+    expect(m.upstreams).toEqual([
+      { provider: "groq", model: "meta-llama/llama-4-scout-17b-16e-instruct" },
+    ]);
+    expect(m.contextWindow).toBe(131_072); // Groq catalog value, not Meta's 10M claim
+    expect(m.capabilities.tools).toBe(true); // on Groq's official tool-use list
   });
 
   test("cerebras key alone still serves the 70B (second upstream)", () => {
@@ -186,6 +196,8 @@ describe("availableManagedModels", () => {
     expect(byId["zintus/grok-4.1-fast"]).toBe("premium");
     // 2026-07-06 Together expansion: $0.32/M blended ⇒ mid band.
     expect(byId["zintus/qwen3-235b"]).toBe("mid");
+    // Scout on Groq: $0.179/M blended ⇒ cheap band (PRICING-FINAL §2 names it).
+    expect(byId["zintus/llama-4-scout"]).toBe("cheap");
   });
 
   test("managedKey trims and defaults to empty", () => {
