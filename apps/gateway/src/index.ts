@@ -26,6 +26,7 @@ import { loadPolicy, watchPolicy, redactSecrets } from "@zintus/router";
 import { DEFAULT_CONFIG } from "@zintus/types";
 import { ActivityStore } from "./activity-store.js";
 import { buildGatewayConfig, type GatewayConfig } from "./auth.js";
+import { applyGatewayDotenv } from "./dotenv.js";
 import { createGatewayHandler, type LogFn } from "./handler.js";
 import { detectLocalRuntimes } from "./local-runtimes.js";
 import { createErrorSink } from "./observability.js";
@@ -66,6 +67,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   if (options.port != null) {
     process.env.GATEWAY_PORT = String(options.port);
   }
+
+  // Fill env gaps from apps/gateway/.env — Bun only auto-loads .env from the
+  // cwd, so starts from the repo root never saw it. Real env vars still win.
+  applyGatewayDotenv();
 
   const config = buildGatewayConfig(process.env);
 
@@ -113,6 +118,16 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       console.log(line);
     }
   };
+
+  // Serper also powers search/research (handler tries Tavily → Serper), so
+  // only warn when BOTH are absent — a Serper-only gateway works fine.
+  if (!config.tavilyApiKey && !config.serperApiKey) {
+    log(
+      "warn",
+      "Deep research unavailable: set TAVILY_API_KEY in apps/gateway/.env to enable",
+      {},
+    );
+  }
 
   // Graceful-shutdown state. `draining` is read by the handler's /health so
   // load balancers/clients stop routing new traffic here once shutdown begins.
