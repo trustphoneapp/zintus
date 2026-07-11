@@ -12,7 +12,7 @@ function GithubMark() {
   );
 }
 import { ZintusLogo } from "@/components/ZintusLogo";
-import { ThemeToggle } from "./ThemeToggle";
+import { ModeSwitcher } from "./ModeSwitcher";
 
 // Section links are root-relative (`/#id`) so they resolve to the homepage
 // sections from ANY route. A bare `#id` is a same-document fragment: it works on
@@ -61,7 +61,7 @@ export function Navbar() {
           <Link href="/chat" style={{ background: "var(--marketing-accent)", color: "#fff", borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center" }}>
             Open app
           </Link>
-          <ThemeToggle />
+          <ModeSwitcher />
           <button
             type="button"
             className="m-nav-mobile-btn"
