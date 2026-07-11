@@ -53,7 +53,7 @@ const PRIVACY_BROKEN_TITLE =
 export function TransparencyStrip({ meta }: { meta: ChatMeta }) {
   const [open, setOpen] = useState(false);
   const provider = PROVIDER_BY_ID[meta.provider as ProviderId];
-  const color = provider?.color ?? "#94a3b8";
+  const color = provider?.color ?? "var(--color-text-sub)";
   const strategy = STRATEGY_LABEL[meta.routingStrategy] ?? meta.routingStrategy;
 
   return (

@@ -50,10 +50,10 @@ export function DeleteAccountWidget() {
   }
 
   const panel: React.CSSProperties = {
-    border: "1px solid rgba(148,163,184,0.25)",
+    border: "1px solid var(--marketing-border)",
     borderRadius: 12,
     padding: "1.5rem",
-    background: "rgba(148,163,184,0.05)",
+    background: "var(--marketing-surface)",
     marginTop: "2rem",
     maxWidth: 760,
   };
@@ -70,7 +70,7 @@ export function DeleteAccountWidget() {
   if (state === "checking") {
     return (
       <div style={panel} aria-busy="true">
-        <p style={{ color: "#94a3b8", margin: 0 }}>Checking your sign-in status…</p>
+        <p style={{ color: "var(--marketing-muted)", margin: 0 }}>Checking your sign-in status…</p>
       </div>
     );
   }
@@ -78,25 +78,22 @@ export function DeleteAccountWidget() {
   if (state === "signed-out") {
     return (
       <div style={panel}>
-        <h2 style={{ fontSize: "1.15rem", fontWeight: 700, color: "#e9d5ff", marginTop: 0 }}>
+        <h2 style={{ fontSize: "1.15rem", fontWeight: 700, color: "var(--marketing-text)", marginTop: 0 }}>
           Delete your Zintus Cloud account
         </h2>
-        <p style={{ color: "#94a3b8" }}>
+        <p style={{ color: "var(--marketing-muted)" }}>
           To delete your account yourself, sign in first — then return here (or use{" "}
-          <strong style={{ color: "#cbd5e1" }}>Settings → Account → Delete account</strong> in the
+          <strong style={{ color: "var(--marketing-text)" }}>Settings → Account → Delete account</strong> in the
           app) and confirm. We only delete the account of the signed-in user.
         </p>
         <p style={{ marginTop: "1rem" }}>
-          <Link
-            href="/login"
-            style={{ ...btn, background: "#7C3AED", color: "#fff", textDecoration: "none" }}
-          >
+          <Link href="/login" className="mk-btn mk-btn-primary">
             Sign in to continue
           </Link>
         </p>
-        <p style={{ color: "#64748b", fontSize: 14, marginTop: "1rem", marginBottom: 0 }}>
+        <p style={{ color: "var(--marketing-muted)", fontSize: 14, marginTop: "1rem", marginBottom: 0 }}>
           Can&apos;t sign in? Email{" "}
-          <a href="mailto:support@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:support@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             support@zintus.ai
           </a>{" "}
           from your account address and we&apos;ll delete it for you.
@@ -111,7 +108,7 @@ export function DeleteAccountWidget() {
         <h2 style={{ fontSize: "1.15rem", fontWeight: 700, color: "#86efac", marginTop: 0 }}>
           Account deleted
         </h2>
-        <p style={{ color: "#94a3b8", marginBottom: 0 }}>
+        <p style={{ color: "var(--marketing-muted)", marginBottom: 0 }}>
           Your Zintus Cloud account and associated data have been deleted, and you&apos;ve been
           signed out. Thanks for trying Zintus.
         </p>
@@ -125,9 +122,9 @@ export function DeleteAccountWidget() {
         <p style={{ color: "#fca5a5", marginTop: 0 }}>
           Something went wrong deleting your account.
         </p>
-        <p style={{ color: "#94a3b8", marginBottom: 0 }}>
+        <p style={{ color: "var(--marketing-muted)", marginBottom: 0 }}>
           Please try again, or email{" "}
-          <a href="mailto:support@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:support@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             support@zintus.ai
           </a>{" "}
           and we&apos;ll remove it for you. (Relay: <code>{RELAY_URL}</code>)
@@ -139,11 +136,11 @@ export function DeleteAccountWidget() {
   // signed-in / confirm / deleting
   return (
     <div style={panel}>
-      <h2 style={{ fontSize: "1.15rem", fontWeight: 700, color: "#e9d5ff", marginTop: 0 }}>
+      <h2 style={{ fontSize: "1.15rem", fontWeight: 700, color: "var(--marketing-text)", marginTop: 0 }}>
         Delete your Zintus Cloud account
       </h2>
-      <p style={{ color: "#94a3b8" }}>
-        Signed in as <strong style={{ color: "#cbd5e1" }}>{email ?? "your account"}</strong>. This
+      <p style={{ color: "var(--marketing-muted)" }}>
+        Signed in as <strong style={{ color: "var(--marketing-text)" }}>{email ?? "your account"}</strong>. This
         permanently deletes your account and all the data listed above. This cannot be undone.
       </p>
       {state === "signed-in" ? (
@@ -166,7 +163,12 @@ export function DeleteAccountWidget() {
           </button>
           <button
             type="button"
-            style={{ ...btn, background: "rgba(148,163,184,0.15)", color: "#cbd5e1" }}
+            style={{
+              ...btn,
+              background: "var(--marketing-surface-2)",
+              color: "var(--marketing-text)",
+              border: "1px solid var(--marketing-border)",
+            }}
             onClick={() => setState("signed-in")}
             disabled={state === "deleting"}
           >

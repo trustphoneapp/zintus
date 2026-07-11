@@ -53,7 +53,7 @@ function Skeleton({ h = 20, w = "100%" }: { h?: number; w?: string }) {
         height: h,
         width: w,
         borderRadius: 6,
-        background: "rgba(124,58,237,0.1)",
+        background: "var(--color-purple-faint)",
         animation: "pulse 1.5s ease-in-out infinite",
       }}
     />
@@ -72,7 +72,7 @@ function Card({
     <div
       style={{
         background: "#0d0820",
-        border: "1px solid #2e1065",
+        border: "1px solid var(--color-border)",
         borderRadius: 12,
         padding: "1.5rem",
         display: "flex",
@@ -87,7 +87,7 @@ function Card({
           fontWeight: 700,
           textTransform: "uppercase",
           letterSpacing: "0.08em",
-          color: "#94a3b8",
+          color: "var(--color-text-sub)",
         }}
       >
         {title}
@@ -158,7 +158,7 @@ export default function BillingPage() {
         <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>
           Billing &amp; Usage
         </h1>
-        <p style={{ margin: "0.25rem 0 0", color: "#94a3b8", fontSize: "0.9rem" }}>
+        <p style={{ margin: "0.25rem 0 0", color: "var(--color-text-sub)", fontSize: "0.9rem" }}>
           Manage your plan, track usage, and share your referral link.
         </p>
       </div>
@@ -204,8 +204,8 @@ export default function BillingPage() {
                   style={{
                     padding: "0.45rem 1rem",
                     borderRadius: 8,
-                    border: "1px solid #7c3aed",
-                    color: "#a78bfa",
+                    border: "1px solid var(--color-purple)",
+                    color: "var(--color-purple-light)",
                     fontSize: "0.85rem",
                     textDecoration: "none",
                     fontWeight: 600,
@@ -221,7 +221,7 @@ export default function BillingPage() {
                   style={{
                     padding: "0.45rem 1rem",
                     borderRadius: 8,
-                    border: "1px solid #2e1065",
+                    border: "1px solid var(--color-border)",
                     background: "transparent",
                     color: "#f1f5f9",
                     fontSize: "0.85rem",
@@ -235,7 +235,7 @@ export default function BillingPage() {
             </div>
           </div>
         ) : (
-          <p style={{ color: "#94a3b8", margin: 0 }}>Unable to load plan data.</p>
+          <p style={{ color: "var(--color-text-sub)", margin: 0 }}>Unable to load plan data.</p>
         )}
       </Card>
 
@@ -248,7 +248,7 @@ export default function BillingPage() {
           </>
         ) : usage ? (
           billing?.tier === "free" ? (
-            <p style={{ margin: 0, color: "#94a3b8", fontSize: "0.9rem" }}>
+            <p style={{ margin: 0, color: "var(--color-text-sub)", fontSize: "0.9rem" }}>
               Unlimited (BYOK — you pay providers directly)
             </p>
           ) : (
@@ -258,7 +258,7 @@ export default function BillingPage() {
                   display: "flex",
                   justifyContent: "space-between",
                   fontSize: "0.85rem",
-                  color: "#94a3b8",
+                  color: "var(--color-text-sub)",
                 }}
               >
                 <span>
@@ -277,7 +277,7 @@ export default function BillingPage() {
                 style={{
                   height: 10,
                   borderRadius: 99,
-                  background: "#1e0a3c",
+                  background: "var(--color-purple-faint)",
                   overflow: "hidden",
                 }}
               >
@@ -289,7 +289,7 @@ export default function BillingPage() {
                     background:
                       (usage.percent_used ?? 0) >= 80
                         ? "#f59e0b"
-                        : "#7c3aed",
+                        : "var(--color-purple)",
                     transition: "width 0.4s ease",
                   }}
                 />
@@ -308,14 +308,14 @@ export default function BillingPage() {
                 </p>
               )}
               {usage.period_end && (
-                <p style={{ margin: 0, fontSize: "0.82rem", color: "#94a3b8" }}>
+                <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--color-text-sub)" }}>
                   Resets on {fmtDate(usage.period_end)}
                 </p>
               )}
             </>
           )
         ) : (
-          <p style={{ color: "#94a3b8", margin: 0 }}>Unable to load usage data.</p>
+          <p style={{ color: "var(--color-text-sub)", margin: 0 }}>Unable to load usage data.</p>
         )}
       </Card>
 
@@ -338,11 +338,11 @@ export default function BillingPage() {
             >
               <code
                 style={{
-                  background: "#1e0a3c",
+                  background: "var(--color-purple-faint)",
                   padding: "0.4rem 0.75rem",
                   borderRadius: 8,
                   fontSize: "0.85rem",
-                  color: "#a78bfa",
+                  color: "var(--color-purple-light)",
                   flex: 1,
                   minWidth: 0,
                   overflow: "hidden",
@@ -357,8 +357,8 @@ export default function BillingPage() {
                 style={{
                   padding: "0.4rem 0.9rem",
                   borderRadius: 8,
-                  border: "1px solid #2e1065",
-                  background: copied ? "#1e0a3c" : "transparent",
+                  border: "1px solid var(--color-border)",
+                  background: copied ? "var(--color-purple-faint)" : "transparent",
                   color: copied ? "#22c55e" : "#f1f5f9",
                   fontSize: "0.82rem",
                   cursor: "pointer",
@@ -387,7 +387,7 @@ export default function BillingPage() {
                   <div
                     key={label}
                     style={{
-                      background: "#1e0a3c",
+                      background: "var(--color-purple-faint)",
                       borderRadius: 10,
                       padding: "0.75rem 1rem",
                     }}
@@ -396,7 +396,7 @@ export default function BillingPage() {
                       style={{
                         margin: 0,
                         fontSize: "0.72rem",
-                        color: "#94a3b8",
+                        color: "var(--color-text-sub)",
                         textTransform: "uppercase",
                         letterSpacing: "0.06em",
                       }}
@@ -422,7 +422,7 @@ export default function BillingPage() {
                 style={{
                   margin: "0.75rem 0 0",
                   fontSize: "0.78rem",
-                  color: "#94a3b8",
+                  color: "var(--color-text-sub)",
                 }}
               >
                 Referral payouts are coming soon. Commissions accrue once managed-key
@@ -431,7 +431,7 @@ export default function BillingPage() {
             )}
           </>
         ) : (
-          <p style={{ color: "#94a3b8", margin: 0 }}>No referral data available.</p>
+          <p style={{ color: "var(--color-text-sub)", margin: 0 }}>No referral data available.</p>
         )}
       </Card>
 
@@ -444,7 +444,7 @@ export default function BillingPage() {
             ))}
           </div>
         ) : history.length === 0 ? (
-          <p style={{ color: "#94a3b8", margin: 0, fontSize: "0.9rem" }}>
+          <p style={{ color: "var(--color-text-sub)", margin: 0, fontSize: "0.9rem" }}>
             No usage data yet.
           </p>
         ) : (
@@ -466,7 +466,7 @@ export default function BillingPage() {
                     flex: 1,
                     minWidth: 4,
                     height: `${Math.max(pct, 2)}%`,
-                    background: "#7c3aed",
+                    background: "var(--color-purple)",
                     borderRadius: "3px 3px 0 0",
                     opacity: 0.8,
                     cursor: "default",

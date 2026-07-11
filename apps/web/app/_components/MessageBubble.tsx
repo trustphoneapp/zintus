@@ -117,7 +117,7 @@ function McpToolActivity({ events }: { events: McpToolEvent[] }) {
     fontFamily: "var(--font-mono, ui-monospace, monospace)",
     fontSize: 12.5,
     lineHeight: 1.5,
-    color: "#94a3b8",
+    color: "var(--color-text-sub)",
     wordBreak: "break-word",
     overflowWrap: "anywhere",
   };
@@ -130,9 +130,9 @@ function McpToolActivity({ events }: { events: McpToolEvent[] }) {
         gap: 3,
         marginTop: 8,
         padding: "6px 10px",
-        borderLeft: "2px solid #7C3AED",
+        borderLeft: "2px solid var(--color-purple)",
         borderRadius: 8,
-        background: "rgba(124,58,237,0.06)",
+        background: "var(--color-purple-faint)",
       }}
     >
       {events.map((ev, i) => {
@@ -144,7 +144,7 @@ function McpToolActivity({ events }: { events: McpToolEvent[] }) {
                 🔧
               </span>{" "}
               Calling{" "}
-              <span style={{ color: "#7C3AED", fontWeight: 600 }}>{label}</span>
+              <span style={{ color: "var(--color-purple-light)", fontWeight: 600 }}>{label}</span>
               {ev.argsSummary ? (
                 <span style={{ color: "#64748b" }}> ({ev.argsSummary})</span>
               ) : null}
@@ -369,7 +369,7 @@ export function MessageBubble({
                     alignItems: "center",
                     gap: 4,
                     fontSize: 11,
-                    color: "#94a3b8",
+                    color: "var(--color-text-sub)",
                     background: "rgba(255,255,255,0.05)",
                     border: "1px solid #232a36",
                     borderRadius: 6,

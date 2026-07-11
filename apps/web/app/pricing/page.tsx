@@ -7,7 +7,7 @@ import { createCheckout } from "@/lib/billing";
 import { getMe } from "@/lib/cloud";
 
 /* ─── palette ────────────────────────────────────────────── */
-const VIOLET = "var(--marketing-accent)"; // #7C3AED brand glow
+const ACCENT = "var(--marketing-accent)"; // brand accent for card highlight + ribbon
 const GREEN = "#22C55E";
 const RED = "#EF4444";
 
@@ -78,7 +78,7 @@ const TIERS: TierCard[] = [
       "BYOK frontier on top (your key)",
     ],
     cta: { kind: "checkout", label: "Get started" },
-    borderColor: VIOLET,
+    borderColor: ACCENT,
   },
   {
     id: "max",
@@ -329,7 +329,7 @@ export default function PricingPage() {
                     top: "-0.75rem",
                     left: "50%",
                     transform: "translateX(-50%)",
-                    background: tier.ribbonColor ?? VIOLET,
+                    background: tier.ribbonColor ?? ACCENT,
                     color: "#fff",
                     fontSize: "0.68rem",
                     fontWeight: 700,
@@ -381,13 +381,13 @@ export default function PricingPage() {
               </ul>
 
               {tier.cta.kind === "link" ? (
-                <a href={tier.cta.href} className="m-primary-btn" style={{ textAlign: "center", display: "block" }}>
+                <a href={tier.cta.href} className="mk-btn mk-btn-primary" style={{ width: "100%" }}>
                   {tier.cta.label}
                 </a>
               ) : (
                 <button
                   type="button"
-                  className="m-primary-btn"
+                  className="mk-btn mk-btn-primary"
                   style={{ width: "100%" }}
                   onClick={() => handleCheckout(tier.id)}
                   disabled={busyTier !== null}
@@ -650,7 +650,7 @@ export default function PricingPage() {
               </tbody>
             </table>
           </div>
-          <a href="/dashboard/referral" className="m-primary-btn" style={{ display: "inline-block" }}>
+          <a href="/dashboard/referral" className="mk-btn mk-btn-primary">
             Get your referral link
           </a>
         </div>

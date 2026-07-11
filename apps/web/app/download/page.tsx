@@ -52,7 +52,7 @@ const WIN_MSI_NAME = "Zintus_<version>_x64_en-US.msi";
 const sectionStyle: React.CSSProperties = {
   marginBottom: "2.75rem",
   paddingBottom: "2.5rem",
-  borderBottom: "1px solid rgba(148,163,184,0.15)",
+  borderBottom: "1px solid var(--marketing-border)",
 };
 const iconWrap: React.CSSProperties = {
   display: "inline-flex",
@@ -61,14 +61,14 @@ const iconWrap: React.CSSProperties = {
   width: 38,
   height: 38,
   borderRadius: 10,
-  background: "rgba(124,58,237,0.12)",
-  border: "1px solid rgba(124,58,237,0.3)",
+  background: "var(--marketing-surface)",
+  border: "1px solid var(--marketing-border)",
   flexShrink: 0,
 };
-const h2Style: React.CSSProperties = { fontSize: "1.4rem", fontWeight: 700, color: "#e9d5ff", margin: 0 };
+const h2Style: React.CSSProperties = { fontSize: "1.4rem", fontWeight: 700, color: "var(--marketing-text)", margin: 0 };
 const leadStyle: React.CSSProperties = {
   fontSize: 14.5,
-  color: "#94a3b8",
+  color: "var(--marketing-muted)",
   lineHeight: 1.7,
   margin: "0.75rem 0 0",
   maxWidth: 680,
@@ -79,13 +79,13 @@ const linkBtn: React.CSSProperties = {
   gap: 6,
   fontSize: 13.5,
   fontWeight: 600,
-  color: "#c4b5fd",
+  color: "var(--marketing-accent)",
   textDecoration: "none",
   marginTop: "1rem",
 };
 const noteStyle: React.CSSProperties = {
   fontSize: 12.5,
-  color: "#7c6a9c",
+  color: "var(--marketing-muted)",
   margin: "0.9rem 0 0",
   maxWidth: 680,
   lineHeight: 1.6,
@@ -103,7 +103,7 @@ function Header({
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "0.85rem", flexWrap: "wrap" }}>
       <span style={iconWrap}>
-        <Icon size={20} color="#a78bfa" />
+        <Icon size={20} color="var(--marketing-accent)" />
       </span>
       <h2 style={h2Style}>{title}</h2>
       {badge ? (
@@ -133,10 +133,10 @@ export default function DownloadPage() {
     <main className="marketing-page">
       <Navbar />
       <section className="m-shell" style={{ padding: "4rem 0 6rem", minHeight: "60vh" }}>
-        <h1 style={{ fontSize: "2.25rem", fontWeight: 700, marginBottom: "0.5rem", color: "#e9d5ff" }}>
+        <h1 style={{ fontSize: "2.25rem", fontWeight: 700, marginBottom: "0.5rem", color: "var(--marketing-text)" }}>
           Get Zintus
         </h1>
-        <p style={{ fontSize: 15, color: "#94a3b8", marginBottom: "3rem", maxWidth: 720, lineHeight: 1.7 }}>
+        <p style={{ fontSize: 15, color: "var(--marketing-muted)", marginBottom: "3rem", maxWidth: 720, lineHeight: 1.7 }}>
           Zintus is local-first and BYOK — your keys live on your machine, not on a hosted
           control plane. The same gateway powers multi-provider routing and failover, tool
           calling, structured JSON output, and image input everywhere it runs. Pick the surface
@@ -150,8 +150,8 @@ export default function DownloadPage() {
             <Header icon={Container} title="Docker — self-host the gateway" badge={{ text: "Stable", tone: "ok" }} />
             <p style={leadStyle}>
               The recommended way to run the gateway as a service. Prebuilt images are published to
-              GitHub Container Registry on every <code style={{ color: "#c4b5fd" }}>v*</code> release.
-              Keys and <code style={{ color: "#c4b5fd" }}>quota.db</code> persist in a named volume;
+              GitHub Container Registry on every <code style={{ color: "var(--marketing-accent)" }}>v*</code> release.
+              Keys and <code style={{ color: "var(--marketing-accent)" }}>quota.db</code> persist in a named volume;
               the container runs as a non-root user.
             </p>
             <CommandBlock
@@ -173,7 +173,7 @@ export default function DownloadPage() {
             <p style={noteStyle}>
               Exposing it beyond loopback? Set <code>GATEWAY_TOKEN</code>,{" "}
               <code>GATEWAY_RATELIMIT_RPM</code>, TLS and CORS first — see the{" "}
-              <Link href="/docs" style={{ color: "#c4b5fd" }}>
+              <Link href="/docs" style={{ color: "var(--marketing-accent)" }}>
                 deployment docs
               </Link>
               .
@@ -187,7 +187,7 @@ export default function DownloadPage() {
           <section style={sectionStyle}>
             <Header icon={Terminal} title="CLI" badge={{ text: "Beta", tone: "soon" }} />
             <p style={leadStyle}>
-              The <code style={{ color: "#c4b5fd" }}>zintus</code> CLI is not yet published to npm —
+              The <code style={{ color: "var(--marketing-accent)" }}>zintus</code> CLI is not yet published to npm —
               build it from source with Bun (it uses <code>bun:sqlite</code>, so it runs on Bun, not Node).
               Keys are stored in your OS keychain — never sent anywhere.
             </p>
@@ -206,13 +206,13 @@ export default function DownloadPage() {
             <p style={leadStyle}>
               A native Tauri app with a built-in gateway, provider dashboard, and quota bars.
               The macOS build is a Universal binary (Apple Silicon + Intel) attached to each{" "}
-              <code style={{ color: "#c4b5fd" }}>desktop-v*</code> release as a <code>.dmg</code>.
+              <code style={{ color: "var(--marketing-accent)" }}>desktop-v*</code> release as a <code>.dmg</code>.
             </p>
             {/* [HUMAN] Not notarized yet. Only add "notarized" once the build is run through
                 Apple notarization — do NOT claim it before then. */}
             <p style={noteStyle}>
               Once the first <code>desktop-v*</code> release is published, the direct download is{" "}
-              <code style={{ color: "#c4b5fd" }}>{latestAsset(MAC_DMG_NAME)}</code> (the{" "}
+              <code style={{ color: "var(--marketing-accent)" }}>{latestAsset(MAC_DMG_NAME)}</code> (the{" "}
               <code>&lt;version&gt;</code> is filled in per release). Builds are{" "}
               <strong>not notarized</strong> yet, so Gatekeeper will warn on first launch — open it
               from the security prompt to proceed. Always grab it from the official Releases page.
@@ -227,14 +227,14 @@ export default function DownloadPage() {
             <Header icon={Monitor} title="Windows — desktop app" badge={{ text: "Beta", tone: "soon" }} />
             <p style={leadStyle}>
               The same Tauri desktop app for Windows (x64), shipped as a WiX{" "}
-              <code style={{ color: "#c4b5fd" }}>.msi</code> installer attached to each{" "}
-              <code style={{ color: "#c4b5fd" }}>desktop-v*</code> release.
+              <code style={{ color: "var(--marketing-accent)" }}>.msi</code> installer attached to each{" "}
+              <code style={{ color: "var(--marketing-accent)" }}>desktop-v*</code> release.
             </p>
             {/* [HUMAN] Not Authenticode-signed yet. Only add "signed (Authenticode)" once a code-
                 signing cert is wired into release-desktop.yml — do NOT claim it before then. */}
             <p style={noteStyle}>
               Once the first <code>desktop-v*</code> release is published, the direct download is{" "}
-              <code style={{ color: "#c4b5fd" }}>{latestAsset(WIN_MSI_NAME)}</code>. Builds are{" "}
+              <code style={{ color: "var(--marketing-accent)" }}>{latestAsset(WIN_MSI_NAME)}</code>. Builds are{" "}
               <strong>not code-signed (Authenticode)</strong> yet, so SmartScreen may warn — choose
               &ldquo;More info → Run anyway.&rdquo; Always grab it from the official Releases page.
             </p>
@@ -247,9 +247,9 @@ export default function DownloadPage() {
           <section style={sectionStyle}>
             <Header icon={Monitor} title="Linux — desktop app" badge={{ text: "Beta", tone: "soon" }} />
             <p style={leadStyle}>
-              Linux builds (x86_64) ship as <code style={{ color: "#c4b5fd" }}>.AppImage</code>,{" "}
+              Linux builds (x86_64) ship as <code style={{ color: "var(--marketing-accent)" }}>.AppImage</code>,{" "}
               <code>.deb</code>, and <code>.rpm</code> bundles on each{" "}
-              <code style={{ color: "#c4b5fd" }}>desktop-v*</code> release. Pick the package that
+              <code style={{ color: "var(--marketing-accent)" }}>desktop-v*</code> release. Pick the package that
               matches your distro from the Releases page.
             </p>
             <a href={RELEASES_URL} style={linkBtn} target="_blank" rel="noopener noreferrer">
@@ -272,7 +272,7 @@ export default function DownloadPage() {
               <strong>Coming soon — TestFlight on request.</strong> There&apos;s no public App Store
               listing yet, so we won&apos;t link a dead store or show an App Store badge until it
               resolves. Want early access?{" "}
-              <Link href="/contact" style={{ color: "#c4b5fd" }}>
+              <Link href="/contact" style={{ color: "var(--marketing-accent)" }}>
                 Ask for a TestFlight invite
               </Link>
               .
@@ -292,7 +292,7 @@ export default function DownloadPage() {
             <p style={noteStyle}>
               <strong>Coming soon.</strong> No public Play Store listing yet — we won&apos;t link a
               dead store or show a Google Play badge until it resolves. Watch the{" "}
-              <Link href="/changelog" style={{ color: "#c4b5fd" }}>
+              <Link href="/changelog" style={{ color: "var(--marketing-accent)" }}>
                 changelog
               </Link>{" "}
               for the rollout (internal testing first).
@@ -300,7 +300,7 @@ export default function DownloadPage() {
           </section>
         </div>
 
-        <Link href="/" style={{ display: "inline-block", marginTop: "2.5rem", fontSize: 14, color: "#c4b5fd", textDecoration: "none" }}>
+        <Link href="/" style={{ display: "inline-block", marginTop: "2.5rem", fontSize: 14, color: "var(--marketing-accent)", textDecoration: "none" }}>
           ← Back to homepage
         </Link>
       </section>

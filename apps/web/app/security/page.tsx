@@ -5,7 +5,7 @@ export const metadata: Metadata = { title: "Security — Zintus" };
 
 const ulStyle: React.CSSProperties = { margin: "0.5rem 0 0", paddingLeft: "1.25rem" };
 const liStyle: React.CSSProperties = { marginBottom: "0.4rem" };
-const strong: React.CSSProperties = { color: "#cbd5e1" };
+const strong: React.CSSProperties = { color: "var(--marketing-text)" };
 const tbd: React.CSSProperties = {
   color: "#fde68a",
   background: "rgba(234,179,8,0.08)",
@@ -98,12 +98,12 @@ export default function SecurityPage() {
       <LegalSection heading="Reporting a vulnerability">
         <p>
           Found something? Please report it privately rather than opening a public issue. Email{" "}
-          <a href="mailto:security@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:security@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             security@zintus.ai
           </a>{" "}
           (or open a private security advisory on the repository). Our machine-readable contact
           details follow RFC 9116 and are published at{" "}
-          <a href="/.well-known/security.txt" style={{ color: "#c4b5fd" }}>
+          <a href="/.well-known/security.txt" style={{ color: "var(--marketing-accent)" }}>
             /.well-known/security.txt
           </a>
           .
@@ -139,7 +139,7 @@ export default function SecurityPage() {
           do not access or modify data that is not yours beyond what is needed to demonstrate
           the issue, and give us reasonable time to respond before disclosure. If in doubt,
           ask us at{" "}
-          <a href="mailto:security@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:security@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             security@zintus.ai
           </a>{" "}
           first. (Adapted from the disclose.io safe-harbor model.)
@@ -153,7 +153,7 @@ export default function SecurityPage() {
             href="https://github.com/trustphoneapp/zintus/blob/main/SECURITY.md"
             target="_blank"
             rel="noreferrer noopener"
-            style={{ color: "#c4b5fd" }}
+            style={{ color: "var(--marketing-accent)" }}
           >
             SECURITY.md
           </a>{" "}

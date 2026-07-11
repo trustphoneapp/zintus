@@ -44,13 +44,13 @@ export function LegalPage({
             fontSize: "2.25rem",
             fontWeight: 700,
             marginBottom: lastUpdated ? "0.4rem" : "1.5rem",
-            color: "#e9d5ff",
+            color: "var(--marketing-text)",
           }}
         >
           {title}
         </h1>
         {lastUpdated ? (
-          <p style={{ fontSize: 13, color: "#64748b", marginBottom: "2rem" }}>
+          <p style={{ fontSize: 13, color: "var(--marketing-muted)", marginBottom: "2rem" }}>
             Last updated: {lastUpdated}
           </p>
         ) : null}
@@ -58,7 +58,7 @@ export function LegalPage({
         <div
           style={{
             fontSize: 15,
-            color: "#94a3b8",
+            color: "var(--marketing-muted)",
             lineHeight: 1.8,
             maxWidth: 760,
           }}
@@ -72,7 +72,7 @@ export function LegalPage({
             display: "inline-block",
             marginTop: "3rem",
             fontSize: 14,
-            color: "#c4b5fd",
+            color: "var(--marketing-accent)",
             textDecoration: "none",
           }}
         >
@@ -98,7 +98,7 @@ export function LegalSection({
         style={{
           fontSize: "1.25rem",
           fontWeight: 700,
-          color: "#e9d5ff",
+          color: "var(--marketing-text)",
           marginBottom: "0.75rem",
         }}
       >

@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 
 const ulStyle: React.CSSProperties = { margin: "0.5rem 0 0", paddingLeft: "1.25rem" };
 const liStyle: React.CSSProperties = { marginBottom: "0.4rem" };
-const strong: React.CSSProperties = { color: "#cbd5e1" };
+const strong: React.CSSProperties = { color: "var(--marketing-text)" };
 const tbd: React.CSSProperties = {
   color: "#fde68a",
   background: "rgba(234,179,8,0.08)",
@@ -40,7 +40,7 @@ export default function PrivacyPage() {
         <p>
           Zintus is operated by <span style={strong}>YS Ventures LLC</span>, based in
           Pittsburgh, Pennsylvania, USA. For any privacy question or request, contact{" "}
-          <a href="mailto:privacy@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:privacy@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             privacy@zintus.ai
           </a>
           .
@@ -168,7 +168,7 @@ export default function PrivacyPage() {
         </ul>
         <p style={{ marginTop: "0.75rem" }}>
           To exercise any of these, email{" "}
-          <a href="mailto:privacy@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:privacy@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             privacy@zintus.ai
           </a>
           . You also have the right to{" "}
@@ -209,7 +209,7 @@ export default function PrivacyPage() {
           <span style={strong}>opt out</span> of sale/sharing (not applicable, since we do
           neither), and to <span style={strong}>non-discrimination</span> for exercising these
           rights. To make a request, email{" "}
-          <a href="mailto:privacy@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:privacy@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             privacy@zintus.ai
           </a>
           . You may use an authorized agent; we will take reasonable steps to verify your
@@ -263,7 +263,7 @@ export default function PrivacyPage() {
           This is a DRAFT pending legal review. Once finalized, we will notify you of material
           changes (for example by email to your account address or a notice on this page) and
           update the &ldquo;last updated&rdquo; date before the change takes effect. Questions:{" "}
-          <a href="mailto:privacy@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:privacy@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             privacy@zintus.ai
           </a>
           .

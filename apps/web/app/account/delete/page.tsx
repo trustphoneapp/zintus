@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 
 const ulStyle: React.CSSProperties = { margin: "0.5rem 0 0", paddingLeft: "1.25rem" };
 const liStyle: React.CSSProperties = { marginBottom: "0.5rem" };
-const strong: React.CSSProperties = { color: "#cbd5e1" };
+const strong: React.CSSProperties = { color: "var(--marketing-text)" };
 
 export default function DeleteAccountPage() {
   return (
@@ -27,13 +27,13 @@ export default function DeleteAccountPage() {
             fontSize: "2.25rem",
             fontWeight: 700,
             marginBottom: "0.75rem",
-            color: "#e9d5ff",
+            color: "var(--marketing-text)",
           }}
         >
           Delete your account
         </h1>
 
-        <div style={{ fontSize: 15, color: "#94a3b8", lineHeight: 1.8, maxWidth: 760 }}>
+        <div style={{ fontSize: 15, color: "var(--marketing-muted)", lineHeight: 1.8, maxWidth: 760 }}>
           <p>
             This page explains how to delete your <span style={strong}>Zintus Cloud</span> account
             and the data associated with it. You can do it yourself, without contacting us. An
@@ -41,7 +41,7 @@ export default function DeleteAccountPage() {
             you only ever used Zintus in local BYOK mode, there is no Zintus account to delete.
           </p>
 
-          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "#e9d5ff", marginTop: "2.25rem" }}>
+          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "var(--marketing-text)", marginTop: "2.25rem" }}>
             What gets deleted
           </h2>
           <p>When you delete your account, we permanently remove:</p>
@@ -67,7 +67,7 @@ export default function DeleteAccountPage() {
             </li>
           </ul>
 
-          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "#e9d5ff", marginTop: "2.25rem" }}>
+          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "var(--marketing-text)", marginTop: "2.25rem" }}>
             What we never stored in the first place
           </h2>
           <p>
@@ -80,20 +80,20 @@ export default function DeleteAccountPage() {
             machine running your gateway.
           </p>
 
-          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "#e9d5ff", marginTop: "2.25rem" }}>
+          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "var(--marketing-text)", marginTop: "2.25rem" }}>
             Retention
           </h2>
           <p>
             Deletion is immediate and irreversible. We may retain limited records where required for
             legal, tax, or fraud-prevention reasons (for example, billing records held by our
             payment processor); see our{" "}
-            <Link href="/privacy" style={{ color: "#c4b5fd" }}>
+            <Link href="/privacy" style={{ color: "var(--marketing-accent)" }}>
               Privacy Policy
             </Link>{" "}
             for details.
           </p>
 
-          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "#e9d5ff", marginTop: "2.25rem" }}>
+          <h2 style={{ fontSize: "1.25rem", fontWeight: 700, color: "var(--marketing-text)", marginTop: "2.25rem" }}>
             How to delete
           </h2>
           <p>You have two self-service options, plus support as a fallback:</p>
@@ -108,7 +108,7 @@ export default function DeleteAccountPage() {
             </li>
             <li style={liStyle}>
               <span style={strong}>By email</span> — write to{" "}
-              <a href="mailto:support@zintus.ai" style={{ color: "#c4b5fd" }}>
+              <a href="mailto:support@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
                 support@zintus.ai
               </a>{" "}
               from your account address and we&apos;ll delete it for you.
@@ -125,7 +125,7 @@ export default function DeleteAccountPage() {
             display: "inline-block",
             marginTop: "3rem",
             fontSize: 14,
-            color: "#c4b5fd",
+            color: "var(--marketing-accent)",
             textDecoration: "none",
           }}
         >

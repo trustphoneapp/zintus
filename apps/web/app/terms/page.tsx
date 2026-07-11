@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 
 const ulStyle: React.CSSProperties = { margin: "0.5rem 0 0", paddingLeft: "1.25rem" };
 const liStyle: React.CSSProperties = { marginBottom: "0.4rem" };
-const strong: React.CSSProperties = { color: "#cbd5e1" };
+const strong: React.CSSProperties = { color: "var(--marketing-text)" };
 const tbd: React.CSSProperties = {
   color: "#fde68a",
   background: "rgba(234,179,8,0.08)",
@@ -184,7 +184,7 @@ export default function TermsPage() {
       <LegalSection heading="10. Dispute resolution &amp; arbitration (with opt-out)">
         <p>
           We hope to resolve any dispute informally first — please email{" "}
-          <a href="mailto:privacy@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:privacy@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             privacy@zintus.ai
           </a>{" "}
           before filing a claim. If we cannot resolve it, disputes will be settled by{" "}
@@ -195,7 +195,7 @@ export default function TermsPage() {
         <p style={{ marginTop: "0.75rem" }}>
           <span style={strong}>30-day opt-out:</span> you may opt out of this arbitration
           agreement by emailing{" "}
-          <a href="mailto:privacy@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:privacy@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             privacy@zintus.ai
           </a>{" "}
           within <span style={strong}>30 days</span> of first accepting these terms; opting out
@@ -208,7 +208,7 @@ export default function TermsPage() {
         <p>
           This is a DRAFT pending legal review. We may update these terms; material changes will
           be posted here with a new date. Questions:{" "}
-          <a href="mailto:privacy@zintus.ai" style={{ color: "#c4b5fd" }}>
+          <a href="mailto:privacy@zintus.ai" style={{ color: "var(--marketing-accent)" }}>
             privacy@zintus.ai
           </a>
           .
