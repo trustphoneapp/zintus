@@ -31,13 +31,13 @@ const FEATURES = [
   },
   {
     icon: Key,
-    color: "#7c3aed",
+    color: "#2dd4bf",
     title: "Your keys stay on your device",
     body: "BYOK keys are stored in your OS keychain or browser's encrypted storage. They go directly from your device to the provider — Zintus never sees them. Managed tier keys are Zintus-provided and stay server-side.",
   },
   {
     icon: Terminal,
-    color: "#c4b5fd",
+    color: "#38bdf8",
     title: "50+ providers, one interface",
     body: "Route across 20+ direct integrations and 70+ more via a model-aggregator key. One config, one dashboard, one token balance — regardless of which provider handles the request.",
   },
@@ -66,8 +66,8 @@ export function Features() {
             display: "grid",
             gridTemplateColumns: "repeat(3, 1fr)",
             gap: "1px",
-            background: "rgba(124,58,237,0.12)",
-            border: "1px solid rgba(124,58,237,0.12)",
+            background: "var(--marketing-border)",
+            border: "1px solid var(--marketing-border)",
             borderRadius: 16,
             overflow: "hidden",
           }}
@@ -96,13 +96,13 @@ export function Features() {
                   style={{
                     fontSize: "0.95rem",
                     fontWeight: 700,
-                    color: "#f1f5f9",
+                    color: "var(--marketing-text)",
                     marginBottom: "0.5rem",
                   }}
                 >
                   {feature.title}
                 </h3>
-                <p style={{ fontSize: "0.85rem", color: "#64748b", lineHeight: 1.7 }}>
+                <p style={{ fontSize: "0.85rem", color: "var(--marketing-muted)", lineHeight: 1.7 }}>
                   {feature.body}
                 </p>
               </div>

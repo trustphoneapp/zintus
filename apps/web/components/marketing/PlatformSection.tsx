@@ -29,13 +29,13 @@ export function PlatformSection() {
   return (
     <section style={{ padding: "5rem 0" }}>
       <div className="m-shell">
-        <h2 style={{ fontSize: "2rem", fontWeight: 700, textAlign: "center", color: "#e9d5ff" }}>
+        <h2 style={{ fontSize: "2rem", fontWeight: 700, textAlign: "center", color: "var(--marketing-text)" }}>
           Take it everywhere.
         </h2>
         <p
           style={{
             textAlign: "center",
-            color: "#94a3b8",
+            color: "var(--marketing-muted)",
             margin: "0.75rem auto 2.5rem",
             maxWidth: 560,
             fontSize: 15,
@@ -48,7 +48,7 @@ export function PlatformSection() {
         <div className="platform-grid">
           {CARDS.map(({ icon: Icon, name, lines, href, mono }) => (
             <Link key={name} href={href} className="platform-card">
-              <Icon size={22} color="#a78bfa" />
+              <Icon size={22} color="var(--marketing-accent)" />
               <span className="platform-card-name">{name}</span>
               {lines.map((line) => (
                 <span
@@ -63,9 +63,9 @@ export function PlatformSection() {
           ))}
         </div>
 
-        <p style={{ textAlign: "center", color: "#94a3b8", fontSize: 13, marginTop: "1.75rem" }}>
+        <p style={{ textAlign: "center", color: "var(--marketing-muted)", fontSize: 13, marginTop: "1.75rem" }}>
           Desktop app available for macOS, Windows, and Linux (beta).{" "}
-          <Link href="/download" style={{ color: "#c4b5fd", textDecoration: "none" }}>
+          <Link href="/download" style={{ color: "var(--marketing-accent-light)", textDecoration: "none" }}>
             See all downloads →
           </Link>
         </p>

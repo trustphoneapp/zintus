@@ -118,6 +118,48 @@ ProviderGrid, InstallSection, Stats, TrustBar, CTA, FAQ, Footer, Reveal.
   (`bunx playwright screenshot` or a tiny script setting `localStorage.theme`), save to `docs/design/redesign-shots/`.
 - Check: no FOUC of purple, mode switcher slides, buttons lift/press, focus rings visible.
 
+## 5b. Slice E — Web chat app redesign (added 2026-07-11, user directive)
+
+User directive: the web **chat app** gets the redesign too — latest CSS, the same 3 modes, and the
+same highly-interactive buttons. Inspired by the platform research (DeepSeek restraint, Z.ai silver
+hierarchy, Perplexity inverted buttons) but a **unique Zintus synthesis, not a copy**: we keep our
+signatures — JetBrains Mono on routing/usage metadata, TransparencyStrip + CompressionBadge,
+provider color dots, the Z-constellation empty state — and lay the neutral 3-mode system under them.
+
+### E1. Mode bridge (fixes a real bug)
+The app shell reads `--color-*` from `packages/ui/styles/tokens.css`, which only defines `.dark`
+(violet hue-295) and `.light`. With the new theme classes (`obsidian`/`indigo`/`graphite`) the shell
+matches neither and falls back to the `:root` **light** theme. Fix at the **web layer only** —
+append override blocks in `apps/web/app/globals.css`; never edit `packages/ui` (desktop shares it).
+
+For `.dark, .indigo` (Indigo is the dark default), `.obsidian`, `.graphite` define:
+`--color-bg/-surface/-elevated/-border/-border-bright` from that mode's neutrals (bg/surface/surface-2/hairline, border-bright ≈ hairline +6% L);
+`--color-text/-text-sub/-text-muted` from ink/muted;
+`--color-purple[-mid/-light/-bright]` → the mode accent ramp (Indigo `#4d6bfe` ramp; Obsidian near-white ink ramp `#f5f5f7/#e8e8ea/#ffffff`; Graphite teal `#20a8b8` ramp);
+`--color-purple-glow/-faint` → LOW-alpha neutral or accent-soft (no violet, no big glows);
+`--c-accent`, `--c-accent-light/-mid` (accent at .16/.25 alpha), `--c-accent-contrast` (white for Indigo, `#0a0a0b` for Obsidian, `#101211` for Graphite);
+`--c-focus` layered ring using the mode accent at 0.4 alpha;
+`--c-user-bubble` = surface-2, `--c-user-bubble-border` = hairline;
+`--c-border`/`--c-border-strong` neutral white-alpha (`rgba(255,255,255,.08/.14)`).
+This alone de-purples the entire chat app in all three modes. `.light` stays untouched (warm-white app theme remains a valid choice inside the app).
+
+### E2. Chat surface rules (research-derived, ours)
+- Assistant messages: plain full-width text, no bubble/panel.
+- User messages: quiet neutral bubble — `--c-user-bubble` + 0.5px hairline, radius `--radius-lg`.
+- The composer is the ONE raised panel: `--color-surface` + `--shadow-md` (neutral); focused state = accent hairline (`--c-accent` at 40%) instead of glow.
+- `.chat-send`: replace hardcoded `#6366f1` with `var(--c-accent)` / `var(--c-accent-contrast)`; add the mk-btn interaction grammar — hover `brightness(1.06)` + `translateY(-1px)`, active `scale(0.95)` at 80ms, `:focus-visible` → `--c-focus`; disabled = accent dimmed toward bg (keep the solid-square rule). Arrow stroke → `var(--c-accent-contrast)` (not `#fff`, which breaks on Obsidian's white button).
+- `.chat-mic`: kill the remaining violet `rgba(124,58,237,…)` pulse shadows → `--c-accent`-tinted at ≤0.25 alpha, small radius (this is a state pulse, not a glow).
+- Sidebar items: hover = `--color-elevated` fill; active = `--c-accent-light` fill + 2px accent left bar; 150ms `--t-fast`; press `scale(0.98)`.
+- Topbar pills/buttons: same press/hover grammar, hairline borders, no glows.
+
+### E3. Mode switcher in the app
+`AppShell.tsx` currently mounts the marketing Sun/Moon `ThemeToggle`. Replace with `ModeSwitcher`
+extended to accept a `withLight` prop: in the app it shows 4 segments (Light · Obsidian · Indigo ·
+Graphite); on marketing it stays 3 (dark-only site). Keep `ThemeToggle.tsx` on disk (unused is fine).
+
+### E4. Scope & verify
+Files: `apps/web/app/globals.css` (append mode-bridge blocks + retouch chat-send/mic/sidebar/composer rules), `AppShell.tsx` (toggle swap), `ModeSwitcher.tsx` (withLight), optionally `MessageBubble.tsx`/`Sidebar.tsx` if bubble/active-state classes need markup tweaks. Typecheck green; hex grep for `6366f1` in chat rules → tokenized; screenshot `/chat` in all 3 modes + light.
+
 ## 6. Guardrails
 - Branch `feat/web-dark-redesign` in worktree `~/Projects/zintus-wt-web` only. Never touch `apps/mobile`, `apps/desktop`, `packages/*`.
 - Commit per slice with conventional messages. No push.

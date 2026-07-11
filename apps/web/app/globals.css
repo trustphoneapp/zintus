@@ -2531,7 +2531,7 @@ select:focus-visible {
 }
 
 .m-section {
-  padding: 2.5rem 0;
+  padding: clamp(3.5rem, 6vw, 5rem) 0;
 }
 
 .m-title {
@@ -2690,6 +2690,35 @@ select:focus-visible {
   font-size: 0.8rem;
   cursor: pointer;
   flex-shrink: 0;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.m-terminal-copy:hover {
+  color: var(--marketing-text);
+  border-color: color-mix(in oklab, var(--marketing-text) 30%, var(--marketing-border));
+}
+.m-terminal-copy:focus-visible {
+  outline: 2px solid var(--marketing-accent);
+  outline-offset: 2px;
+}
+/* Copied confirmation — brief accent-soft tint + icon scale-pop, reverts in JS. */
+.m-terminal-copy.copied {
+  background: var(--marketing-accent-soft);
+  border-color: color-mix(in oklab, var(--marketing-accent) 45%, var(--marketing-border));
+  color: var(--marketing-accent-light);
+}
+.m-terminal-copy svg {
+  transition: transform 150ms cubic-bezier(0.2, 0, 0, 1);
+}
+.m-terminal-copy.copied svg {
+  animation: mk-copy-pop 150ms cubic-bezier(0.2, 0, 0, 1);
+}
+@keyframes mk-copy-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .m-terminal-copy.copied svg { animation: none; }
 }
 
 .m-terminal-tabs {
@@ -4671,6 +4700,14 @@ body:has(.dashboard-container) {
 .hero-v2 h1 em {
   font-style: normal;
   color: var(--marketing-accent);
+}
+/* Obsidian is the ONE mode with a gradient headline — a silver clip. Indigo and
+   Graphite keep the solid --marketing-text set above. */
+.obsidian .hero-v2 h1 {
+  background: linear-gradient(180deg, #ffffff, #8f8f96);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 .hero-v2-sub {
   font-size: clamp(1rem, 2vw, 1.2rem);

@@ -24,7 +24,7 @@ const TURNS: DemoTurn[] = [
       "Neural networks learn through backpropagation — comparing predictions to the truth, then nudging weights to shrink the error, layer by layer.",
     provider: "Cerebras",
     quota: 80,
-    color: "#f59e0b",
+    color: "var(--marketing-accent)",
   },
   {
     user: "Write me a Python function to sort a list",
@@ -32,7 +32,7 @@ const TURNS: DemoTurn[] = [
     assistant: "def sort_list(items):\n    return sorted(items)",
     provider: "Groq",
     quota: 100,
-    color: "#22c55e",
+    color: "var(--marketing-accent)",
   },
 ];
 
@@ -63,7 +63,7 @@ export function MockChatDemo() {
   if (phase >= 2) messages.push({ role: "assistant", text: turn.assistant });
 
   return (
-    <section style={{ background: "#0a0612", padding: "4rem 0" }}>
+    <section style={{ background: "var(--marketing-bg)", padding: "5rem 0" }}>
       <div className="m-shell">
         <div className="demo-card">
           <div className="demo-card-bar">

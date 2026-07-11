@@ -31,7 +31,7 @@ export function Hero() {
   async function copyCmd() {
     await navigator.clipboard.writeText(INSTALL_CMD);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
+    window.setTimeout(() => setCopied(false), 1500);
   }
 
   return (
@@ -60,11 +60,11 @@ export function Hero() {
 
           {/* CTAs */}
           <div className="hero-v2-actions">
-            <Link href="/chat" className="hero-v2-btn-primary">
+            <Link href="/chat" className="mk-btn mk-btn-primary">
               Start routing free
-              <ArrowRight size={16} />
+              <ArrowRight size={16} className="mk-btn-arrow" />
             </Link>
-            <Link href="/pricing" className="hero-v2-btn-secondary">
+            <Link href="/pricing" className="mk-btn mk-btn-secondary">
               See pricing
             </Link>
           </div>
@@ -88,7 +88,7 @@ export function Hero() {
               <span className="hero-v2-terminal-dot" style={{ background: "#ef4444" }} />
               <span className="hero-v2-terminal-dot" style={{ background: "#f59e0b" }} />
               <span className="hero-v2-terminal-dot" style={{ background: "#22c55e" }} />
-              <span style={{ marginLeft: 8, fontSize: 11, color: "#4a3070", fontFamily: "monospace" }}>zintus — terminal</span>
+              <span style={{ marginLeft: 8, fontSize: 11, color: "var(--marketing-muted)", fontFamily: "monospace" }}>zintus — terminal</span>
             </div>
             <div className="hero-v2-terminal-body">
               {/* Static install line */}
@@ -120,15 +120,17 @@ export function Hero() {
           </div>
 
           {/* Copy install */}
-          <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 10 }}>
-            <span style={{ fontSize: 12, color: "#4a3070" }}>build from source · npm publish coming soon:</span>
+          <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+            <span style={{ fontSize: 12, color: "var(--marketing-muted)" }}>build from source · npm publish coming soon:</span>
             <button
               type="button"
               onClick={() => void copyCmd()}
-              style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(124,58,237,0.1)", border: "1px solid rgba(124,58,237,0.25)", borderRadius: 6, padding: "5px 12px", cursor: "pointer", color: "#c4b5fd", fontSize: 13, fontFamily: "monospace" }}
+              className={`m-terminal-copy${copied ? " copied" : ""}`}
+              aria-label="Copy install command"
+              style={{ fontFamily: "'JetBrains Mono', monospace" }}
             >
               <code>{INSTALL_CMD}</code>
-              {copied ? <Check size={13} color="#34d399" /> : <Copy size={13} />}
+              {copied ? <Check size={13} /> : <Copy size={13} />}
             </button>
           </div>
         </div>

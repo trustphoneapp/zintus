@@ -12,16 +12,16 @@ export function TrustBar() {
   return (
     <section
       style={{
-        borderTop: "1px solid rgba(124,58,237,0.12)",
-        borderBottom: "1px solid rgba(124,58,237,0.12)",
-        background: "rgba(7,4,15,0.6)",
+        borderTop: "1px solid var(--marketing-border)",
+        borderBottom: "1px solid var(--marketing-border)",
+        background: "var(--marketing-surface)",
       }}
     >
       <div className="m-shell">
         <ul className="trust-bar">
           {ITEMS.map(({ icon: Icon, label }) => (
             <li key={label} className="trust-bar-item">
-              <Icon size={14} color="#a78bfa" />
+              <Icon size={14} color="var(--marketing-accent)" />
               <span>{label}</span>
             </li>
           ))}

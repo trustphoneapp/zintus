@@ -22,7 +22,7 @@ export function CTA() {
                   fontSize: "clamp(1.8rem, 4vw, 2.8rem)",
                   fontWeight: 800,
                   letterSpacing: "-0.02em",
-                  color: "#f1f5f9",
+                  color: "var(--marketing-text)",
                   marginBottom: "1rem",
                 }}
               >
@@ -30,7 +30,7 @@ export function CTA() {
               </h2>
               <p
                 style={{
-                  color: "#64748b",
+                  color: "var(--marketing-muted)",
                   maxWidth: 480,
                   margin: "0 auto 2rem",
                 }}
@@ -45,40 +45,11 @@ export function CTA() {
                   flexWrap: "wrap",
                 }}
               >
-                <Link
-                  href="/chat"
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: "13px 28px",
-                    borderRadius: 10,
-                    background: "var(--marketing-accent)",
-                    color: "#fff",
-                    fontSize: 15,
-                    fontWeight: 600,
-                    textDecoration: "none",
-                  }}
-                >
+                <Link href="/chat" className="mk-btn mk-btn-primary">
                   Start routing free
-                  <ArrowRight size={16} />
+                  <ArrowRight size={16} className="mk-btn-arrow" />
                 </Link>
-                <Link
-                  href="/pricing"
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: "12px 24px",
-                    borderRadius: 10,
-                    background: "transparent",
-                    color: "var(--marketing-muted)",
-                    fontSize: 15,
-                    fontWeight: 500,
-                    textDecoration: "none",
-                    border: "1px solid var(--marketing-border)",
-                  }}
-                >
+                <Link href="/pricing" className="mk-btn mk-btn-secondary">
                   See pricing
                 </Link>
               </div>
