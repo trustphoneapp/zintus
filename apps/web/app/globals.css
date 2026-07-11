@@ -25,6 +25,10 @@
   --marketing-red: #f04438;
   --marketing-red-soft: rgba(240, 68, 56, 0.18);
   --marketing-shell: 1140px;
+  /* Disabled-state fill for accent-filled controls (chat send). Precomputed
+     per mode (no color-mix — lightningcss collapses var() mixes); this :root
+     value pairs with the default #6366f1 accent used by .light/legacy. */
+  --c-accent-dim: #474a93;
   --font-ui: var(--font-plus-jakarta-sans), var(--font-inter), system-ui, sans-serif;
   --font-serif: var(--font-lora), Georgia, "Times New Roman", serif;
   --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
@@ -72,6 +76,99 @@
 
 .light {
   color-scheme: light;
+}
+
+/* ── App-shell mode bridge ────────────────────────────────────────────────
+   The chat shell reads --color-* / --c-* from @zintus/ui tokens.css, which only
+   defines `.dark` (violet hue-295) and `.light`. The theme classes are now
+   obsidian/indigo/graphite, so without these blocks the shell would fall back
+   to the :root LIGHT theme. Overridden here at the web layer only —
+   packages/ui is shared with apps/desktop and must stay untouched.
+   `.dark` maps to Indigo (the dark default); `.light` stays the warm-white
+   app theme. --color-purple* is the shell's accent ramp: periwinkle in Indigo,
+   achromatic ink in Obsidian, teal (links/tags) in Graphite. */
+.dark,
+.indigo {
+  color-scheme: dark;
+  --color-bg: #0c0c0f;
+  --color-surface: #141419;
+  --color-elevated: #18181f;
+  --color-border: #26262c;
+  --color-border-bright: #34343c;
+  --color-text: #ececef;
+  --color-text-sub: #a7a7ae;
+  --color-text-muted: #8b8b93;
+  --color-purple: #4d6bfe;
+  --color-purple-mid: #3550c8;
+  --color-purple-light: #7c92fe;
+  --color-purple-bright: #98a9ff;
+  --color-purple-glow: rgba(77, 107, 254, 0.25);
+  --color-purple-faint: rgba(77, 107, 254, 0.1);
+  --c-accent: #4d6bfe;
+  --c-accent-light: rgba(77, 107, 254, 0.16);
+  --c-accent-mid: rgba(77, 107, 254, 0.25);
+  --c-accent-contrast: #ffffff;
+  --c-accent-dim: #2e3c85;
+  --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(77, 107, 254, 0.4);
+  --c-border: rgba(255, 255, 255, 0.08);
+  --c-border-strong: rgba(255, 255, 255, 0.14);
+  --c-user-bubble: #18181f;
+  --c-user-bubble-border: #26262c;
+}
+
+.obsidian {
+  --color-bg: #060607;
+  --color-surface: #1a1a1d;
+  --color-elevated: #202024;
+  --color-border: #2a2a2e;
+  --color-border-bright: #333338;
+  --color-text: #f5f5f7;
+  --color-text-sub: #b0b0b6;
+  --color-text-muted: #8f8f96;
+  --color-purple: #f5f5f7;
+  --color-purple-mid: #e8e8ea;
+  --color-purple-light: #ffffff;
+  --color-purple-bright: #ffffff;
+  --color-purple-glow: rgba(245, 245, 247, 0.18);
+  --color-purple-faint: rgba(245, 245, 247, 0.07);
+  --c-accent: #f5f5f7;
+  --c-accent-light: rgba(245, 245, 247, 0.1);
+  --c-accent-mid: rgba(245, 245, 247, 0.18);
+  --c-accent-contrast: #0a0a0b;
+  --c-accent-dim: #6b6b72;
+  --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(245, 245, 247, 0.4);
+  --c-border: rgba(255, 255, 255, 0.08);
+  --c-border-strong: rgba(255, 255, 255, 0.14);
+  --c-user-bubble: #202024;
+  --c-user-bubble-border: #2a2a2e;
+}
+
+.graphite {
+  --color-bg: #0f1110;
+  --color-surface: #191b1a;
+  --color-elevated: #1f2120;
+  --color-border: #2a2d2b;
+  --color-border-bright: #343836;
+  --color-text: #eef0ef;
+  --color-text-sub: #aab0ad;
+  --color-text-muted: #8a908d;
+  --color-purple: #20a8b8;
+  --color-purple-mid: #1b8d9b;
+  --color-purple-light: #3fc5d4;
+  --color-purple-bright: #66d5e1;
+  --color-purple-glow: rgba(32, 168, 184, 0.22);
+  --color-purple-faint: rgba(32, 168, 184, 0.09);
+  /* Perplexity-style: solid fills are inverted-light; teal stays on links/tags. */
+  --c-accent: #eef0ef;
+  --c-accent-light: rgba(32, 168, 184, 0.14);
+  --c-accent-mid: rgba(32, 168, 184, 0.22);
+  --c-accent-contrast: #101211;
+  --c-accent-dim: #6f7472;
+  --c-focus: 0 0 0 2px var(--color-bg), 0 0 0 4px rgba(32, 168, 184, 0.45);
+  --c-border: rgba(255, 255, 255, 0.08);
+  --c-border-strong: rgba(255, 255, 255, 0.14);
+  --c-user-bubble: #1f2120;
+  --c-user-bubble-border: #2a2d2b;
 }
 
 * {
@@ -157,6 +254,31 @@ code {
   background: var(--color-purple-faint);
   color: var(--color-purple-light);
   cursor: pointer;
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    border-color var(--t-fast),
+    transform 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.topbar-button:hover {
+  border-color: var(--c-border-strong);
+  color: var(--color-text);
+}
+
+.topbar-button:active {
+  transform: scale(0.96);
+}
+
+.topbar-button:focus-visible {
+  outline: none;
+  box-shadow: var(--c-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topbar-button:active {
+    transform: none;
+  }
 }
 
 .status-dot {
@@ -405,12 +527,24 @@ code {
   text-decoration: none;
   font-size: 13.5px;
   position: relative;
-  transition: background var(--t-fast), color var(--t-fast);
+  transition:
+    background var(--t-fast),
+    color var(--t-fast),
+    transform 120ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .sidebar-link:hover {
   background: var(--c-accent-light);
   color: var(--color-text-sub);
+}
+
+.sidebar-link:active {
+  transform: scale(0.98);
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-link:active {
+    transform: none;
+  }
 }
 
 .app-sidebar.collapsed .sidebar-link {
@@ -426,6 +560,22 @@ code {
 .sidebar-link.active {
   background: var(--c-accent-light);
   color: var(--c-accent);
+}
+
+/* 2px accent bar marks the active item (depth from hairlines, not fills). */
+.sidebar-link.active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 22%;
+  bottom: 22%;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--color-purple);
+}
+
+.app-sidebar.collapsed .sidebar-link.active::before {
+  display: none;
 }
 
 .sidebar-search {
@@ -1313,11 +1463,14 @@ code {
   border-radius: 12px;
   background: var(--color-elevated);
   border: 0.5px solid var(--c-border);
+  /* The composer is the ONE raised panel in the chat — everything else sits
+     flat on hairlines. */
+  box-shadow: var(--shadow-sm);
   transition: box-shadow 0.15s ease;
 }
 
 .chat-composer.focused {
-  box-shadow: 0 0 0 1px var(--color-purple);
+  box-shadow: var(--shadow-sm), 0 0 0 1px var(--color-purple);
 }
 
 .chat-composer textarea {
@@ -1338,26 +1491,44 @@ code {
   height: 36px;
   border-radius: 10px;
   border: none;
-  background: #6366f1;
-  color: #fff;
+  background: var(--c-accent);
+  color: var(--c-accent-contrast);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   flex-shrink: 0;
-  transition: filter 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    filter 120ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 120ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-/* Hover only brightens — background colour and opacity are unchanged. */
+/* Hover brightens + lifts; press snaps down fast. Background colour and
+   opacity are unchanged in every state. */
 .chat-send:hover:not(:disabled) {
   filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+.chat-send:active:not(:disabled) {
+  transform: scale(0.95);
+  transition-duration: 80ms;
+}
+.chat-send:focus-visible {
+  outline: none;
+  box-shadow: var(--c-focus);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-send:hover:not(:disabled),
+  .chat-send:active:not(:disabled) {
+    transform: none;
+  }
 }
 
-/* Disabled = a SOLID muted-purple square (dim the background, never the whole
-   button). The white arrow stays crisp at full opacity. */
+/* Disabled = a SOLID dimmed-accent square (dim the background, never the whole
+   button). The arrow stays crisp at full opacity. */
 .chat-send:disabled {
-  background: color-mix(in oklch, #6366f1 62%, #1a1a20);
-  color: #fff;
+  background: var(--c-accent-dim);
+  color: var(--c-accent-contrast);
   cursor: not-allowed;
 }
 
@@ -1367,7 +1538,9 @@ code {
   width: 18px;
   height: 18px;
   flex-shrink: 0;
-  stroke: #fff;
+  /* Pairs with the button fill per mode — #fff would vanish on Obsidian's
+     white send button. */
+  stroke: var(--c-accent-contrast);
 }
 
 .chat-suggestions {
@@ -5359,16 +5532,18 @@ body:has(.dashboard-container) {
 .chat-mic.is-listening {
   background: var(--color-purple);
   border-color: var(--color-purple);
-  color: #fff;
+  /* Contrast ink, not #fff — the accent fill is white in Obsidian. */
+  color: var(--c-accent-contrast);
   animation: chat-mic-pulse 1.6s ease-in-out infinite;
 }
+/* State pulse (not a glow): mode-accent tinted, small radius. */
 @keyframes chat-mic-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.45);
+    box-shadow: 0 0 0 0 var(--color-purple-glow);
   }
   50% {
-    box-shadow: 0 0 0 5px rgba(124, 58, 237, 0);
+    box-shadow: 0 0 0 5px transparent;
   }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { fetchGatewayHealth, GATEWAY_URL } from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
-import { ThemeToggle } from "@/components/marketing/ThemeToggle";
+import { ModeSwitcher } from "@/components/marketing/ModeSwitcher";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { Sidebar } from "./Sidebar";
 import { GatewayOfflineBanner } from "./GatewayOfflineBanner";
@@ -121,7 +121,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </kbd>
             </button>
           </Tooltip>
-          <ThemeToggle />
+          <ModeSwitcher withLight />
         </div>
       </header>
       ) : null}

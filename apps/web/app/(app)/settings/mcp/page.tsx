@@ -47,7 +47,8 @@ const sectionTitleStyle: CSSProperties = {
   color: "var(--color-text-muted)",
 };
 
-const VIOLET = "#7C3AED";
+// Inline styles resolve at runtime, so the token tracks the active mode.
+const ACCENT = "var(--color-purple)";
 
 function Section({
   title,
@@ -300,7 +301,7 @@ export default function McpSettingsPage() {
                       href={ex.url}
                       target="_blank"
                       rel="noreferrer noopener"
-                      style={{ color: VIOLET, fontWeight: 600 }}
+                      style={{ color: ACCENT, fontWeight: 600 }}
                     >
                       {ex.name}
                     </a>
@@ -351,7 +352,7 @@ export default function McpSettingsPage() {
                 </p>
 
                 {server.lastConnectedAt ? (
-                  <p style={{ margin: 0, color: VIOLET }}>
+                  <p style={{ margin: 0, color: ACCENT }}>
                     Connected — {toolCount} {toolCount === 1 ? "tool" : "tools"}{" "}
                     available · {formatTime(server.lastConnectedAt)}
                   </p>
@@ -466,9 +467,9 @@ export default function McpSettingsPage() {
                       textAlign: "left",
                       borderRadius: 10,
                       cursor: "pointer",
-                      border: `0.5px solid ${active ? VIOLET : "var(--c-border)"}`,
+                      border: `0.5px solid ${active ? ACCENT : "var(--c-border)"}`,
                       background: active
-                        ? "color-mix(in oklch, #7C3AED 12%, transparent)"
+                        ? "var(--color-purple-faint)"
                         : "var(--color-surface)",
                       transition: "border-color .12s, background .12s",
                     }}

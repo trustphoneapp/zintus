@@ -1454,7 +1454,7 @@ export default function ChatPage() {
               href="/settings/mcp"
               className="chat-tool-toggle"
               title="MCP tools available to the model this chat — manage in settings"
-              style={{ textDecoration: "none", color: "var(--color-purple-light, #7C3AED)" }}
+              style={{ textDecoration: "none", color: "var(--color-purple-light)" }}
             >
               🔧 {mcpToolCount} tool{mcpToolCount === 1 ? "" : "s"} active
             </a>

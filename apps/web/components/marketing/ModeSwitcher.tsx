@@ -15,21 +15,31 @@ type Mode = {
 
 // Order matches the segmented pill left→right. The sliding thumb translates by
 // its own width (one segment) per index, so this order IS the visual order.
-const MODES: Mode[] = [
+const DARK_MODES: Mode[] = [
   { id: "obsidian", label: "Obsidian", canvas: "#060607", accent: "#f5f5f7" },
   { id: "indigo", label: "Indigo", canvas: "#0c0c0f", accent: "#4d6bfe" },
   { id: "graphite", label: "Graphite", canvas: "#0f1110", accent: "#20a8b8" },
 ];
 
-// Indigo is the default: `dark`, `indigo`, `light` and `undefined` all read as
-// Indigo-active. Only the two explicitly-chromatic modes map elsewhere.
-function activeIndex(resolvedTheme: string | undefined): number {
-  if (resolvedTheme === "obsidian") return 0;
-  if (resolvedTheme === "graphite") return 2;
-  return 1;
+// The app shell keeps its warm-white light theme as a fourth choice
+// (marketing is dark-only, so it only renders the three dark modes).
+const LIGHT_MODE: Mode = {
+  id: "light",
+  label: "Light",
+  canvas: "#faf9f7",
+  accent: "#1a1a1e",
+};
+
+// Indigo is the default: `dark`, `indigo`, `undefined` — and `light` when the
+// light segment isn't offered — all read as Indigo-active.
+function activeIndex(modes: Mode[], resolvedTheme: string | undefined): number {
+  const explicit = modes.findIndex((mode) => mode.id === resolvedTheme);
+  if (explicit !== -1) return explicit;
+  return modes.findIndex((mode) => mode.id === "indigo");
 }
 
-export function ModeSwitcher() {
+export function ModeSwitcher({ withLight = false }: { withLight?: boolean }) {
+  const modes = withLight ? [LIGHT_MODE, ...DARK_MODES] : DARK_MODES;
   const { resolvedTheme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const btnRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -39,19 +49,21 @@ export function ModeSwitcher() {
   // hydration mismatch (same pattern as the old ThemeToggle).
   useEffect(() => setMounted(true), []);
 
-  const index = mounted ? activeIndex(resolvedTheme) : 1;
+  const index = mounted
+    ? activeIndex(modes, resolvedTheme)
+    : activeIndex(modes, undefined);
 
   function select(i: number) {
-    const mode = MODES[((i % MODES.length) + MODES.length) % MODES.length];
+    const mode = modes[((i % modes.length) + modes.length) % modes.length];
     if (mode) setTheme(mode.id);
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, i: number) {
     let next: number | null = null;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-      next = (i + 1) % MODES.length;
+      next = (i + 1) % modes.length;
     } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-      next = (i - 1 + MODES.length) % MODES.length;
+      next = (i - 1 + modes.length) % modes.length;
     }
     if (next === null) return;
     event.preventDefault();
@@ -66,7 +78,7 @@ export function ModeSwitcher() {
         aria-hidden="true"
         style={{ transform: `translateX(${index * 100}%)` }}
       />
-      {MODES.map((mode, i) => {
+      {modes.map((mode, i) => {
         const checked = mounted && i === index;
         return (
           <button

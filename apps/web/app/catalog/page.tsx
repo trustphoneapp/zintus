@@ -7,7 +7,7 @@ import { PROVIDERS, MODELS, isRoutableModel, type Model, type Provider } from "@
 import { CATALOG_STATS } from "@/data/catalog-stats";
 import { TIER_COLORS, contextTokens, priceKey, usd } from "./helpers";
 
-const VIOLET = "var(--marketing-accent)"; // #7C3AED
+const ACCENT = "var(--marketing-accent)";
 const GREEN = "#22C55E";
 
 // id → display name, so model rows can show "Anthropic" instead of "anthropic".
@@ -40,11 +40,11 @@ const BADGE_TITLE: Record<Provider["badge"], string> = {
 
 const BADGE_COLOR: Record<Provider["badge"], string> = {
   integrated: GREEN,
-  "add-key": VIOLET,
-  "coming-soon": "#94A3B8",
+  "add-key": ACCENT,
+  "coming-soon": "#8b8b93",
 };
 
-const SLATE = "#94A3B8";
+const SLATE = "#8b8b93";
 
 /** Honest "Planned — not yet routable" pill for models whose provider the router
  *  cannot reach yet. Visually distinct (muted/slate) and carries no CTA. */
@@ -92,9 +92,9 @@ function Chip({
         padding: "5px 12px",
         fontSize: 13,
         fontWeight: 600,
-        border: `1px solid ${active ? color ?? VIOLET : "var(--marketing-border)"}`,
+        border: `1px solid ${active ? color ?? ACCENT : "var(--marketing-border)"}`,
         background: active
-          ? `color-mix(in oklab, ${color ?? VIOLET} 18%, transparent)`
+          ? `color-mix(in oklab, ${color ?? ACCENT} 18%, transparent)`
           : "var(--marketing-surface)",
         color: active ? color ?? "var(--marketing-text)" : "var(--marketing-muted)",
       }}
@@ -220,8 +220,8 @@ export default function CatalogPage() {
         <div className="m-shell">
           {/* view toggle */}
           <div style={{ display: "flex", gap: 8, marginBottom: "1.25rem" }}>
-            <Chip label="Models" active={view === "models"} onClick={() => setView("models")} color={VIOLET} />
-            <Chip label="Providers" active={view === "providers"} onClick={() => setView("providers")} color={VIOLET} />
+            <Chip label="Models" active={view === "models"} onClick={() => setView("models")} color={ACCENT} />
+            <Chip label="Providers" active={view === "providers"} onClick={() => setView("providers")} color={ACCENT} />
           </div>
 
           {/* controls */}
@@ -295,7 +295,7 @@ export default function CatalogPage() {
           {/* tier chips — models only */}
           {view === "models" ? (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: "1.25rem" }}>
-              <Chip label="All tiers" active={tierFilter === "all"} onClick={() => setTierFilter("all")} color={VIOLET} />
+              <Chip label="All tiers" active={tierFilter === "all"} onClick={() => setTierFilter("all")} color={ACCENT} />
               {TIER_OPTIONS.map((t) => (
                 <Chip
                   key={t}

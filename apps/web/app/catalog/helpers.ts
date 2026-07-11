@@ -1,12 +1,14 @@
 import type { Model } from "@/data/providers";
 
-/** Tier badge palette. FREE=green, T0=teal, T1=blue, T2=violet, BYOK=muted. */
+/** Tier badge palette. FREE=green, T0=teal, T1=blue, T2=orange, BYOK=muted.
+ *  Literal hexes: consumers alpha-blend these via color-mix. T2 orange matches
+ *  the ProviderGrid tier-2 chip. */
 export const TIER_COLORS: Record<Model["tier"], string> = {
   FREE: "#22C55E",
   T0: "#14B8A6",
   T1: "#3B82F6",
-  T2: "#7C3AED",
-  BYOK: "#94A3B8",
+  T2: "#f97316",
+  BYOK: "#8b8b93",
 };
 
 /** Parse a context-window label ("128K", "1M", "∞") into a sortable number. */
