@@ -27,7 +27,7 @@ const CARDS = [
 
 export function PlatformSection() {
   return (
-    <section style={{ padding: "5rem 0" }}>
+    <section className="m-cv" style={{ padding: "5rem 0" }}>
       <div className="m-shell">
         <h2 style={{ fontSize: "2rem", fontWeight: 700, textAlign: "center", color: "var(--marketing-text)" }}>
           Take it everywhere.

@@ -122,7 +122,9 @@ function TierTabButton({
         borderRadius: 999,
         border: active ? "none" : "0.5px solid var(--c-border)",
         background: active ? "var(--c-accent)" : "var(--color-elevated)",
-        color: active ? "#fff" : "var(--color-text-sub)",
+        // V9 13.3: active ink pairs with the accent fill (was "#fff" →
+        // unreadable on Obsidian's near-white accent / light-grey fill).
+        color: active ? "var(--c-accent-contrast)" : "var(--color-text-sub)",
         fontSize: 12.5,
         fontWeight: 600,
         cursor: "pointer",

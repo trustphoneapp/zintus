@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
 import { hasEncryptedKeys } from "@/lib/crypto";
 import { useProviderStatusStore } from "@/lib/store";
+import { useFocusTrap } from "@/app/_components/useFocusTrap";
 
 /** The free-tier providers we surface first, with their key-issuance pages. */
 const FEATURED: Array<{ id: ProviderId; url: string }> = [
@@ -35,6 +36,12 @@ export function LocalKeyManager({
   const [drafts, setDrafts] = useState<Partial<Record<ProviderId, string>>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  // a11y: trap focus inside the send-blocking dialog, autofocus the first field,
+  // Escape dismisses (same as Cancel — never a silent grant), and focus returns
+  // to the trigger on close. Hook runs unconditionally (before the early return).
+  useFocusTrap(open, cardRef, onClose);
 
   if (!open) {
     return null;
@@ -72,12 +79,15 @@ export function LocalKeyManager({
   return (
     <div className="lkm-overlay" onClick={onClose}>
       <div
+        ref={cardRef}
         className="lkm-modal"
         role="dialog"
         aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
       >
-        <h2>{vaultExists ? "Unlock your keys" : "Add a key to start"}</h2>
+        <h2 id={titleId}>{vaultExists ? "Unlock your keys" : "Add a key to start"}</h2>
         <p className="lkm-sub">
           {vaultExists
             ? "Enter your vault passphrase to use your saved keys."
@@ -86,7 +96,7 @@ export function LocalKeyManager({
 
         {!vaultExists ? (
           <div className="lkm-providers">
-            {FEATURED.map(({ id, url }) => (
+            {FEATURED.map(({ id, url }, idx) => (
               <div key={id} className="lkm-provider">
                 <div className="lkm-provider-head">
                   <span
@@ -108,6 +118,7 @@ export function LocalKeyManager({
                 <input
                   type="password"
                   placeholder="Paste API key"
+                  data-autofocus={idx === 0 ? "" : undefined}
                   value={drafts[id] ?? ""}
                   onChange={(event) =>
                     setDrafts((prev) => ({ ...prev, [id]: event.target.value }))
@@ -122,6 +133,7 @@ export function LocalKeyManager({
           {vaultExists ? "Vault passphrase" : "Create a passphrase"}
           <input
             type="password"
+            data-autofocus={vaultExists ? "" : undefined}
             value={pass}
             onChange={(event) => setPass(event.target.value)}
             placeholder="••••••••"

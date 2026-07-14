@@ -1,5 +1,5 @@
-"use client";
-
+// Server Component: static Q&A rendered with native <details>/<summary>
+// (no JS accordion), wrapped in the <Reveal> client island.
 import { Plus } from "lucide-react";
 import { Reveal } from "./Reveal";
 
@@ -72,7 +72,7 @@ const faqs = [
 
 export function FAQ() {
   return (
-    <section className="m-section" id="faq">
+    <section className="m-section m-band m-cv" id="faq">
       <div className="m-shell m-faq-shell">
         <Reveal>
           <p className="m-eyebrow">Questions &amp; answers</p>

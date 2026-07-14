@@ -17,7 +17,7 @@ export function InstallSection() {
   }
 
   return (
-    <section className="m-section" id="install">
+    <section className="m-section m-cv" id="install">
       <div className="m-shell">
         <Reveal>
           <p className="m-eyebrow">For developers</p>

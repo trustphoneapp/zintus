@@ -11,78 +11,23 @@
  * self-host docs / download funnel — never internal dev commands.
  */
 export function GatewayOfflineBanner({ url }: { url: string }) {
+  // Slim single-line strip (~36px): status dot + one honest line + links. The
+  // full "point NEXT_PUBLIC_GATEWAY_URL elsewhere" detail moves to the title
+  // tooltip so the strip stays one line. `url` is surfaced there.
   return (
     <div
       role="status"
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        alignItems: "center",
-        gap: 10,
-        padding: "10px 16px",
-        fontSize: 13,
-        lineHeight: 1.5,
-        background: "var(--color-surface)",
-        color: "var(--color-text-sub)",
-        // Calm hairline — the status dot carries the alert; a full-width
-        // saturated rule reads as alarm. Soften toward the neutral border.
-        borderBottom: "1px solid color-mix(in oklch, var(--color-red) 40%, var(--color-border))",
-      }}
+      className="app-offline-strip"
+      title={`Looking for the gateway at ${url} — set NEXT_PUBLIC_GATEWAY_URL to point elsewhere.`}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          background: "var(--color-red)",
-          flexShrink: 0,
-        }}
-      />
-      <span>
-        <strong style={{ color: "var(--color-text)" }}>
-          No gateway connected.
-        </strong>{" "}
-        Zintus is local-first — you run the gateway and your keys stay on your
-        device. Start it with{" "}
-        <code
-          style={{
-            padding: "1px 6px",
-            borderRadius: 4,
-            background: "var(--color-elevated)",
-            color: "var(--color-text)",
-          }}
-        >
-          zintus serve
-        </code>{" "}
-        then reload.
+      <span className="app-offline-dot" aria-hidden />
+      <span className="app-offline-text">
+        <strong>No gateway connected.</strong> Zintus is local-first — start it
+        with <code>zintus serve</code>.
       </span>
-      <span style={{ display: "inline-flex", gap: 12, marginLeft: "auto" }}>
-        <a href="/docs#self-host" style={{ color: "var(--color-accent)" }}>
-          Self-host guide →
-        </a>
-        <a href="/download" style={{ color: "var(--color-accent)" }}>
-          Download
-        </a>
-      </span>
-      <span
-        style={{
-          flexBasis: "100%",
-          color: "var(--color-text-muted)",
-          fontSize: 12,
-        }}
-      >
-        Looking for the gateway at {url} — point{" "}
-        <code
-          style={{
-            padding: "0 4px",
-            borderRadius: 3,
-            background: "var(--color-elevated)",
-          }}
-        >
-          NEXT_PUBLIC_GATEWAY_URL
-        </code>{" "}
-        elsewhere if it runs on another host.
+      <span className="app-offline-links">
+        <a href="/docs#self-host">Self-host</a>
+        <a href="/download">Download</a>
       </span>
     </div>
   );

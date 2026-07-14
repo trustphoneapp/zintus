@@ -254,7 +254,14 @@ export const MODELS: Model[] = [
   { id: "command-r", name: "Command R", provider: "cohere", family: "command", contextWindow: "128K", inputPer1M: 0.15, outputPer1M: 0.60, tier: "T0", free: false, specialty: "Grounded generation · citations", routingTags: ["cohere","rag"] },
   { id: "command-r-plus", name: "Command R+", provider: "cohere", family: "command", contextWindow: "128K", inputPer1M: 2.50, outputPer1M: 10.00, tier: "T1", free: false, specialty: "RAG flagship · full retrieval stack", routingTags: ["cohere","rag","flagship"] },
   { id: "embed-v3-english", name: "Embed v3 English", provider: "cohere", family: "embed", contextWindow: "512", inputPer1M: 0.10, outputPer1M: 0.00, tier: "T0", free: false, specialty: "Best English embeddings", routingTags: ["cohere","embeddings"] },
-  { id: "rerank-v3", name: "Rerank v3", provider: "cohere", family: "rerank", contextWindow: "4K", inputPer1M: 0.00, outputPer1M: 0.00, tier: "T0", free: false, specialty: "Reranking for RAG pipelines", routingTags: ["cohere","reranking","rag"] },
+  // Rerank has no token-based invoice (Cohere bills per search unit, not per
+  // token: $2.00 / 1K search units — cohere.com/pricing, matches the $1-2.50/1k
+  // range in docs/economics/PROVIDER-SURVEY-2026-07.md). It is genuinely NOT
+  // free (unlike this catalog's real free:true entries), so $0/$0 previously
+  // rendered as free-looking while being excluded from the "Free only" filter.
+  // inputPer1M carries the real $2.00 figure with the unit called out in
+  // `specialty` so it is never misread as $2.00-per-million-tokens.
+  { id: "rerank-v3", name: "Rerank v3", provider: "cohere", family: "rerank", contextWindow: "4K", inputPer1M: 2.00, outputPer1M: 0.00, tier: "T0", free: false, specialty: "Reranking for RAG pipelines · $2/1K search units (not per-token)", routingTags: ["cohere","reranking","rag"] },
   // Perplexity Sonar (5)
   { id: "sonar-small", name: "Sonar Small", provider: "perplexity", family: "sonar", contextWindow: "131K", inputPer1M: 0.20, outputPer1M: 0.20, tier: "T0", free: false, specialty: "Web-grounded · live citations", routingTags: ["perplexity","search","web"] },
   { id: "sonar", name: "Sonar", provider: "perplexity", family: "sonar", contextWindow: "131K", inputPer1M: 0.30, outputPer1M: 0.30, tier: "T0", free: false, specialty: "Balanced search-grounded", routingTags: ["perplexity","search"] },

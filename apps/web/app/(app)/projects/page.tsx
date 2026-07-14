@@ -127,7 +127,7 @@ export default function ProjectsPage() {
               borderRadius: 9,
               border: "none",
               background: "var(--c-accent)",
-              color: "#fff",
+              color: "var(--c-accent-contrast)",
               fontSize: 13,
               fontWeight: 600,
               cursor: "pointer",
@@ -296,7 +296,7 @@ export default function ProjectsPage() {
                         borderRadius: 8,
                         border: "none",
                         background: "var(--c-accent)",
-                        color: "#fff",
+                        color: "var(--c-accent-contrast)",
                         fontSize: 12.5,
                         fontWeight: 600,
                         cursor: "pointer",
@@ -374,7 +374,7 @@ export default function ProjectsPage() {
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
               placeholder="e.g. Mobile app"
-              style={{ width: "100%", height: 36, borderRadius: 8, margin: "4px 0 10px", background: "#0b0f17", border: "1px solid #232a36", color: "#e8eef5", padding: "0 10px" }}
+              style={{ width: "100%", height: 36, borderRadius: 8, margin: "4px 0 10px", background: "var(--color-bg)", border: "1px solid var(--c-border)", color: "var(--color-text)", padding: "0 10px" }}
             />
             <label style={{ fontSize: 12, color: "var(--color-text-sub)" }}>Instructions (system prompt)</label>
             <textarea
@@ -382,14 +382,14 @@ export default function ProjectsPage() {
               value={form.instructions}
               onChange={(e) => setForm({ ...form, instructions: e.target.value })}
               placeholder="Shared context for every chat in this project…"
-              style={{ width: "100%", borderRadius: 8, margin: "4px 0 10px", background: "#0b0f17", border: "1px solid #232a36", color: "#e8eef5", padding: 10, resize: "vertical" }}
+              style={{ width: "100%", borderRadius: 8, margin: "4px 0 10px", background: "var(--color-bg)", border: "1px solid var(--c-border)", color: "var(--color-text)", padding: 10, resize: "vertical" }}
             />
             <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 6 }}>
               <label style={{ fontSize: 12, color: "var(--color-text-sub)" }}>Default provider</label>
               <select
                 value={form.defaultProvider}
                 onChange={(e) => setForm({ ...form, defaultProvider: e.target.value as ProviderId | "auto" })}
-                style={{ height: 34, borderRadius: 8, background: "#0b0f17", border: "1px solid #232a36", color: "#e8eef5", padding: "0 8px" }}
+                style={{ height: 34, borderRadius: 8, background: "var(--color-bg)", border: "1px solid var(--c-border)", color: "var(--color-text)", padding: "0 8px" }}
               >
                 <option value="auto">Auto</option>
                 {PROVIDER_IDS.map((id) => (
@@ -400,7 +400,7 @@ export default function ProjectsPage() {
               <select
                 value={form.strategy}
                 onChange={(e) => setForm({ ...form, strategy: e.target.value as RoutingStrategy | "default" })}
-                style={{ height: 34, borderRadius: 8, background: "#0b0f17", border: "1px solid #232a36", color: "#e8eef5", padding: "0 8px" }}
+                style={{ height: 34, borderRadius: 8, background: "var(--color-bg)", border: "1px solid var(--c-border)", color: "var(--color-text)", padding: "0 8px" }}
               >
                 <option value="default">Default</option>
                 <option value="fastest">Fastest</option>

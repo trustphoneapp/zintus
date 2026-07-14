@@ -1,31 +1,35 @@
-import { Zap, KeyRound, ShieldCheck, Wrench, Star } from "lucide-react";
-
-const ITEMS = [
-  { icon: Zap, label: "< 5ms routing latency" },
-  { icon: KeyRound, label: "12 free AI providers" },
-  { icon: ShieldCheck, label: "Keys never leave your device" },
-  { icon: Wrench, label: "Tools · JSON · image input" },
-  { icon: Star, label: "BUSL-1.1 source-available" },
+// A single-row infinite marquee of routed providers (names + status dots),
+// replacing the old static trust chips. The list is duplicated so the CSS
+// translateX(-50%) loop is seamless; `.marquee-track:hover` pauses it and the
+// `.marquee-wrap` mask fades both edges. Pure CSS motion — no JS ticker.
+const PROVIDERS = [
+  { name: "Cerebras", color: "#f59e0b" },
+  { name: "Groq", color: "#f97316" },
+  { name: "Google AI", color: "#60a5fa" },
+  { name: "DeepSeek", color: "#4d6bfe" },
+  { name: "Mistral", color: "#fb923c" },
+  { name: "Together", color: "#2dd4bf" },
+  { name: "Fireworks", color: "#ec4899" },
+  { name: "OpenRouter", color: "#a3a3a3" },
+  { name: "xAI", color: "#e5e5e5" },
+  { name: "Cohere", color: "#38bdf8" },
+  { name: "Ollama", color: "#34d399" },
+  { name: "LM Studio", color: "#818cf8" },
 ];
 
 export function TrustBar() {
+  const doubled = [...PROVIDERS, ...PROVIDERS];
   return (
-    <section
-      style={{
-        borderTop: "1px solid var(--marketing-border)",
-        borderBottom: "1px solid var(--marketing-border)",
-        background: "var(--marketing-surface)",
-      }}
-    >
-      <div className="m-shell">
-        <ul className="trust-bar">
-          {ITEMS.map(({ icon: Icon, label }) => (
-            <li key={label} className="trust-bar-item">
-              <Icon size={14} color="var(--marketing-accent)" />
-              <span>{label}</span>
-            </li>
+    <section className="m-band trust-marquee-band">
+      <div className="marquee-wrap">
+        <div className="marquee-track">
+          {doubled.map((p, i) => (
+            <span key={i} className="trust-marquee-item">
+              <span className="trust-marquee-dot" style={{ background: p.color }} />
+              {p.name}
+            </span>
           ))}
-        </ul>
+        </div>
       </div>
     </section>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { ProviderId } from "@zintus/types";
 import { PROVIDER_BY_ID } from "@/lib/providers";
 import type { McpToolEvent } from "@/lib/gateway";
@@ -8,6 +8,7 @@ import type { UiMessage, ToolCall } from "@/lib/app-store";
 import { formatImageBytes } from "@/lib/image-attachments";
 import { summarizeArtifactBody, type Artifact } from "@/lib/artifacts";
 import { Icon } from "./Icons";
+import { useDismissableMenu } from "./useDismissableMenu";
 import { CompressionBadge } from "./CompressionBadge";
 import { Markdown, CodeBlock } from "./Markdown";
 
@@ -77,10 +78,10 @@ function ToolCallCard({ call }: { call: ToolCall }) {
         fontFamily: "var(--font-mono, ui-monospace, monospace)",
         fontSize: 12.5,
         lineHeight: 1.5,
-        color: "#cbd5e1",
-        background: "rgba(148,163,184,0.06)",
-        border: "1px solid #232a36",
-        borderLeft: "2px solid #6366f1",
+        color: "var(--color-text-sub)",
+        background: "var(--color-purple-faint)",
+        border: "1px solid var(--c-border)",
+        borderLeft: "2px solid var(--color-purple)",
         borderRadius: 8,
         padding: "6px 10px",
       }}
@@ -89,10 +90,10 @@ function ToolCallCard({ call }: { call: ToolCall }) {
         🔧
       </span>
       <span style={{ wordBreak: "break-word", overflowWrap: "anywhere" }}>
-        <span style={{ color: "#a5b4fc", fontWeight: 600 }}>{call.name}</span>
-        <span style={{ color: "#64748b" }}>(</span>
+        <span style={{ color: "var(--color-purple-light)", fontWeight: 600 }}>{call.name}</span>
+        <span style={{ color: "var(--color-text-muted)" }}>(</span>
         {args}
-        <span style={{ color: "#64748b" }}>)</span>
+        <span style={{ color: "var(--color-text-muted)" }}>)</span>
       </span>
     </div>
   );
@@ -175,6 +176,7 @@ function McpToolActivity({ events }: { events: McpToolEvent[] }) {
 export function MessageBubble({
   message,
   onRegenerate,
+  regenerateProviders,
   isStreaming = false,
   toolCalls,
   mcpToolEvents,
@@ -183,7 +185,12 @@ export function MessageBubble({
   onOpenArtifact,
 }: {
   message: UiMessage;
-  onRegenerate?: () => void;
+  /** Regenerate this turn. No arg = as-is; `null` = force Auto routing; a
+   *  ProviderId = regenerate with that provider (10.6 split control). */
+  onRegenerate?: (provider?: ProviderId | null) => void;
+  /** Providers offered in the "regenerate with" split menu (10.6). Omit/empty
+   *  → the plain Regenerate button with no chevron. */
+  regenerateProviders?: ProviderId[];
   isStreaming?: boolean;
   /** Tool/function calls emitted by this assistant turn. */
   toolCalls?: ToolCall[];
@@ -201,6 +208,11 @@ export function MessageBubble({
     ? PROVIDER_BY_ID[message.providerId as ProviderId]
     : null;
   const [copied, setCopied] = useState(false);
+  // "Regenerate with a different model" split menu (10.6). Closes on outside click.
+  const [regenMenuOpen, setRegenMenuOpen] = useState(false);
+  const regenRef = useRef<HTMLDivElement>(null);
+  // Escape (restores focus to the ▾ trigger) + click / focus-out dismissal.
+  useDismissableMenu(regenMenuOpen, () => setRegenMenuOpen(false), regenRef);
   // The route metadata (provider/model/latency + full transparency strip) is
   // collapsed behind "details" by default, matching the design — the answer
   // leads; the receipt is one click away.
@@ -263,10 +275,63 @@ export function MessageBubble({
     }
   }
 
+  // An errored assistant turn carries the raw payload in `message.error`. When
+  // present we keep the partial answer that streamed AND show a compact error
+  // card beneath it (see the render below).
+  //
+  // Legacy fallback: messages persisted before the `error` field existed wrote
+  // the failure straight into the body as "Error: …". We only treat content as a
+  // legacy error when `message.error` is absent AND the turn carries NONE of the
+  // metadata a successful turn always sets (providerId / model / meta) — so a
+  // genuine answer that legitimately begins with "Error: " (it would carry route
+  // metadata) is never misclassified.
+  const looksLegacyError =
+    !isUser &&
+    !message.error &&
+    !message.providerId &&
+    !message.model &&
+    !message.meta &&
+    Boolean(message.content?.startsWith("Error: "));
+  const errorPayload =
+    message.error ??
+    (looksLegacyError ? message.content!.slice("Error:".length).trim() : undefined);
+  // The new path keeps a real partial answer in `content`; the legacy path stores
+  // the error text there. Only render partial body text when it's the former.
+  const hasPartialWithError = Boolean(message.error) && Boolean(message.content);
+  const errorLead = errorPayload
+    ? errorPayload.split("\n").slice(0, 2).join("\n").trim().slice(0, 240)
+    : "";
+
   return (
     <div className={`message-row${isUser ? " user" : ""}`}>
       <div className={`message-bubble${isUser ? " user" : ""}`}>
-        {message.content ? (
+        {!isUser && errorPayload ? (
+          <>
+            {/* Partial answer that streamed before the failure (new-path only —
+                the legacy path stores the error string itself in content). */}
+            {hasPartialWithError ? (
+              contentIsJson && structuredText ? (
+                <CodeBlock lang="json" text={structuredText} label="JSON output" />
+              ) : (
+                <Markdown content={bodyContent} />
+              )
+            ) : null}
+            <div
+              className="msg-error"
+              role="alert"
+              style={hasPartialWithError ? { marginTop: 8 } : undefined}
+            >
+              <div className="msg-error-head">
+                <span aria-hidden>⚠</span> Provider error
+              </div>
+              {errorLead ? <p className="msg-error-lead">{errorLead}</p> : null}
+              <details className="msg-error-details">
+                <summary>Show details</summary>
+                <pre>{errorPayload}</pre>
+              </details>
+            </div>
+          </>
+        ) : message.content ? (
           <>
             {isUser ? (
               <p className="message-paragraph" style={{ whiteSpace: "pre-wrap" }}>
@@ -280,9 +345,8 @@ export function MessageBubble({
             {isStreaming ? <span className="stream-caret" aria-hidden /> : null}
           </>
         ) : !isUser ? (
-          <span className="message-thinking">
-            <span className="thinking-dot" aria-hidden />
-            Thinking…
+          <span className="message-thinking" role="status" aria-live="polite">
+            <span className="thinking-shimmer">Thinking…</span>
           </span>
         ) : null}
         {hasArtifacts && onOpenArtifact ? (
@@ -347,7 +411,7 @@ export function MessageBubble({
                       maxHeight: 220,
                       width: "auto",
                       borderRadius: 8,
-                      border: "1px solid #232a36",
+                      border: "1px solid var(--c-border)",
                       objectFit: "cover",
                       display: "block",
                     }}
@@ -370,8 +434,8 @@ export function MessageBubble({
                     gap: 4,
                     fontSize: 11,
                     color: "var(--color-text-sub)",
-                    background: "rgba(255,255,255,0.05)",
-                    border: "1px solid #232a36",
+                    background: "var(--color-purple-faint)",
+                    border: "1px solid var(--c-border)",
                     borderRadius: 6,
                     padding: "2px 8px",
                   }}
@@ -396,14 +460,74 @@ export function MessageBubble({
               {copied ? "Copied" : "Copy"}
             </button>
             {onRegenerate ? (
-              <button
-                type="button"
-                className="message-action"
-                onClick={onRegenerate}
-              >
-                <Icon name="refresh" size={13} />
-                Regenerate
-              </button>
+              <div className="message-regen" ref={regenRef}>
+                <button
+                  type="button"
+                  className="message-action message-regen-main"
+                  onClick={() => onRegenerate()}
+                >
+                  <Icon name="refresh" size={13} />
+                  Regenerate
+                </button>
+                {regenerateProviders && regenerateProviders.length > 0 ? (
+                  <>
+                    <button
+                      type="button"
+                      className="message-action message-regen-chev"
+                      aria-haspopup="menu"
+                      aria-expanded={regenMenuOpen}
+                      aria-label="Regenerate with a different model"
+                      onClick={() => setRegenMenuOpen((v) => !v)}
+                    >
+                      <Icon name="chevron-down" size={12} />
+                    </button>
+                    {regenMenuOpen ? (
+                      <div className="message-regen-menu" role="menu">
+                        <div className="message-regen-head">Regenerate with</div>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="message-regen-opt"
+                          onClick={() => {
+                            setRegenMenuOpen(false);
+                            onRegenerate(null);
+                          }}
+                        >
+                          <span aria-hidden>⚡</span>
+                          <span className="message-regen-opt-label">Auto</span>
+                          {!message.providerId ? <Icon name="check" size={13} /> : null}
+                        </button>
+                        {regenerateProviders.map((pid) => {
+                          const p = PROVIDER_BY_ID[pid];
+                          return (
+                            <button
+                              key={pid}
+                              type="button"
+                              role="menuitem"
+                              className="message-regen-opt"
+                              onClick={() => {
+                                setRegenMenuOpen(false);
+                                onRegenerate(pid);
+                              }}
+                            >
+                              <span
+                                className="message-provider-dot"
+                                style={{ background: p?.color ?? "var(--color-text-muted)" }}
+                              />
+                              <span className="message-regen-opt-label">
+                                {p?.name ?? pid}
+                              </span>
+                              {message.providerId === pid ? (
+                                <Icon name="check" size={13} />
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
             ) : null}
             <button
               type="button"

@@ -150,11 +150,13 @@ $ zintus chat "Hello from Zintus"`}</Terminal>
             <div className="m-faq-item" style={cardItem}>
               <p style={cardLabel}>1. Install</p>
               <p style={{ marginTop: "0.4rem" }}>
-                One command installs the CLI globally via npm. Requires Node/npm;{" "}
+                There is no package-manager install yet — npm publish is coming soon. For now,
+                clone the repo and build the CLI from source with{" "}
                 <a href="https://bun.sh" style={{ color: "var(--marketing-accent-light)" }}>
                   Bun
                 </a>{" "}
-                1.2+ is recommended if you build from source.
+                1.2+ (see the terminal above): <code>bun install &amp;&amp; bun run --filter
+                zintus build</code>.
               </p>
             </div>
             <div className="m-faq-item" style={cardItem}>

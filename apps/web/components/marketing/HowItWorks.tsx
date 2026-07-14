@@ -1,5 +1,4 @@
-"use client";
-
+// Server Component: static three-step markup wrapped in <Reveal> client islands.
 import { Reveal } from "./Reveal";
 
 const STEPS = [

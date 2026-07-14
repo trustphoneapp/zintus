@@ -13,7 +13,7 @@ describe("sitemap", () => {
 
   it("includes every key public marketing route", () => {
     const paths = entries.map((e) => new URL(e.url).pathname);
-    for (const route of ["/", "/pricing", "/docs", "/developers", "/changelog", "/contact", "/privacy", "/terms", "/security", "/about"]) {
+    for (const route of ["/", "/pricing", "/docs", "/developers", "/changelog", "/contact", "/about"]) {
       const expected = route === "/" ? "/" : route;
       expect(paths).toContain(expected);
     }
@@ -22,6 +22,13 @@ describe("sitemap", () => {
   it("excludes the noindex /blog stub from the sitemap", () => {
     const paths = entries.map((e) => new URL(e.url).pathname);
     expect(paths).not.toContain("/blog");
+  });
+
+  it("excludes /privacy, /terms, and /security — all three carry robots noindex (DRAFT)", () => {
+    const paths = entries.map((e) => new URL(e.url).pathname);
+    for (const route of ["/privacy", "/terms", "/security"]) {
+      expect(paths).not.toContain(route);
+    }
   });
 
   it("has one entry per PUBLIC_ROUTE with absolute https URLs and priorities", () => {

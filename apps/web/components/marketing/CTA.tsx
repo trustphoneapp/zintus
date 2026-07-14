@@ -1,22 +1,20 @@
-"use client";
-
+// Server Component: static CTA markup wrapped in the <Reveal> client island.
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { Reveal } from "./Reveal";
 
 export function CTA() {
   return (
-    <section className="m-section">
+    <section className="m-section m-cv">
       <div className="m-shell">
         <Reveal>
-          <div className="gradient-border-card">
-            <div
-              className="gradient-border-inner"
-              style={{ textAlign: "center", padding: "3.5rem 2rem" }}
-            >
-              <p className="m-eyebrow" style={{ marginBottom: "1rem" }}>
-                Start today
-              </p>
+          <div
+            className="mk-card"
+            style={{ textAlign: "center", padding: "3.5rem 2rem" }}
+          >
+            <p className="m-eyebrow" style={{ marginBottom: "1rem" }}>
+              Start today
+            </p>
               <h2
                 style={{
                   fontSize: "clamp(1.8rem, 4vw, 2.8rem)",
@@ -53,7 +51,6 @@ export function CTA() {
                   See pricing
                 </Link>
               </div>
-            </div>
           </div>
         </Reveal>
       </div>

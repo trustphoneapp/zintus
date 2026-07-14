@@ -1,4 +1,16 @@
-"use client";
+// Server Component: static markup + a pure-CSS marquee (no JS ticker), so it
+// carries no client interactivity. Rendering it server-side keeps its markup
+// and the catalog-stats/providers data graph out of the client bundle.
+import { CATALOG_STATS, floorTo } from "@/data/catalog-stats";
+
+// Derived from data/providers.ts (via catalog-stats) so this never drifts from
+// Stats.tsx / Features.tsx. "Supported" = routable today, not the full
+// transparency catalog (which also lists ~35 not-yet-routable "coming soon"
+// entries).
+const ROUTABLE_PROVIDERS_ROUNDED = floorTo(CATALOG_STATS.routableProviders, 10);
+const ROUTABLE_MODELS_ROUNDED = floorTo(CATALOG_STATS.routableModels, 10);
+const FREE_TIER_PROVIDERS_ROUNDED = floorTo(CATALOG_STATS.freeTierRoutableProviders, 5);
+const AGGREGATOR_MODELS = CATALOG_STATS.aggregatorModels;
 
 const PROVIDERS_ROW1 = [
   { name: "Ultra-fast inference", badge: "1M tok/day", color: "#f59e0b" },
@@ -97,15 +109,18 @@ function MarqueeRow({
 
 export function ProviderGrid() {
   return (
-    <section className="m-section" id="providers" style={{ overflow: "hidden" }}>
+    <section className="m-section m-cv" id="providers" style={{ overflow: "hidden" }}>
       <div className="m-shell">
         <div style={{ textAlign: "center", marginBottom: "2.5rem" }}>
           <p className="m-eyebrow">Supported providers</p>
-          <h2 className="m-title">20+ providers. 100+ models. Smarter every month.</h2>
+          <h2 className="m-title">
+            {ROUTABLE_PROVIDERS_ROUNDED}+ providers. {ROUTABLE_MODELS_ROUNDED}+ models. Smarter
+            every month.
+          </h2>
           <p className="m-subtitle">
-            Free tier routes across 12+ providers with real-time quota tracking. Add a
-            model-aggregator key to reach 300+ models instantly. Managed tiers use
-            Zintus-provided keys across our curated routing roster.
+            Free tier routes across {FREE_TIER_PROVIDERS_ROUNDED}+ providers with real-time quota
+            tracking. Add a model-aggregator key to reach {AGGREGATOR_MODELS}+ models instantly.
+            Managed tiers use Zintus-provided keys across our curated routing roster.
           </p>
         </div>
       </div>

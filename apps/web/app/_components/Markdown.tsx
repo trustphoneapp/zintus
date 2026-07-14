@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Icon } from "./Icons";
 
 /**
  * Dependency-free Markdown renderer for web chat answers — a verbatim port of
@@ -144,7 +145,13 @@ export function CodeBlock({
     <div className="md-code-block">
       <div className="md-code-head">
         <span className="md-code-lang">{label ?? (lang || "code")}</span>
-        <button type="button" className="md-code-copy" onClick={() => void copy()}>
+        <button
+          type="button"
+          className={`md-code-copy${copied ? " is-copied" : ""}`}
+          onClick={() => void copy()}
+          aria-label={copied ? "Copied" : "Copy code"}
+        >
+          <Icon name={copied ? "check" : "copy"} size={12} />
           {copied ? "Copied" : "Copy"}
         </button>
       </div>

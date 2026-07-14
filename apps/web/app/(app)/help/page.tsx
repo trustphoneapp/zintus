@@ -304,7 +304,7 @@ export default function HelpPage() {
               borderRadius: 9,
               border: "none",
               background: "var(--c-accent)",
-              color: "#fff",
+              color: "var(--c-accent-contrast)",
               fontSize: 13,
               fontWeight: 600,
               textDecoration: "none",

@@ -59,7 +59,13 @@ export default function TerminalPage() {
   }, [hydrate]);
 
   useEffect(() => {
-    setMcpCount(loadMcpServers().length);
+    let cancelled = false;
+    void loadMcpServers().then((servers) => {
+      if (!cancelled) setMcpCount(servers.length);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {

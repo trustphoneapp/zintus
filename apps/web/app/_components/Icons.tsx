@@ -26,6 +26,7 @@ type IconName =
   | "mic"
   | "image"
   | "plug"
+  | "pin"
   | "database";
 
 const paths: Record<IconName, ReactNode> = {
@@ -99,6 +100,12 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+  pin: (
+    <>
+      <line x1="12" y1="17" x2="12" y2="22" />
+      <path d="M9 2h6l-1 7 3 3v2H7v-2l3-3-1-7z" />
+    </>
+  ),
   "chevron-down": <polyline points="6 9 12 15 18 9" />,
   "more-horizontal": (
     <>
