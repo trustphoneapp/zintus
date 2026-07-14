@@ -347,13 +347,14 @@ export function ProviderPicker() {
                     {m.planCost}
                   </span>
                 ) : null;
-                // Tier-gated (locked) rows are an Upgrade link, never pinnable.
+                // Tier-gated (locked) rows are an Upgrade link, never pinnable —
+                // still get a responsive (if quieter) hover since they navigate.
                 if (m.locked) {
                   return (
                     <Link
                       key={m.id}
                       href="/pricing"
-                      className="model-pick-row model-pick-row-managed"
+                      className="model-pick-row model-pick-row-managed-locked"
                       onClick={() => setOpen(false)}
                       aria-disabled
                     >
@@ -366,12 +367,14 @@ export function ProviderPicker() {
                     </Link>
                   );
                 }
-                // Reachable rows pin the managed model (routes via the relay).
+                // Reachable rows pin the managed model (routes via the relay) —
+                // same hover/active/focus treatment as the BYOK rows above, now
+                // that they're selectable (MANAGED_ROUTING_ON_WEB).
                 return (
                   <button
                     key={m.id}
                     type="button"
-                    className="model-pick-row model-pick-row-managed"
+                    className="model-pick-row"
                     onClick={() => pickManaged(m)}
                     aria-pressed={active}
                   >

@@ -314,6 +314,56 @@ code {
   font-size: 0.92em;
 }
 
+/* ── Text selection: UI chrome opts out, content opts in ────────────────────
+   Bug: click-drag / Cmd+A inside the chat selected the whole region as one
+   block — sidebar, header, composer buttons, toolbars, kbd hints all
+   highlighted along with the actual message text. `user-select` is inherited,
+   so each chrome landmark below is switched off once and its buttons/labels
+   inherit; nothing under `.message-bubble` (message text, code blocks, error
+   <pre> payloads) or the receipt/details VALUES is touched, so that stays
+   selectable and copyable. Form controls (inputs/textareas) are always
+   exempt from `user-select` regardless of ancestor, so the composer textarea
+   and the sidebar/thread-rename inputs need no override. */
+
+/* Chrome landmarks — sidebar, chat header, banners/strip triggers, composer
+   action row (incl. the model pill + its dropdown, kbd hint row, pinned-
+   provider notice), message action toolbars, the scroll-to-bottom pill, and
+   the code-block header (language badge + copy button, NOT the code itself). */
+.app-sidebar,
+.chat-header,
+.chat-local-banner,
+.transparency-summary,
+.pinned-provider-notice,
+.chat-composer-actions,
+.chat-composer-hint,
+.message-footer,
+.chat-jump,
+.md-code-head,
+.artifact-affordance {
+  user-select: none;
+}
+
+/* Receipt/details grids stay selectable (users may copy model ids, token
+   counts, latency) — only the label column ("Provider", "Model", …) opts out. */
+.message-details-grid .k,
+.transparency-details dt {
+  user-select: none;
+}
+
+/* Marketing chrome — nav links and buttons, not copy/body text. */
+.mk-btn,
+.m-nav-links a {
+  user-select: none;
+}
+
+/* Deliberate selection styling (all four theme modes share these tokens via
+   their .dark/.obsidian/.graphite/.light class on <html>) instead of the
+   browser's default grey. */
+::selection {
+  background: var(--c-accent-mid);
+  color: inherit;
+}
+
 .app-root {
   /* Dynamic viewport height — accounts for the mobile URL bar so the app shell
      fills exactly the VISIBLE viewport and never forces a window scrollbar
@@ -5925,6 +5975,14 @@ select:focus-visible {
 .model-pick-row:hover {
   background: var(--color-elevated);
 }
+/* Keyboard focus ring — matches .composer-picker-option's ring so every
+   pickable row in the app (BYOK models, Auto, selectable managed-membership
+   rows) reads consistently. Mouse clicks don't trigger :focus-visible. */
+.model-pick-auto:focus-visible,
+.model-pick-row:focus-visible {
+  outline: none;
+  box-shadow: var(--c-focus);
+}
 .model-pick-auto.active {
   color: var(--color-text);
 }
@@ -6004,13 +6062,15 @@ select:focus-visible {
   font-weight: 600;
   flex-shrink: 0;
 }
-/* Managed model rows: shown for parity, but not pinnable on web yet — render
-   static (no hover-as-button, default cursor) so they never imply a dead send. */
-.model-pick-row-managed {
-  cursor: default;
-}
-.model-pick-row-managed:hover {
-  background: none;
+/* Locked "Upgrade" managed rows: still a real navigation (aria-disabled is
+   informational, not blocking — clicking sends you to /pricing), so they keep
+   the base .model-pick-row pointer cursor + focus ring but get a quieter,
+   accent-tinted hover (composer-picker-option's faint wash) instead of the
+   full elevated fill selectable rows use — distinct from a pinnable row,
+   never dead. Selectable managed rows (MANAGED_ROUTING_ON_WEB) render as
+   plain .model-pick-row now and pick up that full hover/active/focus set. */
+.model-pick-row-managed-locked:hover {
+  background: var(--color-purple-faint);
 }
 .model-pick-plan {
   font-family: var(--font-mono);
