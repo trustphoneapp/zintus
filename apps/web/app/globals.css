@@ -5419,14 +5419,14 @@ select:focus-visible {
 .model-pill {
   display: flex;
   align-items: center;
-  gap: 9px;
-  height: 36px;
-  padding: 0 11px;
+  gap: 6px;
+  height: 32px;
+  padding: 4px 10px;
   border-radius: 9px;
   border: 0.5px solid var(--c-border);
   background: var(--color-elevated);
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   flex-shrink: 0;
@@ -5436,8 +5436,8 @@ select:focus-visible {
   border-color: var(--color-border-bright, var(--c-border));
 }
 .model-pill-dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -5448,16 +5448,17 @@ select:focus-visible {
 .model-pill-badge {
   display: inline-flex;
   align-items: center;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 999px;
   background: var(--c-accent-light);
   color: var(--c-accent);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
   flex-shrink: 0;
 }
 .model-pill > svg {
   color: var(--color-text-muted);
+  flex-shrink: 0;
 }
 
 .model-pick-menu {

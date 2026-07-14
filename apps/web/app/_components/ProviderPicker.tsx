@@ -197,6 +197,13 @@ export function ProviderPicker() {
     );
   }
 
+  // The routing badge ("Auto") is redundant when the name is already "Auto"
+  // (no pinned/default model resolved yet) — show only one "Auto" in that case.
+  const pillName = shown ? shown.id : "Auto";
+  const rawBadge = !pinned ? "Auto" : null;
+  const pillBadge =
+    rawBadge && rawBadge.toLowerCase() !== pillName.toLowerCase() ? rawBadge : null;
+
   return (
     <div className="composer-picker" ref={ref}>
       <button
@@ -211,9 +218,9 @@ export function ProviderPicker() {
           className="model-pill-dot"
           style={{ background: shown ? dotColor(shown.owned_by) : "var(--color-text-muted)" }}
         />
-        <span className="model-pill-name">{shown ? shown.id : "Auto"}</span>
-        {!pinned ? <span className="model-pill-badge">Auto</span> : null}
-        <Icon name="chevron-down" size={15} />
+        <span className="model-pill-name">{pillName}</span>
+        {pillBadge ? <span className="model-pill-badge">{pillBadge}</span> : null}
+        <Icon name="chevron-down" size={13} />
       </button>
 
       {open ? (
