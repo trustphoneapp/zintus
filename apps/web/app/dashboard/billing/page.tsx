@@ -53,49 +53,47 @@ function Skeleton({ h = 20, w = "100%" }: { h?: number; w?: string }) {
         height: h,
         width: w,
         borderRadius: 6,
-        background: "var(--color-purple-faint)",
+        background: "var(--marketing-surface-2)",
         animation: "pulse 1.5s ease-in-out infinite",
       }}
     />
   );
 }
 
-/* ─── card wrapper ─────────────────────────────────────────── */
+/* ─── presentational primitives (same machined-card recipe as
+   /dashboard — .mk-card supplies bg/border/inset-highlight/shadow,
+   .dash-card supplies padding/layout, .dash-eyebrow the mono label). ─── */
 function Card({
   title,
+  action,
   children,
 }: {
-  title: string;
+  title?: string;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <div
-      style={{
-        background: "#0d0820",
-        border: "1px solid var(--color-border)",
-        borderRadius: 12,
-        padding: "1.5rem",
-        display: "flex",
-        flexDirection: "column",
-        gap: "1rem",
-      }}
-    >
-      <h2
-        style={{
-          margin: 0,
-          fontSize: "0.85rem",
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-          color: "var(--color-text-sub)",
-        }}
-      >
-        {title}
-      </h2>
+    <div className="mk-card dash-card">
+      {(title || action) && (
+        <div className="dash-card-head">
+          {title && <h2 className="dash-eyebrow">{title}</h2>}
+          {action}
+        </div>
+      )}
       {children}
     </div>
   );
 }
+
+// Mono, muted eyebrow for inline stat labels (quiet-grey rule — no accent).
+const labelStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: "0.66rem",
+  fontFamily: "var(--font-mono)",
+  color: "var(--marketing-muted)",
+  textTransform: "uppercase",
+  letterSpacing: "0.1em",
+};
 
 /* ─── main page ────────────────────────────────────────────── */
 export default function BillingPage() {
@@ -141,349 +139,318 @@ export default function BillingPage() {
 
   const historyMax = history.reduce((m, d) => Math.max(m, d.tokens), 1);
 
-  const containerStyle: React.CSSProperties = {
-    maxWidth: 760,
-    margin: "0 auto",
-    padding: "2rem 1.5rem",
-    display: "flex",
-    flexDirection: "column",
-    gap: "1.5rem",
-    color: "#f1f5f9",
-    fontFamily: "inherit",
-  };
-
   return (
-    <div style={containerStyle}>
-      <div>
-        <h1 style={{ margin: 0, fontSize: "1.4rem", fontWeight: 800 }}>
-          Billing &amp; Usage
-        </h1>
-        <p style={{ margin: "0.25rem 0 0", color: "var(--color-text-sub)", fontSize: "0.9rem" }}>
-          Manage your plan, track usage, and share your referral link.
-        </p>
-      </div>
-
-      {/* Current plan */}
-      <Card title="Current plan">
-        {loading ? (
-          <Skeleton h={24} />
-        ) : billing ? (
-          <div
+    <div className="dashboard-container">
+      <div className="dashboard-body">
+        <div>
+          <h1
             style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              flexWrap: "wrap",
-              gap: "1rem",
+              margin: 0,
+              fontFamily: "var(--font-display)",
+              fontSize: "1.4rem",
+              fontWeight: 800,
+              color: "var(--marketing-text)",
+              letterSpacing: "-0.02em",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-              <span style={{ fontSize: "1.3rem", fontWeight: 800 }}>
-                {TIER_LABEL[billing.tier]}
-              </span>
-              <span
-                style={{
-                  fontSize: "0.7rem",
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.08em",
-                  padding: "0.2rem 0.6rem",
-                  borderRadius: 99,
-                  background: `${STATUS_COLOR[billing.status]}22`,
-                  color: STATUS_COLOR[billing.status],
-                  border: `1px solid ${STATUS_COLOR[billing.status]}44`,
-                }}
-              >
-                {billing.status.replace("_", " ")}
-              </span>
-            </div>
-            <div style={{ display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
-              {billing.tier !== "ultra" && (
-                <Link
-                  href="/pricing"
-                  style={{
-                    padding: "0.45rem 1rem",
-                    borderRadius: 8,
-                    border: "1px solid var(--color-purple)",
-                    color: "var(--color-purple-light)",
-                    fontSize: "0.85rem",
-                    textDecoration: "none",
-                    fontWeight: 600,
-                  }}
-                >
-                  Upgrade
-                </Link>
-              )}
-              {billing.tier !== "free" && (
-                <button
-                  onClick={() => void handlePortal()}
-                  disabled={portalLoading}
-                  style={{
-                    padding: "0.45rem 1rem",
-                    borderRadius: 8,
-                    border: "1px solid var(--color-border)",
-                    background: "transparent",
-                    color: "#f1f5f9",
-                    fontSize: "0.85rem",
-                    cursor: portalLoading ? "wait" : "pointer",
-                    fontWeight: 600,
-                  }}
-                >
-                  {portalLoading ? "Loading…" : "Manage subscription"}
-                </button>
-              )}
-            </div>
-          </div>
-        ) : (
-          <p style={{ color: "var(--color-text-sub)", margin: 0 }}>Unable to load plan data.</p>
-        )}
-      </Card>
+            Billing &amp; Usage
+          </h1>
+          <p style={{ margin: "0.25rem 0 0", color: "var(--marketing-muted)", fontSize: "0.9rem" }}>
+            Manage your plan, track usage, and share your referral link.
+          </p>
+        </div>
 
-      {/* Token usage */}
-      <Card title="Token usage">
-        {loading ? (
-          <>
-            <Skeleton h={16} />
-            <Skeleton h={10} />
-          </>
-        ) : usage ? (
-          billing?.tier === "free" ? (
-            <p style={{ margin: 0, color: "var(--color-text-sub)", fontSize: "0.9rem" }}>
-              Unlimited (BYOK — you pay providers directly)
-            </p>
+        {/* Current plan */}
+        <Card title="Plan">
+          {loading ? (
+            <Skeleton h={24} />
+          ) : billing ? (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.7rem", flexWrap: "wrap" }}>
+                {/* Mirror the desktop AppShell vocabulary: "Plan: {Tier}",
+                    free tier tagged BYOK. Capitalized from billing.tier. */}
+                <span style={{ fontSize: "1.4rem", fontWeight: 800, color: "var(--marketing-text)" }}>
+                  Plan: {TIER_LABEL[billing.tier]}
+                  {billing.tier === "free" ? " (BYOK)" : ""}
+                </span>
+                <span
+                  style={{
+                    fontSize: "0.68rem",
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.07em",
+                    padding: "0.2rem 0.55rem",
+                    borderRadius: 99,
+                    background: `${STATUS_COLOR[billing.status]}22`,
+                    color: STATUS_COLOR[billing.status],
+                    border: `1px solid ${STATUS_COLOR[billing.status]}44`,
+                  }}
+                >
+                  {billing.status.replace("_", " ")}
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                {billing.tier !== "ultra" && (
+                  <Link href="/pricing" className="session-btn session-btn--primary" style={{ textDecoration: "none" }}>
+                    Upgrade
+                  </Link>
+                )}
+                {/* Billing-portal gating: only paid tiers can manage a subscription. */}
+                {billing.tier !== "free" && (
+                  <button
+                    onClick={() => void handlePortal()}
+                    disabled={portalLoading}
+                    className="session-btn"
+                  >
+                    {portalLoading ? "Loading…" : "Manage subscription"}
+                  </button>
+                )}
+              </div>
+            </>
           ) : (
+            <p style={{ margin: 0, color: "var(--marketing-muted)", fontSize: "0.9rem" }}>
+              Plan data unavailable.
+            </p>
+          )}
+        </Card>
+
+        {/* Token usage */}
+        <Card
+          title="Usage & quota"
+          action={
+            !loading && usage?.period_end ? (
+              <span style={{ fontSize: "0.78rem", color: "var(--marketing-muted)" }}>
+                Resets {fmtDate(usage.period_end)}
+              </span>
+            ) : undefined
+          }
+        >
+          {loading ? (
+            <>
+              <Skeleton h={16} />
+              <Skeleton h={10} />
+            </>
+          ) : usage ? (
+            billing?.tier === "free" ? (
+              <p style={{ margin: 0, color: "var(--marketing-muted)", fontSize: "0.9rem" }}>
+                Unlimited (BYOK — you pay providers directly)
+              </p>
+            ) : (
+              <>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontSize: "0.85rem",
+                    color: "var(--marketing-muted)",
+                  }}
+                >
+                  <span>
+                    <span style={{ color: "var(--marketing-text)", fontWeight: 700 }}>
+                      {fmt(usage.tokens_used)}
+                    </span>
+                    {" / "}
+                    {usage.tokens_limit ? fmt(usage.tokens_limit) : "∞"} tokens
+                  </span>
+                  {usage.percent_used !== null && (
+                    <span>{usage.percent_used.toFixed(0)}%</span>
+                  )}
+                </div>
+                {/* Progress bar */}
+                <div
+                  style={{
+                    height: 10,
+                    borderRadius: 99,
+                    background: "var(--marketing-surface-2)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      borderRadius: 99,
+                      width: `${Math.min(usage.percent_used ?? 0, 100)}%`,
+                      background:
+                        (usage.percent_used ?? 0) >= 80
+                          ? "#f59e0b"
+                          : "var(--marketing-accent)",
+                      transition: "width 0.4s ease",
+                    }}
+                  />
+                </div>
+                {(usage.percent_used ?? 0) >= 80 && (
+                  <p
+                    style={{
+                      margin: 0,
+                      fontSize: "0.82rem",
+                      color: "#f59e0b",
+                      fontWeight: 600,
+                    }}
+                  >
+                    Warning: you have used {usage.percent_used?.toFixed(0)}% of your monthly
+                    quota. Consider upgrading to avoid disruption.
+                  </p>
+                )}
+              </>
+            )
+          ) : (
+            <p style={{ margin: 0, color: "var(--marketing-muted)", fontSize: "0.9rem" }}>
+              Unable to load usage data.
+            </p>
+          )}
+        </Card>
+
+        {/* Referral (honest, gated) */}
+        <Card title="Referrals">
+          {loading ? (
+            <>
+              <Skeleton h={16} />
+              <Skeleton h={14} w="60%" />
+            </>
+          ) : billing?.referral_code ? (
             <>
               <div
                 style={{
                   display: "flex",
-                  justifyContent: "space-between",
-                  fontSize: "0.85rem",
-                  color: "var(--color-text-sub)",
+                  alignItems: "center",
+                  gap: "0.75rem",
+                  flexWrap: "wrap",
                 }}
               >
-                <span>
-                  <span style={{ color: "#f1f5f9", fontWeight: 700 }}>
-                    {fmt(usage.tokens_used)}
-                  </span>
-                  {" / "}
-                  {usage.tokens_limit ? fmt(usage.tokens_limit) : "∞"} tokens
-                </span>
-                {usage.percent_used !== null && (
-                  <span>{usage.percent_used.toFixed(0)}%</span>
-                )}
+                <code
+                  style={{
+                    background: "var(--marketing-surface-2)",
+                    padding: "0.4rem 0.75rem",
+                    borderRadius: 8,
+                    fontSize: "0.85rem",
+                    color: "var(--marketing-accent)",
+                    flex: 1,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  https://www.zintus.ai/r/{billing.referral_code}
+                </code>
+                <button
+                  onClick={handleCopy}
+                  className="session-btn"
+                  style={{ color: copied ? "#22c55e" : undefined }}
+                >
+                  {copied ? "Copied!" : "Copy link"}
+                </button>
               </div>
-              {/* Progress bar */}
-              <div
-                style={{
-                  height: 10,
-                  borderRadius: 99,
-                  background: "var(--color-purple-faint)",
-                  overflow: "hidden",
-                }}
-              >
+              {referral && (
                 <div
                   style={{
-                    height: "100%",
-                    borderRadius: 99,
-                    width: `${Math.min(usage.percent_used ?? 0, 100)}%`,
-                    background:
-                      (usage.percent_used ?? 0) >= 80
-                        ? "#f59e0b"
-                        : "var(--color-purple)",
-                    transition: "width 0.4s ease",
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+                    gap: "0.6rem",
                   }}
-                />
-              </div>
-              {(usage.percent_used ?? 0) >= 80 && (
+                >
+                  {/* The relay's SUM(CASE …) aggregate returns SQL NULL (not 0)
+                      when a user has zero referral rows, so confirmed/pending
+                      arrive as null. Coerce to 0 at render. */}
+                  {[
+                    { label: "Total referrals", value: String(referral.total ?? 0) },
+                    { label: "Confirmed", value: String(referral.confirmed ?? 0) },
+                    { label: "Pending", value: String(referral.pending ?? 0) },
+                    { label: "Earned", value: formatReferralEarned(referral.earned_cents ?? 0) },
+                  ].map(({ label, value }) => (
+                    <div
+                      key={label}
+                      style={{
+                        background: "var(--marketing-surface-2)",
+                        borderRadius: 10,
+                        padding: "0.75rem 1rem",
+                      }}
+                    >
+                      <p style={labelStyle}>{label}</p>
+                      <p
+                        style={{
+                          margin: "0.25rem 0 0",
+                          fontSize: "1.15rem",
+                          fontWeight: 800,
+                          color: "var(--marketing-text)",
+                        }}
+                      >
+                        {value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {referral && !REFERRAL_PAYOUTS_LIVE && (
                 <p
                   style={{
                     margin: 0,
-                    fontSize: "0.82rem",
-                    color: "#f59e0b",
-                    fontWeight: 600,
+                    fontSize: "0.78rem",
+                    color: "var(--marketing-muted)",
                   }}
                 >
-                  Warning: you have used {usage.percent_used?.toFixed(0)}% of your monthly
-                  quota. Consider upgrading to avoid disruption.
-                </p>
-              )}
-              {usage.period_end && (
-                <p style={{ margin: 0, fontSize: "0.82rem", color: "var(--color-text-sub)" }}>
-                  Resets on {fmtDate(usage.period_end)}
+                  Referral payouts are coming soon. Commissions accrue once managed-key
+                  billing is live, but can&apos;t be withdrawn yet.
                 </p>
               )}
             </>
-          )
-        ) : (
-          <p style={{ color: "var(--color-text-sub)", margin: 0 }}>Unable to load usage data.</p>
-        )}
-      </Card>
+          ) : (
+            <p style={{ margin: 0, color: "var(--marketing-muted)", fontSize: "0.9rem" }}>
+              No referral data available.
+            </p>
+          )}
+        </Card>
 
-      {/* Referral */}
-      <Card title="Referral program">
-        {loading ? (
-          <>
-            <Skeleton h={16} />
-            <Skeleton h={14} w="60%" />
-          </>
-        ) : billing?.referral_code ? (
-          <>
+        {/* Usage history */}
+        <Card title="Usage history · last 30 days">
+          {loading ? (
+            <div style={{ display: "flex", gap: 4, alignItems: "flex-end", height: 80 }}>
+              {Array.from({ length: 15 }).map((_, i) => (
+                <Skeleton key={i} h={((i * 17 + 13) % 60) + 10} w="100%" />
+              ))}
+            </div>
+          ) : history.length === 0 ? (
+            <p style={{ margin: 0, color: "var(--marketing-muted)", fontSize: "0.9rem" }}>
+              No usage data yet.
+            </p>
+          ) : (
             <div
               style={{
                 display: "flex",
-                alignItems: "center",
-                gap: "0.75rem",
-                flexWrap: "wrap",
+                gap: 3,
+                alignItems: "flex-end",
+                height: 80,
               }}
             >
-              <code
-                style={{
-                  background: "var(--color-purple-faint)",
-                  padding: "0.4rem 0.75rem",
-                  borderRadius: 8,
-                  fontSize: "0.85rem",
-                  color: "var(--color-purple-light)",
-                  flex: 1,
-                  minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                https://www.zintus.ai/r/{billing.referral_code}
-              </code>
-              <button
-                onClick={handleCopy}
-                style={{
-                  padding: "0.4rem 0.9rem",
-                  borderRadius: 8,
-                  border: "1px solid var(--color-border)",
-                  background: copied ? "var(--color-purple-faint)" : "transparent",
-                  color: copied ? "#22c55e" : "#f1f5f9",
-                  fontSize: "0.82rem",
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                  fontWeight: 600,
-                  transition: "color 0.2s",
-                }}
-              >
-                {copied ? "Copied!" : "Copy link"}
-              </button>
-            </div>
-            {referral && (
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
-                  gap: "0.75rem",
-                }}
-              >
-                {[
-                  { label: "Total referrals", value: referral.total },
-                  { label: "Confirmed", value: referral.confirmed },
-                  { label: "Pending", value: referral.pending },
-                  { label: "Earned", value: formatReferralEarned(referral.earned_cents) },
-                ].map(({ label, value }) => (
+              {history.map((d) => {
+                const pct = historyMax > 0 ? (d.tokens / historyMax) * 100 : 0;
+                return (
                   <div
-                    key={label}
+                    key={d.day}
+                    title={`${d.day}: ${fmt(d.tokens)} tokens`}
                     style={{
-                      background: "var(--color-purple-faint)",
-                      borderRadius: 10,
-                      padding: "0.75rem 1rem",
+                      flex: 1,
+                      minWidth: 4,
+                      height: `${Math.max(pct, 2)}%`,
+                      background: "var(--marketing-accent)",
+                      borderRadius: "3px 3px 0 0",
+                      opacity: 0.8,
+                      cursor: "default",
+                      transition: "opacity 0.15s",
                     }}
-                  >
-                    <p
-                      style={{
-                        margin: 0,
-                        fontSize: "0.72rem",
-                        color: "var(--color-text-sub)",
-                        textTransform: "uppercase",
-                        letterSpacing: "0.06em",
-                      }}
-                    >
-                      {label}
-                    </p>
-                    <p
-                      style={{
-                        margin: "0.25rem 0 0",
-                        fontSize: "1.2rem",
-                        fontWeight: 800,
-                        color: "#f1f5f9",
-                      }}
-                    >
-                      {value}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
-            {referral && !REFERRAL_PAYOUTS_LIVE && (
-              <p
-                style={{
-                  margin: "0.75rem 0 0",
-                  fontSize: "0.78rem",
-                  color: "var(--color-text-sub)",
-                }}
-              >
-                Referral payouts are coming soon. Commissions accrue once managed-key
-                billing is live, but can&apos;t be withdrawn yet.
-              </p>
-            )}
-          </>
-        ) : (
-          <p style={{ color: "var(--color-text-sub)", margin: 0 }}>No referral data available.</p>
-        )}
-      </Card>
-
-      {/* Usage history */}
-      <Card title="Usage history (last 30 days)">
-        {loading ? (
-          <div style={{ display: "flex", gap: 4, alignItems: "flex-end", height: 80 }}>
-            {Array.from({ length: 15 }).map((_, i) => (
-              <Skeleton key={i} h={((i * 17 + 13) % 60) + 10} w="100%" />
-            ))}
-          </div>
-        ) : history.length === 0 ? (
-          <p style={{ color: "var(--color-text-sub)", margin: 0, fontSize: "0.9rem" }}>
-            No usage data yet.
-          </p>
-        ) : (
-          <div
-            style={{
-              display: "flex",
-              gap: 3,
-              alignItems: "flex-end",
-              height: 80,
-            }}
-          >
-            {history.map((d) => {
-              const pct = historyMax > 0 ? (d.tokens / historyMax) * 100 : 0;
-              return (
-                <div
-                  key={d.day}
-                  title={`${d.day}: ${fmt(d.tokens)} tokens`}
-                  style={{
-                    flex: 1,
-                    minWidth: 4,
-                    height: `${Math.max(pct, 2)}%`,
-                    background: "var(--color-purple)",
-                    borderRadius: "3px 3px 0 0",
-                    opacity: 0.8,
-                    cursor: "default",
-                    transition: "opacity 0.15s",
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLDivElement).style.opacity = "1";
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLDivElement).style.opacity = "0.8";
-                  }}
-                />
-              );
-            })}
-          </div>
-        )}
-      </Card>
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLDivElement).style.opacity = "1";
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLDivElement).style.opacity = "0.8";
+                    }}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </div>
 
       <style>{`
         @keyframes pulse {

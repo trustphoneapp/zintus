@@ -1,6 +1,13 @@
 import { Navbar } from "@/components/marketing/Navbar";
 import { Footer } from "@/components/marketing/Footer";
 import { PricingTiers } from "@/components/marketing/PricingTiers";
+import {
+  CLASS_ECONOMICS,
+  RATE_TIERS,
+  TIER_ORDER,
+  planPer1k,
+  type ModelClass,
+} from "@/lib/economics";
 
 // Server Component. The only interactive surface on this page — the tier grid's
 // Stripe checkout buttons (shared busy/error state + sign-in resume) — lives in
@@ -50,35 +57,18 @@ const COMPARISON: Array<{
 ];
 
 /* ─── per-model plan-token rates ─────────────────────────── */
-// MUST mirror workers/relay/src/tiers.ts (CLASS_BURN + TIERS): burn = credits
-// per 1K model tokens; a plan token displays as allowance/(credits×1000) of a
-// credit. Rate shown = plan tokens debited per 1K model tokens — the exact
-// number the app's receipts use. Relay tests pin the server side; if tiers.ts
-// changes, regenerate these rows. Only classes with LIVE managed models are
-// listed (no aspirational rows for unservable models).
-const RATE_TIERS = [
-  { id: "starter", label: "Starter", allowance: 1_000_000, credits: 15_000 },
-  { id: "pro", label: "Pro", allowance: 10_000_000, credits: 35_000 },
-  { id: "max", label: "Max", allowance: 50_000_000, credits: 60_000 },
-  { id: "ultra", label: "Ultra", allowance: 200_000_000, credits: 120_000 },
-] as const;
-
-const RATE_CLASSES = [
-  { label: "Fast models", examples: "Llama 8B, DeepSeek Flash", burn: 1, minTier: "starter" },
-  { label: "Everyday models", examples: "GPT-4o mini", burn: 2, minTier: "starter" },
-  { label: "Advanced models", examples: "Llama 70B, Kimi K2", burn: 5, minTier: "pro" },
-  // Live frontier-class model (workers/relay/src/managed.ts: zintus/grok-4.3,
-  // class 'frontier'). TIER_CLASS_ACCESS gates 'frontier' at Max+ — Starter/Pro
-  // show "Upgrade" for this row.
-  { label: "Frontier models", examples: "Grok 4.3", burn: 15, minTier: "max" },
-] as const;
-
-const TIER_ORDER = ["starter", "pro", "max", "ultra"] as const;
-
-/** Plan tokens debited per 1K model tokens for a class on a tier. */
-function planPer1k(burn: number, tier: (typeof RATE_TIERS)[number]): number {
-  return Math.round((burn * 1000 * tier.allowance) / (tier.credits * 1000));
-}
+// Rates + tiers + the planPer1k math live in lib/economics.ts (the single
+// client-side mirror of workers/relay/src/tiers.ts). This table only names the
+// classes that have LIVE managed models and their example models; burn rate and
+// min-tier gating come from CLASS_ECONOMICS so no number is hand-copied twice.
+const RATE_CLASSES: Array<{ label: string; examples: string; cls: ModelClass }> = [
+  { label: "Fast models", examples: "Llama 8B, DeepSeek Flash", cls: "cheap" },
+  { label: "Everyday models", examples: "GPT-4o mini", cls: "mid" },
+  { label: "Advanced models", examples: "Llama 70B, Kimi K2", cls: "premium" },
+  // Live frontier-class model (workers/relay/src/managed.ts: zintus/grok-4.3).
+  // CLASS_ECONOMICS gates 'frontier' at Max+ — Starter/Pro show "Upgrade".
+  { label: "Frontier models", examples: "Grok 4.3", cls: "frontier" },
+];
 
 /* ─── referral rows ──────────────────────────────────────── */
 // MUST mirror workers/relay/src/tiers.ts REFERRAL_RULES / REFERRAL_RATE (20%)
@@ -186,17 +176,19 @@ export default function PricingPage() {
                 </tr>
               </thead>
               <tbody>
-                {RATE_CLASSES.map((cls) => (
-                  <tr key={cls.label} style={{ borderBottom: "1px solid var(--marketing-accent-dim)" }}>
+                {RATE_CLASSES.map((row) => {
+                  const { burn, minTier } = CLASS_ECONOMICS[row.cls];
+                  return (
+                  <tr key={row.label} style={{ borderBottom: "1px solid var(--marketing-accent-dim)" }}>
                     <td style={{ padding: "0.6rem 0.75rem" }}>
-                      <span style={{ fontWeight: 600, color: "var(--marketing-text)" }}>{cls.label}</span>
+                      <span style={{ fontWeight: 600, color: "var(--marketing-text)" }}>{row.label}</span>
                       <span style={{ color: "var(--marketing-muted)", display: "block", fontSize: "0.8rem" }}>
-                        {cls.examples}
+                        {row.examples}
                       </span>
                     </td>
                     {RATE_TIERS.map((t) => {
                       const locked =
-                        TIER_ORDER.indexOf(t.id) < TIER_ORDER.indexOf(cls.minTier);
+                        TIER_ORDER.indexOf(t.id) < TIER_ORDER.indexOf(minTier as (typeof TIER_ORDER)[number]);
                       return (
                         <td
                           key={t.id}
@@ -207,12 +199,13 @@ export default function PricingPage() {
                             fontVariantNumeric: "tabular-nums",
                           }}
                         >
-                          {locked ? "Upgrade" : `−${planPer1k(cls.burn, t).toLocaleString()} / 1K`}
+                          {locked ? "Upgrade" : `−${planPer1k(burn, t).toLocaleString()} / 1K`}
                         </td>
                       );
                     })}
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>

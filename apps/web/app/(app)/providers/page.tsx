@@ -6,6 +6,7 @@ import { QuotaBar } from "@/app/_components/QuotaBar";
 import { Icon } from "@/app/_components/Icons";
 import { RouteAdvisor } from "./RouteAdvisor";
 import { KeyManager } from "./KeyManager";
+import { MembershipSection } from "./MembershipSection";
 import {
   deriveProviderStatus,
   resolveProviderStatusInput,
@@ -288,6 +289,11 @@ function ProvidersPageInner() {
             connected — pricing and limits are yours.
           </p>
         </div>
+
+        {/* Membership — managed routing (no keys) when signed in; a quiet
+            sign-in/upgrade upsell otherwise. Sits above the BYOK list; the
+            decision + copy live in lib/membership.ts. */}
+        <MembershipSection />
 
         {/* Keys-stay-on-device reassurance — the honesty headline of this page. */}
         <div

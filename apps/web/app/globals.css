@@ -988,6 +988,13 @@ code {
   gap: 1px;
 }
 
+.sidebar-account-name-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
 .sidebar-account-name {
   font-size: 12.5px;
   font-weight: 600;
@@ -995,6 +1002,31 @@ code {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* Plan chip — semantic green dot + mono label (13.1 density), shown only once
+   billing is known and the subscription is active. Same dot grammar as the
+   gateway-status indicator just below it. */
+.sidebar-account-tier {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--color-green) 12%, transparent);
+  color: var(--color-green);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.sidebar-account-tier .status-dot {
+  width: 5px;
+  height: 5px;
 }
 
 .sidebar-account-trigger-meta {
@@ -4935,6 +4967,19 @@ select:focus-visible {
   background: var(--color-text-muted);
   flex-shrink: 0;
 }
+/* Signed-in variant reuses the same slim strip, dot flips to the semantic
+   "connected" green (matches .status-dot.online / the sidebar plan chip). */
+.chat-local-banner-dot.online {
+  background: var(--color-green);
+  box-shadow: 0 0 6px color-mix(in oklch, var(--color-green) 60%, transparent);
+}
+.chat-local-banner-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
 .chat-local-banner a {
   margin-left: auto;
   color: var(--c-accent);
@@ -5931,6 +5976,57 @@ select:focus-visible {
   padding: 8px 6px 4px;
 }
 
+/* Membership — quiet keys-free upsell row (signed-out / free / cancelled). */
+.model-pick-membership-upsell {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--color-text-sub);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+.model-pick-membership-upsell:hover {
+  background: var(--color-elevated);
+  color: var(--color-text);
+}
+.model-pick-membership-upsell > span[aria-hidden]:first-child {
+  color: var(--c-accent);
+  flex-shrink: 0;
+}
+.model-pick-membership-upsell-text {
+  flex: 1;
+}
+.model-pick-membership-upsell-cta {
+  color: var(--color-text-muted);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+/* Managed model rows: shown for parity, but not pinnable on web yet — render
+   static (no hover-as-button, default cursor) so they never imply a dead send. */
+.model-pick-row-managed {
+  cursor: default;
+}
+.model-pick-row-managed:hover {
+  background: none;
+}
+.model-pick-plan {
+  font-family: var(--font-mono);
+  color: var(--color-text-sub);
+}
+.model-pick-plan-locked {
+  color: var(--color-text-muted);
+}
+/* The single honest footer line under the managed group. */
+.model-pick-membership-note {
+  margin: 2px 0 0;
+  padding: 4px 10px 2px;
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+}
+
 /* Dropdown footer: connected-only filter toggle / add-key affordance. */
 .model-pick-foot {
   margin-top: 4px;
@@ -6601,6 +6697,17 @@ body:has(.dashboard-container) {
   color: var(--marketing-text);
 }
 
+.dashboard-brand {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 8px;
+  transition: opacity 0.15s ease;
+}
+.dashboard-brand:hover {
+  opacity: 0.82;
+}
+
 .dashboard-title {
   margin: 0;
   font-family: var(--font-display);
@@ -6608,6 +6715,91 @@ body:has(.dashboard-container) {
   font-weight: 700;
   color: var(--marketing-text);
   letter-spacing: -0.02em;
+}
+
+/* ── Dashboard "Machined Dark" restyle (V2) ───────────────────────────── */
+/* Card body: padding + column layout on top of the .mk-card machined shell. */
+.dash-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1.15rem 1.25rem;
+}
+.dash-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+/* Mono, muted eyebrow for section labels (quiet-grey rule — no accent). */
+.dash-eyebrow {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--marketing-muted);
+}
+
+/* Hero: the one raised panel. Neutral machined card — no accent glow/gradient. */
+.dash-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1.6rem 1.5rem;
+}
+.dash-hero-value {
+  font-family: var(--font-mono);
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--marketing-text);
+}
+/* Empty ledger reads as a quiet zero, not an alarming figure. */
+.dash-hero-value--empty {
+  color: var(--marketing-muted);
+}
+.dash-hero-sub {
+  margin: 0;
+  color: var(--marketing-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+/* Collapsed group of stale, never-connected gateways. */
+.dash-stale {
+  border-radius: 12px;
+}
+.dash-stale-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 0.55rem 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  color: var(--marketing-muted);
+  border: 1px dashed var(--marketing-border);
+  border-radius: 10px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.dash-stale-summary::-webkit-details-marker {
+  display: none;
+}
+.dash-stale-summary::before {
+  content: "▸ ";
+}
+.dash-stale[open] .dash-stale-summary::before {
+  content: "▾ ";
+}
+.dash-stale-summary:hover {
+  color: var(--marketing-text);
+  border-color: color-mix(in oklab, var(--marketing-text) 24%, var(--marketing-border));
+}
+.dash-stale-list {
+  margin-top: 0.6rem;
+  opacity: 0.9;
 }
 
 .dashboard-header-right {
@@ -6660,20 +6852,22 @@ body:has(.dashboard-container) {
   margin: 0 0 1rem;
 }
 
+/* Quiet secondary — chroma budget stays on the header "Open chat" + plan CTA. */
 .dashboard-add-btn {
-  padding: 0.58rem 1.2rem;
+  padding: 0.5rem 1rem;
   border-radius: 9px;
-  border: 1px solid var(--marketing-accent);
-  background: var(--marketing-accent);
-  color: var(--marketing-on-accent);
-  font-size: 0.9rem;
+  border: 1px solid var(--marketing-border);
+  background: var(--marketing-surface-2);
+  color: var(--marketing-text);
+  font-size: 0.88rem;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
 
 .dashboard-add-btn:hover {
-  opacity: 0.85;
+  border-color: color-mix(in oklab, var(--marketing-text) 30%, var(--marketing-border));
+  background: var(--marketing-surface);
 }
 
 .dashboard-sessions {
@@ -6687,16 +6881,20 @@ body:has(.dashboard-container) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1rem 1.25rem;
-  border-radius: 14px;
+  padding: 0.8rem 1rem;
+  border-radius: 12px;
   border: 1px solid var(--marketing-border);
-  background: var(--marketing-surface);
+  /* Machined ladder: surface-2 → surface-1 with the inset top-highlight. */
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 1px 2px rgba(0, 0, 0, 0.35);
   gap: 1rem;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, transform 0.15s ease;
 }
 
 .session-card:hover {
-  border-color: color-mix(in oklch, var(--marketing-accent) 40%, var(--marketing-border));
+  border-color: color-mix(in oklab, var(--marketing-text) 24%, var(--marketing-border));
 }
 
 .session-card-left {

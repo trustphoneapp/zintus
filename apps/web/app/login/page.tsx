@@ -39,7 +39,10 @@ export default function LoginPage() {
         `https://www.zintus.ai/dashboard/cli-callback?state=${encodeURIComponent(cliState)}`
       : nextPath
         ? `https://www.zintus.ai${nextPath}`
-        : "https://www.zintus.ai/dashboard";
+        : // Default post-login destination is the chat app, not the Cloud
+          // dashboard — the dashboard is reachable from chat and has its own
+          // "Open chat" CTA, but a fresh sign-in should land in the product.
+          "https://www.zintus.ai/chat";
 
   async function handleMagicLink(event: React.FormEvent) {
     event.preventDefault();

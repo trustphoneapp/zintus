@@ -8,6 +8,16 @@ import { useAppStore } from "@/lib/app-store";
 import { useProviderStatusStore } from "@/lib/store";
 import { fetchCatalogModels, type CatalogModelDto } from "@/lib/gateway";
 import { SELECTED_MODEL_KEY, unpinModel } from "@/lib/pinned-model";
+import {
+  fetchBillingStatus,
+  fetchManagedModels,
+  type BillingStatus,
+  type ManagedModelDto,
+} from "@/lib/billing";
+import {
+  resolveModelPickerMembership,
+  type ModelPickerMembership,
+} from "@/lib/model-picker-membership";
 import { useDismissableMenu } from "./useDismissableMenu";
 import { Icon } from "./Icons";
 
@@ -68,6 +78,11 @@ export function ProviderPicker() {
   // Default to only models from providers you've connected (have a key for);
   // "Show all free models" reveals the full catalog.
   const [showAll, setShowAll] = useState(false);
+  // Membership: the relay's billing status + live managed catalog. `billingLoaded`
+  // gates the section so a paying member never sees the upsell flash first.
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
+  const [managedModels, setManagedModels] = useState<ManagedModelDto[]>([]);
+  const [billingLoaded, setBillingLoaded] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Make sure the browser key vault is unlocked so connected-provider detection
@@ -118,6 +133,28 @@ export function ProviderPicker() {
       active = false;
     };
   }, [gatewayConnected]);
+
+  // Membership status + managed catalog (relay). Both fail silent to the upsell
+  // row on an offline/unauthenticated relay — never a false managed claim.
+  useEffect(() => {
+    let active = true;
+    void Promise.all([fetchBillingStatus(), fetchManagedModels()]).then(
+      ([status, managed]) => {
+        if (!active) return;
+        setBilling(status);
+        setManagedModels(managed);
+        setBillingLoaded(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const membership: ModelPickerMembership = useMemo(
+    () => resolveModelPickerMembership(billingLoaded, billing, managedModels),
+    [billingLoaded, billing, managedModels],
+  );
 
   // Escape (restores focus to the pill) + click / focus-out dismissal.
   useDismissableMenu(open, () => setOpen(false), ref);
@@ -234,6 +271,62 @@ export function ProviderPicker() {
             <span>Auto</span>
             {!pinned ? <Icon name="check" size={14} /> : null}
           </button>
+
+          {/* Membership — first-class routing option (parity with the desktop
+              Models directory). Active members see their managed models + real
+              plan-token cost; everyone else sees one quiet keys-free upsell.
+              Rows are non-pinnable until the web send path can route managed
+              (see lib/model-picker-membership.ts) — no dead sends. */}
+          {membership.kind === "upsell" ? (
+            <Link
+              href={membership.href}
+              className="model-pick-membership-upsell"
+              onClick={() => setOpen(false)}
+            >
+              <span aria-hidden>✦</span>
+              <span className="model-pick-membership-upsell-text">
+                {membership.text}
+              </span>
+              <span className="model-pick-membership-upsell-cta" aria-hidden>
+                →
+              </span>
+            </Link>
+          ) : null}
+
+          {membership.kind === "member" ? (
+            <>
+              <div className="model-pick-section">{membership.title}</div>
+              {membership.rows.map((m) => (
+                <div
+                  key={m.id}
+                  className="model-pick-row model-pick-row-managed"
+                  aria-disabled={!m.selectable}
+                >
+                  <span
+                    className="model-pick-dot"
+                    style={{ background: "var(--c-accent)" }}
+                  />
+                  <span className="model-pick-id">{m.displayName}</span>
+                  <span className="model-pick-meta">
+                    {m.planCost ? (
+                      <span
+                        className={
+                          m.locked
+                            ? "model-pick-plan model-pick-plan-locked"
+                            : "model-pick-plan"
+                        }
+                      >
+                        {m.planCost}
+                      </span>
+                    ) : null}
+                  </span>
+                </div>
+              ))}
+              {membership.footer ? (
+                <p className="model-pick-membership-note">{membership.footer}</p>
+              ) : null}
+            </>
+          ) : null}
 
           {connectedCount === 0 && !showAll ? (
             /* No usable (connected) models → send the user straight to Providers

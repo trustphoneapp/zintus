@@ -8,6 +8,17 @@ import {
   type CatalogModelDto,
 } from "@/lib/gateway";
 import { Icon } from "@/app/_components/Icons";
+import {
+  fetchBillingStatus,
+  fetchManagedModels,
+  type ManagedModelDto,
+} from "@/lib/billing";
+import { isManagedMember } from "@/lib/membership";
+import {
+  modelPlanEconomics,
+  planCostLabel,
+  type PlanTier,
+} from "@/lib/economics";
 import { ModelDetailPanel } from "./ModelDetailPanel";
 import { CompareTable } from "./CompareTable";
 import {
@@ -190,6 +201,33 @@ export default function ModelsPage() {
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [showCompare, setShowCompare] = useState(false);
   const [hoverId, setHoverId] = useState<string | null>(null);
+
+  // Signed-in membership economics: the member's own tier + the live managed
+  // catalog (id → class/min_tier), so each row can show what it debits per 1K
+  // plan tokens. Only fetched for an active paid member; a non-member/signed-out
+  // user (or unreachable relay) leaves these null and the column stays hidden.
+  const [planTier, setPlanTier] = useState<PlanTier | null>(null);
+  const [managedById, setManagedById] = useState<Map<string, ManagedModelDto>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    let active = true;
+    void fetchBillingStatus().then(async (status) => {
+      if (!active || !isManagedMember(status) || status!.tier === "free") return;
+      const tier = status!.tier as PlanTier;
+      const managed = await fetchManagedModels();
+      if (!active) return;
+      setPlanTier(tier);
+      setManagedById(new Map(managed.map((m) => [m.id, m])));
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+  // Show the plan-cost column only once we know the tier AND have ≥1 priceable
+  // managed model to annotate — never an all-blank column.
+  const showPlanCost = planTier != null && managedById.size > 0;
+  const gridCols = showPlanCost ? `${TABLE_COLS} 0.9fr` : TABLE_COLS;
 
   // Fetch the full catalog once the gateway is reachable. We pull the whole list
   // and filter client-side for instant chip toggles; an offline/erroring gateway
@@ -401,7 +439,7 @@ export default function ModelsPage() {
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: TABLE_COLS,
+                gridTemplateColumns: gridCols,
                 gap: 12,
                 padding: "11px 18px",
                 background: "var(--color-elevated)",
@@ -419,11 +457,21 @@ export default function ModelsPage() {
               <span>Price in / out</span>
               <span>Context</span>
               <span>Best for</span>
+              {showPlanCost ? <span title="Plan tokens debited per 1K on your plan">Plan cost</span> : null}
             </div>
 
             {/* Data rows — clicking opens the detail panel (Use / Compare actions). */}
             {visible.map((m, i) => {
               const tier = modelTier(m);
+              // Per-row plan-token debit — only for a live managed model on the
+              // member's tier; anything else (BYOK-only, unknown class) shows
+              // nothing rather than a guessed number.
+              const managed = showPlanCost ? managedById.get(m.id) : undefined;
+              const econ =
+                managed && planTier
+                  ? modelPlanEconomics(managed.class, planTier)
+                  : null;
+              const planCost = econ ? planCostLabel(econ) : null;
               return (
                 <div
                   key={m.id}
@@ -440,7 +488,7 @@ export default function ModelsPage() {
                   onMouseLeave={() => setHoverId((id) => (id === m.id ? null : id))}
                   style={{
                     display: "grid",
-                    gridTemplateColumns: TABLE_COLS,
+                    gridTemplateColumns: gridCols,
                     gap: 12,
                     padding: "14px 18px",
                     borderBottom: i === visible.length - 1 ? "none" : "0.5px solid var(--c-border)",
@@ -485,6 +533,21 @@ export default function ModelsPage() {
                   <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>
                     {bestFor(m, tier)}
                   </span>
+                  {showPlanCost ? (
+                    <span
+                      style={{
+                        fontSize: 12,
+                        fontFamily: "var(--font-mono)",
+                        fontVariantNumeric: "tabular-nums",
+                        color:
+                          planCost === "Upgrade" || planCost == null
+                            ? "var(--color-text-muted)"
+                            : "var(--color-text-sub)",
+                      }}
+                    >
+                      {planCost ?? ""}
+                    </span>
+                  ) : null}
                 </div>
               );
             })}

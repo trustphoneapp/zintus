@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useShallow } from "zustand/react/shallow";
 import type { ResearchDepth } from "@/lib/gateway";
@@ -96,6 +96,9 @@ import {
   deriveProviderStatus,
   resolveProviderStatusInput,
 } from "@/app/(app)/providers/status";
+import { getMe } from "@/lib/cloud";
+import { fetchBillingStatus, type BillingStatus } from "@/lib/billing";
+import { resolveChatTopStrip } from "@/lib/chat-top-strip";
 
 const PROMPT_CARDS = [
   { title: "Explain this code", body: "Walk through a snippet step by step" },
@@ -211,6 +214,7 @@ export default function ChatPage() {
   const { settings, hydrate, update: updateSettings } = useSettingsStore();
   const { unlock } = useProviderStatusStore();
   const router = useRouter();
+  const pathname = usePathname();
   const toggleSidebar = useSidebarStore((s) => s.toggle);
   // Atomic value selectors — re-render only when these specific fields change
   // (not on unrelated store writes like terminal-line spam or savings updates).
@@ -283,9 +287,15 @@ export default function ChatPage() {
   const [mcpToolCount, setMcpToolCount] = useState(0);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [activePreset, setActivePreset] = useState<Preset | null>(null);
-  // Local mode = no cloud session cookie. Set after mount to avoid an SSR/CSR
-  // hydration mismatch (document.cookie is client-only).
+  // Local mode = getMe() resolved not-authenticated. Set after mount (from
+  // the async getMe() response) to avoid an SSR/CSR hydration mismatch.
   const [localMode, setLocalMode] = useState(false);
+  // Real identity/plan for the signed-in top strip (Sidebar.tsx's AccountBlock
+  // does the same lookup for the footer). Fetched once per mount via getMe();
+  // both calls fail silent to `null` so an unreachable relay just keeps the
+  // strip in its "local mode" shape.
+  const [signedInEmail, setSignedInEmail] = useState<string | null>(null);
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
   // Collapsed secondary-controls popover ("⚙ More") and the New-chat affordance
   // menu (which owns the incognito option). Both close on outside click.
   const [moreOpen, setMoreOpen] = useState(false);
@@ -547,7 +557,21 @@ export default function ChatPage() {
   useEffect(() => {
     hydrate();
     void unlock();
-    setLocalMode(!document.cookie.includes("zintus_session="));
+    // Identity comes from getMe() (a cheap authenticated GET), not from
+    // reading the session cookie client-side — zintus_session is HttpOnly,
+    // so document.cookie can never see it and a cookie-presence gate would
+    // never pass (Sidebar.tsx's AccountBlock does the same lookup).
+    void getMe().then((me) => {
+      if (!me.authenticated) {
+        setLocalMode(true);
+        return;
+      }
+      setLocalMode(false);
+      if (me.email) setSignedInEmail(me.email);
+      void fetchBillingStatus().then((status) => {
+        if (status) setBilling(status);
+      });
+    });
     setPresets(loadPresets());
     setActiveProjectName(getActiveProject()?.name ?? null);
     setCanScreenshot(screenshotSupported());
@@ -1470,6 +1494,17 @@ export default function ChatPage() {
     downloadFile("zintus-chat.md", md, "text/markdown");
   }, [messages]);
 
+  // Local-mode / signed-in-with-plan top strip (see lib/chat-top-strip.ts for
+  // the pure branch logic + its unit tests).
+  const topStrip = resolveChatTopStrip({
+    incognito,
+    gatewayConnected,
+    localMode,
+    signedInEmail,
+    billing,
+    pathname,
+  });
+
   return (
     <div className="chat-layout">
     <div className="screen chat-screen">
@@ -1497,11 +1532,29 @@ export default function ChatPage() {
             Private · this chat won&apos;t be saved
           </span>
         </div>
-      ) : localMode && gatewayConnected ? (
+      ) : topStrip.kind === "local" ? (
         <div className="chat-local-banner">
           <span className="chat-local-banner-dot" aria-hidden />
-          <span>Local mode — chats stay on this device.</span>
-          <a href="/login">Sign in for account &amp; billing →</a>
+          <span className="chat-local-banner-text">
+            Local mode — chats stay on this device.
+          </span>
+          <a
+            href={topStrip.signInHref}
+            aria-label="Sign in with Google — returns you to this page"
+          >
+            Sign in for account &amp; billing →
+          </a>
+        </div>
+      ) : topStrip.kind === "signed-in" ? (
+        <div className="chat-local-banner signed-in">
+          <span className="chat-local-banner-dot online" aria-hidden />
+          <span className="chat-local-banner-text">
+            Signed in as {topStrip.email}
+            {topStrip.tierLabel ? ` · ${topStrip.tierLabel} active` : ""}
+          </span>
+          <a href="/dashboard" aria-label="Manage account and billing">
+            Manage →
+          </a>
         </div>
       ) : null}
       <LocalKeyManager

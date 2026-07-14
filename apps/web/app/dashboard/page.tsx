@@ -76,41 +76,10 @@ function Card({
   style?: React.CSSProperties;
 }) {
   return (
-    <div
-      style={{
-        background: "var(--marketing-surface)",
-        border: "1px solid var(--marketing-border)",
-        borderRadius: 14,
-        padding: "1.25rem 1.35rem",
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.9rem",
-        ...style,
-      }}
-    >
+    <div className="mk-card dash-card" style={style}>
       {(title || action) && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: "0.75rem",
-          }}
-        >
-          {title && (
-            <h2
-              style={{
-                margin: 0,
-                fontSize: "0.72rem",
-                fontWeight: 700,
-                textTransform: "uppercase",
-                letterSpacing: "0.08em",
-                color: "var(--marketing-muted)",
-              }}
-            >
-              {title}
-            </h2>
-          )}
+        <div className="dash-card-head">
+          {title && <h2 className="dash-eyebrow">{title}</h2>}
           {action}
         </div>
       )}
@@ -119,12 +88,14 @@ function Card({
   );
 }
 
+// Mono, muted eyebrow for inline stat labels (quiet-grey rule — no accent).
 const labelStyle: React.CSSProperties = {
   margin: 0,
-  fontSize: "0.7rem",
+  fontSize: "0.66rem",
+  fontFamily: "var(--font-mono)",
   color: "var(--marketing-muted)",
   textTransform: "uppercase",
-  letterSpacing: "0.06em",
+  letterSpacing: "0.1em",
 };
 
 /* ─── page ─────────────────────────────────────────────────── */
@@ -236,11 +207,51 @@ export default function DashboardPage() {
   const savedUsd = gatewaySavings?.estimatedUsdSaved ?? null;
   const historyMax = history.reduce((m, d) => Math.max(m, d.tokens), 1);
   const onlineCount = sessions.filter((s) => s.online).length;
+  // Split live/recently-seen gateways from stale ones that never connected
+  // (offline AND never seen) — the CLI leaves duplicate "never seen" rows behind,
+  // so collapse those into a quiet, expandable group instead of four loud cards.
+  const liveSessions = sessions.filter((s) => s.online || s.last_seen != null);
+  const staleSessions = sessions.filter((s) => !s.online && s.last_seen == null);
+
+  // Shared row renderer. `quiet` drops all chroma (grey Connect + grey Delete)
+  // for the collapsed stale group. Delete/Connect handlers are unchanged.
+  const renderSessionRow = (s: GatewaySession, quiet = false) => (
+    <div key={s.id} className="session-card">
+      <div className="session-card-left">
+        <span
+          className={`session-dot ${s.online ? "session-dot--online" : "session-dot--offline"}`}
+          aria-label={s.online ? "online" : "offline"}
+        />
+        <div>
+          <p className="session-name">{s.name}</p>
+          <p className="session-meta">
+            {s.online ? "Online" : `Last seen ${formatLastSeen(s.last_seen)}`}
+          </p>
+        </div>
+      </div>
+      <div className="session-card-actions">
+        <button
+          onClick={() => router.push(`/dashboard/sessions/${s.id}`)}
+          className="session-btn"
+        >
+          Connect
+        </button>
+        <button
+          onClick={() => handleDelete(s.id)}
+          className={quiet ? "session-btn" : "session-btn session-btn--danger"}
+        >
+          Delete
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <div className="dashboard-container">
       <header className="dashboard-header">
-        <h1 className="dashboard-title">Zintus Cloud</h1>
+        <a href="/" className="dashboard-brand" aria-label="Zintus home">
+          <span className="dashboard-title">Zintus Cloud</span>
+        </a>
         <div className="dashboard-header-right">
           <span className="dashboard-email">{email}</span>
           <a href="/dashboard/billing" className="dashboard-nav-link">Billing</a>
@@ -248,46 +259,22 @@ export default function DashboardPage() {
           <button onClick={handleSignOut} className="dashboard-signout-btn">
             Sign out
           </button>
+          <a href="/chat" className="mk-btn mk-btn-primary mk-btn-sm">
+            Open chat
+          </a>
         </div>
       </header>
 
       <div className="dashboard-body">
-        {/* ── Hero: savings ledger ──────────────────────────── */}
-        <div
-          style={{
-            background:
-              "linear-gradient(135deg, color-mix(in oklch, var(--marketing-accent) 22%, var(--marketing-surface)), var(--marketing-surface))",
-            border: "1px solid color-mix(in oklch, var(--marketing-accent) 45%, var(--marketing-border))",
-            borderRadius: 18,
-            padding: "1.75rem",
-            display: "flex",
-            flexDirection: "column",
-            gap: "0.5rem",
-          }}
-        >
-          <span
-            style={{
-              fontSize: "0.72rem",
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "0.1em",
-              color: "var(--marketing-muted)",
-            }}
-          >
-            Savings ledger
-          </span>
+        {/* ── Hero: savings ledger (the one raised panel) ─────── */}
+        <div className="mk-card dash-hero">
+          <span className="dash-eyebrow">Savings ledger</span>
           <strong
-            style={{
-              fontSize: "2.85rem",
-              fontWeight: 800,
-              lineHeight: 1.05,
-              color: "var(--marketing-text)",
-              letterSpacing: "-0.02em",
-            }}
+            className={`dash-hero-value${savedUsd === null ? " dash-hero-value--empty" : ""}`}
           >
-            {savedUsd !== null ? `$${savedUsd.toFixed(2)}` : "—"}
+            ${(savedUsd ?? 0).toFixed(2)}
           </strong>
-          <p style={{ margin: 0, color: "var(--marketing-muted)", fontSize: "0.9rem" }}>
+          <p className="dash-hero-sub">
             {savedUsd !== null
               ? "cumulative, vs paid APIs (estimate — free-tier tokens valued at list pricing)"
               : "Route requests through your Zintus gateway to start tracking what you save vs paid APIs."}
@@ -408,8 +395,11 @@ export default function DashboardPage() {
             {billing ? (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.7rem" }}>
+                  {/* Mirror the desktop AppShell vocabulary: "Plan: {Tier}",
+                      free tier tagged BYOK. Capitalized from billing.tier. */}
                   <span style={{ fontSize: "1.4rem", fontWeight: 800, color: "var(--marketing-text)" }}>
-                    {TIER_LABEL[billing.tier]}
+                    Plan: {TIER_LABEL[billing.tier]}
+                    {billing.tier === "free" ? " (BYOK)" : ""}
                   </span>
                   <span
                     style={{
@@ -489,11 +479,14 @@ export default function DashboardPage() {
                       gap: "0.6rem",
                     }}
                   >
+                    {/* The relay's SUM(CASE …) aggregate returns SQL NULL (not 0)
+                        when a user has zero referral rows, so confirmed/pending
+                        arrive as null. Coerce to 0 at render. */}
                     {[
-                      { label: "Total", value: String(referral.total) },
-                      { label: "Confirmed", value: String(referral.confirmed) },
-                      { label: "Pending", value: String(referral.pending) },
-                      { label: "Earned", value: formatReferralEarned(referral.earned_cents) },
+                      { label: "Total", value: String(referral.total ?? 0) },
+                      { label: "Confirmed", value: String(referral.confirmed ?? 0) },
+                      { label: "Pending", value: String(referral.pending ?? 0) },
+                      { label: "Earned", value: formatReferralEarned(referral.earned_cents ?? 0) },
                     ].map(({ label, value }) => (
                       <div key={label}>
                         <p style={labelStyle}>{label}</p>
@@ -547,36 +540,18 @@ export default function DashboardPage() {
             </div>
           ) : (
             <div className="dashboard-sessions">
-              {sessions.map((s) => (
-                <div key={s.id} className="session-card">
-                  <div className="session-card-left">
-                    <span
-                      className={`session-dot ${s.online ? "session-dot--online" : "session-dot--offline"}`}
-                      aria-label={s.online ? "online" : "offline"}
-                    />
-                    <div>
-                      <p className="session-name">{s.name}</p>
-                      <p className="session-meta">
-                        {s.online ? "Online" : `Last seen ${formatLastSeen(s.last_seen)}`}
-                      </p>
-                    </div>
+              {liveSessions.map((s) => renderSessionRow(s))}
+              {staleSessions.length > 0 && (
+                <details className="dash-stale">
+                  <summary className="dash-stale-summary">
+                    {staleSessions.length} unused gateway
+                    {staleSessions.length > 1 ? "s" : ""} · never connected
+                  </summary>
+                  <div className="dashboard-sessions dash-stale-list">
+                    {staleSessions.map((s) => renderSessionRow(s, true))}
                   </div>
-                  <div className="session-card-actions">
-                    <button
-                      onClick={() => router.push(`/dashboard/sessions/${s.id}`)}
-                      className="session-btn session-btn--primary"
-                    >
-                      Connect
-                    </button>
-                    <button
-                      onClick={() => handleDelete(s.id)}
-                      className="session-btn session-btn--danger"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
+                </details>
+              )}
             </div>
           )}
         </Card>

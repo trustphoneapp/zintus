@@ -24,6 +24,22 @@ export interface ReferralStats {
   earned_cents: number;
 }
 
+// One live managed model as the relay's public catalog reports it
+// (GET /v1/managed/models). `class` is the pricing class and `min_tier` the
+// cheapest tier that can reach it — both computed relay-side from tiers.ts, so
+// they're the honest source for the Models page's per-row plan-token economics.
+// Only models with a configured operator key appear here (never vaporware).
+export interface ManagedModelDto {
+  id: string;
+  display_name: string;
+  context_window: number;
+  class: string;
+  /** Plan tokens debited per 1K model tokens, keyed by tier id. */
+  plan_tokens_per_1k: Record<string, number>;
+  min_tier: string;
+  capabilities: { tools: boolean; json: boolean; vision: boolean };
+}
+
 // Referral commissions accrue server-side (the relay tracks commission_cents via
 // Stripe `invoice.paid`), but there is NO payout/disbursement path yet AND the
 // managed-key paid tiers that generate those commissions are themselves gated
@@ -61,6 +77,16 @@ export async function fetchUsageCurrent(): Promise<UsageCurrent | null> {
     if (!res.ok) return null;
     return res.json();
   } catch { return null; }
+}
+
+/** Live managed models from the relay. Returns [] on an offline/erroring relay. */
+export async function fetchManagedModels(): Promise<ManagedModelDto[]> {
+  try {
+    const res = await fetch(`${RELAY_URL}/v1/managed/models`, { credentials: 'include' });
+    if (!res.ok) return [];
+    const body = await res.json() as { models?: ManagedModelDto[] };
+    return body.models ?? [];
+  } catch { return []; }
 }
 
 export async function fetchUsageHistory(): Promise<{ history: { day: string; tokens: number }[] } | null> {

@@ -6,7 +6,9 @@ import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { getGatewayUrl } from "@/lib/gateway";
 import { useAppStore, type Thread } from "@/lib/app-store";
-import { signOut } from "@/lib/cloud";
+import { signOut, getMe, googleSignInUrl } from "@/lib/cloud";
+import { fetchBillingStatus, type BillingStatus } from "@/lib/billing";
+import { TIER_LABEL } from "@/lib/chat-top-strip";
 import { ZintusLogo } from "@/components/ZintusLogo";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useDismissableMenu } from "./useDismissableMenu";
@@ -243,6 +245,18 @@ function ThreadRow({
   );
 }
 
+/** Small plan chip — semantic green dot + mono label, same visual grammar as
+ *  the gateway-status dot below it. Only rendered once billing is known AND
+ *  the subscription is active (never a guess). */
+function TierBadge({ tier }: { tier: BillingStatus["tier"] }) {
+  return (
+    <span className="sidebar-account-tier" aria-label={`${TIER_LABEL[tier]} plan active`}>
+      <span className="status-dot online" aria-hidden />
+      {TIER_LABEL[tier]}
+    </span>
+  );
+}
+
 /**
  * Bottom-of-sidebar account block (design parity). The design mocks a managed
  * "Starter plan" with a token quota + Top-up — but managed keys are gated off
@@ -253,16 +267,32 @@ function ThreadRow({
 function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
   const gatewaySavings = useAppStore((s) => s.gatewaySavings);
   const { theme, setTheme } = useTheme();
+  const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
-  // Identity is cookie-only (no client-readable profile endpoint): a session
-  // cookie means "synced", otherwise this is a local-only workspace.
+  // Identity comes from getMe() (a cheap authenticated GET), not from reading
+  // the session cookie client-side — zintus_session is HttpOnly, so
+  // document.cookie can never see it and a cookie-presence gate would never
+  // pass. getMe() fails silent to {authenticated:false} when signed out.
   const [signedIn, setSignedIn] = useState(false);
+  // Real identity/plan, fetched once per mount (no polling — the popover's
+  // "Sign out" reload and the gateway heartbeat elsewhere cover staleness).
+  // Both calls fail silent to `null`, so the footer just keeps showing
+  // "Local workspace" / no badge if the relay is unreachable.
+  const [email, setEmail] = useState<string | null>(null);
+  const [billing, setBilling] = useState<BillingStatus | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMounted(true);
-    setSignedIn(document.cookie.includes("zintus_session="));
+    void getMe().then((me) => {
+      if (!me.authenticated) return;
+      setSignedIn(true);
+      if (me.email) setEmail(me.email);
+      void fetchBillingStatus().then((status) => {
+        if (status) setBilling(status);
+      });
+    });
   }, []);
 
   // Escape (restores focus to the account trigger) + click / focus-out dismissal.
@@ -271,11 +301,17 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
   // Sign-in gates account identity, billing/subscription, and gateway-session
   // pairing (see lib/cloud.ts + lib/billing.ts) — there is no chat/thread sync
   // backend, so this copy must never claim chats sync across devices.
-  const name = signedIn ? "Signed in" : "Local workspace";
+  const name = signedIn ? (email ?? "Signed in") : "Local workspace";
   const sub = signedIn ? "Account & billing synced" : "Chats stay on this device";
-  const initial = signedIn ? "A" : "L";
+  // Two-letter email initials (matches the desktop account avatar) when known,
+  // otherwise a generic mark.
+  const initial = signedIn ? (email ? email.slice(0, 2).toUpperCase() : "A") : "L";
+  const tierActive = signedIn && billing?.status === "active";
   const savedUsd = gatewaySavings?.estimatedUsdSaved ?? 0;
   const isDark = !mounted || theme !== "light";
+  // Google OAuth round-trip: land the user back where they were (or /chat)
+  // instead of the relay's default dashboard redirect.
+  const signInHref = googleSignInUrl(pathname || "/chat");
 
   return (
     <div className="sidebar-account" ref={ref}>
@@ -284,7 +320,10 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
           <div className="sidebar-account-id">
             <span className="sidebar-account-avatar" aria-hidden>{initial}</span>
             <div className="sidebar-account-id-text">
-              <span className="sidebar-account-name">{name}</span>
+              <span className="sidebar-account-name-row">
+                <span className="sidebar-account-name">{name}</span>
+                {tierActive && billing ? <TierBadge tier={billing.tier} /> : null}
+              </span>
               <span className="sidebar-account-sub">{sub}</span>
             </div>
           </div>
@@ -296,6 +335,29 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
               {gatewayConnected ? `$${savedUsd.toFixed(2)}` : "—"}
             </strong>
           </div>
+
+          {/* Plan row — same "Plan: X · manage" / "Plan: Free (BYOK) ·
+              upgrade" grammar as the desktop account menu, so the two apps
+              read as one product. Always present once billing is known
+              (never a guess while it's still loading). */}
+          {signedIn && billing ? (
+            <Link
+              href={billing.tier !== "free" ? "/dashboard" : "/pricing"}
+              className="sidebar-account-link sidebar-account-plan"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+            >
+              <span
+                className={`status-dot${billing.status === "active" ? " online" : ""}`}
+                aria-hidden
+              />
+              <span>
+                {billing.tier !== "free"
+                  ? `Plan: ${TIER_LABEL[billing.tier]} · manage`
+                  : "Plan: Free (BYOK) · upgrade"}
+              </span>
+            </Link>
+          ) : null}
 
           <div className="sidebar-account-divider" />
 
@@ -362,14 +424,15 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
               Sign out
             </button>
           ) : (
-            <Link
-              href="/login"
+            <a
+              href={signInHref}
               className="sidebar-account-signin"
               role="menuitem"
+              aria-label="Sign in with Google — returns you to this page"
               onClick={() => setOpen(false)}
             >
               Sign in for account &amp; billing →
-            </Link>
+            </a>
           )}
         </div>
       ) : null}
@@ -383,7 +446,10 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
       >
         <span className="sidebar-account-avatar" aria-hidden>{initial}</span>
         <div className="sidebar-account-trigger-text">
-          <span className="sidebar-account-name">{name}</span>
+          <span className="sidebar-account-name-row">
+            <span className="sidebar-account-name">{name}</span>
+            {tierActive && billing ? <TierBadge tier={billing.tier} /> : null}
+          </span>
           <span className="sidebar-account-trigger-meta">
             <span className={`status-dot${gatewayConnected ? " online" : ""}`} />
             {gatewayConnected ? `Saved $${savedUsd.toFixed(2)}` : "Gateway offline"}
