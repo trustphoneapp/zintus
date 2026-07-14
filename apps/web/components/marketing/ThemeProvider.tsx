@@ -15,7 +15,9 @@ export function ThemeProvider({
     <NextThemesProvider
       attribute="class"
       defaultTheme="dark"
-      themes={["light", "dark", "obsidian", "indigo", "graphite"]}
+      {/* Indigo-only brand: unknown stored values (legacy obsidian/graphite
+          picks) fall back to defaultTheme, migrating those visitors to Indigo. */}
+      themes={["light", "dark", "indigo"]}
       enableSystem={false}
       disableTransitionOnChange
       nonce={nonce}
