@@ -54,7 +54,7 @@ export class EngineerPublicationManager {
     const deadlineMs = run.riskTier === "HIGH" ? 24 * 60 * 60_000 : 72 * 60 * 60_000;
     const deadlineAt = new Date(new Date(requestedAt).getTime() + deadlineMs).toISOString();
     const approval = this.options.supervisor.recordApprovalRequest(ApprovalRequestRecordSchema.parse({
-      approvalRequestId: this.id(), runId, riskTier: run.riskTier, assignedReviewerId,
+      approvalRequestId: this.id(), runId, riskTier: run.riskTier, assignedReviewerId: assignedReviewerId ?? run.userId,
       requestedAt, deadlineAt,
       reminderSchedule: [0.5, 0.8].map((ratio) => new Date(new Date(requestedAt).getTime() + deadlineMs * ratio).toISOString()),
       timeoutAction: run.riskTier === "HIGH" ? "HUMAN_REVIEW_REQUIRED" : "HUMAN_REVIEW_REQUIRED",
@@ -67,6 +67,7 @@ export class EngineerPublicationManager {
 
   async approve(runId: string, actorId: string, reason: string): Promise<PublicationStartResult> {
     const request = this.requirePendingApproval(runId);
+    this.assertDecisionActor(request, actorId);
     this.assertBeforeDeadline(request);
     this.assertApprovalBinding(request);
     const decision = this.options.supervisor.decideApproval(ApprovalDecisionRecordSchema.parse({
@@ -84,6 +85,7 @@ export class EngineerPublicationManager {
 
   requestChanges(runId: string, actorId: string, reason: string): void {
     const request = this.requirePendingApproval(runId);
+    this.assertDecisionActor(request, actorId);
     const decision = this.options.supervisor.decideApproval(ApprovalDecisionRecordSchema.parse({
       approvalDecisionId: this.id(), approvalRequestId: request.approvalRequestId,
       actorId, decision: "REQUEST_CHANGES", reason, decidedAt: this.timestamp(),
@@ -93,6 +95,7 @@ export class EngineerPublicationManager {
 
   reject(runId: string, actorId: string, reason: string): void {
     const request = this.requirePendingApproval(runId);
+    this.assertDecisionActor(request, actorId);
     const decision = this.options.supervisor.decideApproval(ApprovalDecisionRecordSchema.parse({
       approvalDecisionId: this.id(), approvalRequestId: request.approvalRequestId,
       actorId, decision: "REJECT", reason, decidedAt: this.timestamp(),
@@ -105,6 +108,7 @@ export class EngineerPublicationManager {
       throw new Error("approval extension must be between 60 seconds and 7 days");
     }
     const request = this.requirePendingApproval(runId);
+    this.assertDecisionActor(request, actorId);
     const deadlineAt = new Date(new Date(request.deadlineAt).getTime() + extensionSeconds * 1_000).toISOString();
     return this.options.supervisor.extendApproval(ApprovalDecisionRecordSchema.parse({
       approvalDecisionId: this.id(), approvalRequestId: request.approvalRequestId,
@@ -136,6 +140,7 @@ export class EngineerPublicationManager {
 
   async cancel(runId: string, actorId: string, reason: string): Promise<void> {
     const run = this.options.supervisor.getRun(runId);
+    if (actorId !== run.userId) throw new Error("cancellation actor does not own this run");
     if (run.terminalAt) throw new Error(`terminal run ${run.state} cannot be cancelled`);
     const artifact = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
       runId, type: "CANCELLATION_REQUEST", bytes: JSON.stringify({ actorId, reason, requestedAt: this.timestamp() }),
@@ -252,6 +257,12 @@ export class EngineerPublicationManager {
       throw new Error("exact hash-bound human approval is unavailable");
     }
     return request;
+  }
+
+  private assertDecisionActor(request: ApprovalRequestRecord, actorId: string): void {
+    if (request.assignedReviewerId && request.assignedReviewerId !== actorId) {
+      throw new Error("human decision actor is not the assigned reviewer");
+    }
   }
 
   private assertApprovalBinding(request: ApprovalRequestRecord): void {

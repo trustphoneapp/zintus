@@ -166,6 +166,12 @@ describe("gateway handler", () => {
       totalRuns: 1,
       runsByState: { REQUEST_RECEIVED: 1 },
     });
+    const deniedCancellation = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/cancel", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ actorId: "another-user", reason: "Attempt to cancel another user's run." }),
+    }));
+    expect(deniedCancellation.status).toBe(400);
+    expect(supervisor.getRun("gateway-run-1").state).toBe("REQUEST_RECEIVED");
     const cancelled = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/cancel", {
       method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
       body: JSON.stringify({ actorId: "user-1", reason: "Stop the incomplete run." }),

@@ -114,7 +114,7 @@ function builderInstructions(manifest: TaskManifest, repairContext?: RepairConte
     "Prefer minimal production-quality changes and add tests when the manifest requires them.",
     "You cannot push, merge, deploy, access Git credentials, change workflow state, or claim that a check passed without executor evidence.",
     ...(repairContext ? [
-      "This is a Reviewer-triggered repair. Address only the supplied structured findings without expanding frozen scope.",
+      "This is a bounded repair. Address only the supplied structured findings without expanding frozen scope, and never weaken or remove a required check.",
       `Structured repair context:\n${JSON.stringify(repairContext)}`,
     ] : []),
     `Frozen manifest JSON:\n${JSON.stringify(manifest)}`,

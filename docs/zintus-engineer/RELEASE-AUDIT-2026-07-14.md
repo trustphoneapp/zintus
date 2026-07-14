@@ -31,30 +31,40 @@ blocker below is closed and the end-to-end Docker/OpenAI/GitHub evaluation passe
   floors remain monotonic.
 - Engineer mutation endpoints now share gateway rate limiting and redact secrets
   from returned errors.
+- Stable failures of frozen MUST checks now enter a bounded SOL Builder repair
+  loop. Each attempt consumes the authoritative retry budget, rejects identical
+  or no-progress patches, and restarts independent verification from FAST_CHECKS.
+- Planning and independent-verification failures now produce durable categorized
+  `FailureRecord` entries, including malformed model output, unsafe proposed
+  commands, flaky tests, blocked sandbox commands, stable required-test failures,
+  failed security checks, and critical findings.
+- Human decisions are restricted to the assigned reviewer and cancellation is
+  restricted to the run owner. This is defense in depth until gateway actors are
+  derived from authenticated server-side identity rather than request fields.
+- Web and desktop can restore the active run after reload, retry a failed planning
+  call, resume a frozen run, display manager errors, avoid stale SSE refreshes,
+  and render progress from durable workflow state rather than event count.
 
 ## Release blockers
 
 ### TERRA lane — architecture and orchestration
 
-1. Implement the Builder repair loop after failed verification. A failing required
-   test currently ends at `VERIFICATION_INCOMPLETE`; the demo cannot repair its
-   intentionally failing token-reuse test.
-2. Add a real Context Engine. Planning currently receives only repository metadata
+1. Add a real Context Engine. Planning currently receives only repository metadata
    and the request, so allowed paths, commands, and tests are guesses rather than
    repository-grounded decisions.
-3. Move blocking Git, Docker, and test execution out of the gateway event loop into
+2. Move blocking Git, Docker, and test execution out of the gateway event loop into
    supervised workers with leases, heartbeats, cancellation, and bounded
    concurrency.
-4. Implement restart recovery for every active state, publication resume,
+3. Implement restart recovery for every active state, publication resume,
    stale-base re-verification, `FIX_REQUESTED`, and `PR_CREATION_FAILED`.
-5. Enforce manifest time, token, and cost budgets and every retry budget at the
+4. Enforce manifest time, token, and cost budgets and every retry budget at the
    authoritative worker boundary.
-6. Recompute risk after the actual diff, tests, coverage, retries, changed paths,
+5. Recompute risk after the actual diff, tests, coverage, retries, changed paths,
    dependencies, schema changes, and security findings. Planning-time model
    features must not be the final authority.
-7. Make base-branch inspection and publication an atomic stale-base decision;
+6. Make base-branch inspection and publication an atomic stale-base decision;
    enforce branch protection rather than merely recording it.
-8. Provide offline dependencies or a content-addressed cache in the network-denied
+7. Provide offline dependencies or a content-addressed cache in the network-denied
    sandbox. A stock Bun image plus an ignored `node_modules` worktree cannot run
    dependency-bearing projects.
 
@@ -65,30 +75,27 @@ blocker below is closed and the end-to-end Docker/OpenAI/GitHub evaluation passe
 2. Add deterministic request/path/diff feature floors so a model cannot conceal
    authentication, authorization, payment, secret, migration, or infrastructure
    risk.
-3. Persist a `FailureRecord` for every model, sandbox, command, dependency,
-   verification, Git, timeout, and cancellation failure; use it for retry and
-   observability decisions.
+3. Complete durable `FailureRecord` coverage for execution, dependency, Git,
+   publication, timeout, and cancellation failures. Planning and verification
+   failures are now categorized, persisted, and used by the repair policy.
 4. Add timeout and heartbeat watchdogs using the existing runtime-policy and
    heartbeat schema, then prove recovery after process termination.
 5. Fail startup when required models, model capabilities, Docker, the pinned image,
    repository access, or publication credentials are unavailable.
-6. Add run ownership and authenticated actor binding. Client-supplied `userId` and
-   `actorId` are not identities, and assigned reviewers are not currently enforced.
+6. Bind run ownership and approval actors to authenticated server-side identity.
+   Assigned-reviewer and owner comparisons are enforced, but client-supplied
+   `userId` and `actorId` remain spoofable request fields.
 7. Route private-repository Git operations through the configured credential
    boundary; REST uses the GitHub token while `git push` currently depends on
    ambient Git credentials.
 
 ## Experience and observability gaps
 
-- A failed plan leaves the UI without a retry-plan action.
-- Freeze success followed by start failure can leave client and server states out
-  of sync.
-- SSE refreshes the full evidence surface per event, has no resume cursor, and can
-  issue a large concurrent request burst on replay.
-- Reload cannot reopen a durable run because there is no run list or URL/local run
-  identity.
-- The UI does not surface every manager `lastError` and has no dedicated
-  observability page.
+- SSE has no resume cursor and still refreshes the evidence surface after a
+  coalesced event burst rather than consuming event deltas.
+- Reload restores the locally active run, but there is no server-side run list or
+  shareable run URL for reopening other durable runs.
+- There is no dedicated Engineer observability page.
 - Mobile has no Engineer workflow.
 - The secure `GATEWAY_TOKEN` operator mode is not usable by the browser UI because
   it intentionally sends no bearer token. Authentication-disabled loopback mode is
@@ -109,7 +116,7 @@ blocker below is closed and the end-to-end Docker/OpenAI/GitHub evaluation passe
 
 ## Validation results
 
-- Engineer plus gateway focused suite: 123 passed, 0 failed.
+- Engineer plus gateway focused suite: 129 passed, 0 failed.
 - Root typecheck: passed for core, gateway, web, desktop, and mobile.
 - Root test command: 1,229 passed and 5 failed. All five failures are the existing
   gateway MCP stdio bridge integration file. The lower-level MCP stdio integration
@@ -123,12 +130,12 @@ blocker below is closed and the end-to-end Docker/OpenAI/GitHub evaluation passe
 | --- | --- |
 | Durable Supervisor/state ledger | Partial: strong transition core; recovery/watchdogs incomplete |
 | Frozen manifest and evidence binding | Implemented, with audit hardening |
-| SOL Builder and isolated SOL Reviewer | Partial: roles exist; failed-test repair loop missing |
+| SOL Builder and isolated SOL Reviewer | Implemented in code, including bounded failed-test and review repair; live model proof missing |
 | TERRA planning/testing/security | Partial: runtime calls exist; planning lacks repository context |
-| LUNA classification roles | Not implemented at runtime |
+| LUNA classification roles | Partial: deterministic durable failure taxonomy exists; LUNA model roles have no production call sites |
 | Offline Docker sandbox | Partial: policy exists; dependencies and live Docker proof missing |
 | Independent verification and claim evidence | Partial: executable gates exist; full evaluation matrix missing |
 | Human approval and Supervisor publication | Partial: hash binding exists; actor identity and live Git proof missing |
 | Risk, retries, and budgets | Partial: deterministic rules exist; final reassessment and enforcement missing |
-| Web/desktop workflow | Partial: main screen exists; recovery/resume/error paths incomplete |
+| Web/desktop workflow | Partial: main workflow, local recovery, resume, retry, and error paths exist; run list/cursor/operations views missing |
 | Mobile, observability, operations | Incomplete |

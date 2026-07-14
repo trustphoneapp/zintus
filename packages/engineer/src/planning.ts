@@ -8,6 +8,7 @@ import {
   TaskManifestContentSchema,
   TestPlanItemSchema,
 } from "./contracts.js";
+import { FailureRecordSchema, type FailureRecord } from "./control-contracts.js";
 import { sha256 } from "./hash.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 import type { EngineerSupervisor } from "./supervisor.js";
@@ -78,6 +79,7 @@ export class EngineerPlanningManager {
     this.options.supervisor.recordAgentExecution({ agentExecutionId: agentId, runId, role: "PLANNER", modelTier: route.logicalTier, status: "RUNNING", inputHash, outputArtifactId: null, startedAt, completedAt: null });
     this.options.supervisor.recordModelRouting({ routingDecisionId: this.id(), runId, agentRole: "PLANNER", logicalTier: route.logicalTier, resolvedModel: route.model, routingPolicyVersion: route.policyVersion, fallbackUsed: false, fallbackReason: null, cacheKey: null, timestamp: startedAt });
     const callStarted = Date.now();
+    let failureStage: "MODEL_CALL" | "STRUCTURED_OUTPUT" | "COMMAND_POLICY" | "WORKFLOW" = "MODEL_CALL";
     try {
     const response = await (await this.options.transportForRun(runId)).create({
       model: route.model,
@@ -88,10 +90,13 @@ export class EngineerPlanningManager {
       reasoning: { effort: "medium", summary: "auto" }, max_output_tokens: 8_000, store: false,
       safety_identifier: sha256(runId), metadata: { run_id: runId, role: "planner", policy_version: PLANNER_POLICY_VERSION },
     });
+    failureStage = "STRUCTURED_OUTPUT";
     const call = response.output.map((item) => FunctionCallSchema.safeParse(item)).find((item) => item.success);
     if (!call?.success) throw new Error("Planner did not submit a structured plan");
     const output = PlannerOutputSchema.parse(JSON.parse(call.data.arguments));
+    failureStage = "COMMAND_POLICY";
     for (const command of output.allowedCommands) parseTrustedCommand(command);
+    failureStage = "WORKFLOW";
     let current = this.options.supervisor.normalizeRequest({ runId, expectedStateVersion: run.stateVersion, normalizedRequest: output.normalizedRequest, idempotencyKey: `plan:normalize:${inputHash}` }).run;
     current = this.options.supervisor.transition({ runId, expectedStateVersion: current.stateVersion, nextState: "PLANNING", reasonCode: "STRUCTURED_PLANNING_STARTED", idempotencyKey: `plan:start:${inputHash}` }).run;
     const risk = this.options.supervisor.assessRunRisk(runId, current.stateVersion, output.riskFeatures, { autoApproveLowRisk: true });
@@ -117,6 +122,15 @@ export class EngineerPlanningManager {
     this.options.supervisor.transition({ runId, expectedStateVersion: current.stateVersion, nextState: "PLAN_READY", reasonCode: "STRUCTURED_PLAN_READY", evidenceIds: [artifact.artifactId], manifestHash: null, idempotencyKey: `plan:ready:${proposalHash}` });
     return proposal;
     } catch (error) {
+      const failure = this.classifyFailure(failureStage);
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: this.id(), runId,
+        failureClass: failure.failureClass,
+        reasonCode: failure.reasonCode,
+        fingerprint: sha256({ failureClass: failure.failureClass, reasonCode: failure.reasonCode, message }),
+        evidenceIds: [], retryable: failure.retryable, createdAt: this.timestamp(),
+      }));
       this.options.supervisor.recordModelCall({ modelCallId: this.id(), runId, agentExecutionId: agentId, logicalTier: route.logicalTier, resolvedModel: route.model, promptTemplateVersion: PLANNER_POLICY_VERSION, inputContextRefs: [inputHash], outputSchemaVersion: "plan-proposal-v1", cacheKey: sha256({ role: "PLANNER", inputHash, policy: PLANNER_POLICY_VERSION }), cacheHit: null, latencyMs: Math.max(0, Date.now() - callStarted), inputTokens: null, outputTokens: null, retryCount: 0, status: "FAILED", createdAt: this.timestamp() });
       this.options.supervisor.recordAgentExecution({ agentExecutionId: agentId, runId, role: "PLANNER", modelTier: route.logicalTier, status: "FAILED", inputHash, outputArtifactId: null, startedAt, completedAt: this.timestamp() });
       throw error;
@@ -124,6 +138,19 @@ export class EngineerPlanningManager {
   }
 
   get(runId: string): PlanProposal | null { return this.options.supervisor.latestPlanProposal(runId); }
+  private classifyFailure(stage: "MODEL_CALL" | "STRUCTURED_OUTPUT" | "COMMAND_POLICY" | "WORKFLOW"):
+    Pick<FailureRecord, "failureClass" | "reasonCode" | "retryable"> {
+    if (stage === "MODEL_CALL") {
+      return { failureClass: "MODEL_FAILURE", reasonCode: "PLANNER_MODEL_CALL_FAILED", retryable: true };
+    }
+    if (stage === "STRUCTURED_OUTPUT") {
+      return { failureClass: "MODEL_FAILURE", reasonCode: "PLANNER_OUTPUT_INVALID", retryable: true };
+    }
+    if (stage === "COMMAND_POLICY") {
+      return { failureClass: "MODEL_FAILURE", reasonCode: "PLANNER_COMMAND_POLICY_VIOLATION", retryable: true };
+    }
+    return { failureClass: "WORKFLOW_FAILURE", reasonCode: "PLANNING_WORKFLOW_FAILED", retryable: false };
+  }
   private id(): string { return (this.options.idFactory ?? randomUUID)(); }
   private timestamp(): string { return (this.options.now ?? (() => new Date()))().toISOString(); }
 }

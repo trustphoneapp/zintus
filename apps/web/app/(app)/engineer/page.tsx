@@ -6,7 +6,8 @@ import {
   engineerDecision,
   freezeEngineerPlan,
   getEngineerData,
-  getEngineerRun,
+  getEngineerPlan,
+  getEngineerRunStatus,
   planEngineerRun,
   startEngineerRun,
   streamEngineerEvents,
@@ -18,6 +19,8 @@ import {
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
+const RUN_STORAGE_KEY = "zintus-engineer-active-run";
+const STATE_PROGRESS: Record<string, number> = { REQUEST_RECEIVED: 2, REQUEST_NORMALIZED: 5, PLANNING: 7, PLAN_READY: 10, PLAN_FROZEN: 12, QUEUED: 15, SANDBOX_WARM_CLAIMING: 18, SANDBOX_COLD_PROVISIONING: 18, SANDBOX_PREFLIGHT: 22, SANDBOX_READY: 25, CONTEXT_BUILDING: 30, IMPLEMENTING: 42, FAST_CHECKS: 50, UNIT_TESTING: 58, INTEGRATION_TESTING: 66, E2E_TESTING: 72, SECURITY_REVIEW: 78, REVIEWING: 86, REVIEW_APPROVED: 90, HUMAN_APPROVAL_PENDING: 94, HUMAN_APPROVED: 96, PR_PREFLIGHT: 97, PR_CREATING: 98, PR_CREATED: 99 };
 
 export default function EngineerPage() {
   const [request, setRequest] = useState("");
@@ -30,15 +33,18 @@ export default function EngineerPage() {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [managerError, setManagerError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async (runId: string) => {
-    const [nextRun, nextData] = await Promise.all([getEngineerRun(runId), getEngineerData(runId)]);
-    setRun(nextRun);
+    const [status, nextData] = await Promise.all([getEngineerRunStatus(runId), getEngineerData(runId)]);
+    setRun((current) => !current || status.run.runId !== current.runId || status.run.stateVersion >= current.stateVersion ? status.run : current);
+    setManagerError(status.lastError);
     setData(nextData);
   }, []);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => { abortRef.current?.abort(); if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); }, []);
 
   const watch = useCallback((runId: string) => {
     abortRef.current?.abort();
@@ -46,22 +52,43 @@ export default function EngineerPage() {
     abortRef.current = controller;
     void streamEngineerEvents(runId, (event) => {
       setEvents((current) => current.some((item) => item.eventId === event.eventId) ? current : [...current, event]);
-      void refresh(runId);
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = setTimeout(() => { refreshTimerRef.current = null; void refresh(runId); }, 100);
     }, controller.signal).then(() => refresh(runId)).catch((cause) => {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Timeline disconnected");
     });
   }, [refresh]);
+
+  useEffect(() => {
+    const runId = window.localStorage.getItem(RUN_STORAGE_KEY);
+    if (!runId) return;
+    let active = true;
+    void Promise.all([getEngineerRunStatus(runId), getEngineerPlan(runId).catch(() => null), getEngineerData(runId)]).then(([status, storedPlan, storedData]) => {
+      if (!active) return;
+      setRun(status.run); setPlan(storedPlan); setData(storedData); setManagerError(status.lastError);
+      if (!TERMINAL.has(status.run.state)) watch(runId);
+    }).catch(() => { window.localStorage.removeItem(RUN_STORAGE_KEY); });
+    return () => { active = false; };
+  }, [watch]);
 
   const submit = async () => {
     if (!request.trim() || !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(repository.baseCommitSha)) return;
     setBusy(true); setError(null);
     try {
       const created = await createEngineerRun({ userId: "local-user", repository, request: request.trim() });
-      setRun(created);
+      setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
       const proposal = await planEngineerRun(created.runId);
       setPlan(proposal);
-      setRun(await getEngineerRun(created.runId));
+      const status = await getEngineerRunStatus(created.runId); setRun(status.run); setManagerError(status.lastError);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create Engineer run"); }
+    finally { setBusy(false); }
+  };
+
+  const retryPlanning = async () => {
+    if (!run) return;
+    setBusy(true); setError(null); setManagerError(null);
+    try { const proposal = await planEngineerRun(run.runId); setPlan(proposal); const status = await getEngineerRunStatus(run.runId); setRun(status.run); setManagerError(status.lastError); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
     finally { setBusy(false); }
   };
 
@@ -70,9 +97,18 @@ export default function EngineerPage() {
     setBusy(true); setError(null);
     try {
       const frozen = await freezeEngineerPlan(run, plan.manifest);
+      setRun(frozen);
       const queued = await startEngineerRun(frozen.runId);
       setRun(queued); setEvents([]); watch(queued.runId);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
+    finally { setBusy(false); }
+  };
+
+  const startFrozen = async () => {
+    if (!run || run.state !== "PLAN_FROZEN") return;
+    setBusy(true); setError(null);
+    try { const queued = await startEngineerRun(run.runId); setRun(queued); setEvents([]); watch(queued.runId); }
+    catch (cause) { const status = await getEngineerRunStatus(run.runId).catch(() => null); if (status) { setRun(status.run); setManagerError(status.lastError); } setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
     finally { setBusy(false); }
   };
 
@@ -90,7 +126,7 @@ export default function EngineerPage() {
   const findings = (data?.securityFindings ?? []) as Array<{ securityFindingId?: string; severity?: string; category?: string; description?: string }>;
   const failures = (data?.failures ?? []) as Array<{ failureId?: string; reasonCode?: string; failureClass?: string }>;
   const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; evidenceBundleHash?: string } | null | undefined;
-  const progress = useMemo(() => Math.min(100, Math.round((events.length / 16) * 100)), [events.length]);
+  const progress = useMemo(() => TERMINAL.has(latestState) ? 100 : STATE_PROGRESS[latestState] ?? 35, [latestState]);
 
   if (!run) return (
     <main className="engineer-screen">
@@ -129,6 +165,7 @@ export default function EngineerPage() {
           <div><span>Allowed paths</span>{plan.manifest.allowedPaths.map((path) => <code key={path}>{path}</code>)}</div>
           <div><span>Commands</span>{plan.manifest.allowedCommands.map((command) => <code key={command}>{command}</code>)}</div>
           {error ? <p className="engineer-error">{error}</p> : null}
+          {managerError ? <p className="engineer-error">{managerError}</p> : null}
           <button className="engineer-primary" onClick={() => void freezeAndStart()} disabled={busy}>{busy ? "Starting…" : "Freeze plan and start"}</button>
         </aside>
       </section>
@@ -139,6 +176,8 @@ export default function EngineerPage() {
     <main className="engineer-screen">
       <RunHeader run={run} progress={TERMINAL.has(latestState) ? 100 : progress} />
       <nav className="engineer-tabs" aria-label="Engineer run views">{(["timeline", "diff", "evidence"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
+      {latestState === "REQUEST_RECEIVED" && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The durable run is intact. Planning can be retried without creating a duplicate run.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{busy ? "Planning…" : "Retry planning"}</button></section> : null}
+      {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{busy ? "Starting…" : "Start frozen plan"}</button></section> : null}
       {tab === "timeline" ? <section className="engineer-run-grid">
         <div className="engineer-card"><h2>Live timeline</h2><div className="engineer-timeline">{events.length ? events.map((event) => <div key={event.eventId} className="engineer-event"><span /><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div><strong>{event.nextState.replaceAll("_", " ")}</strong><small>{event.reasonCode.replaceAll("_", " ")}</small></div></div>) : <p className="engineer-muted">Waiting for the first durable event…</p>}</div></div>
         <aside className="engineer-card engineer-verification"><h2>Verification</h2><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /><Metric label="Failures" value={String(failures.length)} /></aside>
@@ -149,10 +188,10 @@ export default function EngineerPage() {
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
       {error ? <p className="engineer-error">{error}</p> : null}
+      {managerError ? <p className="engineer-error">{managerError}</p> : null}
     </main>
   );
 }
 
 function RunHeader({ run, progress }: { run: EngineerRun; progress: number }) { return <header className="engineer-run-header"><div><span className="engineer-kicker">Zintus Engineer · {run.repository.name}</span><h1>{run.requestNormalized || run.requestOriginal}</h1><div className="engineer-run-meta"><span className={`engineer-risk engineer-risk--${run.riskTier.toLowerCase()}`}>{run.riskTier}</span><code>{run.runId}</code></div></div><div className="engineer-progress"><div><span>{run.state.replaceAll("_", " ")}</span><strong>{progress}%</strong></div><progress max="100" value={progress} /></div></header>; }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="engineer-metric"><span>{label}</span><strong>{value}</strong></div>; }
-

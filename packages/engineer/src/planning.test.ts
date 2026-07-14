@@ -55,6 +55,43 @@ describe("Phase 5 structured planning", () => {
     await expect(manager.plan(run.runId)).rejects.toThrow("metacharacters");
     expect(supervisor.getRun(run.runId).state).toBe("REQUEST_RECEIVED");
     expect(manager.get(run.runId)).toBeNull();
+    expect(supervisor.listFailures(run.runId)).toMatchObject([{
+      runId: run.runId,
+      failureClass: "MODEL_FAILURE",
+      reasonCode: "PLANNER_COMMAND_POLICY_VIOLATION",
+      evidenceIds: [],
+      retryable: true,
+    }]);
     supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("durably records model transport and malformed structured-output failures", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-failures-"));
+    const dbPath = join(root, "engineer.db");
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const repository = { repositoryId: "repo-1", provider: "local" as const, owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) };
+    const supervisor = new EngineerSupervisor({ dbPath });
+    supervisor.receiveRequest({ runId: "transport-failure", userId: "user-1", repository, request: "Plan the change." });
+    supervisor.receiveRequest({ runId: "output-failure", userId: "user-1", repository, request: "Plan another change." });
+    const transportFailure = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() { throw new Error("upstream unavailable"); } }),
+    });
+    const outputFailure = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() { return { id: "no-plan", output: [] }; } }),
+    });
+    await expect(transportFailure.plan("transport-failure")).rejects.toThrow("upstream unavailable");
+    await expect(outputFailure.plan("output-failure")).rejects.toThrow("structured plan");
+    supervisor.close();
+
+    const reopened = new EngineerSupervisor({ dbPath });
+    expect(reopened.listFailures("transport-failure")).toMatchObject([{
+      failureClass: "MODEL_FAILURE", reasonCode: "PLANNER_MODEL_CALL_FAILED", retryable: true,
+    }]);
+    expect(reopened.listFailures("output-failure")).toMatchObject([{
+      failureClass: "MODEL_FAILURE", reasonCode: "PLANNER_OUTPUT_INVALID", retryable: true,
+    }]);
+    reopened.close(); rmSync(root, { recursive: true, force: true });
   });
 });

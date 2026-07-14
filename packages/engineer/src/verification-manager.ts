@@ -9,13 +9,14 @@ import {
   type TaskManifest,
   type TrustedEvidence,
 } from "./contracts.js";
+import { FailureRecordSchema } from "./control-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, type ResponsesTransport } from "./codex-builder.js";
 import type { AgentExecutionRecord, ArtifactRecord, SandboxRecord } from "./execution-contracts.js";
 import type { EngineerExecutionManager } from "./execution-manager.js";
 import type { DockerSandboxManager, ProvisionedSandbox } from "./sandbox-manager.js";
 import { sha256 } from "./hash.js";
-import { IndependentVerifier } from "./independent-verifier.js";
+import { IndependentVerifier, StableRequiredTestFailure } from "./independent-verifier.js";
 import { IsolatedReviewer, REVIEWER_POLICY_VERSION } from "./isolated-reviewer.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 import type { EngineerSupervisor } from "./supervisor.js";
@@ -65,7 +66,7 @@ export class EngineerVerificationManager {
     if (existing) return existing;
     const promise = this.verifyPass(runId)
       .catch((error) => {
-        this.failClosed(runId);
+        this.failClosed(runId, error);
         throw error;
       })
       .finally(() => this.active.delete(runId));
@@ -95,16 +96,26 @@ export class EngineerVerificationManager {
     const diff = workspaceManager.diff(sandbox.workspace);
     const pass = supervisor.nextReviewerAttempt(runId);
     const executor = this.executor(manifest, sandbox);
-    const verified = new IndependentVerifier({
-      supervisor,
-      artifactStore: this.options.artifactStore,
-      manifest,
-      executor,
-      diff: () => diff,
-      verificationPass: pass,
-      now: this.options.now,
-      idFactory: this.options.idFactory,
-    }).run();
+    let verified;
+    try {
+      verified = new IndependentVerifier({
+        supervisor,
+        artifactStore: this.options.artifactStore,
+        manifest,
+        executor,
+        diff: () => diff,
+        // Every return to FAST_CHECKS has a new durable state version, including
+        // Builder repair loops that occur before any Reviewer session exists.
+        verificationPass: initial.stateVersion,
+        now: this.options.now,
+        idFactory: this.options.idFactory,
+      }).run();
+    } catch (error) {
+      if (error instanceof StableRequiredTestFailure) {
+        return this.repairStableRequiredTest(manifest, sandbox, resultCommitSha, diff, error);
+      }
+      throw error;
+    }
 
     const advisorAgents = new Map<"TESTER" | "SECURITY", AgentContext>();
     const advisors = new TerraAdvisors({
@@ -240,11 +251,77 @@ export class EngineerVerificationManager {
       remainingReviewFixAttempts: retry.remainingKindAttempts,
     });
     this.transition(runId, "IMPLEMENTING", "REVIEW_REPAIR_STARTED", [reviewArtifact.artifactId], { scopeWithinManifest: true });
-    await this.repair(manifest, sandbox, repairContext);
+    await this.repair(manifest, sandbox, repairContext, "REVIEW_REPAIR_IMPLEMENTED");
     return this.verifyPass(runId);
   }
 
-  private async repair(manifest: TaskManifest, sandbox: ProvisionedSandbox, repairContext: ReturnType<typeof RepairContextSchema.parse>): Promise<void> {
+  private async repairStableRequiredTest(
+    manifest: TaskManifest,
+    sandbox: ProvisionedSandbox,
+    currentCommitSha: string,
+    diff: string,
+    failure: StableRequiredTestFailure,
+  ): Promise<VerificationResult> {
+    const runId = manifest.runId;
+    const supervisor = this.options.supervisor;
+    const evidenceIds = failure.evidence.map((item) => item.evidenceId);
+    const retry = supervisor.authorizeRetry({
+      runId,
+      expectedStateVersion: supervisor.getRun(runId).stateVersion,
+      kind: "BUILDER_REPAIR",
+      failureFingerprint: failure.failureFingerprint,
+      patchHash: sha256(diff),
+    });
+    supervisor.recordFailure(FailureRecordSchema.parse({
+      failureId: this.id(),
+      runId,
+      failureClass: "TEST_FAILURE",
+      reasonCode: "STABLE_REQUIRED_TEST_FAILED",
+      fingerprint: failure.failureFingerprint,
+      evidenceIds,
+      retryable: retry.allowed,
+      createdAt: this.timestamp(),
+    }));
+    if (!retry.allowed) {
+      this.transition(runId, "RETRY_BUDGET_EXHAUSTED", retry.reasonCode, evidenceIds);
+      throw new Error(`Builder repair denied for ${failure.test.testId}: ${retry.reasonCode}`);
+    }
+    const reviewFindings = [{
+      findingId: `verification-${failure.test.testId}-${retry.attemptNumber}`,
+      severity: "HIGH" as const,
+      category: "REQUIRED_TEST_FAILURE",
+      file: "",
+      lineStart: 0,
+      lineEnd: 0,
+      criterionIds: failure.requiredCriterionIds,
+      description: `Frozen required test ${failure.test.testId} failed independently in three comparable executions.`,
+      requiredChange: `Repair the implementation within frozen scope so ${failure.test.command ?? failure.test.testId} passes. Do not weaken, remove, or skip the test.`,
+      evidenceIds,
+    }];
+    const repairContext = RepairContextSchema.parse({
+      runId,
+      manifestHash: manifest.manifestHash,
+      manifest,
+      reviewFindings,
+      reviewFindingsHash: sha256(reviewFindings),
+      currentCommitSha,
+      allowedPaths: manifest.allowedPaths,
+      remainingReviewFixAttempts: retry.remainingKindAttempts,
+    });
+    this.transition(runId, "IMPLEMENTING", "STABLE_REQUIRED_TEST_REPAIR_STARTED", evidenceIds, {
+      retryBudgetAvailable: true,
+      scopeWithinManifest: true,
+    });
+    await this.repair(manifest, sandbox, repairContext, "STABLE_REQUIRED_TEST_REPAIR_IMPLEMENTED");
+    return this.verifyPass(runId);
+  }
+
+  private async repair(
+    manifest: TaskManifest,
+    sandbox: ProvisionedSandbox,
+    repairContext: ReturnType<typeof RepairContextSchema.parse>,
+    completionReason: "REVIEW_REPAIR_IMPLEMENTED" | "STABLE_REQUIRED_TEST_REPAIR_IMPLEMENTED",
+  ): Promise<void> {
     const runId = manifest.runId;
     const executor = this.executor(manifest, sandbox);
     const agent = this.startAgent(runId, "BUILDER", sha256(repairContext));
@@ -271,7 +348,7 @@ export class EngineerVerificationManager {
     });
     const builderResult = await builder.run();
     const artifact = this.storeAgentOutput(runId, agent, "BUILDER_REPAIR_RESULT", builderResult);
-    this.transition(runId, "FAST_CHECKS", "REVIEW_REPAIR_IMPLEMENTED", [artifact.artifactId]);
+    this.transition(runId, "FAST_CHECKS", completionReason, [artifact.artifactId]);
   }
 
   private executor(manifest: TaskManifest, sandbox: ProvisionedSandbox): TrustedCommandExecutor {
@@ -395,7 +472,7 @@ export class EngineerVerificationManager {
     });
   }
 
-  private failClosed(runId: string): void {
+  private failClosed(runId: string, error: unknown): void {
     const run = this.options.supervisor.getRun(runId);
     if (isTerminalState(run.state) || run.state === "REVIEW_APPROVED") return;
     const preferred = ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "REVERIFYING"].includes(run.state)
@@ -408,6 +485,17 @@ export class EngineerVerificationManager {
             ? "FAILED"
             : "RETRY_BUDGET_EXHAUSTED";
     if (!canTransition(run.state, preferred)) return;
+    const message = error instanceof Error ? error.message : String(error);
+    this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+      failureId: this.id(),
+      runId,
+      failureClass: "WORKFLOW_FAILURE",
+      reasonCode: "PHASE3_UNEXPECTED_FAILURE",
+      fingerprint: sha256({ failureClass: "WORKFLOW_FAILURE", reasonCode: "PHASE3_UNEXPECTED_FAILURE", state: run.state, message }),
+      evidenceIds: [],
+      retryable: false,
+      createdAt: this.timestamp(),
+    }));
     this.transition(runId, preferred, "PHASE3_UNEXPECTED_FAILURE");
   }
 

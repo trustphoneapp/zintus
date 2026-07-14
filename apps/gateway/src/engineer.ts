@@ -153,6 +153,7 @@ export class EngineerRunManager {
     const artifactStore = this.options.artifactStore;
     if (!artifactStore) throw new Error("Engineer control is not configured on this gateway");
     const run = this.options.supervisor.getRun(runId);
+    if (actorId !== run.userId) throw new Error("cancellation actor does not own this run");
     if (run.terminalAt) throw new Error(`terminal run ${run.state} cannot be cancelled`);
     const artifact = this.options.supervisor.recordArtifact(artifactStore.put({
       runId, type: "CANCELLATION_REQUEST",

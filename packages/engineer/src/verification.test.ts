@@ -11,6 +11,7 @@ import {
   DockerSandboxManager,
   GitWorkspaceManager,
   IndependentVerifier,
+  StableRequiredTestFailure,
   IsolatedReviewer,
   LocalArtifactStore,
   REVIEWER_POLICY_VERSION,
@@ -154,6 +155,88 @@ describe("Phase 3 independent verification", () => {
     expect(result.executions).toHaveLength(1);
     expect(result.executions[0]).toMatchObject({ type: "SECURITY", status: "PASSED" });
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_REVIEW");
+    setup.supervisor.close();
+  });
+
+  test("quarantines mixed outcomes instead of sending a flaky check to Builder repair", () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const outcomes = [1, 0, 1];
+    const executor = new TrustedCommandExecutor({
+      artifactStore, workspace: setup.workspace, sandbox: setup.sandbox, manifest: setup.manifest,
+      currentCommit: () => setup.manifest.repository.baseCommitSha,
+      runner: () => ({ status: outcomes.shift()!, stdout: "", stderr: "mixed outcome" }),
+      onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
+    });
+    let thrown: unknown;
+    try {
+      new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(StableRequiredTestFailure);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("VERIFICATION_INCOMPLETE");
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toMatchObject([{
+      failureClass: "TEST_FAILURE",
+      reasonCode: "FLAKY_TEST_QUARANTINED",
+      retryable: false,
+    }]);
+    expect(setup.supervisor.listFailures(setup.manifest.runId)[0]?.evidenceIds).toHaveLength(3);
+    setup.supervisor.close();
+  });
+
+  test("escalates a failed security check instead of sending it to Builder repair", () => {
+    const path = root();
+    const setup = setupFastChecks(path, "SECURITY");
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const executor = new TrustedCommandExecutor({
+      artifactStore, workspace: setup.workspace, sandbox: setup.sandbox, manifest: setup.manifest,
+      currentCommit: () => setup.manifest.repository.baseCommitSha,
+      runner: () => ({ status: 1, stdout: "", stderr: "security failure" }),
+      onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
+    });
+    let thrown: unknown;
+    try {
+      new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(StableRequiredTestFailure);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_ESCALATION");
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toMatchObject([{
+      failureClass: "SECURITY_FAILURE",
+      reasonCode: "INDEPENDENT_SECURITY_CHECK_FAILED",
+      retryable: false,
+    }]);
+    expect(setup.supervisor.listFailures(setup.manifest.runId)[0]?.evidenceIds).toHaveLength(1);
+    setup.supervisor.close();
+  });
+
+  test("durably records a critical deterministic diff finding with its report evidence", () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const executor = new TrustedCommandExecutor({
+      artifactStore, workspace: setup.workspace, sandbox: setup.sandbox, manifest: setup.manifest,
+      currentCommit: () => setup.manifest.repository.baseCommitSha,
+      runner: () => ({ status: 0, stdout: "test pass", stderr: "" }),
+      onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
+    });
+    expect(() => new IndependentVerifier({
+      supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor,
+      diff: () => 'diff --git a/src/value.ts b/src/value.ts\n+++ b/src/value.ts\n@@ -1 +1 @@\n+const api_key = "hard-coded-secret";\n',
+    }).run()).toThrow("critical deterministic security finding");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_ESCALATION");
+    const failures = setup.supervisor.listFailures(setup.manifest.runId);
+    expect(failures).toMatchObject([{
+      failureClass: "SECURITY_FAILURE",
+      reasonCode: "CRITICAL_SECURITY_FINDING",
+      retryable: false,
+    }]);
+    expect(failures[0]?.evidenceIds).toHaveLength(1);
     setup.supervisor.close();
   });
 });
@@ -317,7 +400,9 @@ describe("Phase 3 authoritative verification manager", () => {
     const pending = await publication.start(setup.manifest.runId, "reviewer@example.test");
     expect(pending.status).toBe("AWAITING_APPROVAL");
     expect(pullRequestCalls).toBe(0);
-    const published = await publication.approve(setup.manifest.runId, "human-1", "Evidence is sufficient.");
+    await expect(publication.approve(setup.manifest.runId, "unassigned-reviewer", "Attempt to impersonate the reviewer."))
+      .rejects.toThrow("not the assigned reviewer");
+    const published = await publication.approve(setup.manifest.runId, "reviewer@example.test", "Evidence is sufficient.");
     expect(published.status).toBe("PUBLISHED");
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("COMPLETED");
     const replay = await publication.resume(setup.manifest.runId);
@@ -328,6 +413,148 @@ describe("Phase 3 authoritative verification manager", () => {
     expect((db.query("SELECT COUNT(*) AS count FROM reviewer_sessions").get() as { count: number }).count).toBe(1);
     expect((db.query("SELECT COUNT(*) AS count FROM model_calls").get() as { count: number }).count).toBe(3);
     expect((db.query("SELECT COUNT(*) AS count FROM evidence_bundles").get() as { count: number }).count).toBe(1);
+    db.close();
+    setup.supervisor.close();
+  });
+
+  test("repairs a stable failed MUST check within budget and fully reverifies from FAST_CHECKS", async () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
+    const sandboxManager = new DockerSandboxManager({ workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest });
+    let commandRuns = 0;
+    const provisioned: ProvisionedSandbox = {
+      record: setup.sandbox,
+      workspace: setup.workspace,
+      commandRunner: () => {
+        commandRuns += 1;
+        const repaired = readFileSync(join(setup.workspace.workspaceRoot, "src", "value.ts"), "utf8").includes("stable-test-repair");
+        return repaired
+          ? { status: 0, stdout: "1 pass", stderr: "" }
+          : { status: 1, stdout: "0 pass", stderr: "expected repair" };
+      },
+    };
+    const executionManager = { getSandbox: () => provisioned } as unknown as EngineerExecutionManager;
+    let builderCalls = 0;
+    let reviewerCalls = 0;
+    const transportForRole = (_runId: string, role: "BUILDER" | "TESTER" | "SECURITY" | "REVIEWER"): ResponsesTransport => ({
+      async create(request) {
+        if (role === "BUILDER") {
+          builderCalls += 1;
+          if (builderCalls === 1) {
+            expect(JSON.stringify(request)).toContain("REQUIRED_TEST_FAILURE");
+            return { id: "stable-repair-tool", output: [{
+              type: "function_call", call_id: "stable-repair-write", name: "write_file",
+              arguments: JSON.stringify({ path: "src/value.ts", content: "// stable-test-repair\nexport const value = 2;\n" }),
+            }] };
+          }
+          return { id: "stable-repair-done", output: [], output_text: "Applied the bounded required-test repair." };
+        }
+        if (role === "TESTER") return { id: "tester-after-repair", output: [{
+          type: "function_call", call_id: "tester-after-repair-call", name: "submit_test_advisory",
+          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+        }] };
+        if (role === "SECURITY") return { id: "security-after-repair", output: [{
+          type: "function_call", call_id: "security-after-repair-call", name: "submit_security_advisory",
+          arguments: JSON.stringify({ findings: [] }),
+        }] };
+        reviewerCalls += 1;
+        const requestInput = request.input as Array<{ content: Array<{ text: string }> }>;
+        const input = JSON.parse(requestInput[0]!.content[0]!.text) as {
+          diffHash: string; evidenceBundleHash: string; trustedEvidence: Array<{ evidenceId: string; eventType: string }>;
+        };
+        const evidenceId = input.trustedEvidence.find((item) => item.eventType === "INDEPENDENT_VERIFICATION")!.evidenceId;
+        return { id: "review-after-stable-repair", output: [{
+          type: "function_call", call_id: "review-after-stable-repair-call", name: "submit_review",
+          arguments: JSON.stringify({
+            decision: "APPROVE",
+            requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: [evidenceId], explanation: "Fresh independent verification passed." }],
+            findings: [], unsupportedClaims: [], residualRisks: [],
+            reviewedDiffHash: input.diffHash, reviewedEvidenceBundleHash: input.evidenceBundleHash,
+            reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+          }),
+        }] };
+      },
+    });
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor,
+      executionManager,
+      sandboxManager,
+      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
+      transportForRole,
+    });
+
+    const result = await manager.verify(setup.manifest.runId);
+
+    expect(commandRuns).toBe(4);
+    expect(builderCalls).toBe(2);
+    expect(reviewerCalls).toBe(1);
+    expect(result.verificationExecutions).toHaveLength(1);
+    expect(result.verificationExecutions[0]?.status).toBe("PASSED");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toMatchObject([{
+      failureClass: "TEST_FAILURE",
+      reasonCode: "STABLE_REQUIRED_TEST_FAILED",
+      retryable: true,
+    }]);
+    expect(setup.supervisor.listFailures(setup.manifest.runId)[0]?.evidenceIds).toHaveLength(3);
+    const db = new Database(setup.dbPath, { readonly: true });
+    expect((db.query("SELECT COUNT(*) AS count FROM retry_attempts WHERE kind = 'BUILDER_REPAIR' AND allowed = 1").get() as { count: number }).count).toBe(1);
+    expect((db.query("SELECT COUNT(*) AS count FROM test_executions").get() as { count: number }).count).toBe(4);
+    expect((db.query("SELECT COUNT(*) AS count FROM run_state_events WHERE next_state = 'FAST_CHECKS'").get() as { count: number }).count).toBe(2);
+    db.close();
+    setup.supervisor.close();
+  });
+
+  test("stops a stable required-test repair loop when the Builder makes an identical patch", async () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
+    const sandboxManager = new DockerSandboxManager({ workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest });
+    let commandRuns = 0;
+    const executionManager = { getSandbox: () => ({
+      record: setup.sandbox,
+      workspace: setup.workspace,
+      commandRunner: () => {
+        commandRuns += 1;
+        return { status: 1, stdout: "0 pass", stderr: "same stable failure" };
+      },
+    }) } as unknown as EngineerExecutionManager;
+    let builderCalls = 0;
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor,
+      executionManager,
+      sandboxManager,
+      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
+      transportForRole: async (_runId, role) => ({
+        async create() {
+          if (role !== "BUILDER") throw new Error(`${role} must not run before verification passes`);
+          builderCalls += 1;
+          return { id: "no-progress-repair", output: [], output_text: "No repository change was made." };
+        },
+      }),
+    });
+
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("IDENTICAL_PATCH_REPEATED");
+
+    expect(commandRuns).toBe(6);
+    expect(builderCalls).toBe(1);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("RETRY_BUDGET_EXHAUSTED");
+    expect(setup.supervisor.listFailures(setup.manifest.runId).map((failure) => ({
+      failureClass: failure.failureClass,
+      reasonCode: failure.reasonCode,
+      retryable: failure.retryable,
+    }))).toEqual([
+      { failureClass: "TEST_FAILURE", reasonCode: "STABLE_REQUIRED_TEST_FAILED", retryable: true },
+      { failureClass: "TEST_FAILURE", reasonCode: "STABLE_REQUIRED_TEST_FAILED", retryable: false },
+    ]);
+    const db = new Database(setup.dbPath, { readonly: true });
+    expect(db.query("SELECT allowed, reason_code FROM retry_attempts ORDER BY created_at, id").all()).toEqual([
+      { allowed: 1, reason_code: "RETRY_ALLOWED" },
+      { allowed: 0, reason_code: "IDENTICAL_PATCH_REPEATED" },
+    ]);
     db.close();
     setup.supervisor.close();
   });
@@ -441,7 +668,9 @@ describe("Phase 4 human control", () => {
         async createPullRequest() { throw new Error("not used"); },
       },
     });
-    await publication.cancel(setup.manifest.runId, "human-1", "Stop this run.");
+    await expect(publication.cancel(setup.manifest.runId, "another-user", "Stop somebody else's run."))
+      .rejects.toThrow("does not own this run");
+    await publication.cancel(setup.manifest.runId, "user-1", "Stop this run.");
     expect(cleaned).toBe(1);
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("CANCELLED");
     expect(() => publication.requestChanges(setup.manifest.runId, "human-1", "too late")).toThrow();

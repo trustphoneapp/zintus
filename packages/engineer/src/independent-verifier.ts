@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { TaskManifest, TrustedEvidence } from "./contracts.js";
 import { TrustedEvidenceSchema } from "./contracts.js";
+import { FailureRecordSchema, type FailureRecord } from "./control-contracts.js";
 import type { ArtifactRecord, CommandExecutionRecord } from "./execution-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import { sha256 } from "./hash.js";
@@ -35,6 +36,43 @@ export interface IndependentVerificationOutput {
   securityFindings: SecurityFindingRecord[];
   trustedEvidence: TrustedEvidence[];
   securityReportArtifact: ArtifactRecord;
+}
+
+/**
+ * A deterministic, repository-fixable failure of a frozen MUST check.
+ *
+ * The verifier deliberately does not change workflow state for this error. The
+ * verification manager is the retry authority: it can grant a bounded Builder
+ * repair or fail closed when that budget is exhausted.
+ */
+export class StableRequiredTestFailure extends Error {
+  readonly test: TestPlanItem;
+  readonly requiredCriterionIds: string[];
+  readonly executions: VerificationExecutionRecord[];
+  readonly evidence: TrustedEvidence[];
+  readonly failureFingerprint: string;
+
+  constructor(input: {
+    test: TestPlanItem;
+    requiredCriterionIds: string[];
+    executions: VerificationExecutionRecord[];
+    evidence: TrustedEvidence[];
+  }) {
+    super(`stable required verification failed for ${input.test.testId}`);
+    this.name = "StableRequiredTestFailure";
+    this.test = input.test;
+    this.requiredCriterionIds = [...input.requiredCriterionIds];
+    this.executions = [...input.executions];
+    this.evidence = [...input.evidence];
+    this.failureFingerprint = sha256({
+      policyVersion: VERIFICATION_POLICY_VERSION,
+      classification: "STABLE_FAIL",
+      testId: input.test.testId,
+      type: input.test.type,
+      command: input.test.command,
+      requiredCriterionIds: [...input.requiredCriterionIds].sort(),
+    });
+  }
 }
 
 const GROUPS: ReadonlyArray<{
@@ -88,8 +126,37 @@ export class IndependentVerifier {
             commitSha: attempt.command.commitSha,
             environmentDigest: attempt.command.environmentDigest,
           })));
+          const requiredCriterionIds = item.criterionIds.filter((criterionId) =>
+            this.options.manifest.acceptanceCriteria.some(
+              (criterion) => criterion.criterionId === criterionId && criterion.priority === "MUST",
+            ),
+          );
+          if (
+            flake.classification === "STABLE_FAIL" &&
+            repeated.every((attempt) => attempt.execution.status === "FAILED") &&
+            requiredCriterionIds.length > 0
+          ) {
+            throw new StableRequiredTestFailure({
+              test: item,
+              requiredCriterionIds,
+              executions: repeated.map((attempt) => attempt.execution),
+              evidence: repeated.map((attempt) => attempt.evidence),
+            });
+          }
           const reasonCode = flake.quarantineRequired ? "FLAKY_TEST_QUARANTINED" : "INDEPENDENT_VERIFICATION_FAILED";
-          this.transition("VERIFICATION_INCOMPLETE", reasonCode, repeated.map((attempt) => attempt.evidence.evidenceId));
+          const evidenceIds = repeated.map((attempt) => attempt.evidence.evidenceId);
+          const statuses = repeated.map((attempt) => attempt.execution.status);
+          const failureClass = statuses.includes("BLOCKED") ? "SANDBOX_FAILURE" : "TEST_FAILURE";
+          const failureReason = statuses.includes("BLOCKED")
+            ? "INDEPENDENT_TEST_COMMAND_BLOCKED"
+            : statuses.includes("TIMED_OUT")
+              ? "INDEPENDENT_TEST_TIMED_OUT"
+              : reasonCode;
+          this.recordFailure(failureClass, failureReason, evidenceIds, false, {
+            testId: item.testId, type: item.type, statuses,
+            classification: flake.classification, quarantineRequired: flake.quarantineRequired,
+          });
+          this.transition("VERIFICATION_INCOMPLETE", reasonCode, evidenceIds);
           throw new Error(`independent verification failed for ${item.testId}: ${result.execution.status}`);
         }
       }
@@ -100,6 +167,9 @@ export class IndependentVerifier {
       executions.push(result.execution);
       trustedEvidence.push(result.evidence);
       if (result.execution.status !== "PASSED") {
+        this.recordFailure("SECURITY_FAILURE", "INDEPENDENT_SECURITY_CHECK_FAILED", [result.evidence.evidenceId], false, {
+          testId: item.testId, status: result.execution.status,
+        });
         this.transition("SECURITY_ESCALATION", "INDEPENDENT_SECURITY_CHECK_FAILED", [result.evidence.evidenceId]);
         throw new Error(`independent security check failed for ${item.testId}: ${result.execution.status}`);
       }
@@ -131,6 +201,13 @@ export class IndependentVerifier {
       createdAt: securityReportArtifact.createdAt,
     }));
     if (securityFindings.some((finding) => finding.severity === "CRITICAL")) {
+      this.recordFailure("SECURITY_FAILURE", "CRITICAL_SECURITY_FINDING", [securityReportArtifact.artifactId], false, {
+        reportSha256: securityReportArtifact.sha256,
+        criticalFindingIds: securityFindings
+          .filter((finding) => finding.severity === "CRITICAL")
+          .map((finding) => finding.securityFindingId)
+          .sort(),
+      });
       this.transition("SECURITY_ESCALATION", "CRITICAL_SECURITY_FINDING", [securityReportArtifact.artifactId]);
       throw new Error("critical deterministic security finding blocks review");
     }
@@ -252,5 +329,24 @@ export class IndependentVerifier {
       manifestHash: run.manifestHash,
       idempotencyKey: `phase3:${nextState.toLowerCase()}:${run.stateVersion + 1}`,
     });
+  }
+
+  private recordFailure(
+    failureClass: FailureRecord["failureClass"],
+    reasonCode: string,
+    evidenceIds: string[],
+    retryable: boolean,
+    fingerprintSource: unknown,
+  ): void {
+    this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+      failureId: (this.options.idFactory ?? randomUUID)(),
+      runId: this.options.manifest.runId,
+      failureClass,
+      reasonCode,
+      fingerprint: sha256({ policyVersion: VERIFICATION_POLICY_VERSION, failureClass, reasonCode, fingerprintSource }),
+      evidenceIds,
+      retryable,
+      createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+    }));
   }
 }
