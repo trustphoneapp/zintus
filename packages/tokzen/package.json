@@ -2,7 +2,7 @@
   "name": "tokzen",
   "version": "0.1.0",
   "description": "Token-efficient LLM context compression. TypeScript-native.",
-  "license": "MIT",
+  "license": "MIT AND BUSL-1.1",
   "type": "module",
   "exports": {
     ".": {
