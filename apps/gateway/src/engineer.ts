@@ -1,0 +1,112 @@
+import {
+  RepositoryReferenceSchema,
+  TaskManifestContentSchema,
+  type EngineerExecutionManager,
+  type EngineerRun,
+  type EngineerSupervisor,
+  type RepositoryReference,
+  type TaskManifestContent,
+} from "@zintus/engineer";
+
+export interface EngineerRunManagerOptions {
+  supervisor: EngineerSupervisor;
+  execution?: EngineerExecutionManager;
+}
+
+/** Gateway facade. It exposes no generic state-transition endpoint. */
+export class EngineerRunManager {
+  private readonly options: EngineerRunManagerOptions;
+  private readonly errors = new Map<string, string>();
+
+  constructor(options: EngineerRunManagerOptions) {
+    this.options = options;
+  }
+
+  create(input: {
+    runId?: string;
+    userId: string;
+    userEmail?: string;
+    repository: RepositoryReference;
+    request: string;
+  }): EngineerRun {
+    return this.options.supervisor.receiveRequest({
+      ...input,
+      repository: RepositoryReferenceSchema.parse(input.repository),
+    });
+  }
+
+  get(runId: string): { run: EngineerRun; lastError: string | null } {
+    return { run: this.options.supervisor.getRun(runId), lastError: this.errors.get(runId) ?? null };
+  }
+
+  freeze(runId: string, input: {
+    expectedStateVersion: number;
+    manifest: TaskManifestContent;
+    actorId: string;
+    idempotencyKey: string;
+  }): EngineerRun {
+    return this.options.supervisor.freezePlan({
+      runId,
+      expectedStateVersion: input.expectedStateVersion,
+      manifest: TaskManifestContentSchema.parse(input.manifest),
+      actorId: input.actorId,
+      idempotencyKey: input.idempotencyKey,
+    }).run;
+  }
+
+  start(runId: string): EngineerRun {
+    if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
+    const run = this.options.execution.enqueue(runId);
+    this.errors.delete(runId);
+    setTimeout(() => {
+      this.options.execution!.runQueued(runId).catch((error) => {
+        this.errors.set(runId, error instanceof Error ? error.message : String(error));
+      });
+    }, 0);
+    return run;
+  }
+
+  events(runId: string) {
+    return this.options.supervisor.listEvents(runId);
+  }
+
+  artifacts(runId: string) {
+    return this.options.supervisor.listArtifacts(runId);
+  }
+
+  subscribe(runId: string): ReadableStream<Uint8Array> {
+    this.options.supervisor.getRun(runId);
+    const encoder = new TextEncoder();
+    let nextSequence = 1;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    let closed = false;
+    const pump = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+      if (closed) return;
+      const events = this.options.supervisor.listEvents(runId).filter((event) => event.sequence >= nextSequence);
+      for (const event of events) {
+        controller.enqueue(encoder.encode(`id: ${event.sequence}\nevent: state\ndata: ${JSON.stringify(event)}\n\n`));
+        nextSequence = event.sequence + 1;
+      }
+      const state = this.options.supervisor.getRun(runId).state;
+      if (state === "FAST_CHECKS" || [
+        "COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED",
+        "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION",
+        "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED",
+      ].includes(state)) {
+        if (timer) clearInterval(timer);
+        closed = true;
+        controller.close();
+      }
+    };
+    return new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        pump(controller);
+        if (!closed) {
+          timer = setInterval(() => pump(controller), 250);
+          timer.unref?.();
+        }
+      },
+      cancel: () => { if (timer) clearInterval(timer); },
+    });
+  }
+}

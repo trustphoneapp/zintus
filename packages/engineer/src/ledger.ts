@@ -16,6 +16,18 @@ import {
   type TaskManifest,
 } from "./contracts.js";
 import {
+  ArtifactRecordSchema,
+  AgentExecutionRecordSchema,
+  CommandExecutionRecordSchema,
+  ModelCallRecordSchema,
+  SandboxRecordSchema,
+  type ArtifactRecord,
+  type AgentExecutionRecord,
+  type CommandExecutionRecord,
+  type ModelCallRecord,
+  type SandboxRecord,
+} from "./execution-contracts.js";
+import {
   ENGINEER_DATABASE_SCHEMA_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
 } from "./database-schema.js";
@@ -240,6 +252,13 @@ export class EngineerLedger {
     return rowToRun(row);
   }
 
+  listRuns(states?: RunState[]): EngineerRun[] {
+    const rows = states && states.length > 0
+      ? this.db.query(`${RUN_SELECT} WHERE r.state IN (${states.map(() => "?").join(",")}) ORDER BY r.created_at`).all(...states)
+      : this.db.query(`${RUN_SELECT} ORDER BY r.created_at`).all();
+    return (rows as RunRow[]).map(rowToRun);
+  }
+
   listEvents(runId: string): RunStateEvent[] {
     this.getRun(runId);
     const rows = this.db
@@ -455,8 +474,162 @@ export class EngineerLedger {
         input.allowed ? 1 : 0, input.reasonCode, input.policyVersion, input.createdAt);
   }
 
+  recordSandbox(record: SandboxRecord): SandboxRecord {
+    const parsed = SandboxRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    const existing = this.db.query("SELECT id, workspace_identity, image_digest FROM sandboxes WHERE run_id = ?")
+      .get(parsed.runId) as { id: string; workspace_identity: string; image_digest: string } | null;
+    if (existing) {
+      if (existing.id !== parsed.sandboxId || existing.workspace_identity !== parsed.workspaceIdentity ||
+          existing.image_digest !== parsed.imageDigest) {
+        throw new IdempotencyConflictError(parsed.runId, `sandbox:${parsed.sandboxId}`);
+      }
+      this.db.query("UPDATE sandboxes SET status = ?, environment_digest = ?, destroyed_at = ? WHERE id = ?")
+        .run(parsed.status, parsed.environmentDigest, parsed.destroyedAt, parsed.sandboxId);
+      return parsed;
+    }
+    this.db.query(`INSERT INTO sandboxes
+      (id, run_id, workspace_identity, image_digest, environment_digest, status, created_at, destroyed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.sandboxId, parsed.runId, parsed.workspaceIdentity, parsed.imageDigest,
+      parsed.environmentDigest, parsed.status, parsed.createdAt, parsed.destroyedAt,
+    );
+    this.insertAudit(parsed.runId, "SANDBOX_RECORDED", "SYSTEM", "sandbox-manager", {
+      sandboxId: parsed.sandboxId,
+      workspaceIdentity: parsed.workspaceIdentity,
+      imageDigest: parsed.imageDigest,
+      environmentDigest: parsed.environmentDigest,
+      source: parsed.source,
+    }, parsed.createdAt);
+    return parsed;
+  }
+
+  recordArtifact(record: ArtifactRecord): ArtifactRecord {
+    const parsed = ArtifactRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    const existing = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ? AND type = ?")
+      .get(parsed.runId, parsed.sha256, parsed.type) as Record<string, unknown> | null;
+    if (existing) return this.artifactFromRow(existing);
+    this.db.query(`INSERT INTO artifacts
+      (id, run_id, type, sha256, producer_type, producer_id, storage_reference, size_bytes, trusted, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.artifactId, parsed.runId, parsed.type, parsed.sha256, parsed.producerType,
+      parsed.producerId, parsed.storageReference, parsed.sizeBytes, parsed.trusted ? 1 : 0, parsed.createdAt,
+    );
+    return parsed;
+  }
+
+  listArtifacts(runId: string): ArtifactRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query("SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, rowid")
+      .all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.artifactFromRow(row));
+  }
+
+  recordCommandExecution(record: CommandExecutionRecord): CommandExecutionRecord {
+    const parsed = CommandExecutionRecordSchema.parse(record);
+    const run = this.getRun(parsed.runId);
+    const sandbox = this.db.query("SELECT run_id FROM sandboxes WHERE id = ?").get(parsed.sandboxId) as { run_id: string } | null;
+    if (!sandbox || sandbox.run_id !== parsed.runId) throw new EngineerNotFoundError("sandbox", parsed.sandboxId);
+    const replay = this.db.query("SELECT id, command FROM command_executions WHERE run_id = ? AND idempotency_key = ?")
+      .get(parsed.runId, parsed.idempotencyKey) as { id: string; command: string } | null;
+    if (replay) {
+      if (replay.id !== parsed.commandExecutionId || replay.command !== parsed.command) {
+        throw new IdempotencyConflictError(parsed.runId, parsed.idempotencyKey);
+      }
+      return parsed;
+    }
+    const transact = this.db.transaction(() => {
+      const stdout = this.recordArtifact(parsed.stdoutArtifact);
+      const stderr = this.recordArtifact(parsed.stderrArtifact);
+      this.db.query(`INSERT INTO command_executions
+        (id, run_id, sandbox_id, command, executor_id, exit_code, started_at, finished_at,
+         stdout_artifact_id, stderr_artifact_id, environment_digest, commit_sha, status, idempotency_key)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        parsed.commandExecutionId, parsed.runId, parsed.sandboxId, parsed.command, parsed.executorId,
+        parsed.exitCode, parsed.startedAt, parsed.finishedAt, stdout.artifactId, stderr.artifactId,
+        parsed.environmentDigest, parsed.commitSha, parsed.status, parsed.idempotencyKey,
+      );
+      this.insertAudit(parsed.runId, "COMMAND_EXECUTED", "EXECUTOR", parsed.executorId, {
+        commandExecutionId: parsed.commandExecutionId,
+        command: parsed.command,
+        exitCode: parsed.exitCode,
+        status: parsed.status,
+        stdoutArtifactId: stdout.artifactId,
+        stderrArtifactId: stderr.artifactId,
+        environmentDigest: parsed.environmentDigest,
+        commitSha: parsed.commitSha,
+        manifestHash: run.manifestHash,
+      }, parsed.finishedAt);
+      return CommandExecutionRecordSchema.parse({ ...parsed, stdoutArtifact: stdout, stderrArtifact: stderr });
+    });
+    return transact();
+  }
+
+  recordModelRouting(input: import("./contracts.js").ModelRoutingDecision): void {
+    this.getRun(input.runId);
+    this.db.query(`INSERT INTO model_routing_decisions
+      (id, run_id, agent_role, logical_tier, resolved_model, routing_policy_version,
+       fallback_used, fallback_reason, cache_key, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      input.routingDecisionId, input.runId, input.agentRole, input.logicalTier, input.resolvedModel,
+      input.routingPolicyVersion, input.fallbackUsed ? 1 : 0, input.fallbackReason, input.cacheKey, input.timestamp,
+    );
+  }
+
+  recordAgentExecution(record: AgentExecutionRecord): void {
+    const parsed = AgentExecutionRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    const existing = this.db.query("SELECT run_id, role, model_tier FROM agent_executions WHERE id = ?")
+      .get(parsed.agentExecutionId) as { run_id: string; role: string; model_tier: string } | null;
+    if (existing) {
+      if (existing.run_id !== parsed.runId || existing.role !== parsed.role || existing.model_tier !== parsed.modelTier) {
+        throw new IdempotencyConflictError(parsed.runId, `agent:${parsed.agentExecutionId}`);
+      }
+      this.db.query("UPDATE agent_executions SET status = ?, output_artifact_id = ?, completed_at = ? WHERE id = ?")
+        .run(parsed.status, parsed.outputArtifactId, parsed.completedAt, parsed.agentExecutionId);
+      return;
+    }
+    this.db.query(`INSERT INTO agent_executions
+      (id, run_id, role, model_tier, status, input_hash, output_artifact_id, started_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.agentExecutionId, parsed.runId, parsed.role, parsed.modelTier, parsed.status,
+      parsed.inputHash, parsed.outputArtifactId, parsed.startedAt, parsed.completedAt,
+    );
+  }
+
+  recordModelCall(record: ModelCallRecord): void {
+    const parsed = ModelCallRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    this.db.query(`INSERT INTO model_calls
+      (id, run_id, agent_execution_id, logical_tier, resolved_model, prompt_template_version,
+       input_context_refs_json, output_schema_version, cache_key, cache_hit, latency_ms,
+       input_tokens, output_tokens, retry_count, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.modelCallId, parsed.runId, parsed.agentExecutionId, parsed.logicalTier, parsed.resolvedModel,
+      parsed.promptTemplateVersion, canonicalJson(parsed.inputContextRefs), parsed.outputSchemaVersion,
+      parsed.cacheKey, parsed.cacheHit === null ? null : parsed.cacheHit ? 1 : 0, parsed.latencyMs,
+      parsed.inputTokens, parsed.outputTokens, parsed.retryCount, parsed.status, parsed.createdAt,
+    );
+  }
+
   close(): void {
     this.db.close();
+  }
+
+  private artifactFromRow(row: Record<string, unknown>): ArtifactRecord {
+    return ArtifactRecordSchema.parse({
+      artifactId: row.id,
+      runId: row.run_id,
+      type: row.type,
+      sha256: row.sha256,
+      producerType: row.producer_type,
+      producerId: row.producer_id,
+      storageReference: row.storage_reference,
+      sizeBytes: row.size_bytes,
+      trusted: row.trusted === 1,
+      createdAt: row.created_at,
+    });
   }
 
   private assertExpectedRun(run: EngineerRun, command: LedgerTransitionCommand): void {

@@ -16,13 +16,13 @@ or reformat those changes.
 | Concern | Existing Zintus implementation | Engineer decision |
 | --- | --- | --- |
 | Frontend | Next.js 16/React 19 web and desktop; Expo/React Native mobile | Add Engineer screens to the existing shells in phase 5 |
-| Backend | Bun HTTP gateway; Hono Cloudflare relay | Add authenticated `/v1/engineer` gateway routes in later phases |
+| Backend | Bun HTTP gateway; Hono Cloudflare relay | Authenticated `/v1/engineer` intake, read, freeze, start, events, and artifact routes landed in phase 2 |
 | Package manager | Bun workspaces and `bun.lock` | Add a workspace package and use existing scripts |
 | Database | Machine-local `bun:sqlite`; Drizzle-backed stores; Cloudflare D1/KV for cloud | Use owner-only SQLite/WAL for the local phase-1 ledger; keep a storage interface suitable for a later D1/Postgres adapter |
 | Authentication | Gateway bearer token; relay email/Google sessions and scoped gateway credentials | Reuse the gateway boundary; persist the authenticated user ID on every run |
 | Model routing | `@zintus/router` with capability, quota, failover, and structured-output routing | Add centrally enforced Engineer role-to-tier routing in a later phase; agents never pick their tier |
 | Streaming | Existing SSE chat, research, and agent event streams; relay WebSocket | Reuse SSE for run timelines and the relay for remote clients |
-| Queue/workers | No durable general-purpose queue; gateway agent tasks are in-process with persisted checkpoints | Phase 1 is synchronous application logic; add a durable worker queue before remote autonomous execution |
+| Queue/workers | No external general-purpose queue; gateway agent tasks are in-process with persisted checkpoints | Engineer uses the authoritative `QUEUED` ledger state as the durable local dispatch record, acknowledges only after commit, and reclaims queued work after restart |
 | Repository integration | Local repository map, sandboxed file tools, Docker command runner; no narrow PR service | Reuse read/write sandbox primitives; build a supervisor-only Git service in phase 2/4 |
 | Design system | Shared Zintus tokens plus app-level cards, badges, buttons, inputs, typography, themes | Reuse components and tokens; Engineer is a workflow UI, not a chat window |
 | Tests | `bun:test`, Vitest, TypeScript build references, CI security/build/smoke jobs | Add deterministic package tests and include them in the root suite |
@@ -70,7 +70,7 @@ or reformat those changes.
 
 ## Delivery phases
 
-### Phase 1 — foundation (this increment)
+### Phase 1 — foundation (complete)
 
 Objective: make workflow authority deterministic and durable before any model is
 allowed to build.
@@ -100,10 +100,28 @@ changed; no model, sandbox, command, PR, or UI result is mocked as complete.
 
 ### Phase 2 — execution
 
-Add authenticated gateway run endpoints, durable work dispatch, sandbox claim/cold
-fallback, exact-base Git workspaces, trusted command execution, artifact capture,
-provider resolution for the fixed role tiers, and Codex Builder integration. Builder credentials
-have no push, PR, merge, deployment, or branch-protection authority.
+Status: complete for the local single-repository execution slice.
+
+Delivered:
+
+1. Authenticated `/v1/engineer/runs` intake/read/freeze/start/events/artifact routes.
+2. Durable `QUEUED` dispatch acknowledgment and queued-run recovery on gateway restart.
+3. Exact-base, per-run Git worktrees and unique local run branches.
+4. Pinned-digest Docker execution with no network, read-only rootfs, non-root UID,
+   dropped capabilities, no-new-privileges, CPU/memory/PID limits, and bounded output/time.
+5. Atomic warm-pool reservation, exact base/origin/lockfile/image/toolchain validation,
+   quarantine on failure, cold fallback, and one-time destruction after claim.
+6. Frozen-manifest path/command enforcement, symlink and `.git` denial, argv-only
+   command execution, and no Builder Git/PR/deployment tools or credentials.
+7. Content-addressed immutable artifacts with size limits and read-time hash verification.
+8. Current fixed OpenAI tier resolution (`gpt-5.6-sol`, `gpt-5.6-terra`,
+   `gpt-5.6-luna`) and a `store:false` Responses API Codex Builder loop with strict
+   function tools, bounded rounds/mutations, model-call metadata, and real Git diff output.
+9. Supervisor-owned persistence of sandboxes, agent executions, model routing/model
+   calls, command executions, stdout/stderr artifacts, and Builder result metadata.
+
+The worker deliberately stops at `FAST_CHECKS`. Builder-requested commands are recorded,
+but they do not satisfy Phase-3 independent verification gates.
 
 ### Phase 3 — verification
 

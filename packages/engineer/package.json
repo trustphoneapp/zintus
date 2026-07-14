@@ -16,6 +16,7 @@
     "test": "bun test src/"
   },
   "dependencies": {
+    "openai": "^6.46.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

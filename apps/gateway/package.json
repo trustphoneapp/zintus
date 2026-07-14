@@ -21,6 +21,7 @@
     "@noble/curves": "^2.2.0",
     "@zintus/crypto-e2e": "workspace:*",
     "@zintus/engine": "workspace:*",
+    "@zintus/engineer": "workspace:*",
     "@zintus/keychain": "workspace:*",
     "@zintus/mcp": "workspace:*",
     "@zintus/providers": "workspace:*",

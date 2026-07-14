@@ -19,7 +19,16 @@ import {
   type RunStateEvent,
   type TaskManifest,
   type TaskManifestContent,
+  ModelRoutingDecisionSchema,
+  type ModelRoutingDecision,
 } from "./contracts.js";
+import type {
+  AgentExecutionRecord,
+  ArtifactRecord,
+  CommandExecutionRecord,
+  ModelCallRecord,
+  SandboxRecord,
+} from "./execution-contracts.js";
 import { IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
 import { sha256 } from "./hash.js";
 import { EngineerLedger, type LedgerTransitionResult } from "./ledger.js";
@@ -290,6 +299,10 @@ export class EngineerSupervisor {
     return this.ledger.getRun(runId);
   }
 
+  listRuns(states?: RunState[]): EngineerRun[] {
+    return this.ledger.listRuns(states);
+  }
+
   getManifest(runId: string, version?: number): TaskManifest | null {
     return this.ledger.getManifest(runId, version);
   }
@@ -300,6 +313,41 @@ export class EngineerSupervisor {
 
   listEvents(runId: string): RunStateEvent[] {
     return this.ledger.listEvents(runId);
+  }
+
+  recordSandbox(record: SandboxRecord): SandboxRecord {
+    return this.ledger.recordSandbox(record);
+  }
+
+  recordArtifact(record: ArtifactRecord): ArtifactRecord {
+    return this.ledger.recordArtifact(record);
+  }
+
+  listArtifacts(runId: string): ArtifactRecord[] {
+    return this.ledger.listArtifacts(runId);
+  }
+
+  recordCommandExecution(record: CommandExecutionRecord): CommandExecutionRecord {
+    const run = this.ledger.getRun(record.runId);
+    if (run.manifestHash === null) throw new ManifestIntegrityError("commands require a frozen manifest");
+    if (!["IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "SECURITY_REVIEW", "REVERIFYING"]
+      .includes(run.state)) {
+      throw new InvalidTransitionError(`commands cannot be recorded while run is ${run.state}`);
+    }
+    return this.ledger.recordCommandExecution(record);
+  }
+
+  recordModelRouting(decision: ModelRoutingDecision): void {
+    const parsed = ModelRoutingDecisionSchema.parse(decision);
+    this.ledger.recordModelRouting(parsed);
+  }
+
+  recordAgentExecution(record: AgentExecutionRecord): void {
+    this.ledger.recordAgentExecution(record);
+  }
+
+  recordModelCall(record: ModelCallRecord): void {
+    this.ledger.recordModelCall(record);
   }
 
   close(): void {

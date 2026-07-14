@@ -13,9 +13,10 @@ Existing Zintus gateway
           |
           +--> @zintus/engineer (authoritative supervisor + ledger)
           +--> @zintus/router (central model resolution)
-          +--> @zintus/agent (Builder tools only)
+          +--> OpenAI Responses API (Codex Builder, fixed SOL tier)
           +--> context/index packages (untrusted repository data)
-          +--> sandbox / executor / evidence / Git service (later phases)
+          +--> exact-base Git worktree + Docker trusted executor + artifact store
+          +--> evidence / publication Git service (later phases)
 ```
 
 The existing generic agent remains available, but an Engineer run cannot be
@@ -41,7 +42,7 @@ and supervisor-controlled publication.
 7. **Git service:** a narrow publication capability callable only by an
    authenticated Supervisor command after preflight.
 
-## Phase-1 package
+## Foundation and execution package
 
 `@zintus/engineer` is a shared, UI-agnostic package. Its public entry point exposes
 validated types, pure policy functions, a read API, and the deterministic
@@ -58,8 +59,22 @@ SQLite-specific result types so a cloud adapter can be added later.
 The same package fixes the logical model tier for every role: SOL is reserved for
 Builder and Reviewer, TERRA serves planning/testing/security/architecture, and
 LUNA serves classification/risk-feature/docs/formatting work. Phase 2 resolves
-those logical tiers to provider models at startup; resolution may fail explicitly
-but may not silently change a role's tier.
+those logical tiers to the current official OpenAI model IDs. Resolution may fail
+explicitly but may not silently change a role's tier.
+
+Phase 2 adds the execution boundary inside the same UI-agnostic package. A durable
+`QUEUED` event is committed before the gateway acknowledges `/start`; committed
+queued work is reclaimed after restart. The worker claims and validates a warm
+workspace or provisions an exact-base cold worktree, records the sandbox identity,
+then gives Codex only strict manifest-scoped file and command-request functions.
+No shell, Git mutation, PR, merge, deployment, secret, or generic state-transition
+capability is exposed to the model.
+
+The command executor independently checks the frozen command allowlist and a narrow
+package-runner policy, spawns argv with `shell:false`, executes inside a pinned
+offline Docker image, and stores stdout/stderr as immutable trusted artifacts. A
+Builder summary and diff remain untrusted model output. Phase 2 ends at
+`FAST_CHECKS`; Phase 3 owns all correctness promotion.
 
 ## Core invariants
 
@@ -104,6 +119,6 @@ are marked by producer and filtered before Reviewer input construction.
 
 ## Deferred integrations
 
-Phase 1 does not execute commands, contact a model, create branches, open PRs, or
-expose API routes. Those omissions are deliberate: the authority and persistence
-layer must be testable before side effects are connected.
+Independent test/security execution, claim synthesis, isolated Reviewer sessions,
+evidence bundles, human approval, remote branch push, and PR creation remain
+deferred. The Builder has no credentials for those operations.

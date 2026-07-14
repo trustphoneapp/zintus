@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Engine } from "@zintus/engine";
@@ -7,6 +7,8 @@ import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
+import { EngineerSupervisor } from "@zintus/engineer";
+import { EngineerRunManager } from "./engineer.js";
 
 function fakeEngine(overrides: Partial<Engine> = {}): Engine {
   const base: Engine = {
@@ -104,6 +106,39 @@ describe("origin rejection (CSRF / denial-of-wallet guard)", () => {
 });
 
 describe("gateway handler", () => {
+  test("Engineer run intake and reads use the gateway bearer boundary", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-gateway-engineer-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const engineerRuns = new EngineerRunManager({ supervisor });
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const body = JSON.stringify({
+      runId: "gateway-run-1",
+      userId: "user-1",
+      repository: {
+        repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture",
+        baseBranch: "main", baseCommitSha: "1".repeat(40),
+      },
+      request: "Add a bounded feature",
+    });
+    expect((await handler(new Request("http://x/v1/engineer/runs", { method: "POST", body }))).status).toBe(401);
+    const created = await handler(new Request("http://x/v1/engineer/runs", {
+      method: "POST", body, headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+    }));
+    expect(created.status).toBe(201);
+    const read = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(read.status).toBe(200);
+    expect(((await read.json()) as { run: { state: string } }).run.state).toBe("REQUEST_RECEIVED");
+    const artifacts = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/artifacts", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(artifacts.status).toBe(200);
+    expect((await artifacts.json()) as unknown).toEqual({ artifacts: [] });
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   test("GET /health is public and reports auth state", async () => {
     const handler = makeHandler({ token: "secret" });
     const res = await handler(new Request("http://x/health"));

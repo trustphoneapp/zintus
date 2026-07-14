@@ -12,6 +12,7 @@
     { "path": "../../packages/crypto-e2e" },
     { "path": "../../packages/keychain" },
     { "path": "../../packages/engine" },
+    { "path": "../../packages/engineer" },
     { "path": "../../packages/search" }
   ]
 }

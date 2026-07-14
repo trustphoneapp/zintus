@@ -52,6 +52,7 @@ import {
   type AgentEngine,
   type CreateAgentTaskBody,
 } from "./agents.js";
+import type { EngineerRunManager } from "./engineer.js";
 import {
   mcpToolsToDefinitions,
   mcpToolName,
@@ -631,6 +632,8 @@ export interface GatewayHandlerDeps {
    * server connects once.
    */
   mcpRegistry?: MCPRegistry;
+  /** Zintus Engineer run facade. Omitted when the local execution feature is disabled. */
+  engineerRuns?: EngineerRunManager;
 }
 
 /** Hard cap on SERVER-SIDE MCP tool-loop rounds (model calls) per request. Each
@@ -667,6 +670,7 @@ export function createGatewayHandler(
     deps.readProviderKey ?? (async (provider: ProviderId) => (await keychainGetKey(provider)) ?? null);
   const activityStore = deps.activityStore;
   const mcpRegistry = deps.mcpRegistry ?? new MCPRegistry();
+  const engineerRuns = deps.engineerRuns;
   // P2: gateway-hosted agent runtime (one manager per handler; tasks live for
   // the life of the process, finished runs persist to ~/.zintus/agents).
   const agents = new AgentTaskManager(engine as unknown as AgentEngine);
@@ -2744,6 +2748,64 @@ export function createGatewayHandler(
     }
 
     // ── P2: gateway-hosted agent runtime ─────────────────────────────────────
+    if (url.pathname === "/v1/engineer/runs" && request.method === "POST") {
+      if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
+      try {
+        const body = await request.json() as {
+          runId?: string; userId?: string; userEmail?: string; repository?: unknown; request?: string;
+        };
+        if (!body.userId || !body.repository || !body.request) throw new Error("userId, repository, and request are required");
+        const run = engineerRuns.create({
+          ...(body.runId ? { runId: body.runId } : {}),
+          userId: body.userId,
+          ...(body.userEmail ? { userEmail: body.userEmail } : {}),
+          repository: body.repository as never,
+          request: body.request,
+        });
+        return json(request, { run }, 201);
+      } catch (error) {
+        return json(request, { error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+      }
+    }
+
+    if (url.pathname.startsWith("/v1/engineer/runs/") && engineerRuns) {
+      const parts = url.pathname.split("/");
+      const runId = parts[4] ?? "";
+      const action = parts[5];
+      try {
+        if (!action && request.method === "GET") return json(request, engineerRuns.get(runId));
+        if (action === "freeze-plan" && request.method === "POST") {
+          const body = await request.json() as {
+            expectedStateVersion?: number; manifest?: unknown; actorId?: string; idempotencyKey?: string;
+          };
+          if (typeof body.expectedStateVersion !== "number" || !body.manifest || !body.actorId || !body.idempotencyKey) {
+            throw new Error("expectedStateVersion, manifest, actorId, and idempotencyKey are required");
+          }
+          return json(request, { run: engineerRuns.freeze(runId, {
+            expectedStateVersion: body.expectedStateVersion,
+            manifest: body.manifest as never,
+            actorId: body.actorId,
+            idempotencyKey: body.idempotencyKey,
+          }) });
+        }
+        if (action === "start" && request.method === "POST") {
+          return json(request, { run: engineerRuns.start(runId), accepted: true }, 202);
+        }
+        if (action === "events" && request.method === "GET") {
+          return new Response(engineerRuns.subscribe(runId), {
+            headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", ...corsHeaders(request) },
+          });
+        }
+        if (action === "artifacts" && request.method === "GET") {
+          return json(request, { artifacts: engineerRuns.artifacts(runId) });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = /not found/i.test(message) ? 404 : /not configured|PLAN_FROZEN/i.test(message) ? 409 : 400;
+        return json(request, { error: { message } }, status);
+      }
+    }
+
     if (url.pathname === "/v1/agents" && request.method === "POST") {
       const body = (await request.json().catch(() => null)) as
         | (CreateAgentTaskBody & { task?: unknown })

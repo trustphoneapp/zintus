@@ -13,6 +13,7 @@ export {
   type RouteOptionsResult,
 } from "./route-options.js";
 export { MCPRegistry, type MCPRegistryOptions } from "./mcp-registry.js";
+export { EngineerRunManager, type EngineerRunManagerOptions } from "./engineer.js";
 // Re-exported so integration tests (and @zintus/test-utils) can build a handler
 // against a custom engine without reaching into ./handler.js internals.
 export {
@@ -32,6 +33,19 @@ import { detectLocalRuntimes } from "./local-runtimes.js";
 import { createErrorSink } from "./observability.js";
 import { createRateLimiter, type RateLimiter } from "./rate-limit.js";
 import { MCPRegistry } from "./mcp-registry.js";
+import { getKey as getProviderKey } from "@zintus/keychain";
+import {
+  DockerSandboxManager,
+  EngineerExecutionManager,
+  EngineerSupervisor,
+  GitWorkspaceManager,
+  LocalArtifactStore,
+  OpenAIResponsesTransport,
+  WarmSandboxPool,
+} from "@zintus/engineer";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { EngineerRunManager } from "./engineer.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -100,6 +114,70 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // relay.
   const mcpRegistry = new MCPRegistry();
 
+  // Zintus Engineer is always available for durable intake/plan records. The
+  // execution worker is enabled only when the single connected repository and
+  // immutable Docker image are explicitly configured; otherwise /start fails
+  // closed while read/intake routes remain usable.
+  const engineerRoot = join(homedir(), ".zintus", "engineer");
+  const engineerSupervisor = new EngineerSupervisor({ dbPath: join(engineerRoot, "engineer.db") });
+  const engineerRepositoryRoot = process.env.ZINTUS_ENGINEER_REPOSITORY_ROOT;
+  const engineerRepositoryId = process.env.ZINTUS_ENGINEER_REPOSITORY_ID;
+  const engineerImage = process.env.ZINTUS_ENGINEER_IMAGE;
+  const engineerImageDigest = process.env.ZINTUS_ENGINEER_IMAGE_DIGEST;
+  const engineerArtifactStore = new LocalArtifactStore({ root: join(engineerRoot, "artifacts") });
+  let engineerExecution: EngineerExecutionManager | undefined;
+  if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest) {
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(engineerRoot, "workspaces") });
+    const warmLockfileHash = process.env.ZINTUS_ENGINEER_LOCKFILE_HASH;
+    const warmToolchainHash = process.env.ZINTUS_ENGINEER_TOOLCHAIN_HASH;
+    const warmPool = warmLockfileHash && warmToolchainHash
+      ? {
+          pool: new WarmSandboxPool({ root: join(engineerRoot, "warm-pool") }),
+          lockfileHash: warmLockfileHash,
+          toolchainHash: warmToolchainHash,
+        }
+      : undefined;
+    const sandboxManager = new DockerSandboxManager({
+      workspaceManager,
+      imageReference: engineerImage,
+      imageDigest: engineerImageDigest,
+      ...(warmPool ? { warmPool } : {}),
+    });
+    const prewarmBaseCommit = process.env.ZINTUS_ENGINEER_PREWARM_BASE_COMMIT_SHA;
+    if (prewarmBaseCommit && warmPool) {
+      sandboxManager.prewarm({
+        repositoryId: engineerRepositoryId,
+        repositoryRoot: engineerRepositoryRoot,
+        baseCommitSha: prewarmBaseCommit,
+      });
+    }
+    engineerExecution = new EngineerExecutionManager({
+      supervisor: engineerSupervisor,
+      sandboxManager,
+      artifactStore: engineerArtifactStore,
+      repositoryRootFor: (repositoryId) => {
+        if (repositoryId !== engineerRepositoryId) throw new Error("run repository is not the configured Engineer repository");
+        return engineerRepositoryRoot;
+      },
+      transportForRun: async () => {
+        const apiKey = await getProviderKey("openai");
+        if (!apiKey) throw new Error("OpenAI BYOK key is required for the Codex Builder");
+        return new OpenAIResponsesTransport({ apiKey });
+      },
+      builderOptions: {
+        modelConfiguration: {
+          sol: process.env.ZINTUS_ENGINEER_MODEL_SOL,
+          terra: process.env.ZINTUS_ENGINEER_MODEL_TERRA,
+          luna: process.env.ZINTUS_ENGINEER_MODEL_LUNA,
+        },
+      },
+    });
+  }
+  const engineerRuns = new EngineerRunManager({
+    supervisor: engineerSupervisor,
+    ...(engineerExecution ? { execution: engineerExecution } : {}),
+  });
+
   const log: LogFn = (level, message, fields = {}) => {
     // Redact any provider/secret token before the structured line is emitted —
     // an upstream error echoed into `fields` (e.g. a 401 body) can carry a key.
@@ -127,6 +205,18 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       "Deep research unavailable: set TAVILY_API_KEY in apps/gateway/.env to enable",
       {},
     );
+  }
+
+  // QUEUED is the durable dispatch record. A gateway restart reclaims queued
+  // work only after reading that committed state; failures are handled by the
+  // execution manager's deterministic environment/Builder terminal paths.
+  for (const recovery of engineerExecution?.recoverQueued() ?? []) {
+    recovery.promise.catch((error) => {
+      log("error", "engineer.recovery_failed", {
+        runId: recovery.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   // Graceful-shutdown state. `draining` is read by the handler's /health so
@@ -162,6 +252,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       rateLimiter,
       activityStore,
       mcpRegistry,
+      engineerRuns,
       getDraining: () => draining,
       // Real, in-flight-aware free-tier quota signal for Tokzen's quota-aware
       // compression dial (was always the hardcoded 1.0 default before wiring).
@@ -278,6 +369,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         clearTimeout(timer);
       }
       log("info", "gateway.stopped", {});
+      engineerSupervisor.close();
     })();
     return shuttingDown;
   }
