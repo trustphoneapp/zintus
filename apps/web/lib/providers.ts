@@ -26,3 +26,11 @@ export const PROVIDERS: ProviderDisplay[] = [
 export const PROVIDER_BY_ID = Object.fromEntries(
   PROVIDERS.map((provider) => [provider.id, provider]),
 ) as Record<ProviderId, ProviderDisplay>;
+
+/** Local, on-device runtimes — no API key, no quota, detected by probing a
+ *  loopback port. Shared by the Providers page and the chat composer's
+ *  pinned-provider notice so "is this provider local?" has one answer. */
+export const LOCAL_PROVIDER_IDS: ReadonlySet<ProviderId> = new Set<ProviderId>([
+  "ollama",
+  "lmstudio",
+]);

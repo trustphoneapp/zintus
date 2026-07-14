@@ -106,8 +106,33 @@
   --marketing-green: #34d399;
 }
 
+/* Marketing LIGHT — neutral "machined light" palette, indigo brand accent kept.
+   accent-light is darkened to #3550c8 so accent-as-text clears ≥4.5:1 on the
+   #faf9fb canvas (measured ~6.4:1). Terminals/code panels stay dark (pinned
+   below) — screens are dark in every theme. */
 .light {
   color-scheme: light;
+  --marketing-bg: #faf9fb;
+  --surface-1: #ffffff;
+  --surface-2: #f4f4f7;
+  --surface-3: #ececf1;
+  --marketing-surface: #ffffff;
+  --marketing-surface-2: #f4f4f7;
+  --nav-glass: rgba(250, 249, 251, 0.72);
+  --marketing-text: #1a1a20;
+  --marketing-muted: #6a6a74;
+  --marketing-border: #e4e4ea;
+  --marketing-accent: #4d6bfe;
+  --marketing-accent-light: #3550c8;
+  --marketing-accent-dim: #dfe5ff;
+  --marketing-on-accent: #ffffff;
+  --marketing-accent-soft: rgba(77, 107, 254, 0.08);
+  --marketing-btn-primary-bg: #4d6bfe;
+  --marketing-btn-primary-ink: #ffffff;
+  --marketing-glow: transparent;
+  --marketing-green: #16a34a;
+  --marketing-red: #b91c1c;
+  --marketing-red-soft: rgba(185, 28, 28, 0.14);
 }
 
 /* ── App-shell mode bridge ────────────────────────────────────────────────
@@ -1820,6 +1845,25 @@ code {
   gap: 12px;
 }
 
+/* These "screen" variants scroll via the .screen flex container itself (no
+   inner scroll region, unlike .chat-messages / .agent-body). Per the CSS
+   flexbox "automatic minimum size" rule, a flex item whose OWN overflow is
+   not `visible` (e.g. a table/list wrapper set to `overflow: hidden` just to
+   clip rounded corners) gets its automatic min-height reduced to 0 — so
+   flex-shrink can silently crush it to fit the viewport instead of letting it
+   keep its content height and overflow .screen (which is what should trigger
+   the scrollbar). Found on /models: the 51-row table was squeezed to ~536px
+   and unreachable past that point instead of scrolling. flex-shrink: 0 gives
+   every direct child a content-based floor so .screen's own overflow-y:auto
+   is what scrolls, as intended. */
+.providers-screen > *,
+.usage-screen > *,
+.settings-screen > *,
+.compare-screen > *,
+.research-screen > * {
+  flex-shrink: 0;
+}
+
 .providers-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1982,6 +2026,268 @@ body:not(:has(.marketing-page)) input[type="checkbox"] {
   background: var(--color-purple-faint);
   color: var(--color-purple-light);
   font-size: 13px;
+}
+
+/* ── /providers "patch bay" dense list ───────────────────────────────────── */
+/* Mono eyebrow shared by the vault row + key form labels. */
+.provider-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+/* Vault passphrase as a single compact inline row (~56px). */
+.provider-vault-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 12px;
+  border-radius: 12px;
+  background: var(--color-surface);
+  border: 0.5px solid var(--c-border);
+}
+.provider-vault-row-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.provider-vault-row input {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.provider-vault-hint {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.provider-vault-hint code {
+  font-size: 10px;
+}
+
+/* Machined container holding every provider as one hairline row. */
+.provider-list {
+  position: relative;
+  border-radius: 14px;
+  background: linear-gradient(180deg, var(--color-elevated), var(--color-surface));
+  border: 0.5px solid var(--c-border);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 1px 2px rgba(0, 0, 0, 0.4),
+    0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.pv-row {
+  border-top: 0.5px solid var(--c-border);
+}
+.pv-row:first-child {
+  border-top: none;
+}
+.pv-row.selected {
+  background: color-mix(in oklch, var(--color-elevated) 70%, transparent);
+}
+
+.pv-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: 12px;
+}
+
+.pv-row-toggle {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(88px, auto) minmax(0, 1fr) minmax(0, 1.25fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 5px 0 5px 12px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.pv-row-toggle:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+.pv-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pv-name-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.pv-name {
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pv-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.pv-model {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pv-caps {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pv-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  justify-content: flex-end;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.pv-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+/* Quiet grey action (user rule: --c-accent is near-white ink in dark modes, so
+   an accent-filled pill glows on every row — state is told by grey level, not
+   chroma). Rest = elevated fill + hairline; hover = accent-tinted fill +
+   bright border; press = scale. "Add key" and "Manage" share this treatment. */
+.pv-action {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  border: 0.5px solid var(--c-border-strong);
+  background: var(--color-elevated);
+  color: var(--color-text);
+  transition:
+    background 120ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 120ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.pv-action:hover {
+  background: var(--c-accent-mid);
+  border-color: var(--color-border-bright);
+}
+.pv-action:active {
+  transform: scale(0.96);
+  transition-duration: 80ms;
+}
+.pv-action:focus-visible {
+  outline: none;
+  box-shadow: var(--c-focus);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pv-action:active {
+    transform: none;
+  }
+}
+
+.pv-panel {
+  padding: 10px 12px 12px;
+  border-top: 0.5px solid var(--c-border);
+}
+.pv-quota {
+  margin-bottom: 10px;
+}
+
+/* Inline key form (compact). */
+.provider-key-labelrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+}
+.provider-key-input {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.provider-key-actions {
+  margin-top: 8px;
+  align-items: center;
+}
+.provider-key-actions button {
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+.actions button.linklike {
+  padding: 6px 4px;
+  background: transparent;
+  border: none;
+  color: var(--color-text-sub);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.actions button.linklike:disabled {
+  text-decoration: none;
+}
+.provider-key-hint {
+  margin: 10px 0 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 560px) {
+  .pv-row-toggle {
+    grid-template-columns: 24px minmax(80px, auto) minmax(0, 1fr) auto;
+  }
+  .pv-caps {
+    display: none;
+  }
+}
+
+@media (pointer: coarse) {
+  .pv-action {
+    height: 40px;
+  }
 }
 
 /* ── BYOK key-push sections ──────────────────────────────────────────────── */
@@ -2648,20 +2954,36 @@ select:focus-visible {
 }
 
 .theme-toggle {
-  width: 38px;
-  height: 38px;
-  border-radius: 999px;
-  border: 1px solid var(--marketing-border);
-  background: var(--marketing-surface);
-  color: var(--marketing-text);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-sub);
+  display: grid;
+  place-items: center;
   cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), transform 120ms;
 }
 
 .theme-toggle:hover {
-  box-shadow: 0 0 0 4px var(--marketing-accent-soft);
+  background: var(--color-elevated);
+  color: var(--color-text);
+}
+
+.theme-toggle:active {
+  transform: scale(0.96);
+}
+
+.theme-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--c-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-toggle:active {
+    transform: none;
+  }
 }
 
 /* ── ModeSwitcher — segmented Obsidian / Indigo / Graphite pill ────────── */
@@ -3668,8 +3990,22 @@ select:focus-visible {
   overflow: hidden;
 }
 
-.light .m-terminal {
-  background: #f6f6fc;
+/* Terminals & code panels are physical screens — DARK in every theme, so their
+   inline var(--marketing-*) children stay light-on-dark. Re-pin the token subset
+   locally: a no-op in dark, and keeps them dark (readable) under .light. */
+.m-terminal,
+.hero-v2-terminal,
+.dev-snippet {
+  --surface-1: #131316;
+  --surface-2: #1a1a1f;
+  --marketing-surface: #131316;
+  --marketing-surface-2: #1a1a1f;
+  --marketing-text: #ececef;
+  --marketing-muted: #8b8b93;
+  --marketing-accent: #4d6bfe;
+  --marketing-accent-light: #7c92fe;
+  --marketing-accent-soft: rgba(77, 107, 254, 0.12);
+  --marketing-border: #26262c;
 }
 
 .m-terminal-header {
@@ -3848,6 +4184,7 @@ select:focus-visible {
   .m-nav-links,
   .m-nav-actions .m-ghost-btn,
   .m-nav-github,
+  .m-nav-actions .theme-toggle,
   .m-nav-actions .mode-switcher {
     display: none;
   }
@@ -3996,6 +4333,37 @@ select:focus-visible {
 
 .light .m-primary-btn {
   box-shadow: 0 1px 2px rgba(17, 17, 17, 0.18);
+}
+
+/* ── Marketing LIGHT overrides ─────────────────────────────────────────────
+   Border/text/bg all flow from the .light --marketing-* tokens; only the
+   hard-coded dark drop-shadows and white-dot/grain effects need light variants. */
+/* Machined cards on white: hairline (from --marketing-border #e4e4ea) + a soft
+   neutral lift — the base rgba(0,0,0,.4/.5) drops read as bruises on light. */
+.light .mk-card {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 1px 2px rgba(17, 17, 26, 0.05),
+    0 8px 24px -14px rgba(17, 17, 26, 0.12);
+}
+/* Hero dot grid: white dots vanish on white — swap to a faint dark dot. */
+.light .hero-v2::after {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.06) 1px, transparent 1px);
+}
+/* Grain tile reads far heavier on white — dial it back. */
+.light body:has(.marketing-page)::after {
+  opacity: 0.015;
+}
+/* ThemeToggle lives in the marketing nav but its base CSS reads the app-shell
+   --color-* ramp; retoken to --marketing-* so it reads right in both themes. */
+.m-nav .theme-toggle,
+.m-nav-mobile .theme-toggle {
+  color: var(--marketing-muted);
+}
+.m-nav .theme-toggle:hover,
+.m-nav-mobile .theme-toggle:hover {
+  background: var(--marketing-accent-soft);
+  color: var(--marketing-text);
 }
 
 /* ── Redesign: sidebar new-chat + sections ────────────────────────────── */
@@ -6834,6 +7202,70 @@ body:has(.dashboard-container) {
 }
 .chat-composer-notice.is-ok {
   color: #16a34a;
+}
+/* ── Pinned-provider notice (Task 3) ───────────────────────────────────────
+   Slim, informational-only strip above the composer card — appears when the
+   catalog "pin" (Models page's "Use this model" / the composer's model
+   picker) targets a provider that isn't ready. Same styling family as
+   .chat-composer-notice above, but lives as a sibling of .chat-composer (not
+   inside it) since it tracks pin/key status, not send-time validation. Never
+   blocks send — LocalKeyManager's vault dialog remains the hard gate. */
+.pinned-provider-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.pinned-provider-notice .ppn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--color-text-muted);
+}
+.pinned-provider-notice.is-key .ppn-dot {
+  background: var(--color-yellow);
+}
+.pinned-provider-notice .ppn-text {
+  color: var(--color-text-muted);
+}
+.pinned-provider-notice.is-key .ppn-text {
+  color: var(--color-yellow);
+}
+/* Links/button always read as the quiet-grey interaction pattern used
+   elsewhere in the composer (e.g. .chat-attachment-remove), regardless of
+   the notice's tone. */
+.pinned-provider-notice a.ppn-action,
+.pinned-provider-notice button.ppn-action {
+  color: var(--color-text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.pinned-provider-notice a.ppn-action:hover,
+.pinned-provider-notice button.ppn-action:hover {
+  color: var(--color-text);
+}
+.pinned-provider-notice .ppn-dismiss {
+  margin-left: auto;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 2px;
+}
+.pinned-provider-notice .ppn-dismiss:hover {
+  color: var(--color-text);
 }
 /* ── Web search toggle ──────────────────────────────────────────────────── */
 .chat-tool-toggle {

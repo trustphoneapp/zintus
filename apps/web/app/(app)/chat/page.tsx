@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useShallow } from "zustand/react/shallow";
 import type { ResearchDepth } from "@/lib/gateway";
 import { MessageBubble } from "@/app/_components/MessageBubble";
@@ -89,6 +90,12 @@ import {
   useSpeechRecognition,
   appendDictation,
 } from "@/lib/use-speech-recognition";
+import { LOCAL_PROVIDER_IDS, PROVIDER_BY_ID } from "@/lib/providers";
+import { readPinnedModel, unpinModel } from "@/lib/pinned-model";
+import {
+  deriveProviderStatus,
+  resolveProviderStatusInput,
+} from "@/app/(app)/providers/status";
 
 const PROMPT_CARDS = [
   { title: "Explain this code", body: "Walk through a snippet step by step" },
@@ -264,6 +271,12 @@ export default function ChatPage() {
   const [keyManagerOpen, setKeyManagerOpen] = useState(false);
   const [consentOpen, setConsentOpen] = useState(false);
   const [notice, setNotice] = useState<ComposerNotice | null>(null);
+  // Pinned-provider readiness notice: dismissed per pinned-provider (a repin
+  // to a different provider — or a status flip that changes which provider is
+  // pinned — makes it reappear). Purely informational; it never blocks send,
+  // LocalKeyManager's vault dialog remains the hard gate.
+  const [dismissedPinnedProvider, setDismissedPinnedProvider] =
+    useState<ProviderId | null>(null);
   const [activeProjectName, setActiveProjectName] = useState<string | null>(null);
   // Count of MCP tools active this chat (header indicator). Read from localStorage
   // on mount + when the window regains focus (e.g. after editing /settings/mcp).
@@ -1385,6 +1398,47 @@ export default function ChatPage() {
     ? providerCanSeeImages(effectiveComposerProvider)
     : false;
 
+  // Task 3 — pinned-model key notice. "Pinned" means the catalog pin
+  // (Models page's "Use this model", or the composer's model picker) targets
+  // the CURRENTLY selected provider — a stale pin left over from a since-
+  // changed provider is not a pin. Re-reads localStorage whenever
+  // `selectedProvider` changes, mirroring the send-path's own pin check.
+  const pinnedModel = useMemo(() => {
+    if (!selectedProvider) return null;
+    const sel = readPinnedModel();
+    return sel && sel.provider === selectedProvider ? sel : null;
+  }, [selectedProvider]);
+  const pinnedProviderId = pinnedModel
+    ? (pinnedModel.provider as ProviderId)
+    : null;
+
+  // Reuse the EXACT status derivation the Providers page uses (deriveProviderStatus
+  // + resolveProviderStatusInput) — this notice never re-judges "ready" on its own.
+  const pinnedProviderStatus = useMemo(() => {
+    if (!pinnedProviderId) return null;
+    const isLocal = LOCAL_PROVIDER_IDS.has(pinnedProviderId);
+    const gateway = gatewayProviders.find((p) => p.id === pinnedProviderId);
+    const vault = vaultProviders.find((p) => p.id === pinnedProviderId);
+    return deriveProviderStatus(
+      resolveProviderStatusInput({ isLocal, gatewayConnected, gateway, vault }),
+    );
+  }, [pinnedProviderId, gatewayProviders, vaultProviders, gatewayConnected]);
+
+  // Only two of deriveProviderStatus's outcomes are "not ready" for this
+  // informational strip — a keyed-but-degraded provider (cooldown/exhausted/
+  // unavailable) is left to the existing send-time error handling instead.
+  const pinnedNoticeKind: "key" | "local" | null =
+    pinnedProviderStatus?.key === "needs-key"
+      ? "key"
+      : pinnedProviderStatus?.key === "local-stopped" ||
+          pinnedProviderStatus?.key === "local-unknown"
+        ? "local"
+        : null;
+  const showPinnedNotice =
+    pinnedNoticeKind !== null &&
+    pinnedProviderId !== null &&
+    dismissedPinnedProvider !== pinnedProviderId;
+
   // Private toggle: turning ON opens a fresh empty private chat (and remembers
   // where you were); turning OFF restores that previous chat exactly as it was.
   const togglePrivate = useCallback(() => {
@@ -1714,6 +1768,54 @@ export default function ChatPage() {
       ) : null}
 
       <div className="chat-composer-wrap">
+        {showPinnedNotice && pinnedProviderId && pinnedModel ? (
+          <div
+            className={`pinned-provider-notice${pinnedNoticeKind === "key" ? " is-key" : ""}`}
+            role="status"
+          >
+            <span className="ppn-dot" aria-hidden="true" />
+            <span className="ppn-text">
+              {pinnedNoticeKind === "key" ? (
+                <>
+                  ⚠ {PROVIDER_BY_ID[pinnedProviderId]?.name ?? pinnedProviderId} needs a key to
+                  route {pinnedModel.id} —{" "}
+                </>
+              ) : (
+                <>
+                  Runs on your machine — make sure{" "}
+                  {PROVIDER_BY_ID[pinnedProviderId]?.name ?? pinnedProviderId} is serving.{" "}
+                </>
+              )}
+            </span>
+            {pinnedNoticeKind === "key" ? (
+              <>
+                <Link href={`/providers?provider=${pinnedProviderId}`} className="ppn-action">
+                  Add key →
+                </Link>
+                <span aria-hidden="true">·</span>
+                <button
+                  type="button"
+                  className="ppn-action"
+                  onClick={() => unpinModel(setSelectedProvider)}
+                >
+                  use Auto instead
+                </button>
+              </>
+            ) : (
+              <Link href={`/providers?provider=${pinnedProviderId}`} className="ppn-action">
+                Setup →
+              </Link>
+            )}
+            <button
+              type="button"
+              className="ppn-dismiss"
+              onClick={() => setDismissedPinnedProvider(pinnedProviderId)}
+              aria-label="Dismiss"
+            >
+              <Icon name="x" size={10} />
+            </button>
+          </div>
+        ) : null}
         <div
           className="chat-composer"
           onDragOver={(e) => e.preventDefault()}

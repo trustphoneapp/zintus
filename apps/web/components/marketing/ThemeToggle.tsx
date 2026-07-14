@@ -14,7 +14,7 @@ export function ThemeToggle() {
   }, []);
 
   const isDark = mounted ? resolvedTheme !== "light" : true;
-  const label = isDark ? "Switch to light mode" : "Switch to dark mode";
+  const label = isDark ? "Switch to light" : "Switch to dark";
 
   return (
     <Tooltip content={label} side="bottom">

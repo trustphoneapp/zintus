@@ -12,6 +12,7 @@ function GithubMark() {
   );
 }
 import { ZintusLogo } from "@/components/ZintusLogo";
+import { ThemeToggle } from "./ThemeToggle";
 import { useMagnetic } from "./use-magnetic";
 
 // Section links are root-relative (`/#id`) so they resolve to the homepage
@@ -82,6 +83,8 @@ export function Navbar() {
               Open app
             </Link>
           </span>
+          {/* Far right edge, matching the desktop app's topbar placement. */}
+          <ThemeToggle />
           <button
             type="button"
             className="m-nav-mobile-btn"
@@ -111,6 +114,7 @@ export function Navbar() {
             <GithubMark />
             Star on GitHub
           </a>
+          <ThemeToggle />
         </div>
       ) : null}
     </header>

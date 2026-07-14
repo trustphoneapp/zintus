@@ -65,7 +65,14 @@ const STATUS_LABEL: Record<KeyStatus, string> = {
  * No custody: every key is encrypted with the vault passphrase and stays on this
  * device. The local gateway walks this ordered list on a 401/403 auth failure.
  */
-export function KeyManager({ providerId }: { providerId: ProviderId }) {
+export function KeyManager({
+  providerId,
+  freeKeyUrl,
+}: {
+  providerId: ProviderId;
+  /** When the provider has no key yet, a "Get a free key →" link target. */
+  freeKeyUrl?: string;
+}) {
   const passphrase = useProviderStatusStore((s) => s.passphrase);
   const primary = useProviderStatusStore((s) => s.keys[providerId] ?? null);
   const saveKey = useProviderStatusStore((s) => s.saveKey);
@@ -166,27 +173,41 @@ export function KeyManager({ providerId }: { providerId: ProviderId }) {
   const fallbackCount = Math.max(0, entries.length - 1);
 
   return (
-    <div style={{ marginTop: 12 }}>
-      <label>
-        Add API key
-        <input
-          type="password"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              addDraft();
-            }
-          }}
-          placeholder={
-            entries.length === 0
-              ? `Paste your ${PROVIDER_BY_ID[providerId].name} API key`
-              : "Paste another key (fallback)"
+    <div>
+      <div className="provider-key-labelrow">
+        <label htmlFor={`key-${providerId}`} className="provider-eyebrow">
+          {entries.length === 0 ? "Add API key" : "Add fallback key"}
+        </label>
+        {freeKeyUrl && entries.length === 0 ? (
+          <a
+            href={freeKeyUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="provider-getkey"
+          >
+            Get a free key →
+          </a>
+        ) : null}
+      </div>
+      <input
+        id={`key-${providerId}`}
+        className="provider-key-input"
+        type="password"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            addDraft();
           }
-        />
-      </label>
-      <div className="actions">
+        }}
+        placeholder={
+          entries.length === 0
+            ? `Paste your ${PROVIDER_BY_ID[providerId].name} API key`
+            : "Paste another key (fallback)"
+        }
+      />
+      <div className="actions provider-key-actions">
         <button
           type="button"
           onClick={validateDraftThenAdd}
@@ -203,7 +224,7 @@ export function KeyManager({ providerId }: { providerId: ProviderId }) {
         </button>
         <button
           type="button"
-          className="secondary"
+          className="linklike"
           onClick={addDraft}
           disabled={busy || !draft.trim()}
         >
@@ -215,7 +236,7 @@ export function KeyManager({ providerId }: { providerId: ProviderId }) {
         <>
           <div
             className="provider-card-quota-label"
-            style={{ marginTop: 14, marginBottom: 6 }}
+            style={{ marginTop: 10, marginBottom: 6 }}
           >
             <span>
               {entries.length} key{entries.length === 1 ? "" : "s"}
@@ -348,11 +369,8 @@ export function KeyManager({ providerId }: { providerId: ProviderId }) {
         </>
       ) : null}
 
-      <p className="vault-hint" style={{ marginTop: 10 }}>
-        Keys are encrypted on this device (AES-256-GCM) and never sent anywhere
-        except the provider. The first key is the primary; your local gateway
-        retries the next key in order on an authentication failure before failing
-        over to another provider.
+      <p className="provider-key-hint">
+        Encrypted on this device · first key is primary, retried in order
       </p>
     </div>
   );

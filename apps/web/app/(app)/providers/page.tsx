@@ -1,20 +1,21 @@
 "use client";
 
-import { useEffect, useState, type CSSProperties } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { QuotaBar } from "@/app/_components/QuotaBar";
 import { Icon } from "@/app/_components/Icons";
 import { RouteAdvisor } from "./RouteAdvisor";
 import { KeyManager } from "./KeyManager";
 import {
   deriveProviderStatus,
+  resolveProviderStatusInput,
   statusNeedsAdvice,
   type ProviderStatusDescriptor,
   type ProviderStatusTone,
 } from "./status";
 import { useAppStore } from "@/lib/app-store";
 import { hasEncryptedKeys } from "@/lib/crypto";
-import { PROVIDERS } from "@/lib/providers";
+import { LOCAL_PROVIDER_IDS, PROVIDERS } from "@/lib/providers";
 import { getRemainingQuotaPercent } from "@/lib/quota";
 import { useProviderStatusStore } from "@/lib/store";
 import { fetchGatewayTraces } from "@/lib/gateway";
@@ -26,23 +27,21 @@ import {
   type TrainingBadge,
 } from "@zintus/providers";
 
-const LOCAL_IDS: ReadonlySet<ProviderId> = new Set<ProviderId>([
-  "ollama",
-  "lmstudio",
-]);
-
-const BADGE_LABEL: Record<TrainingBadge, string> = {
-  "no-training": "🟢 No training",
-  trains: "🔴 May train",
-  zdr: "🔵 Zero retention",
-  unknown: "⚪ Policy unknown",
-};
+const LOCAL_IDS = LOCAL_PROVIDER_IDS;
 
 const TONE_COLOR: Record<ProviderStatusTone, string> = {
   green: "var(--color-green)",
   warn: "var(--c-warn)",
   danger: "var(--c-danger)",
   muted: "var(--color-text-muted)",
+};
+
+/** Training-policy → the 6px row dot (color + short title). */
+const TRAINING_DOT: Record<TrainingBadge, { color: string; label: string }> = {
+  "no-training": { color: "var(--color-green)", label: "No training" },
+  trains: { color: "var(--color-yellow)", label: "May train" },
+  zdr: { color: "var(--color-purple-light)", label: "Zero retention" },
+  unknown: { color: "var(--color-text-muted)", label: "Policy unknown" },
 };
 
 /** Compact token label, e.g. 1_000_000 → "1M", 128_000 → "128K". */
@@ -64,196 +63,37 @@ function localStartHint(id: ProviderId): string {
   return `Start it: open LM Studio → Local Server${port ? ` (port ${port})` : ""}.`;
 }
 
-const CAP_ON: CSSProperties = {
-  color: "var(--color-green)",
-  border: "1px solid color-mix(in oklch, var(--color-green) 35%, transparent)",
-  background: "color-mix(in oklch, var(--color-green) 12%, transparent)",
-};
-const CAP_OFF: CSSProperties = {
-  color: "var(--color-text-muted)",
-  border: "1px solid var(--c-border)",
-  background: "transparent",
-  opacity: 0.6,
-};
-const CAP_CTX: CSSProperties = {
-  color: "var(--color-text-sub)",
-  border: "1px solid var(--c-border)",
-  background: "transparent",
-};
-
-/** Compact context-window label, e.g. 1_000_000 → "1M", 128_000 → "128K". */
-function formatContext(tokens: number): string {
-  return formatTokens(tokens);
+/** Plain mono capability microline for a provider's default model, e.g.
+ *  "tools · json · 128k". Missing caps are omitted; context is always last. */
+function capMicroline(id: ProviderId): string {
+  const caps = MODEL_CAPABILITIES[id];
+  if (!caps) return "";
+  const parts: string[] = [];
+  if (caps.vision) parts.push("vision");
+  if (caps.tools) parts.push("tools");
+  if (caps.json) parts.push("json");
+  parts.push(formatTokens(caps.contextWindow).toLowerCase());
+  return parts.join(" · ");
 }
 
-/** OpenRouter-style capability chips for a provider's default model. */
-function CapabilityBadges({ providerId }: { providerId: ProviderId }) {
-  const caps = MODEL_CAPABILITIES[providerId];
-  if (!caps) return null;
-  const jsonTitle =
-    caps.structuredOutput === "json_schema"
-      ? "Structured output: schema-constrained (guaranteed)"
-      : caps.structuredOutput === "json_object"
-        ? "Structured output: JSON mode"
-        : "No native structured output";
-  const items: Array<{ label: string; on: boolean; title: string }> = [
-    { label: "Vision", on: caps.vision, title: "Accepts image input" },
-    { label: "Tools", on: caps.tools, title: "Supports tool / function calling" },
-    { label: "JSON", on: caps.json, title: jsonTitle },
-  ];
-  return (
-    <div
-      className="provider-card-caps"
-      style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
-    >
-      {items.map((item) => (
-        <span
-          key={item.label}
-          className="provider-chip"
-          style={item.on ? CAP_ON : CAP_OFF}
-          title={item.title}
-        >
-          {item.label}
-        </span>
-      ))}
-      <span
-        className="provider-chip"
-        style={CAP_CTX}
-        title={`${caps.contextWindow.toLocaleString()} token context window · ${caps.model}`}
-      >
-        {formatContext(caps.contextWindow)} ctx
-      </span>
-    </div>
-  );
-}
-
-/** Tinted status pill — the cockpit's headline "is this provider usable?" signal. */
-function StatusPill({ desc }: { desc: ProviderStatusDescriptor }) {
+/** Compact status: a green "● connected" for live providers, else muted text
+ *  ("needs key" / "not running") — mono 10px, honest per the derived status. */
+function RowStatus({ desc }: { desc: ProviderStatusDescriptor }) {
+  const showDot = desc.key !== "needs-key";
   const color = TONE_COLOR[desc.tone];
   return (
-    <span
-      className="provider-chip"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        color,
-        border: `1px solid color-mix(in oklch, ${color} 35%, transparent)`,
-        background: `color-mix(in oklch, ${color} 12%, transparent)`,
-      }}
-      title={desc.label}
-    >
-      <Icon name={desc.icon} size={12} />
-      {desc.label}
-    </span>
-  );
-}
-
-/** Data-policy badge + a link to the provider's own policy (the source of truth). */
-function PolicyBadge({ providerId }: { providerId: ProviderId }) {
-  const policy = DATA_POLICIES[providerId];
-  const isLocal = policy.policyUrl === "local";
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-      <span
-        className={`policy-badge ${policy.badge}`}
-        title={policy.note}
-      >
-        {BADGE_LABEL[policy.badge]}
+    <span className="pv-status" title={desc.label}>
+      {showDot ? (
+        <span className="pv-status-dot" style={{ background: color }} />
+      ) : null}
+      <span style={{ color: showDot ? color : "var(--color-text-muted)" }}>
+        {desc.label.toLowerCase()}
       </span>
-      {isLocal ? (
-        <span style={{ fontSize: 11, color: "var(--color-text-muted)" }}>
-          on-device
-        </span>
-      ) : (
-        <a
-          href={policy.policyUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(event) => event.stopPropagation()}
-          style={{
-            fontSize: 11,
-            color: "var(--color-text-muted)",
-            textDecoration: "underline",
-          }}
-          title={`${policy.dataRetention} — opens the provider's policy`}
-        >
-          policy ↗
-        </a>
-      )}
-    </div>
-  );
-}
-
-/** Compact, design-matched policy pill: short label + tone, no link clutter. */
-const POLICY_PILL: Record<TrainingBadge, { label: string; color: string }> = {
-  "no-training": { label: "No training", color: "var(--color-green)" },
-  trains: { label: "May train", color: "var(--color-yellow)" },
-  zdr: { label: "Zero retention", color: "var(--color-purple-light)" },
-  unknown: { label: "Policy unknown", color: "var(--color-text-muted)" },
-};
-
-function PolicyPill({
-  providerId,
-  isLocal,
-}: {
-  providerId: ProviderId;
-  isLocal: boolean;
-}) {
-  const policy = DATA_POLICIES[providerId];
-  const pill = isLocal
-    ? { label: "Local", color: "var(--color-purple-light)" }
-    : POLICY_PILL[policy.badge];
-  return (
-    <span
-      title={policy.note}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        padding: "1px 9px",
-        borderRadius: 999,
-        fontSize: 10.5,
-        fontWeight: 700,
-        color: pill.color,
-        background: `color-mix(in oklch, ${pill.color} 14%, transparent)`,
-      }}
-    >
-      {pill.label}
     </span>
   );
 }
 
-/** Tinted, lettered avatar in the provider's own hue — the row's identity anchor. */
-function ProviderAvatar({ name, color }: { name: string; color: string }) {
-  return (
-    <span
-      aria-hidden="true"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: 40,
-        height: 40,
-        borderRadius: 11,
-        flexShrink: 0,
-        fontWeight: 700,
-        fontSize: 16,
-        background: `color-mix(in oklch, ${color} 18%, transparent)`,
-        color,
-      }}
-    >
-      {name.charAt(0).toUpperCase()}
-    </span>
-  );
-}
-
-/** Mask a key for display — only ever show the last 4 chars, never the secret. */
-function maskKeyTail(value: string): string {
-  const tail = value.slice(-4);
-  return value.length <= 4 ? "••••" : `••••${tail}`;
-}
-
-/** Where to get a free API key, per provider (used on unconfigured cards). */
+/** Where to get a free API key, per provider (used on unconfigured rows). */
 const FREE_KEY_URLS: Partial<Record<ProviderId, string>> = {
   cerebras: "https://cloud.cerebras.ai/",
   groq: "https://console.groq.com/keys",
@@ -273,8 +113,9 @@ interface ProviderStat {
   avgLatencyMs: number;
 }
 
-export default function ProvidersPage() {
+function ProvidersPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { gatewayConnected, gatewayHealthLoaded, gatewayProviders } =
     useAppStore();
   const setSelectedProvider = useAppStore((s) => s.setSelectedProvider);
@@ -287,7 +128,6 @@ export default function ProvidersPage() {
   };
   const {
     providers,
-    keys,
     selected,
     passphrase,
     statusMessage,
@@ -296,8 +136,8 @@ export default function ProvidersPage() {
     unlock,
   } = useProviderStatusStore();
 
-  // Row-level "Add key" / "Manage" simply expand that provider's card in place —
-  // the key input lives inline in the expanded row (no scroll-to-bottom).
+  // Row-level "Add key" / "Manage" simply expand that provider's row in place —
+  // the key input lives inline in the expanded panel (no scroll-to-bottom).
   const selectAndManage = (id: ProviderId) => {
     setSelected(id);
   };
@@ -306,6 +146,23 @@ export default function ProvidersPage() {
   useEffect(() => {
     void unlock();
   }, [passphrase, unlock]);
+
+  // Deep-link support (?provider=groq): auto-expand that row once the real
+  // rows (not the loading skeleton) are on screen, and scroll it into view —
+  // used by the chat composer's pinned-provider notice ("Add key" / "Setup →").
+  const deepLinkHandled = useRef(false);
+  const rowRefs = useRef<Partial<Record<ProviderId, HTMLDivElement | null>>>({});
+  const showSkeleton = gatewayConnected && !gatewayHealthLoaded;
+  useEffect(() => {
+    if (deepLinkHandled.current || showSkeleton) return;
+    const param = searchParams.get("provider");
+    if (!param) return;
+    const match = PROVIDERS.find((p) => p.id === param);
+    if (!match) return;
+    deepLinkHandled.current = true;
+    setSelected(match.id);
+    rowRefs.current[match.id]?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [searchParams, showSkeleton, setSelected]);
 
   // Aggregate per-provider success rate + avg latency from recent traces.
   useEffect(() => {
@@ -352,19 +209,11 @@ export default function ProvidersPage() {
     const isLocal = LOCAL_IDS.has(provider.id);
     const gatewayHasKey = Boolean(gateway?.hasKey);
     const vaultHasKey = Boolean(vault?.hasKey);
-    // A key is "configured" if the gateway holds it server-side OR the browser
-    // vault holds it — vault keys are sent per-request to the loopback gateway,
-    // so a vault-only key is just as usable as a server-side one.
-    const hasKey = gatewayHasKey || vaultHasKey || isLocal;
-    const available = gatewayConnected
-      ? Boolean(gateway?.available) || vaultHasKey
-      : Boolean(vault?.enabled);
-    const inCooldown = gatewayConnected ? Boolean(gateway?.inCooldown) : false;
+    const { hasKey, available, inCooldown, quotaUsed, quotaLimit } =
+      resolveProviderStatusInput({ isLocal, gatewayConnected, gateway, vault });
     // The gateway only tracks quota for keys IT holds. A vault-only key's quota
     // is unknown to the gateway, so leave the raw figures undefined → "—".
     const gatewayTracksQuota = gatewayConnected && gatewayHasKey;
-    const quotaUsed = gatewayTracksQuota ? gateway?.quotaUsed : undefined;
-    const quotaLimit = gatewayTracksQuota ? gateway?.quotaLimit : undefined;
     const quota = gatewayTracksQuota
       ? getRemainingQuotaPercent({
           hasKey,
@@ -403,8 +252,6 @@ export default function ProvidersPage() {
     };
   });
 
-  const showSkeleton = gatewayConnected && !gatewayHealthLoaded;
-
   return (
     <div className="screen providers-screen">
       <div
@@ -413,7 +260,7 @@ export default function ProvidersPage() {
           maxWidth: 820,
           display: "flex",
           flexDirection: "column",
-          gap: 16,
+          gap: 12,
         }}
       >
         {/* Page intro — matches the design's title + bring-your-own-keys promise. */}
@@ -430,9 +277,9 @@ export default function ProvidersPage() {
           </h1>
           <p
             style={{
-              margin: "8px 0 0",
-              fontSize: 14.5,
-              lineHeight: 1.6,
+              margin: "6px 0 0",
+              fontSize: 14,
+              lineHeight: 1.5,
               color: "var(--color-text-sub)",
               maxWidth: 600,
             }}
@@ -447,7 +294,7 @@ export default function ProvidersPage() {
           style={{
             display: "flex",
             gap: 9,
-            padding: "12px 14px",
+            padding: "9px 12px",
             borderRadius: 12,
             background: "color-mix(in oklch, var(--color-green) 9%, transparent)",
             border:
@@ -462,12 +309,12 @@ export default function ProvidersPage() {
               display: "inline-flex",
             }}
           >
-            <Icon name="plug" size={17} />
+            <Icon name="plug" size={15} />
           </span>
           <span
             style={{
-              fontSize: 13,
-              lineHeight: 1.55,
+              fontSize: 12.5,
+              lineHeight: 1.5,
               color: "var(--color-text-sub)",
             }}
           >
@@ -479,343 +326,252 @@ export default function ProvidersPage() {
           </span>
         </div>
 
-        <div className="vault-card">
-          <label>
-            Vault passphrase
-            <input
-              type="password"
-              value={passphrase}
-              onChange={(event) => setPassphrase(event.target.value)}
-              placeholder={
-                hasEncryptedKeys()
-                  ? "Unlock local key vault"
-                  : "Create vault passphrase"
-              }
-            />
-          </label>
-          <p className="vault-hint">
-            Stored in browser with AES-256-GCM. For OS keychain routing, use{" "}
-            <code>zintus keys set</code> and run the gateway.
-          </p>
+        {/* Vault passphrase — a single compact inline row (label + input + hint). */}
+        <div className="provider-vault-row">
+          <div className="provider-vault-row-top">
+            <label htmlFor="vault-passphrase" className="provider-eyebrow">
+              Vault passphrase
+            </label>
+            <span className="provider-vault-hint">
+              AES-256-GCM in this browser · <code>zintus keys set</code> routes
+              the OS keychain
+            </span>
+          </div>
+          <input
+            id="vault-passphrase"
+            type="password"
+            value={passphrase}
+            onChange={(event) => setPassphrase(event.target.value)}
+            placeholder={
+              hasEncryptedKeys()
+                ? "Unlock local key vault"
+                : "Create vault passphrase"
+            }
+          />
         </div>
 
-        <div
-          style={{ display: "flex", flexDirection: "column", gap: 10 }}
-        >
-          {showSkeleton
-            ? PROVIDERS.map((provider) => (
+        {showSkeleton ? (
+          <div className="provider-list" aria-hidden="true">
+            {PROVIDERS.map((provider) => (
+              <div key={provider.id} className="pv-row">
                 <div
-                  key={provider.id}
-                  className="provider-card provider-card-skeleton"
-                  aria-hidden="true"
-                  style={{ display: "flex", alignItems: "center", gap: 14 }}
+                  className="pv-row-toggle"
+                  style={{ pointerEvents: "none" }}
                 >
                   <div
                     className="skeleton-line"
-                    style={{ width: 40, height: 40, borderRadius: 11 }}
+                    style={{ width: 24, height: 24, borderRadius: 7 }}
                   />
-                  <div style={{ flex: 1 }}>
-                    <div className="skeleton-line skeleton-line-title" />
-                    <div className="skeleton-line skeleton-line-sub" />
-                  </div>
-                  <div className="skeleton-line skeleton-line-badge" />
-                </div>
-              ))
-            : rows.map((provider) => {
-                const pct = provider.quota ?? 0;
-                const selectedCard = selected === provider.id;
-                const showAdvisor =
-                  gatewayConnected &&
-                  !provider.isLocal &&
-                  provider.hasKey &&
-                  (statusNeedsAdvice(provider.status.key) ||
-                    (provider.quota != null && provider.quota <= 20));
-
-                // Honest sub-line: masked key only when this device actually holds
-                // it; otherwise the default model / runtime endpoint — never faked.
-                const port = PROVIDER_METADATA[provider.id]?.detectPort;
-                const localKey = keys[provider.id];
-                const model = MODEL_CAPABILITIES[provider.id]?.model;
-                let sub: string;
-                if (provider.isLocal) {
-                  sub = port ? `localhost:${port}` : "local runtime";
-                } else {
-                  const parts: string[] = [];
-                  if (localKey) parts.push(maskKeyTail(localKey));
-                  else if (provider.hasKey) parts.push("key on gateway");
-                  if (model) parts.push(model);
-                  sub = parts.length > 0 ? parts.join(" · ") : "Bring your own key";
-                }
-
-                return (
+                  <div className="skeleton-line skeleton-line-title" />
+                  <div className="skeleton-line skeleton-line-sub" />
+                  <div />
                   <div
-                    key={provider.id}
-                    role="button"
-                    tabIndex={0}
-                    aria-pressed={selectedCard}
-                    className={`provider-card${selectedCard ? " selected" : ""}`}
-                    style={{ padding: "15px 16px" }}
-                    onClick={() => setSelected(provider.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        setSelected(provider.id);
-                      }
-                    }}
-                  >
-                    <div
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 14,
-                      }}
+                    className="skeleton-line skeleton-line-badge"
+                    style={{ justifySelf: "end" }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="provider-list">
+            {rows.map((provider) => {
+              const pct = provider.quota ?? 0;
+              const isSelected = selected === provider.id;
+              const showAdvisor =
+                gatewayConnected &&
+                !provider.isLocal &&
+                provider.hasKey &&
+                (statusNeedsAdvice(provider.status.key) ||
+                  (provider.quota != null && provider.quota <= 20));
+
+              const port = PROVIDER_METADATA[provider.id]?.detectPort;
+              const model = MODEL_CAPABILITIES[provider.id]?.model;
+              // Row model/endpoint microcopy — the default model, or the local
+              // runtime endpoint for on-device providers. Never faked.
+              const modelLine = provider.isLocal
+                ? port
+                  ? `localhost:${port}`
+                  : "local runtime"
+                : model ?? "";
+
+              const dot = provider.isLocal
+                ? { color: "var(--color-purple-light)", label: "Local runtime" }
+                : TRAINING_DOT[DATA_POLICIES[provider.id].badge];
+              const dotTitle = provider.isLocal
+                ? DATA_POLICIES[provider.id].note
+                : `${dot.label} — ${DATA_POLICIES[provider.id].note}`;
+
+              const freeKeyUrl = FREE_KEY_URLS[provider.id];
+
+              return (
+                <div
+                  key={provider.id}
+                  ref={(el) => {
+                    rowRefs.current[provider.id] = el;
+                  }}
+                  className={`pv-row${isSelected ? " selected" : ""}`}
+                >
+                  <div className="pv-row-head">
+                    <button
+                      type="button"
+                      className="pv-row-toggle"
+                      aria-expanded={isSelected}
+                      onClick={() => setSelected(provider.id)}
                     >
-                      <ProviderAvatar
-                        name={provider.name}
-                        color={provider.color}
-                      />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 9,
-                            flexWrap: "wrap",
-                          }}
-                        >
-                          <span style={{ fontSize: 14.5, fontWeight: 700 }}>
-                            {provider.name}
-                          </span>
-                          <PolicyPill
-                            providerId={provider.id}
-                            isLocal={provider.isLocal}
-                          />
-                        </div>
-                        <div
-                          style={{
-                            marginTop: 4,
-                            fontSize: 12,
-                            color: "var(--color-text-muted)",
-                            fontFamily: "var(--font-mono)",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {sub}
-                        </div>
-                      </div>
-                      <div
+                      <span
+                        className="pv-chip"
+                        aria-hidden="true"
                         style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 10,
-                          flexShrink: 0,
+                          background: `color-mix(in oklch, ${provider.color} 18%, transparent)`,
+                          color: provider.color,
                         }}
                       >
-                        <StatusPill desc={provider.status} />
-                        {!provider.isLocal && provider.hasKey ? (
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              selectAndManage(provider.id);
-                            }}
-                            style={{
-                              padding: "7px 13px",
-                              borderRadius: 9,
-                              border: "0.5px solid var(--c-border-strong)",
-                              background: "var(--color-elevated)",
-                              color: "var(--color-text-sub)",
-                              fontSize: 12.5,
-                              fontWeight: 600,
-                              cursor: "pointer",
-                            }}
-                          >
-                            Manage
-                          </button>
-                        ) : !provider.isLocal ? (
-                          <button
-                            type="button"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              selectAndManage(provider.id);
-                            }}
-                            style={{
-                              padding: "8px 15px",
-                              borderRadius: 9,
-                              border: "none",
-                              background: "var(--c-accent)",
-                              color: "var(--c-accent-contrast)",
-                              fontSize: 12.5,
-                              fontWeight: 600,
-                              cursor: "pointer",
-                            }}
-                          >
-                            Add key
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    {/* Expanded detail — all the real wiring, surfaced on select. */}
-                    {selectedCard ? (
-                      <div style={{ marginTop: 12 }}>
-                        <PolicyBadge providerId={provider.id} />
-                        <CapabilityBadges providerId={provider.id} />
-
-                        {!provider.isLocal && !provider.hasKey &&
-                        FREE_KEY_URLS[provider.id] ? (
-                          <button
-                            type="button"
-                            className="provider-getkey"
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              window.open(
-                                FREE_KEY_URLS[provider.id],
-                                "_blank",
-                                "noopener,noreferrer",
-                              );
-                            }}
-                            style={{
-                              marginTop: 10,
-                              background: "none",
-                              border: "none",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Get a free key →
-                          </button>
-                        ) : null}
-
-                        {provider.isLocal ? (
-                          <>
-                            <div
-                              className="provider-card-quota-label"
-                              style={{ marginTop: 10 }}
-                            >
-                              <span>Local runtime</span>
-                              <span>
-                                {provider.status.key === "local-running"
-                                  ? "no API quota"
-                                  : provider.status.key === "local-stopped"
-                                    ? "offline"
-                                    : "—"}
-                              </span>
-                            </div>
-                            {provider.status.key === "local-running" ? (
-                              <div className="actions">
-                                <button
-                                  type="button"
-                                  onClick={() => useInChat(provider.id)}
-                                >
-                                  Use in chat (on-device)
-                                </button>
-                              </div>
-                            ) : null}
-                            {provider.status.key === "local-stopped" ? (
-                              <p className="vault-hint" style={{ marginTop: 8 }}>
-                                {localStartHint(provider.id)}
-                              </p>
-                            ) : null}
-                            {provider.status.key === "local-unknown" ? (
-                              <p className="vault-hint" style={{ marginTop: 8 }}>
-                                Run the gateway to detect a running local runtime.
-                              </p>
-                            ) : null}
-                          </>
-                        ) : provider.hasKey ? (
-                          <>
-                            <div
-                              className="provider-card-quota-label"
-                              style={{ marginTop: 10 }}
-                            >
-                              <span>Daily quota</span>
-                              <span>
-                                {provider.quota == null
-                                  ? "quota —"
-                                  : `${pct}% remaining`}
-                              </span>
-                            </div>
-                            <QuotaBar value={pct} color={provider.color} />
-                            {provider.quotaLimit != null &&
-                            provider.quotaLimit > 0 ? (
-                              <div
-                                className="provider-card-model"
-                                style={{ marginTop: 4 }}
-                              >
-                                {formatTokens(provider.quotaUsed ?? 0)} /{" "}
-                                {formatTokens(provider.quotaLimit)} tokens used
-                              </div>
-                            ) : null}
-                            {stats[provider.id] &&
-                            stats[provider.id]!.attempts > 0 ? (
-                              <div className="provider-card-stats">
-                                {Math.round(
-                                  (stats[provider.id]!.successes /
-                                    stats[provider.id]!.attempts) *
-                                    100,
-                                )}
-                                % success · {stats[provider.id]!.avgLatencyMs}ms
-                                avg · {stats[provider.id]!.attempts} req
-                              </div>
-                            ) : null}
-                            {showAdvisor ? (
-                              <RouteAdvisor
-                                provider={provider.id}
-                                quotaPct={provider.quota}
-                              />
-                            ) : null}
-                          </>
-                        ) : null}
-
-                        {/* Key input, inline in the expanded row (add / manage
-                            keys right here — no jump to a separate card). The
-                            stopPropagation keeps clicks inside the form from
-                            re-toggling the card. */}
-                        {!provider.isLocal ? (
-                          <div
-                            className="provider-keymanager-inline"
-                            onClick={(event) => event.stopPropagation()}
-                            onKeyDown={(event) => event.stopPropagation()}
-                          >
-                            <KeyManager providerId={provider.id} />
-                          </div>
-                        ) : null}
-                      </div>
+                        {provider.name.charAt(0).toUpperCase()}
+                      </span>
+                      <span className="pv-name-cell">
+                        <span className="pv-name">{provider.name}</span>
+                        <span
+                          className="pv-dot"
+                          title={dotTitle}
+                          style={{ background: dot.color }}
+                        />
+                      </span>
+                      <span className="pv-model" title={modelLine}>
+                        {modelLine}
+                      </span>
+                      <span className="pv-caps">
+                        {capMicroline(provider.id)}
+                      </span>
+                      <RowStatus desc={provider.status} />
+                    </button>
+                    {!provider.isLocal && provider.hasKey ? (
+                      <button
+                        type="button"
+                        className="pv-action manage"
+                        onClick={() => selectAndManage(provider.id)}
+                      >
+                        Manage
+                      </button>
+                    ) : !provider.isLocal ? (
+                      <button
+                        type="button"
+                        className="pv-action add"
+                        onClick={() => selectAndManage(provider.id)}
+                      >
+                        Add key
+                      </button>
                     ) : null}
                   </div>
-                );
-              })}
-        </div>
 
-        {/* Key priority & fallback — manageable here in the cockpit, end to end.
-          The selected provider's card below holds an ORDERED key list (primary +
-          fallbacks): add, reorder, test, and remove keys. The first key is the
-          primary; the local gateway walks the list on an auth (401/403) failure
-          before abandoning the provider (OpenRouter-style). No custody — keys are
-          encrypted on this device and never sent anywhere except your gateway. */}
-      <div className="vault-card">
-        <div className="provider-card-top" style={{ marginBottom: 6 }}>
-          <div className="provider-card-title">
-            <Icon name="layers" size={14} />
-            <span>Key priority &amp; fallback</span>
+                  {/* Expanded panel — all the real wiring, in normal flow. */}
+                  {isSelected ? (
+                    <div className="pv-panel">
+                      {provider.isLocal ? (
+                        <>
+                          <div className="provider-card-quota-label">
+                            <span>Local runtime</span>
+                            <span>
+                              {provider.status.key === "local-running"
+                                ? "no API quota"
+                                : provider.status.key === "local-stopped"
+                                  ? "offline"
+                                  : "—"}
+                            </span>
+                          </div>
+                          {provider.status.key === "local-running" ? (
+                            <div className="actions">
+                              <button
+                                type="button"
+                                onClick={() => useInChat(provider.id)}
+                              >
+                                Use in chat (on-device)
+                              </button>
+                            </div>
+                          ) : null}
+                          {provider.status.key === "local-stopped" ? (
+                            <p className="vault-hint" style={{ marginTop: 8 }}>
+                              {localStartHint(provider.id)}
+                            </p>
+                          ) : null}
+                          {provider.status.key === "local-unknown" ? (
+                            <p className="vault-hint" style={{ marginTop: 8 }}>
+                              Run the gateway to detect a running local runtime.
+                            </p>
+                          ) : null}
+                        </>
+                      ) : (
+                        <>
+                          {provider.hasKey ? (
+                            <div className="pv-quota">
+                              <div className="provider-card-quota-label">
+                                <span>Daily quota</span>
+                                <span>
+                                  {provider.quota == null
+                                    ? "quota —"
+                                    : `${pct}% remaining`}
+                                </span>
+                              </div>
+                              <QuotaBar value={pct} color={provider.color} />
+                              {provider.quotaLimit != null &&
+                              provider.quotaLimit > 0 ? (
+                                <div
+                                  className="provider-card-model"
+                                  style={{ marginTop: 4 }}
+                                >
+                                  {formatTokens(provider.quotaUsed ?? 0)} /{" "}
+                                  {formatTokens(provider.quotaLimit)} tokens used
+                                </div>
+                              ) : null}
+                              {stats[provider.id] &&
+                              stats[provider.id]!.attempts > 0 ? (
+                                <div className="provider-card-stats">
+                                  {Math.round(
+                                    (stats[provider.id]!.successes /
+                                      stats[provider.id]!.attempts) *
+                                      100,
+                                  )}
+                                  % success · {stats[provider.id]!.avgLatencyMs}ms
+                                  avg · {stats[provider.id]!.attempts} req
+                                </div>
+                              ) : null}
+                              {showAdvisor ? (
+                                <RouteAdvisor
+                                  provider={provider.id}
+                                  quotaPct={provider.quota}
+                                />
+                              ) : null}
+                            </div>
+                          ) : null}
+                          <KeyManager
+                            providerId={provider.id}
+                            freeKeyUrl={freeKeyUrl}
+                          />
+                        </>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
           </div>
-          <span className="provider-badge ok">Active</span>
-        </div>
-        <p className="vault-hint">
-          Each provider keeps an ordered key list — expand a provider above to add
-          a primary plus any number of fallbacks. On an authentication failure your
-          local gateway automatically retries the next key in priority order before
-          failing over to another provider. Keys are never sent anywhere except your
-          own gateway.
-        </p>
-      </div>
+        )}
 
         {statusMessage ? (
           <p className="status-banner">{statusMessage}</p>
         ) : null}
       </div>
     </div>
+  );
+}
+
+// `useSearchParams` (for the `?provider=` deep link) opts this page out of
+// static rendering unless it's wrapped in a Suspense boundary — same pattern
+// as app/dashboard/cli-callback/page.tsx.
+export default function ProvidersPage() {
+  return (
+    <Suspense fallback={<div className="screen providers-screen" />}>
+      <ProvidersPageInner />
+    </Suspense>
   );
 }

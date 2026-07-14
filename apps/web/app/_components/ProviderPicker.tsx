@@ -7,10 +7,10 @@ import { PROVIDER_BY_ID } from "@/lib/providers";
 import { useAppStore } from "@/lib/app-store";
 import { useProviderStatusStore } from "@/lib/store";
 import { fetchCatalogModels, type CatalogModelDto } from "@/lib/gateway";
+import { SELECTED_MODEL_KEY, unpinModel } from "@/lib/pinned-model";
 import { useDismissableMenu } from "./useDismissableMenu";
 import { Icon } from "./Icons";
 
-const SELECTED_MODEL_KEY = "zintus:selected-model";
 /** Models at or below this $/1M input price are the cheap "T0 — Default" tier
  *  the router reaches for first; pricier ones are "T1 — Capable". Mirrors the
  *  derivation used on the Models page (free/local are always T0). */
@@ -161,12 +161,7 @@ export function ProviderPicker() {
   }
 
   function clearPin() {
-    try {
-      localStorage.removeItem(SELECTED_MODEL_KEY);
-    } catch {
-      /* ignore */
-    }
-    setSelectedProvider(null);
+    unpinModel(setSelectedProvider);
     setPinnedId(null);
     setOpen(false);
   }

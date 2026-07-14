@@ -95,3 +95,48 @@ export function deriveProviderStatus(
 export function statusNeedsAdvice(key: ProviderStatusKey): boolean {
   return key === "cooldown" || key === "exhausted" || key === "unavailable";
 }
+
+/** Raw per-provider signals from the gateway poll + browser key vault — the
+ *  same shapes as `GatewayProviderStatus` (lib/gateway.ts) and
+ *  `WebProviderStatus` (lib/store.ts), kept structural here so this module
+ *  stays free of React/store imports. */
+export interface RawProviderSignals {
+  isLocal: boolean;
+  gatewayConnected: boolean;
+  gateway?: {
+    available: boolean;
+    hasKey: boolean;
+    inCooldown?: boolean;
+    quotaUsed?: number;
+    quotaLimit?: number;
+  };
+  vault?: { hasKey: boolean; enabled: boolean };
+}
+
+/**
+ * Normalize raw gateway + vault signals into a `ProviderStatusInput`. This is
+ * the ONE place "does this provider have a usable key / is it available" is
+ * computed — the Providers page and the chat composer's pinned-provider
+ * notice both call it so a provider is never independently re-judged.
+ */
+export function resolveProviderStatusInput(
+  signals: RawProviderSignals,
+): ProviderStatusInput {
+  const { isLocal, gatewayConnected, gateway, vault } = signals;
+  const gatewayHasKey = Boolean(gateway?.hasKey);
+  const vaultHasKey = Boolean(vault?.hasKey);
+  // A key is "configured" if the gateway holds it server-side OR the browser
+  // vault holds it — vault keys are sent per-request to the loopback gateway,
+  // so a vault-only key is just as usable as a server-side one.
+  const hasKey = gatewayHasKey || vaultHasKey || isLocal;
+  const available = gatewayConnected
+    ? Boolean(gateway?.available) || vaultHasKey
+    : Boolean(vault?.enabled);
+  const inCooldown = gatewayConnected ? Boolean(gateway?.inCooldown) : false;
+  // The gateway only tracks quota for keys IT holds. A vault-only key's quota
+  // is unknown to the gateway, so leave the raw figures undefined → "—".
+  const gatewayTracksQuota = gatewayConnected && gatewayHasKey;
+  const quotaUsed = gatewayTracksQuota ? gateway?.quotaUsed : undefined;
+  const quotaLimit = gatewayTracksQuota ? gateway?.quotaLimit : undefined;
+  return { isLocal, gatewayConnected, hasKey, available, inCooldown, quotaUsed, quotaLimit };
+}
