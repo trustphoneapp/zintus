@@ -738,13 +738,14 @@ export function createGatewayHandler(
     );
     const headers: Record<string, string> = {
       "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
       "Access-Control-Expose-Headers":
         "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, X-Zintus-Route-Reason, " +
         "X-Zintus-Original-Tokens, X-Zintus-Compressed-Tokens, " +
         "X-Zintus-Tokens-Saved, X-Zintus-Compression-Ratio, " +
         "X-Zintus-Cost-Saved-Usd, X-Zintus-Private-Honored, " +
-        "X-Zintus-Vision-Provider, X-Zintus-Images, X-Zintus-Image-Bytes, X-Zintus-Exif-Stripped",
+        "X-Zintus-Vision-Provider, X-Zintus-Images, X-Zintus-Image-Bytes, X-Zintus-Exif-Stripped, " +
+        "X-Zintus-Engineer-Review-Approved-Terminal",
       Vary: "Origin",
     };
     if (origin) {
@@ -2798,6 +2799,11 @@ export function createGatewayHandler(
       }
     }
 
+    if (url.pathname === "/v1/engineer/runs" && request.method === "GET") {
+      if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
+      return json(request, { runs: engineerRuns.list(engineerPrincipal!) });
+    }
+
     if (url.pathname.startsWith("/v1/engineer/runs/") && engineerRuns) {
       const parts = url.pathname.split("/");
       const runId = parts[4] ?? "";
@@ -2855,8 +2861,17 @@ export function createGatewayHandler(
           return json(request, { run: engineerRuns.get(runId).run });
         }
         if (action === "events" && request.method === "GET") {
-          return new Response(engineerRuns.subscribe(runId), {
-            headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", ...corsHeaders(request) },
+          const queryCursor = url.searchParams.get("afterSequence");
+          const headerCursor = request.headers.get("Last-Event-ID");
+          const rawCursor = queryCursor ?? headerCursor ?? "0";
+          if (!/^\d+$/.test(rawCursor)) throw new Error("invalid Engineer event cursor");
+          const afterSequence = Number(rawCursor);
+          return new Response(engineerRuns.subscribe(runId, afterSequence), {
+            headers: {
+              "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive",
+              "X-Zintus-Engineer-Review-Approved-Terminal": String(engineerRuns.reviewApprovedEndsStream()),
+              ...corsHeaders(request),
+            },
           });
         }
         if (action === "artifacts" && request.method === "GET") {
@@ -2867,6 +2882,16 @@ export function createGatewayHandler(
         }
         if (action === "evidence" && request.method === "GET") {
           return json(request, { evidenceBundles: engineerRuns.evidenceBundles(runId) });
+        }
+        if (action === "evidence-export" && request.method === "GET") {
+          return new Response(JSON.stringify(engineerRuns.evidenceExport(engineerPrincipal!, runId), null, 2), {
+            headers: {
+              "Content-Type": "application/json; charset=utf-8",
+              "Content-Disposition": `attachment; filename="zintus-engineer-${runId}-evidence.json"`,
+              "Cache-Control": "no-store",
+              ...corsHeaders(request),
+            },
+          });
         }
         if (action === "tests" && request.method === "GET") {
           return json(request, { tests: engineerRuns.tests(runId) });
@@ -2888,12 +2913,12 @@ export function createGatewayHandler(
               typeof body.rationale !== "string" || typeof body.idempotencyKey !== "string") {
             throw new Error("expectedStateVersion, selectedOptionId, rationale, and idempotencyKey are required");
           }
-          return json(request, { resolution: await engineerRuns.resolveDecision(engineerPrincipal!, runId, decisionId, {
+          return json(request, await engineerRuns.resolveDecision(engineerPrincipal!, runId, decisionId, {
             expectedStateVersion: body.expectedStateVersion,
             selectedOptionId: body.selectedOptionId,
             rationale: body.rationale,
             idempotencyKey: body.idempotencyKey,
-          }) });
+          }));
         }
         if (action === "diff" && request.method === "GET") {
           return json(request, { diff: engineerRuns.diff(runId) });

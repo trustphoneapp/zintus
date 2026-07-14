@@ -34,6 +34,15 @@ import { transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
+function metered(transport: ResponsesTransport): ResponsesTransport {
+  return {
+    async create(request, options) {
+      const response = await transport.create(request, options);
+      return { ...response, usage: response.usage ?? { input_tokens: 100, output_tokens: 100 } };
+    },
+  };
+}
+
 function root(): string {
   const value = realpathSync(mkdtempSync(join(tmpdir(), "zintus-engineer-phase3-")));
   roots.push(value);
@@ -70,7 +79,12 @@ function repository(path: string): { path: string; sha: string } {
   return { path: repo, sha: readFileSync(join(repo, ".git", head), "utf8").trim() };
 }
 
-function task(runId: string, sha: string, testType: "UNIT" | "SECURITY" = "UNIT"): TaskManifest {
+function task(
+  runId: string,
+  sha: string,
+  testType: "UNIT" | "SECURITY" = "UNIT",
+  overrides: Partial<Pick<TaskManifest, "tokenBudget" | "costBudgetUsd" | "timeBudgetSeconds">> = {},
+): TaskManifest {
   const content = {
     manifestVersion: 1, runId,
     repository: { repositoryId: "repo-1", provider: "local" as const, owner: "local", name: "repo", baseBranch: "main", baseCommitSha: sha },
@@ -81,15 +95,19 @@ function task(runId: string, sha: string, testType: "UNIT" | "SECURITY" = "UNIT"
     riskTier: "MEDIUM" as const, humanGateRequired: true,
     retryBudgets: { sameFailureAttempts: 2, builderRepairAttempts: 4, reviewerFixAttempts: 2, plannerRestarts: 1, sandboxProvisioningAttempts: 3, transientModelAttempts: 3 },
     timeBudgetSeconds: 600, tokenBudget: 100_000, costBudgetUsd: 10,
-    createdAt: "2026-07-14T12:00:00.000Z",
+    createdAt: "2026-07-14T12:00:00.000Z", ...overrides,
   };
   return TaskManifestSchema.parse({ ...content, manifestHash: sha256(content) });
 }
 
-function setupFastChecks(path: string, testType: "UNIT" | "SECURITY" = "UNIT") {
+function setupFastChecks(
+  path: string,
+  testType: "UNIT" | "SECURITY" = "UNIT",
+  overrides: Partial<Pick<TaskManifest, "tokenBudget" | "costBudgetUsd" | "timeBudgetSeconds">> = {},
+) {
   const repo = repository(path);
   const supervisor = new EngineerSupervisor({ dbPath: join(path, "engineer.db") });
-  const manifest = task("run-phase3", repo.sha, testType);
+  const manifest = task("run-phase3", repo.sha, testType, overrides);
   const { manifestHash: _hash, ...content } = manifest;
   const received = supervisor.receiveRequest({ runId: manifest.runId, userId: "user-1", repository: manifest.repository, request: manifest.request.original });
   let run = transitionToPlanReadyForTest({
@@ -312,6 +330,36 @@ describe("Phase 3 isolated Reviewer", () => {
 });
 
 describe("Phase 3 authoritative verification manager", () => {
+  test("classifies model admission limits as a terminal runtime-budget stop", async () => {
+    const path = root();
+    const setup = setupFastChecks(path, "UNIT", { tokenBudget: 100 });
+    const digest = `sha256:${"a".repeat(64)}`;
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
+    const sandboxManager = new DockerSandboxManager({
+      workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest,
+    });
+    const provisioned: ProvisionedSandbox = {
+      record: setup.sandbox, workspace: setup.workspace,
+      commandRunner: () => ({ status: 0, stdout: "1 pass", stderr: "" }),
+    };
+    const executionManager = { getSandbox: () => provisioned } as unknown as EngineerExecutionManager;
+    let providerCalls = 0;
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor,
+      executionManager,
+      sandboxManager,
+      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
+      transportForRole: () => ({ async create() { providerCalls += 1; return { id: "must-not-dispatch", output: [] }; } }),
+    });
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("runtime budget exhausted");
+    expect(providerCalls).toBe(0);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("RETRY_BUDGET_EXHAUSTED");
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      failureClass: "WORKFLOW_FAILURE", reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false,
+    }));
+    setup.supervisor.close();
+  });
+
   test("uses Terra advisories and a fresh Sol review to produce a hash-bound evidence bundle", async () => {
     const path = root();
     const setup = setupFastChecks(path);
@@ -374,7 +422,7 @@ describe("Phase 3 authoritative verification manager", () => {
       executionManager,
       sandboxManager,
       artifactStore,
-      transportForRole,
+      transportForRole: (runId, role) => metered(transportForRole(runId, role)),
     });
     const result = await manager.verify(setup.manifest.runId);
     expect(seenModels).toEqual(["gpt-5.6-terra", "gpt-5.6-terra", "gpt-5.6-sol"]);
@@ -487,7 +535,7 @@ describe("Phase 3 authoritative verification manager", () => {
       executionManager,
       sandboxManager,
       artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
-      transportForRole,
+      transportForRole: (runId, role) => metered(transportForRole(runId, role)),
     });
 
     const result = await manager.verify(setup.manifest.runId);
@@ -533,7 +581,7 @@ describe("Phase 3 authoritative verification manager", () => {
       executionManager,
       sandboxManager,
       artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
-      transportForRole: async (_runId, role) => ({
+      transportForRole: async (_runId, role) => metered({
         async create() {
           if (role !== "BUILDER") throw new Error(`${role} must not run before verification passes`);
           builderCalls += 1;
@@ -620,7 +668,7 @@ describe("Phase 3 authoritative verification manager", () => {
     const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
     const manager = new EngineerVerificationManager({
       supervisor: setup.supervisor, executionManager, sandboxManager,
-      artifactStore, transportForRole,
+      artifactStore, transportForRole: (runId, role) => metered(transportForRole(runId, role)),
     });
     const result = await manager.verify(setup.manifest.runId);
     expect(reviewAttempt).toBe(2);

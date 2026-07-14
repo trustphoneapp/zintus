@@ -8,9 +8,9 @@
 - The current execution slice supports one explicitly configured local checkout.
   Supervisor-only GitHub publication is available, but multi-repository connection
   management is not yet implemented.
-- `QUEUED` dispatch survives restart. A process that dies after sandbox claim is
-  visible in the ledger, but heartbeat leases and automatic reconciliation of
-  every mid-command orphan are not yet implemented.
+- `QUEUED` dispatch survives restart. Execution now uses durable fenced leases,
+  bounded heartbeats, watchdog recovery, and shutdown draining. Recovery for every
+  verification/publication state and every orphaned container/worktree is not yet complete.
 - The warm pool provides atomic one-time claims, TTL rejection, validation,
   quarantine, cold fallback, one-time destruction after claim, and a periodic
   maximum/health sweep. It does not yet replenish to a configured minimum or
@@ -29,8 +29,15 @@
 - TERRA Tester and Security outputs are intentionally advisory. Deterministic
   checks and trusted command records remain authoritative, so the current security
   scan depth is limited to the frozen commands plus the built-in diff scanner.
-- Web and desktop now replay the durable SSE ledger, but mobile-specific Engineer
-  screens and explicit relay reconnect-cursor UX are not yet implemented.
+- Web and desktop replay the durable SSE ledger with `Last-Event-ID`/sequence
+  cursors, heartbeat comments, bounded pages, duplicate/gap checks, and bounded
+  reconnect. Mobile-specific Engineer screens are not yet implemented.
+- Runtime budget contracts now fail closed for unknown pricing and bound time,
+  tokens, cost, command duration, diff size, artifact bytes, and concurrent agents.
+  Every SOL/TERRA/LUNA call reserves its conservative worst case before transport
+  and atomically reconciles the durable reservation to actual reported usage.
+  Cached-token usage details are not yet stored, so billing evidence deliberately
+  prices all reported input at the higher uncached rate.
 - New-run repository metadata and the exact base commit are entered directly in
   this local-first slice. A connected repository picker and automatic branch-tip
   resolution require the future repository-connection service; the server still

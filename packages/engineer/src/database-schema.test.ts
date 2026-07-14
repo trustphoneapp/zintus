@@ -32,7 +32,7 @@ describe("Engineer database schema", () => {
     ]) {
       expect(tables.has(table)).toBe(true);
     }
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(4);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(8);
     db.close();
   });
 });

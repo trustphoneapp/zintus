@@ -47,6 +47,9 @@ function DecisionCard({ decision, onResolve }: {
       <div className="engineer-decision-reasons" aria-label="Decision reasons">
         {decision.reasonCodes.map((reasonCode) => <span key={reasonCode}>{reasonCode.replaceAll("_", " ")}</span>)}
       </div>
+      {decision.provenance?.trust === "UNTRUSTED_MODEL_OUTPUT"
+        ? <p className="engineer-muted">AI-generated choice text from untrusted planning context. Verify the impact and deterministic reason codes before choosing.</p>
+        : null}
       <div className="engineer-decision-options" role="list" aria-label={`Options for ${decision.question}`}>
         {options.map((option) => {
           const selected = decision.selectedOptionId === option.optionId;

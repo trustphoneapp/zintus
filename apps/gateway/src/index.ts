@@ -308,6 +308,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       builderOptions: {
         modelConfiguration: engineerModelConfiguration,
       },
+      safetyIdentifierForUser: (userId) => {
+        if (userId !== engineerPrincipal.ownerId) throw new Error("unknown Engineer safety subject");
+        return engineerPrincipal.safetyIdentifier;
+      },
     });
     engineerVerification = new EngineerVerificationManager({
       supervisor: engineerSupervisor,
@@ -316,6 +320,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       artifactStore: engineerArtifactStore,
       transportForRole: async () => transportForRole(),
       modelConfiguration: engineerModelConfiguration,
+      safetyIdentifierForUser: (userId) => {
+        if (userId !== engineerPrincipal.ownerId) throw new Error("unknown Engineer safety subject");
+        return engineerPrincipal.safetyIdentifier;
+      },
     });
     engineerPublication = publicationSecret && githubToken
       ? new EngineerPublicationManager({

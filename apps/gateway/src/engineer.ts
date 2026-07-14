@@ -12,9 +12,11 @@ import {
   type TaskManifestContent,
   type LocalArtifactStore,
   engineerObservabilitySnapshot,
+  sha256,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
 import type { EngineerCapabilityPreflight, EngineerReadiness } from "./engineer-preflight.js";
+import { redactSecrets } from "@zintus/router";
 
 export interface EngineerRunManagerOptions {
   supervisor: EngineerSupervisor;
@@ -62,10 +64,18 @@ export class EngineerRunManager {
   }
 
   get(runId: string): { run: EngineerRun; lastError: string | null } {
+    this.assertOwner(runId, this.options.principal);
     return { run: this.options.supervisor.getRun(runId), lastError: this.errors.get(runId) ?? null };
   }
 
-  observability() { return engineerObservabilitySnapshot(this.options.supervisor); }
+  list(principal: EngineerPrincipal): EngineerRun[] {
+    this.assertPrincipal(principal);
+    return this.options.supervisor.listRuns().filter((run) => run.userId === principal.ownerId).reverse();
+  }
+
+  observability() { return engineerObservabilitySnapshot(this.options.supervisor, new Date(), this.options.principal.ownerId); }
+
+  reviewApprovedEndsStream(): boolean { return !this.options.publication; }
 
   async freeze(principal: EngineerPrincipal, runId: string, input: {
     expectedStateVersion: number;
@@ -91,10 +101,13 @@ export class EngineerRunManager {
     if (!this.options.context) throw new Error("Engineer context is not configured on this gateway");
     if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
     this.options.context.build(runId);
-    return this.options.planning.plan(runId);
+    const plan = await this.options.planning.plan(runId);
+    this.errors.delete(runId);
+    return plan;
   }
 
   planProposal(runId: string) {
+    this.assertOwner(runId, this.options.principal);
     return this.options.supervisor.latestPlanProposal(runId);
   }
 
@@ -116,7 +129,7 @@ export class EngineerRunManager {
         }
       });
     })().catch((error) => {
-      this.errors.set(runId, error instanceof Error ? error.message : String(error));
+      this.errors.set(runId, redactSecrets(error instanceof Error ? error.message : String(error)));
     });
     this.background.add(job);
     void job.finally(() => this.background.delete(job));
@@ -142,26 +155,62 @@ export class EngineerRunManager {
   }
 
   events(runId: string) {
+    this.assertOwner(runId, this.options.principal);
     return this.options.supervisor.listEvents(runId);
   }
 
   artifacts(runId: string) {
+    this.assertOwner(runId, this.options.principal);
     return this.options.supervisor.listArtifacts(runId);
   }
 
   claims(runId: string) {
+    this.assertOwner(runId, this.options.principal);
     return this.options.supervisor.listClaimEvidence(runId);
   }
 
   evidenceBundles(runId: string) {
+    this.assertOwner(runId, this.options.principal);
     return this.options.supervisor.listEvidenceBundles(runId);
   }
 
-  tests(runId: string) { return this.options.supervisor.listTestExecutions(runId); }
+  evidenceExport(principal: EngineerPrincipal, runId: string) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    if (!this.options.artifactStore) throw new Error("Engineer artifact store is required for a complete evidence export");
+    const snapshot = this.options.supervisor.evidenceExportSnapshot(runId);
+    const artifactPayloads = snapshot.artifacts.map((artifact) => ({
+      artifactId: artifact.artifactId,
+      sha256: artifact.sha256,
+      sizeBytes: artifact.sizeBytes,
+      encoding: "base64" as const,
+      content: this.options.artifactStore!.read(artifact).toString("base64"),
+    }));
+    const content = {
+      exportVersion: 2,
+      run: snapshot.run,
+      manifest: snapshot.manifest,
+      riskAssessment: snapshot.riskAssessment,
+      events: snapshot.events,
+      completeness: { eventsComplete: snapshot.events.length === snapshot.latestEventSequence, eventCount: snapshot.events.length },
+      artifacts: snapshot.artifacts,
+      artifactPayloads,
+      durableRecords: snapshot.durableRecords,
+      claims: snapshot.claims,
+      evidenceBundles: snapshot.evidenceBundles,
+      tests: snapshot.tests,
+      securityFindings: snapshot.securityFindings,
+      failures: snapshot.failures,
+      decisions: snapshot.decisions,
+    };
+    return { ...content, exportHash: sha256(content) };
+  }
 
-  security(runId: string) { return this.options.supervisor.listSecurityFindings(runId); }
+  tests(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listTestExecutions(runId); }
 
-  failures(runId: string) { return this.options.supervisor.listFailures(runId); }
+  security(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listSecurityFindings(runId); }
+
+  failures(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listFailures(runId); }
 
   decisions(principal: EngineerPrincipal, runId: string) {
     this.assertPrincipal(principal);
@@ -179,6 +228,7 @@ export class EngineerRunManager {
         selectedOptionId: resolution?.selectedOptionId ?? null,
         createdAt: decision.createdAt,
         selectionMode: "EXCLUSIVE" as const,
+        provenance: { origin: "AI_GENERATED" as const, trust: "UNTRUSTED_MODEL_OUTPUT" as const },
       };
     });
   }
@@ -192,7 +242,7 @@ export class EngineerRunManager {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
-    return this.options.supervisor.resolveDecision({
+    const resolution = this.options.supervisor.resolveDecision({
       runId,
       decisionId,
       expectedStateVersion: input.expectedStateVersion,
@@ -208,14 +258,32 @@ export class EngineerRunManager {
       }],
       idempotencyKey: input.idempotencyKey,
     });
+    let plan = null;
+    let planningError: string | null = null;
+    if (this.options.supervisor.getRun(runId).state === "PLANNING") {
+      if (!this.options.planning) {
+        planningError = "Engineer planning is not configured on this gateway";
+      } else {
+        try {
+          plan = await this.options.planning.plan(runId);
+          this.errors.delete(runId);
+        } catch (error) {
+          planningError = redactSecrets(error instanceof Error ? error.message : String(error));
+          this.errors.set(runId, planningError);
+        }
+      }
+    }
+    return { resolution, plan, planningError };
   }
 
   diff(runId: string) {
+    this.assertOwner(runId, this.options.principal);
     if (!this.options.diffForRun) throw new Error("Engineer diff is not available on this gateway");
     return this.options.diffForRun(runId);
   }
 
   approval(runId: string) {
+    this.assertOwner(runId, this.options.principal);
     return this.options.supervisor.latestApprovalRequest(runId);
   }
 
@@ -308,40 +376,61 @@ export class EngineerRunManager {
     }
   }
 
-  subscribe(runId: string): ReadableStream<Uint8Array> {
-    this.options.supervisor.getRun(runId);
+  subscribe(runId: string, afterSequence = 0): ReadableStream<Uint8Array> {
+    this.assertOwner(runId, this.options.principal);
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new Error("invalid Engineer event cursor");
+    const latestSequence = this.options.supervisor.latestEventSequence(runId);
+    if (afterSequence > latestSequence) throw new Error("Engineer event cursor is ahead of the durable ledger");
     const encoder = new TextEncoder();
-    let nextSequence = 1;
+    let nextSequence = afterSequence + 1;
     let timer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let closed = false;
+    let pendingEvents: ReturnType<EngineerSupervisor["listEvents"]> = [];
     const pump = (controller: ReadableStreamDefaultController<Uint8Array>) => {
       if (closed) return;
-      const events = this.options.supervisor.listEvents(runId).filter((event) => event.sequence >= nextSequence);
-      for (const event of events) {
+      if (controller.desiredSize !== null && controller.desiredSize <= 0) return;
+      while (controller.desiredSize === null || controller.desiredSize > 0) {
+        if (pendingEvents.length === 0) {
+          pendingEvents = this.options.supervisor.listEvents(runId, nextSequence - 1, 250);
+          if (pendingEvents.length === 0) break;
+        }
+        const event = pendingEvents.shift()!;
         controller.enqueue(encoder.encode(`id: ${event.sequence}\nevent: state\ndata: ${JSON.stringify(event)}\n\n`));
         nextSequence = event.sequence + 1;
       }
+      if (pendingEvents.length > 0) return;
       const state = this.options.supervisor.getRun(runId).state;
+      const ledgerIsDrained = nextSequence > this.options.supervisor.latestEventSequence(runId);
       if ([
         ...(!this.options.publication ? ["REVIEW_APPROVED"] : []),
         "COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED",
         "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION",
         "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED",
-      ].includes(state)) {
+      ].includes(state) && ledgerIsDrained) {
         if (timer) clearInterval(timer);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
         closed = true;
         controller.close();
       }
     };
     return new ReadableStream<Uint8Array>({
       start: (controller) => {
+        controller.enqueue(encoder.encode("retry: 1000\n\n"));
         pump(controller);
         if (!closed) {
           timer = setInterval(() => pump(controller), 250);
           timer.unref?.();
+          heartbeatTimer = setInterval(() => {
+            if (!closed && (controller.desiredSize === null || controller.desiredSize > 0)) {
+              controller.enqueue(encoder.encode(`: heartbeat ${Date.now()}\n\n`));
+            }
+          }, 15_000);
+          heartbeatTimer.unref?.();
         }
       },
-      cancel: () => { if (timer) clearInterval(timer); },
+      pull: (controller) => pump(controller),
+      cancel: () => { if (timer) clearInterval(timer); if (heartbeatTimer) clearInterval(heartbeatTimer); },
     });
   }
 }

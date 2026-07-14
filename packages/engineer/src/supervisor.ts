@@ -69,6 +69,7 @@ import {
   type DecisionResolution,
 } from "./decision-contracts.js";
 import { DECISION_POLICY_VERSION, classifyDecisionFactors } from "./decision-policy.js";
+import { assertRunBudget as assertBudgetPolicy, estimateGpt56CostUsd, RunBudgetUsageSchema, type RunBudgetDecision, type RunBudgetUsage } from "./runtime-budget.js";
 
 export interface SupervisorOptions {
   dbPath?: string;
@@ -274,7 +275,7 @@ export class EngineerSupervisor {
       throw new ManifestIntegrityError("manifest risk and human gate must match the Supervisor decision");
     }
     const proposal = this.ledger.latestPlanProposal(run.runId);
-    if (proposal && proposal.proposalHash !== sha256(content)) {
+    if (proposal && sha256(proposal.manifest) !== sha256(content)) {
       throw new ManifestIntegrityError("manifest does not match the persisted plan proposal");
     }
     if (content.riskTier !== "LOW" && !content.humanGateRequired) {
@@ -376,6 +377,10 @@ export class EngineerSupervisor {
     return decision;
   }
 
+  retryAttemptCount(runId: string): number {
+    return this.ledger.retryAttemptCount(runId);
+  }
+
   createDecision(input: CreateDecisionInput): DecisionRecord {
     const currentRun = this.ledger.getRun(input.runId);
     const suppliedFactors = DecisionFactorsSchema.parse(input.factors);
@@ -458,6 +463,9 @@ export class EngineerSupervisor {
   resolveDecision(input: ResolveDecisionInput): DecisionResolution {
     const decision = this.ledger.getDecision(input.runId, input.decisionId);
     if (decision.classification === "AUTO") throw new InvalidTransitionError("AUTO decisions are Supervisor-resolved");
+    if (!decision.options.some((option) => option.optionId === input.selectedOptionId)) {
+      throw new InvalidTransitionError("selected decision option does not exist");
+    }
     const sourceEvidence = input.sourceEvidence.map((evidence) => DecisionEvidenceReferenceSchema.parse(evidence));
     const rationale = input.rationale.trim();
     if (!rationale) throw new InvalidTransitionError("decision resolution rationale must not be empty");
@@ -493,9 +501,11 @@ export class EngineerSupervisor {
       resolvedAt,
     });
     const resolution = DecisionResolutionSchema.parse({ ...content, resolutionHash: sha256(content) });
-    this.ledger.recordDecisionResolution(resolution);
-    this.resumeResolvedDecision(decision, resolution, input.expectedStateVersion);
-    return resolution;
+    return this.ledger.atomic(() => {
+      this.ledger.recordDecisionResolution(resolution);
+      this.resumeResolvedDecision(decision, resolution, input.expectedStateVersion);
+      return resolution;
+    });
   }
 
   listDecisions(runId: string): DecisionRecord[] {
@@ -558,8 +568,53 @@ export class EngineerSupervisor {
     return this.ledger.latestContextSnapshot(runId);
   }
 
-  listEvents(runId: string): RunStateEvent[] {
-    return this.ledger.listEvents(runId);
+  listEvents(runId: string, afterSequence = 0, limit = 1_000): RunStateEvent[] {
+    return this.ledger.listEvents(runId, afterSequence, limit);
+  }
+
+  latestEventSequence(runId: string): number {
+    return this.ledger.latestEventSequence(runId);
+  }
+
+  exportRunRecords(runId: string): Record<string, Array<Record<string, unknown>>> {
+    return this.ledger.exportRunRecords(runId);
+  }
+
+  evidenceExportSnapshot(runId: string) {
+    return this.ledger.atomic(() => {
+      const events: RunStateEvent[] = [];
+      let cursor = 0;
+      while (true) {
+        const page = this.ledger.listEvents(runId, cursor, 10_000);
+        events.push(...page);
+        if (page.length < 10_000) break;
+        cursor = page.at(-1)!.sequence;
+      }
+      const decisions = this.ledger.listDecisions(runId).map((decision) => ({
+        decision,
+        resolution: this.ledger.getDecisionResolution(runId, decision.decisionId),
+      }));
+      const latestEventSequence = this.ledger.latestEventSequence(runId);
+      return {
+        run: this.ledger.getRun(runId),
+        manifest: this.ledger.getManifest(runId),
+        riskAssessment: this.ledger.latestRiskAssessment(runId),
+        events,
+        latestEventSequence,
+        artifacts: this.ledger.listArtifacts(runId),
+        durableRecords: this.ledger.exportRunRecords(runId),
+        claims: this.ledger.listClaimEvidence(runId),
+        evidenceBundles: this.ledger.listEvidenceBundles(runId),
+        tests: this.ledger.listTestExecutions(runId),
+        securityFindings: this.ledger.listSecurityFindings(runId),
+        failures: this.ledger.listFailures(runId),
+        decisions,
+      };
+    });
+  }
+
+  latestRiskAssessment(runId: string): RiskAssessment | null {
+    return this.ledger.latestRiskAssessment(runId);
   }
 
   recordSandbox(record: SandboxRecord): SandboxRecord {
@@ -567,7 +622,11 @@ export class EngineerSupervisor {
   }
 
   recordArtifact(record: ArtifactRecord): ArtifactRecord {
-    return this.ledger.recordArtifact(record);
+    return this.ledger.atomic(() => {
+      const artifact = this.ledger.recordArtifact(record);
+      this.assertRuntimeBudget(record.runId);
+      return artifact;
+    });
   }
 
   listArtifacts(runId: string): ArtifactRecord[] {
@@ -581,7 +640,11 @@ export class EngineerSupervisor {
       .includes(run.state)) {
       throw new InvalidTransitionError(`commands cannot be recorded while run is ${run.state}`);
     }
-    return this.ledger.recordCommandExecution(record);
+    return this.ledger.atomic(() => {
+      const command = this.ledger.recordCommandExecution(record);
+      this.assertRuntimeBudget(record.runId);
+      return command;
+    });
   }
 
   recordModelRouting(decision: ModelRoutingDecision): void {
@@ -590,11 +653,74 @@ export class EngineerSupervisor {
   }
 
   recordAgentExecution(record: AgentExecutionRecord): void {
-    this.ledger.recordAgentExecution(record);
+    this.ledger.atomic(() => {
+      this.ledger.recordAgentExecution(record);
+      if (record.status === "RUNNING") this.assertRuntimeBudget(record.runId);
+    });
   }
 
-  recordModelCall(record: ModelCallRecord): void {
-    this.ledger.recordModelCall(record);
+  recordModelCall(record: ModelCallRecord, reservationId?: string): void {
+    if (record.status === "SUCCEEDED" && !reservationId) {
+      throw new Error("successful model calls require a pre-admitted budget reservation");
+    }
+    this.ledger.atomic(() => {
+      if (reservationId) {
+        const reservation = this.ledger.modelBudgetReservation(record.runId, reservationId);
+        if (reservation.agentExecutionId !== record.agentExecutionId || reservation.model !== record.resolvedModel) {
+          throw new Error("model call does not match its budget reservation route");
+        }
+        const activeRoute = this.ledger.modelRouteForAgent(
+          record.runId,
+          record.agentExecutionId,
+          record.resolvedModel,
+        );
+        if (activeRoute.routingDecisionId !== reservation.routingDecisionId) {
+          throw new Error("model call route changed after its budget reservation was admitted");
+        }
+        if (record.inputTokens !== null && record.inputTokens > reservation.inputTokens) {
+          throw new Error("actual model input exceeded its admitted reservation");
+        }
+        if (record.outputTokens !== null && record.outputTokens > reservation.outputTokens) {
+          throw new Error("actual model output exceeded its admitted reservation");
+        }
+        if (record.inputTokens !== null && record.outputTokens !== null) {
+          const actualCostUsd = estimateGpt56CostUsd(record.resolvedModel, record.inputTokens, record.outputTokens);
+          if (actualCostUsd > reservation.estimatedCostUsd + Number.EPSILON) {
+            throw new Error("actual model cost exceeded its admitted reservation");
+          }
+        }
+        if (record.inputTokens !== null && record.outputTokens !== null) {
+          this.ledger.releaseModelBudgetReservation(record.runId, reservationId);
+        }
+      }
+      this.ledger.recordModelCall(record, reservationId);
+      if (record.status === "SUCCEEDED") this.assertRuntimeBudget(record.runId);
+    });
+  }
+
+  reserveModelBudget(input: { runId: string; reservationId: string; agentExecutionId: string; model: string; inputTokenUpperBound: number; maxOutputTokens: number }): string {
+    const estimatedCostUsd = estimateGpt56CostUsd(input.model, input.inputTokenUpperBound, input.maxOutputTokens);
+    this.ledger.atomic(() => {
+      const route = this.ledger.modelRouteForAgent(input.runId, input.agentExecutionId, input.model);
+      this.ledger.reserveModelBudget({
+        runId: input.runId, reservationId: input.reservationId,
+        inputTokens: input.inputTokenUpperBound, outputTokens: input.maxOutputTokens,
+        estimatedCostUsd, agentExecutionId: input.agentExecutionId, model: input.model,
+        routingDecisionId: route.routingDecisionId, createdAt: this.timestamp(),
+      });
+      this.assertRuntimeBudget(input.runId);
+    });
+    return input.reservationId;
+  }
+
+  assertRuntimeBudget(runId: string, overrides: Partial<RunBudgetUsage> = {}): RunBudgetDecision | null {
+    const frozenManifest = this.ledger.getManifest(runId);
+    const proposalManifest = frozenManifest ? null : this.ledger.latestPlanProposal(runId)?.manifest;
+    const manifest = frozenManifest ?? (proposalManifest
+      ? TaskManifestSchema.parse({ ...proposalManifest, manifestHash: sha256(proposalManifest) })
+      : { timeBudgetSeconds: 3_600, tokenBudget: 200_000, costBudgetUsd: 20 });
+    const usage = { ...this.ledger.runtimeBudgetUsage(runId, new Date(this.timestamp())), ...overrides };
+    return assertBudgetPolicy(manifest, RunBudgetUsageSchema.parse(usage));
   }
 
   recordVerificationExecution(record: VerificationExecutionRecord): VerificationExecutionRecord {

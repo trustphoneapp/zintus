@@ -1,13 +1,25 @@
 import { GATEWAY_URL, gatewayAuthHeaders } from "./gateway";
 import type { EngineerDecisionItem } from "./engineer-decisions";
+import { acceptEngineerEvent, parseEngineerSse } from "./engineer-sse";
 
 export type EngineerState = string;
 export interface EngineerRun { runId: string; state: EngineerState; stateVersion: number; manifestHash: string | null; riskTier: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"; humanGateRequired: boolean; requestOriginal: string; requestNormalized: string; repository: EngineerRepository; terminalAt: string | null; }
 export interface EngineerRepository { repositoryId: string; provider: "github" | "local"; owner: string; name: string; url?: string; baseBranch: string; baseCommitSha: string; }
 export interface EngineerManifest { manifestVersion: number; runId: string; repository: EngineerRepository; request: { original: string; normalized: string }; acceptanceCriteria: Array<{ criterionId: string; statement: string; verificationMethod: string; priority: string }>; testPlan: Array<{ testId: string; criterionIds: string[]; type: string; description: string; command?: string }>; allowedPaths: string[]; deniedPaths: string[]; allowedCommands: string[]; prohibitedCommands: string[]; riskTier: EngineerRun["riskTier"]; humanGateRequired: boolean; retryBudgets: Record<string, number>; timeBudgetSeconds: number; tokenBudget: number; costBudgetUsd: number; createdAt: string; }
-export interface PlanProposal { planProposalId: string; runId: string; manifest: EngineerManifest; proposalHash: string; artifactId: string; createdAt: string; }
+export interface PlanProposal { planProposalId: string; runId: string; manifest: EngineerManifest; planningAnalysis: { architectureSummary: string; assumptions: Array<{ assumptionId: string; statement: string; confidence: number; reversible: boolean; sourceRefs: string[] }>; unresolvedQuestions: Array<{ questionId: string; question: string; impact: string }>; touchedFileEstimates: Array<{ path: string; expectedChange: string; confidence: number }> }; proposalHash: string; artifactId: string; createdAt: string; }
 export interface RunEvent { eventId: string; sequence: number; previousState: string; nextState: string; reasonCode: string; timestamp: string; evidenceIds: string[]; }
 export interface EngineerRunStatus { run: EngineerRun; lastError: string | null; }
+export interface EngineerData {
+  claims: unknown[];
+  evidenceBundles: unknown[];
+  tests: unknown[];
+  securityFindings: unknown[];
+  failures: unknown[];
+  diff: string;
+  approval: unknown | null;
+  decisions: EngineerDecisionItem[];
+  errors: Array<{ section: string; message: string }>;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${GATEWAY_URL}${path}`, { ...init, cache: "no-store", headers: { "Content-Type": "application/json", ...gatewayAuthHeaders(), ...init?.headers } });
@@ -25,16 +37,32 @@ export async function freezeEngineerPlan(run: EngineerRun, manifest: EngineerMan
 export async function startEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST" })).run; }
 export async function getEngineerRunStatus(runId: string): Promise<EngineerRunStatus> { return request<EngineerRunStatus>(`/v1/engineer/runs/${runId}`); }
 export async function getEngineerRun(runId: string): Promise<EngineerRun> { return (await getEngineerRunStatus(runId)).run; }
-export async function getEngineerData(runId: string) { const [claims, evidence, tests, security, failures, diff, approval, decisions] = await Promise.all([
-  request<{ claims: unknown[] }>(`/v1/engineer/runs/${runId}/claims`), request<{ evidenceBundles: unknown[] }>(`/v1/engineer/runs/${runId}/evidence`),
-  request<{ tests: unknown[] }>(`/v1/engineer/runs/${runId}/tests`), request<{ securityFindings: unknown[] }>(`/v1/engineer/runs/${runId}/security`),
-  request<{ failures: unknown[] }>(`/v1/engineer/runs/${runId}/failures`), request<{ diff: string }>(`/v1/engineer/runs/${runId}/diff`).catch(() => ({ diff: "" })),
-  request<{ approval: unknown | null }>(`/v1/engineer/runs/${runId}/approval`),
-  request<{ decisions: EngineerDecisionItem[] }>(`/v1/engineer/runs/${runId}/decisions`).catch(() => ({ decisions: [] })),
-]); return { ...claims, ...evidence, ...tests, ...security, ...failures, ...diff, ...approval, ...decisions }; }
+export async function listEngineerRuns(): Promise<EngineerRun[]> { return (await request<{ runs: EngineerRun[] }>("/v1/engineer/runs")).runs; }
+export async function getEngineerEvidenceExport(runId: string): Promise<Record<string, unknown>> { return request<Record<string, unknown>>(`/v1/engineer/runs/${runId}/evidence-export`); }
+export async function getEngineerData(runId: string): Promise<EngineerData> {
+  const load = async <T>(section: string, promise: Promise<T>, fallback: T) => {
+    try { return { data: await promise, error: null }; }
+    catch (error) { return { data: fallback, error: { section, message: error instanceof Error ? error.message : String(error) } }; }
+  };
+  const results = await Promise.all([
+    load("claims", request<{ claims: unknown[] }>(`/v1/engineer/runs/${runId}/claims`), { claims: [] }),
+    load("evidence", request<{ evidenceBundles: unknown[] }>(`/v1/engineer/runs/${runId}/evidence`), { evidenceBundles: [] }),
+    load("tests", request<{ tests: unknown[] }>(`/v1/engineer/runs/${runId}/tests`), { tests: [] }),
+    load("security", request<{ securityFindings: unknown[] }>(`/v1/engineer/runs/${runId}/security`), { securityFindings: [] }),
+    load("failures", request<{ failures: unknown[] }>(`/v1/engineer/runs/${runId}/failures`), { failures: [] }),
+    load("diff", request<{ diff: string }>(`/v1/engineer/runs/${runId}/diff`), { diff: "" }),
+    load("approval", request<{ approval: unknown | null }>(`/v1/engineer/runs/${runId}/approval`), { approval: null }),
+    load("decisions", request<{ decisions: EngineerDecisionItem[] }>(`/v1/engineer/runs/${runId}/decisions`), { decisions: [] }),
+  ]);
+  return {
+    ...results[0].data, ...results[1].data, ...results[2].data, ...results[3].data,
+    ...results[4].data, ...results[5].data, ...results[6].data, ...results[7].data,
+    errors: results.flatMap((result) => result.error ? [result.error] : []),
+  };
+}
 export async function engineerDecision(runId: string, action: "approve" | "request-changes" | "reject" | "cancel", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/${action}`, { method: "POST", body: JSON.stringify({ actorId: "local-user", reason }) }); }
-export async function resolveEngineerDecision(run: EngineerRun, decisionId: string, selectedOptionId: string, rationale: string): Promise<void> {
-  await request(`/v1/engineer/runs/${run.runId}/decisions/${decisionId}/resolve`, {
+export async function resolveEngineerDecision(run: EngineerRun, decisionId: string, selectedOptionId: string, rationale: string): Promise<{ plan: PlanProposal | null; planningError: string | null }> {
+  return request(`/v1/engineer/runs/${run.runId}/decisions/${decisionId}/resolve`, {
     method: "POST",
     body: JSON.stringify({
       expectedStateVersion: run.stateVersion,
@@ -45,9 +73,55 @@ export async function resolveEngineerDecision(run: EngineerRun, decisionId: stri
   });
 }
 
-export async function streamEngineerEvents(runId: string, onEvent: (event: RunEvent) => void, signal: AbortSignal): Promise<void> {
-  const response = await fetch(`${GATEWAY_URL}/v1/engineer/runs/${runId}/events`, { headers: gatewayAuthHeaders(), signal });
-  if (!response.ok || !response.body) throw new Error("Engineer event stream is unavailable");
-  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
-  try { while (true) { const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); const frames = buffer.split(/\n\n/); buffer = frames.pop() ?? ""; for (const frame of frames) { const line = frame.split(/\r?\n/).find((item) => item.startsWith("data:")); if (line) onEvent(JSON.parse(line.slice(5).trim()) as RunEvent); } } } finally { reader.releaseLock(); }
+export async function streamEngineerEvents(
+  runId: string,
+  onEvent: (event: RunEvent) => void,
+  signal: AbortSignal,
+  options: { afterSequence?: number; onCursor?: (sequence: number) => void; maxReconnects?: number; reconnectDelayMs?: number } = {},
+): Promise<void> {
+  let cursor = options.afterSequence ?? 0;
+  let reconnects = 0;
+  let retryMs = options.reconnectDelayMs ?? 1_000;
+  const maximum = options.maxReconnects ?? 5;
+  const terminalStates = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
+  while (!signal.aborted) {
+    let receivedEvent = false;
+    try {
+      const response = await fetch(`${GATEWAY_URL}/v1/engineer/runs/${runId}/events?afterSequence=${cursor}`, { headers: { ...gatewayAuthHeaders(), ...(cursor ? { "Last-Event-ID": String(cursor) } : {}) }, signal });
+      if (!response.ok || !response.body) throw new Error("Engineer event stream is unavailable");
+      const reviewApprovedIsTerminal = response.headers.get("X-Zintus-Engineer-Review-Approved-Terminal") === "true";
+      const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+      try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parsed = parseEngineerSse(buffer); buffer = parsed.remainder;
+        if (parsed.retryMs !== null) retryMs = parsed.retryMs;
+        for (const item of parsed.events) {
+          const disposition = acceptEngineerEvent(cursor, item.id);
+          if (disposition === "DUPLICATE") continue;
+          if (disposition === "GAP") throw new Error(`Engineer event sequence gap after ${cursor}`);
+          cursor = item.id; options.onCursor?.(cursor); onEvent(item.event);
+          receivedEvent = true;
+        }
+      }
+      } finally { reader.releaseLock(); }
+      if (receivedEvent) reconnects = 0;
+      const status = await getEngineerRunStatus(runId).catch(() => null);
+      if (status && (terminalStates.has(status.run.state) || (reviewApprovedIsTerminal && status.run.state === "REVIEW_APPROVED"))) return;
+    } catch (error) {
+      if (signal.aborted) return;
+      if (reconnects >= maximum) throw error;
+    }
+    if (signal.aborted) return;
+    if (reconnects >= maximum) throw new Error("Engineer event stream reconnect budget exhausted");
+    reconnects += 1;
+    await new Promise<void>((resolve, reject) => {
+      const delay = Math.min(10_000, retryMs * 2 ** (reconnects - 1));
+      const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, delay);
+      const abort = () => { clearTimeout(timer); reject(signal.reason); };
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
 }

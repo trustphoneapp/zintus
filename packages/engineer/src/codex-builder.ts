@@ -15,6 +15,8 @@ export const CODEX_BUILDER_PROMPT_VERSION = "engineer-codex-builder-v1";
 export const MAX_BUILDER_TOOL_ROUNDS = 20;
 export const MAX_BUILDER_FILE_BYTES = 1024 * 1024;
 export const MAX_BUILDER_MUTATIONS = 50;
+export const MAX_BUILDER_ARGUMENT_BYTES_PER_ROUND = 128 * 1024;
+const BUILDER_TOOL_NAMES = new Set(["list_files", "read_file", "write_file", "run_command", "git_diff"]);
 
 const ResponsesFunctionCallSchema = z.object({
   type: z.literal("function_call"),
@@ -158,8 +160,22 @@ export interface CodexBuilderOptions {
     latencyMs: number;
     inputTokens: number | null;
     outputTokens: number | null;
+    reservationId?: string;
+    retryCount: number;
   }) => void;
+  reserveModelCall?: (input: { model: string; inputTokenUpperBound: number; maxOutputTokens: number; round: number; attempt: number }) => string;
+  authorizeModelRetry?: (input: {
+    round: number;
+    attempt: number;
+    failedAttempt: number;
+    error: unknown;
+    inputHash: string;
+    cacheKey: string;
+    reservationId?: string;
+    latencyMs: number;
+  }) => boolean;
   signal?: AbortSignal;
+  safetyIdentifier?: string;
 }
 
 export class CodexBuilder {
@@ -202,19 +218,45 @@ export class CodexBuilder {
         inputHash,
       });
       const callStarted = Date.now();
-      const response = await this.options.transport.create({
+      const maxOutputTokens = 16_000;
+      const instructions = builderInstructions(this.options.manifest, this.options.repairContext);
+      const request = {
         model: route.model,
-        instructions: builderInstructions(this.options.manifest, this.options.repairContext),
+        instructions,
         input,
         tools: TOOL_DEFINITIONS,
         tool_choice: "auto",
         parallel_tool_calls: false,
         reasoning: { effort: "high", summary: "auto" },
-        max_output_tokens: 16_000,
+        max_output_tokens: maxOutputTokens,
         store: false,
-        safety_identifier: sha256(this.options.manifest.runId),
+        prompt_cache_key: cacheKey,
+        safety_identifier: this.options.safetyIdentifier ?? sha256(this.options.manifest.runId),
         metadata: { run_id: this.options.manifest.runId, prompt_version: CODEX_BUILDER_PROMPT_VERSION },
-      }, { signal: this.options.signal });
+      };
+      let attempt = 0;
+      let reservationId: string | undefined;
+      let response: ResponsesResult;
+      while (true) {
+        reservationId = this.options.reserveModelCall?.({
+          model: route.model,
+          inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
+          maxOutputTokens,
+          round,
+          attempt,
+        });
+        const attemptStarted = Date.now();
+        try {
+          response = await this.options.transport.create(request, { signal: this.options.signal });
+          break;
+        } catch (error) {
+          if (!this.options.authorizeModelRetry?.({
+            round, attempt: attempt + 1, failedAttempt: attempt, error, inputHash, cacheKey, reservationId,
+            latencyMs: Math.max(0, Date.now() - attemptStarted),
+          })) throw error;
+          attempt += 1;
+        }
+      }
       this.options.onModelCall?.({
         responseId: response.id,
         round,
@@ -223,12 +265,21 @@ export class CodexBuilder {
         latencyMs: Math.max(0, Date.now() - callStarted),
         inputTokens: response.usage?.input_tokens ?? null,
         outputTokens: response.usage?.output_tokens ?? null,
+        reservationId,
+        retryCount: attempt,
       });
       responseIds.push(response.id);
-      const calls = response.output
-        .map((item) => ResponsesFunctionCallSchema.safeParse(item))
-        .filter((item): item is { success: true; data: z.infer<typeof ResponsesFunctionCallSchema> } => item.success)
-        .map((item) => item.data);
+      const rawCalls = response.output.filter((item) => typeof item === "object" && item !== null && (item as { type?: unknown }).type === "function_call");
+      const calls = rawCalls.map((item) => ResponsesFunctionCallSchema.parse(item));
+      if (new Set(calls.map((call) => call.call_id)).size !== calls.length) {
+        throw new Error("Builder supplied duplicate function call IDs");
+      }
+      if (calls.some((call) => !BUILDER_TOOL_NAMES.has(call.name))) {
+        throw new Error("Builder requested an uninstalled tool");
+      }
+      if (calls.reduce((bytes, call) => bytes + Buffer.byteLength(call.arguments), 0) > MAX_BUILDER_ARGUMENT_BYTES_PER_ROUND) {
+        throw new Error("Builder tool arguments exceed the per-round byte limit");
+      }
       input.push(...response.output);
       finalText = response.output_text ?? finalText;
       if (calls.length === 0) break;

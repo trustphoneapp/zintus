@@ -41,6 +41,11 @@ describe("decision feature extraction", () => {
           question: "Should we drop table data?",
           impact: "This is a blocking decision with no safe default.",
           sourceRefs: ["context-source-2"],
+          options: [
+            { optionId: "preserve", label: "Preserve data", impact: "Avoid destructive behavior.", reversibility: "REVERSIBLE", riskTier: "MEDIUM" },
+            { optionId: "drop", label: "Drop data", impact: "Deletes stored data.", reversibility: "IRREVERSIBLE", riskTier: "CRITICAL" },
+          ],
+          recommendedOptionId: "preserve",
         }],
       }),
       contextWarnings: [],
@@ -70,7 +75,10 @@ describe("decision feature extraction", () => {
       runId: "run-1",
       planningAnalysis: analysis({
         assumptions: [{ assumptionId: "a", statement: "Use the existing naming style.", sourceRefs: [], confidence: 0.99, reversible: true }],
-        unresolvedQuestions: [{ questionId: "q", question: "Prefer concise or descriptive labels?", impact: "Presentation only.", sourceRefs: [] }],
+        unresolvedQuestions: [{ questionId: "q", question: "Prefer concise or descriptive labels?", impact: "Presentation only.", sourceRefs: [], options: [
+          { optionId: "concise", label: "Concise", impact: "Short labels.", reversibility: "REVERSIBLE", riskTier: "LOW" },
+          { optionId: "descriptive", label: "Descriptive", impact: "Long labels.", reversibility: "REVERSIBLE", riskTier: "LOW" },
+        ], recommendedOptionId: "concise" }],
       }),
       contextWarnings: [],
     });

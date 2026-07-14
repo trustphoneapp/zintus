@@ -155,6 +155,20 @@ describe("Phase 2 immutable artifacts", () => {
       runId: "run-1", type: "LOG", bytes: "four", producerType: "SYSTEM", producerId: "system", trusted: true,
     })).toThrow("byte limit");
   });
+
+  test("rejects aggregate run artifacts before writing beyond the run cap", () => {
+    const root = temporaryRoot();
+    const store = new LocalArtifactStore({ root, maxArtifactBytes: 4, maxRunArtifactBytes: 8 });
+    store.put({
+      runId: "run-1", type: "LOG", bytes: "four", producerType: "SYSTEM", producerId: "system", trusted: true,
+    });
+    expect(() => store.put({
+      runId: "run-1", type: "LOG", bytes: "more", producerType: "SYSTEM", producerId: "system", trusted: true,
+    })).toThrow("run artifacts exceed");
+    expect(store.put({
+      runId: "run-2", type: "LOG", bytes: "more", producerType: "SYSTEM", producerId: "system", trusted: true,
+    }).sizeBytes).toBe(4);
+  });
 });
 
 describe("Phase 2 exact-base Git workspaces", () => {
@@ -419,19 +433,20 @@ describe("Phase 2 authoritative execution worker", () => {
     const transport: ResponsesTransport = {
       async create() {
         response += 1;
-        if (response === 1) return {
-          id: "worker-response-1",
+        if (response === 1) throw new Error("transient provider failure");
+        if (response === 2) return {
+          id: "worker-response-1", usage: { input_tokens: 100, output_tokens: 100 },
           output: [{ type: "function_call", call_id: "write-1", name: "write_file", arguments: JSON.stringify({
             path: "src/value.ts", content: "export const value = 2;\n",
           }) }],
         };
-        if (response === 2) return {
-          id: "worker-response-2",
+        if (response === 3) return {
+          id: "worker-response-2", usage: { input_tokens: 100, output_tokens: 100 },
           output: [{ type: "function_call", call_id: "command-1", name: "run_command", arguments: JSON.stringify({
             command: "bun run test",
           }) }],
         };
-        return { id: "worker-response-3", output: [], output_text: "Implementation complete; executor evidence is separate." };
+        return { id: "worker-response-3", usage: { input_tokens: 100, output_tokens: 100 }, output: [], output_text: "Implementation complete; executor evidence is separate." };
       },
     };
     const leaseManager = new EngineerWorkerLeaseManager({
@@ -464,8 +479,46 @@ describe("Phase 2 authoritative execution worker", () => {
     const auditDb = new Database(join(root, "engineer.db"), { readonly: true });
     expect((auditDb.query("SELECT COUNT(*) AS count FROM command_executions").get() as { count: number }).count).toBe(1);
     expect((auditDb.query("SELECT COUNT(*) AS count FROM agent_executions").get() as { count: number }).count).toBe(1);
-    expect((auditDb.query("SELECT COUNT(*) AS count FROM model_calls").get() as { count: number }).count).toBe(3);
+    expect(auditDb.query("SELECT status, retry_count, budget_reservation_id FROM model_calls ORDER BY rowid").all()).toEqual([
+      { status: "FAILED", retry_count: 0, budget_reservation_id: expect.any(String) },
+      { status: "SUCCEEDED", retry_count: 1, budget_reservation_id: expect.any(String) },
+      { status: "SUCCEEDED", retry_count: 0, budget_reservation_id: expect.any(String) },
+      { status: "SUCCEEDED", retry_count: 0, budget_reservation_id: expect.any(String) },
+    ]);
+    expect((auditDb.query("SELECT COUNT(*) AS count FROM cost_records WHERE source_type = 'MODEL_RESERVATION'").get() as { count: number }).count).toBe(1);
     auditDb.close();
+
+    const budgetReceived = supervisor.receiveRequest({
+      runId: "run-worker-budget-stop", userId: "user-1",
+      repository: {
+        repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture",
+        baseBranch: "main", baseCommitSha: repository.sha,
+      },
+      request: "Change value",
+    });
+    const budgetTask = manifest(budgetReceived.runId, repository.sha, { tokenBudget: 100 });
+    const { manifestHash: _budgetProposalHash, ...budgetProposalContent } = budgetTask;
+    const budgetPlanReady = transitionToPlanReadyForTest({
+      supervisor, received: budgetReceived,
+      normalizedRequest: budgetProposalContent.request.normalized,
+      manifest: budgetProposalContent,
+      key: "worker-budget-stop",
+      artifactRoot: join(root, "planning-budget-artifacts"),
+    });
+    const budgetFrozen = supervisor.freezePlan({
+      runId: budgetPlanReady.runId,
+      expectedStateVersion: budgetPlanReady.stateVersion,
+      manifest: budgetProposalContent,
+      actorId: "test-planner",
+      idempotencyKey: "freeze-worker-budget-stop",
+    }).run;
+    expect(budgetFrozen.state).toBe("PLAN_FROZEN");
+    await expect(manager.execute(budgetFrozen.runId)).rejects.toThrow("runtime budget exhausted");
+    expect(supervisor.getRun(budgetFrozen.runId).state).toBe("RETRY_BUDGET_EXHAUSTED");
+    expect(supervisor.listFailures(budgetFrozen.runId)).toMatchObject([{
+      failureClass: "WORKFLOW_FAILURE", reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false,
+    }]);
+
     expect(manager.destroy(run.runId)?.status).toBe("DESTROYED");
     leaseManager.close();
     supervisor.close();

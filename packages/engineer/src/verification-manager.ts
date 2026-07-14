@@ -23,6 +23,8 @@ import type { EngineerSupervisor } from "./supervisor.js";
 import { TERRA_ADVISOR_POLICY_VERSION, TerraAdvisors } from "./terra-advisors.js";
 import { TrustedCommandExecutor } from "./trusted-executor.js";
 import { canTransition, isTerminalState } from "./state-machine.js";
+import { derivePostVerificationRiskFeatures } from "./post-verification-risk.js";
+import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import {
   ClaimEvidenceRecordSchema,
   EvidenceBundleRecordSchema,
@@ -42,6 +44,7 @@ export interface EngineerVerificationManagerOptions {
   modelConfiguration?: EngineerModelConfiguration;
   now?: () => Date;
   idFactory?: () => string;
+  safetyIdentifierForUser?: (userId: string) => string;
 }
 
 interface AgentContext {
@@ -89,6 +92,7 @@ export class EngineerVerificationManager {
     }
     const manifest = supervisor.getManifest(runId);
     if (!manifest) throw new Error("frozen manifest is unavailable");
+    const safetyIdentifier = this.options.safetyIdentifierForUser?.(initial.userId);
     const sandbox = this.options.executionManager.getSandbox(runId);
     if (!sandbox) throw new Error("Phase 3 requires the retained Phase 2 sandbox");
     const workspaceManager = this.options.sandboxManager.workspaceManager();
@@ -121,6 +125,28 @@ export class EngineerVerificationManager {
     const advisors = new TerraAdvisors({
       transportForRole: (role) => this.options.transportForRole(runId, role),
       modelConfiguration: this.options.modelConfiguration,
+      safetyIdentifier,
+      reserveModelCall: ({ role, model, inputTokenUpperBound, maxOutputTokens, attempt }) => {
+        const agent = advisorAgents.get(role);
+        if (!agent) throw new Error(`missing ${role} execution context for budget reservation`);
+        return supervisor.reserveModelBudget({
+          runId, reservationId: sha256({ runId, agentExecutionId: agent.id, role, pass, attempt, purpose: "advisor-model-call" }),
+          agentExecutionId: agent.id,
+          model, inputTokenUpperBound, maxOutputTokens,
+        });
+      },
+      authorizeModelRetry: ({ role, error, attempt, failedAttempt, inputHash, cacheKey, reservationId, latencyMs }) => {
+        const agent = advisorAgents.get(role);
+        if (!agent) throw new Error(`missing ${role} execution context for failed call evidence`);
+        supervisor.recordModelCall({
+          modelCallId: this.id(), runId, agentExecutionId: agent.id,
+          logicalTier: agent.route.logicalTier, resolvedModel: agent.route.model,
+          promptTemplateVersion: TERRA_ADVISOR_POLICY_VERSION, inputContextRefs: [manifest.manifestHash, inputHash],
+          outputSchemaVersion: "phase3-advisory-v1", cacheKey, cacheHit: null, latencyMs,
+          inputTokens: null, outputTokens: null, retryCount: failedAttempt, status: "FAILED", createdAt: this.timestamp(),
+        }, reservationId);
+        return this.authorizeTransientModelRetry(runId, role, error, attempt);
+      },
       onModelCall: (observation) => {
         const agent = advisorAgents.get(observation.role);
         if (!agent) throw new Error(`missing ${observation.role} execution context`);
@@ -131,19 +157,32 @@ export class EngineerVerificationManager {
           inputContextRefs: [manifest.manifestHash, observation.inputHash], outputSchemaVersion: "phase3-advisory-v1",
           cacheKey: observation.cacheKey, cacheHit: null, latencyMs: observation.latencyMs,
           inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
-          retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp(),
-        });
+          retryCount: observation.retryCount, status: "SUCCEEDED", createdAt: this.timestamp(),
+        }, observation.reservationId);
       },
     });
     const testerAgent = this.startAgent(runId, "TESTER", sha256({ manifest: manifest.manifestHash, diff: sha256(diff), evidence: verified.trustedEvidence }));
     advisorAgents.set("TESTER", testerAgent);
-    const testAdvisory = await advisors.testCoverage(manifest, diff, verified.trustedEvidence);
-    this.storeAgentOutput(runId, testerAgent, "TEST_ADVISORY", testAdvisory);
+    let testAdvisory;
+    try {
+      testAdvisory = await advisors.testCoverage(manifest, diff, verified.trustedEvidence);
+      this.storeAgentOutput(runId, testerAgent, "TEST_ADVISORY", testAdvisory);
+    } catch (error) {
+      this.failAgent(runId, testerAgent);
+      throw error;
+    }
 
     const securityAgent = this.startAgent(runId, "SECURITY", sha256({ manifest: manifest.manifestHash, diff: sha256(diff) }));
     advisorAgents.set("SECURITY", securityAgent);
-    const securityAdvisory = await advisors.security(manifest, diff);
-    const securityArtifact = this.storeAgentOutput(runId, securityAgent, "SECURITY_ADVISORY", securityAdvisory);
+    let securityAdvisory;
+    let securityArtifact;
+    try {
+      securityAdvisory = await advisors.security(manifest, diff);
+      securityArtifact = this.storeAgentOutput(runId, securityAgent, "SECURITY_ADVISORY", securityAdvisory);
+    } catch (error) {
+      this.failAgent(runId, securityAgent);
+      throw error;
+    }
     const advisoryFindingRecords = securityAdvisory.findings.map((finding) =>
       supervisor.recordSecurityFinding(SecurityFindingRecordSchema.parse({
         securityFindingId: this.id(), runId, severity: finding.severity,
@@ -155,6 +194,18 @@ export class EngineerVerificationManager {
     // Model advisories remain auditable artifacts/findings, but never cross the
     // trust boundary into Reviewer evidence or acceptance-claim certification.
     const trustedEvidence = verified.trustedEvidence;
+    const finalRiskFeatures = derivePostVerificationRiskFeatures({
+      diff,
+      requiredChecksPassed: verified.executions.every((execution) => execution.status === "PASSED"),
+      retryCount: supervisor.retryAttemptCount(runId),
+      unresolvedWarnings: securityAdvisory.findings.length,
+      securityFindings: [
+        ...verified.securityFindings,
+        ...advisoryFindingRecords,
+      ],
+    });
+    supervisor.assertRuntimeBudget(runId, { diffLines: finalRiskFeatures.diffLines });
+    const finalRiskAssessment = supervisor.assessRunRisk(runId, supervisor.getRun(runId).stateVersion, finalRiskFeatures, { autoApproveLowRisk: true });
     this.transition(runId, "REVIEWING", "INDEPENDENT_VERIFICATION_COMPLETE", trustedEvidence.map((item) => item.evidenceId));
 
     const evidenceBundleHash = reviewerEvidenceBundleHash({
@@ -162,32 +213,64 @@ export class EngineerVerificationManager {
       diffHash: sha256(diff),
       resultCommitSha,
       trustedEvidence,
+      riskAssessment: finalRiskAssessment,
     });
     const reviewSessionId = this.id();
     const reviewerInput = ReviewerInputSchema.parse({
       reviewSessionId, runId, reviewAttempt: pass, manifest, manifestHash: manifest.manifestHash,
       finalDiff: diff, diffHash: sha256(diff), trustedEvidence, evidenceBundleHash, resultCommitSha,
+      riskAssessment: finalRiskAssessment,
       reviewPolicyVersion: REVIEWER_POLICY_VERSION, createdAt: this.timestamp(),
     });
     const reviewerAgent = this.startAgent(runId, "REVIEWER", sha256(reviewerInput));
+    let reviewerTransport;
+    try {
+      reviewerTransport = await this.options.transportForRole(runId, "REVIEWER");
+    } catch (error) {
+      this.failAgent(runId, reviewerAgent);
+      throw error;
+    }
     const reviewer = new IsolatedReviewer({
-      transport: await this.options.transportForRole(runId, "REVIEWER"),
+      transport: reviewerTransport,
       modelConfiguration: this.options.modelConfiguration,
       now: this.options.now,
+      safetyIdentifier,
+      reserveModelCall: ({ model, inputTokenUpperBound, maxOutputTokens, attempt }) => supervisor.reserveModelBudget({
+        runId, reservationId: sha256({ runId, reviewSessionId, pass, attempt, purpose: "reviewer-model-call" }),
+        agentExecutionId: reviewerAgent.id,
+        model, inputTokenUpperBound, maxOutputTokens,
+      }),
+      authorizeModelRetry: ({ error, attempt, failedAttempt, inputHash, cacheKey, reservationId, latencyMs }) => {
+        supervisor.recordModelCall({
+          modelCallId: this.id(), runId, agentExecutionId: reviewerAgent.id,
+          logicalTier: reviewerAgent.route.logicalTier, resolvedModel: reviewerAgent.route.model,
+          promptTemplateVersion: REVIEWER_POLICY_VERSION, inputContextRefs: [manifest.manifestHash, inputHash],
+          outputSchemaVersion: "reviewer-output-v1", cacheKey, cacheHit: null, latencyMs,
+          inputTokens: null, outputTokens: null, retryCount: failedAttempt, status: "FAILED", createdAt: this.timestamp(),
+        }, reservationId);
+        return this.authorizeTransientModelRetry(runId, "REVIEWER", error, attempt);
+      },
       onModelCall: (observation) => {
         supervisor.recordModelCall({
           modelCallId: this.id(), runId, agentExecutionId: reviewerAgent.id,
           logicalTier: reviewerAgent.route.logicalTier, resolvedModel: reviewerAgent.route.model,
           promptTemplateVersion: REVIEWER_POLICY_VERSION,
           inputContextRefs: [manifest.manifestHash, observation.dynamicInputHash], outputSchemaVersion: "reviewer-output-v1",
-          cacheKey: observation.cacheKey, cacheHit: false, latencyMs: observation.latencyMs,
+          cacheKey: observation.cacheKey, cacheHit: null, latencyMs: observation.latencyMs,
           inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
-          retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp(),
-        });
+          retryCount: observation.retryCount, status: "SUCCEEDED", createdAt: this.timestamp(),
+        }, observation.reservationId);
       },
     });
-    const review = await reviewer.review(reviewerInput, pass);
-    const reviewArtifact = this.storeAgentOutput(runId, reviewerAgent, "REVIEWER_OUTPUT", review.session.output);
+    let review;
+    let reviewArtifact;
+    try {
+      review = await reviewer.review(reviewerInput, pass);
+      reviewArtifact = this.storeAgentOutput(runId, reviewerAgent, "REVIEWER_OUTPUT", review.session.output);
+    } catch (error) {
+      this.failAgent(runId, reviewerAgent);
+      throw error;
+    }
     supervisor.recordReviewerSession(review.session, review.findings);
     const claims = this.mapClaims(manifest, review.session.output, trustedEvidence, pass);
     for (const claim of claims) supervisor.recordClaimEvidence(claim);
@@ -325,8 +408,15 @@ export class EngineerVerificationManager {
     const runId = manifest.runId;
     const executor = this.executor(manifest, sandbox);
     const agent = this.startAgent(runId, "BUILDER", sha256(repairContext));
+    let transport;
+    try {
+      transport = await this.options.transportForRole(runId, "BUILDER");
+    } catch (error) {
+      this.failAgent(runId, agent);
+      throw error;
+    }
     const builder = new CodexBuilder({
-      transport: await this.options.transportForRole(runId, "BUILDER"),
+      transport,
       manifest,
       workspace: sandbox.workspace,
       workspaceManager: this.options.sandboxManager.workspaceManager(),
@@ -334,6 +424,32 @@ export class EngineerVerificationManager {
       modelConfiguration: this.options.modelConfiguration,
       repairContext,
       now: this.options.now,
+      safetyIdentifier: this.options.safetyIdentifierForUser?.(this.options.supervisor.getRun(runId).userId),
+      reserveModelCall: ({ model, inputTokenUpperBound, maxOutputTokens, round, attempt }) => this.options.supervisor.reserveModelBudget({
+        runId, reservationId: sha256({ runId, agentExecutionId: agent.id, round, attempt, purpose: "repair-model-call" }),
+        agentExecutionId: agent.id,
+        model, inputTokenUpperBound, maxOutputTokens,
+      }),
+      authorizeModelRetry: ({ error, attempt, failedAttempt, inputHash, cacheKey, reservationId, latencyMs }) => {
+        const message = error instanceof Error ? error.message : String(error);
+        const current = this.options.supervisor.getRun(runId);
+        this.options.supervisor.recordModelCall({
+          modelCallId: this.id(), runId, agentExecutionId: agent.id,
+          logicalTier: agent.route.logicalTier, resolvedModel: agent.route.model,
+          promptTemplateVersion: CODEX_BUILDER_PROMPT_VERSION,
+          inputContextRefs: [manifest.manifestHash, inputHash], outputSchemaVersion: null,
+          cacheKey, cacheHit: null, latencyMs, inputTokens: null, outputTokens: null,
+          retryCount: failedAttempt, status: "FAILED", createdAt: this.timestamp(),
+        }, reservationId);
+        const retry = this.options.supervisor.authorizeRetry({
+          runId, expectedStateVersion: current.stateVersion, kind: "TRANSIENT_MODEL",
+          failureFingerprint: sha256({ role: "BUILDER", message }), patchHash: null, progressMetric: attempt,
+        });
+        if (!retry.allowed && canTransition(current.state, "RETRY_BUDGET_EXHAUSTED")) {
+          this.transition(runId, "RETRY_BUDGET_EXHAUSTED", retry.reasonCode);
+        }
+        return retry.allowed;
+      },
       onModelCall: (observation) => {
         this.options.supervisor.recordModelCall({
           modelCallId: this.id(), runId, agentExecutionId: agent.id,
@@ -342,13 +458,18 @@ export class EngineerVerificationManager {
           inputContextRefs: [manifest.manifestHash, repairContext.reviewFindingsHash, observation.inputHash],
           outputSchemaVersion: null, cacheKey: observation.cacheKey, cacheHit: null,
           latencyMs: observation.latencyMs, inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
-          retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp(),
-        });
+          retryCount: observation.retryCount, status: "SUCCEEDED", createdAt: this.timestamp(),
+        }, observation.reservationId);
       },
     });
-    const builderResult = await builder.run();
-    const artifact = this.storeAgentOutput(runId, agent, "BUILDER_REPAIR_RESULT", builderResult);
-    this.transition(runId, "FAST_CHECKS", completionReason, [artifact.artifactId]);
+    try {
+      const builderResult = await builder.run();
+      const artifact = this.storeAgentOutput(runId, agent, "BUILDER_REPAIR_RESULT", builderResult);
+      this.transition(runId, "FAST_CHECKS", completionReason, [artifact.artifactId]);
+    } catch (error) {
+      this.failAgent(runId, agent);
+      throw error;
+    }
   }
 
   private executor(manifest: TaskManifest, sandbox: ProvisionedSandbox): TrustedCommandExecutor {
@@ -373,7 +494,7 @@ export class EngineerVerificationManager {
       status: "RUNNING", inputHash, outputArtifactId: null, startedAt: context.startedAt, completedAt: null,
     });
     this.options.supervisor.recordModelRouting({
-      routingDecisionId: this.id(), runId, agentRole: role, logicalTier: route.logicalTier,
+      routingDecisionId: this.id(), runId, agentExecutionId: context.id, agentRole: role, logicalTier: route.logicalTier,
       resolvedModel: route.model, routingPolicyVersion: route.policyVersion,
       fallbackUsed: false, fallbackReason: null, cacheKey: null, timestamp: context.startedAt,
     });
@@ -391,6 +512,27 @@ export class EngineerVerificationManager {
     };
     this.options.supervisor.recordAgentExecution(record);
     return artifact;
+  }
+
+  private failAgent(runId: string, agent: AgentContext): void {
+    this.options.supervisor.recordAgentExecution({
+      agentExecutionId: agent.id, runId, role: agent.role, modelTier: agent.route.logicalTier,
+      status: "FAILED", inputHash: agent.inputHash, outputArtifactId: null,
+      startedAt: agent.startedAt, completedAt: this.timestamp(),
+    });
+  }
+
+  private authorizeTransientModelRetry(runId: string, role: ModelRole, error: unknown, attempt: number): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    const current = this.options.supervisor.getRun(runId);
+    const retry = this.options.supervisor.authorizeRetry({
+      runId, expectedStateVersion: current.stateVersion, kind: "TRANSIENT_MODEL",
+      failureFingerprint: sha256({ role, message }), patchHash: null, progressMetric: attempt,
+    });
+    if (!retry.allowed && canTransition(current.state, "RETRY_BUDGET_EXHAUSTED")) {
+      this.transition(runId, "RETRY_BUDGET_EXHAUSTED", retry.reasonCode);
+    }
+    return retry.allowed;
   }
 
   private mapClaims(
@@ -475,6 +617,18 @@ export class EngineerVerificationManager {
   private failClosed(runId: string, error: unknown): void {
     const run = this.options.supervisor.getRun(runId);
     if (isTerminalState(run.state) || run.state === "REVIEW_APPROVED") return;
+    if (error instanceof RuntimeBudgetExhaustedError) {
+      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: this.id(), runId, failureClass: "WORKFLOW_FAILURE",
+        reasonCode: "RUNTIME_BUDGET_EXHAUSTED",
+        fingerprint: sha256({ reasonCode: "RUNTIME_BUDGET_EXHAUSTED", reasons: error.decision.hardLimitReasons }),
+        evidenceIds: [], retryable: false, createdAt: this.timestamp(),
+      }));
+      if (canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")) {
+        this.transition(runId, "RETRY_BUDGET_EXHAUSTED", "RUNTIME_BUDGET_EXHAUSTED");
+      }
+      return;
+    }
     const preferred = ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "REVERIFYING"].includes(run.state)
       ? "VERIFICATION_INCOMPLETE"
       : run.state === "SECURITY_REVIEW"

@@ -8,6 +8,7 @@ import {
 import { createEngineerSupervisor, type EngineerSupervisor } from "./supervisor.js";
 import type { RepositoryReference, TaskManifestContent } from "./contracts.js";
 import { RiskFeaturesSchema } from "./contracts.js";
+import { sha256 } from "./hash.js";
 import { transitionReplanToPlanReadyForTest, transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 
 const repository: RepositoryReference = {
@@ -514,6 +515,161 @@ describe("Engineer Supervisor foundation", () => {
     expect(assessment.humanGateRequired).toBe(true);
     expect(assessment.matchedRules).toContain("PRIOR_RISK_TIER_FLOOR");
     expect(supervisor.getRun(frozen.runId).riskTier).toBe("MEDIUM");
+    supervisor.close();
+  });
+
+  test("atomically reserves worst-case model spend and reconciles it to actual usage", () => {
+    const supervisor = createSupervisor();
+    const run = supervisor.receiveRequest({
+      runId: "run-model-budget",
+      userId: "user-1",
+      repository,
+      request: "Plan within the runtime budget",
+    });
+    supervisor.recordAgentExecution({
+      agentExecutionId: "planner-budget-agent",
+      runId: run.runId,
+      role: "PLANNER",
+      modelTier: "GPT-5.6_TERRA",
+      status: "RUNNING",
+      inputHash: sha256("planner-input"),
+      outputArtifactId: null,
+      startedAt: "2026-07-14T12:00:02.000Z",
+      completedAt: null,
+    });
+    supervisor.recordModelRouting({
+      routingDecisionId: "planner-budget-route",
+      runId: run.runId,
+      agentExecutionId: "planner-budget-agent",
+      agentRole: "PLANNER",
+      logicalTier: "GPT-5.6_TERRA",
+      resolvedModel: "gpt-5.6-terra",
+      routingPolicyVersion: "test-routing-v1",
+      fallbackUsed: false,
+      fallbackReason: null,
+      cacheKey: null,
+      timestamp: "2026-07-14T12:00:02.000Z",
+    });
+
+    expect(() => supervisor.reserveModelBudget({
+      runId: run.runId,
+      reservationId: "wrong-model-reservation",
+      agentExecutionId: "planner-budget-agent",
+      model: "gpt-5.6-luna",
+      inputTokenUpperBound: 10,
+      maxOutputTokens: 10,
+    })).toThrow("recorded route");
+    expect(() => supervisor.recordModelCall({
+      modelCallId: "wrong-tier-call", runId: run.runId, agentExecutionId: "planner-budget-agent",
+      logicalTier: "GPT-5.6_LUNA", resolvedModel: "gpt-5.6-luna",
+      promptTemplateVersion: "test-v1", inputContextRefs: [sha256("planner-input")],
+      outputSchemaVersion: "test-v1", cacheKey: sha256("wrong-cache"), cacheHit: null,
+      latencyMs: 1, inputTokens: 1, outputTokens: 1, retryCount: 0, status: "SUCCEEDED",
+      createdAt: "2026-07-14T12:00:02.000Z",
+    })).toThrow("pre-admitted budget reservation");
+
+    expect(() => supervisor.reserveModelBudget({
+      runId: run.runId,
+      reservationId: "oversized-reservation",
+      agentExecutionId: "planner-budget-agent",
+      model: "gpt-5.6-terra",
+      inputTokenUpperBound: 200_000,
+      maxOutputTokens: 1,
+    })).toThrow("MODEL_TOKENS_BUDGET_EXHAUSTED");
+    expect(supervisor.exportRunRecords(run.runId).cost_records).toEqual([]);
+
+    const reservationId = supervisor.reserveModelBudget({
+      runId: run.runId,
+      reservationId: "planner-reservation",
+      agentExecutionId: "planner-budget-agent",
+      model: "gpt-5.6-terra",
+      inputTokenUpperBound: 1_000,
+      maxOutputTokens: 500,
+    });
+    expect(supervisor.exportRunRecords(run.runId).cost_records).toMatchObject([{
+      source_type: "MODEL_RESERVATION",
+      source_id: reservationId,
+      input_tokens: 1_000,
+      output_tokens: 500,
+    }]);
+
+    supervisor.recordModelCall({
+      modelCallId: "planner-budget-call",
+      runId: run.runId,
+      agentExecutionId: "planner-budget-agent",
+      logicalTier: "GPT-5.6_TERRA",
+      resolvedModel: "gpt-5.6-terra",
+      promptTemplateVersion: "test-v1",
+      inputContextRefs: [sha256("planner-input")],
+      outputSchemaVersion: "test-v1",
+      cacheKey: sha256("planner-cache"),
+      cacheHit: false,
+      latencyMs: 10,
+      inputTokens: 100,
+      outputTokens: 50,
+      retryCount: 0,
+      status: "SUCCEEDED",
+      createdAt: "2026-07-14T12:00:03.000Z",
+    }, reservationId);
+    expect(supervisor.exportRunRecords(run.runId).cost_records).toMatchObject([{
+      source_type: "MODEL_CALL",
+      source_id: "planner-budget-call",
+      input_tokens: 100,
+      output_tokens: 50,
+    }]);
+    expect(supervisor.assertRuntimeBudget(run.runId)).toMatchObject({ status: "WITHIN_BUDGET", totalTokens: 150 });
+
+    const staleRouteReservation = supervisor.reserveModelBudget({
+      runId: run.runId,
+      reservationId: "stale-route-reservation",
+      agentExecutionId: "planner-budget-agent",
+      model: "gpt-5.6-terra",
+      inputTokenUpperBound: 100,
+      maxOutputTokens: 50,
+    });
+    supervisor.recordModelRouting({
+      routingDecisionId: "planner-budget-route-2",
+      runId: run.runId,
+      agentExecutionId: "planner-budget-agent",
+      agentRole: "PLANNER",
+      logicalTier: "GPT-5.6_TERRA",
+      resolvedModel: "gpt-5.6-terra",
+      routingPolicyVersion: "test-routing-v2",
+      fallbackUsed: false,
+      fallbackReason: null,
+      cacheKey: null,
+      timestamp: "2026-07-14T12:00:04.000Z",
+    });
+    expect(() => supervisor.recordModelCall({
+      modelCallId: "stale-route-call", runId: run.runId, agentExecutionId: "planner-budget-agent",
+      logicalTier: "GPT-5.6_TERRA", resolvedModel: "gpt-5.6-terra",
+      promptTemplateVersion: "test-v1", inputContextRefs: [sha256("planner-input")],
+      outputSchemaVersion: "test-v1", cacheKey: sha256("planner-cache"), cacheHit: false,
+      latencyMs: 1, inputTokens: 10, outputTokens: 5, retryCount: 0, status: "SUCCEEDED",
+      createdAt: "2026-07-14T12:00:05.000Z",
+    }, staleRouteReservation)).toThrow("route changed");
+    supervisor.close();
+  });
+
+  test("permits failed-agent finalization after the runtime budget has expired", () => {
+    let clock = new Date("2026-07-14T12:00:00.000Z");
+    const supervisor = createEngineerSupervisor({ dbPath: ":memory:", now: () => clock });
+    const run = supervisor.receiveRequest({
+      runId: "run-expired-agent", userId: "user-1", repository, request: "Run bounded work",
+    });
+    const startedAt = clock.toISOString();
+    supervisor.recordAgentExecution({
+      agentExecutionId: "expired-agent", runId: run.runId, role: "PLANNER", modelTier: "GPT-5.6_TERRA",
+      status: "RUNNING", inputHash: sha256("expired-agent-input"), outputArtifactId: null,
+      startedAt, completedAt: null,
+    });
+    clock = new Date("2026-07-14T14:00:00.000Z");
+    expect(() => supervisor.recordAgentExecution({
+      agentExecutionId: "expired-agent", runId: run.runId, role: "PLANNER", modelTier: "GPT-5.6_TERRA",
+      status: "FAILED", inputHash: sha256("expired-agent-input"), outputArtifactId: null,
+      startedAt, completedAt: clock.toISOString(),
+    })).not.toThrow();
+    expect(supervisor.exportRunRecords(run.runId).agent_executions).toMatchObject([{ status: "FAILED" }]);
     supervisor.close();
   });
 });

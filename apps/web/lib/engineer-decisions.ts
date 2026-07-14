@@ -27,6 +27,7 @@ export interface EngineerDecisionItem {
    * independently authored choices can safely be combined.
    */
   selectionMode?: "EXCLUSIVE" | "COMBINABLE";
+  provenance?: { origin: "AI_GENERATED"; trust: "UNTRUSTED_MODEL_OUTPUT" };
 }
 
 export interface PresentedDecisionOption extends EngineerDecisionOption {

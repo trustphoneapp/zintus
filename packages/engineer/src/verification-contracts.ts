@@ -47,7 +47,7 @@ export const ReviewerSessionRecordSchema = z.object({
   evidenceBundleHash: HashSchema,
   policyVersion: z.string().min(1).max(200),
   cacheKey: HashSchema,
-  cacheHit: z.boolean(),
+  cacheHit: z.boolean().nullable(),
   startedAt: IsoTimestampSchema,
   completedAt: IsoTimestampSchema,
   decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "HUMAN_REVIEW_REQUIRED"]),

@@ -231,6 +231,24 @@ paths:
         "503": { description: Engineer is not configured. }
 
   /v1/engineer/runs:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRuns
+      summary: List durable runs owned by the authenticated Engineer principal
+      responses:
+        "200":
+          description: Runs ordered newest first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs:
+                    type: array
+                    items: { $ref: "#/components/schemas/EngineerRun" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Engineer is not configured. }
     post:
       tags: [Engineer]
       operationId: createEngineerRun
@@ -395,6 +413,16 @@ paths:
       summary: Replay and stream durable run-state events
       parameters:
         - $ref: "#/components/parameters/EngineerRunId"
+        - name: afterSequence
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Replay only events with a greater durable sequence number.
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: integer, minimum: 0 }
+          description: Standard SSE resume cursor, used when afterSequence is absent.
       responses:
         "200":
           description: |
@@ -472,6 +500,26 @@ paths:
                   evidenceBundles:
                     type: array
                     items: { $ref: "#/components/schemas/EngineerEvidenceBundleRecord" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/evidence-export:
+    get:
+      tags: [Engineer]
+      operationId: exportEngineerRunEvidence
+      summary: Download an owner-checked, hash-bound JSON evidence aggregate
+      parameters:
+        - $ref: "#/components/parameters/EngineerRunId"
+      responses:
+        "200":
+          description: Evidence aggregate with a canonical SHA-256 export hash.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [exportVersion, run, events, artifacts, claims, evidenceBundles, tests, securityFindings, failures, decisions, exportHash]
+                additionalProperties: true
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Run not found. }

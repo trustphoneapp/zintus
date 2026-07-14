@@ -13,8 +13,8 @@ export interface EngineerObservabilitySnapshot {
 }
 
 /** Aggregates durable ledger truth only; it does not infer health from model text. */
-export function engineerObservabilitySnapshot(supervisor: EngineerSupervisor, now = new Date()): EngineerObservabilitySnapshot {
-  const runs = supervisor.listRuns();
+export function engineerObservabilitySnapshot(supervisor: EngineerSupervisor, now = new Date(), ownerId?: string): EngineerObservabilitySnapshot {
+  const runs = supervisor.listRuns().filter((run) => ownerId === undefined || run.userId === ownerId);
   const runsByState: Record<string, number> = {};
   const runsByRisk: Record<string, number> = {};
   const failuresByClass: Record<string, number> = {};

@@ -12,7 +12,7 @@ import {
 } from "./context-contracts.js";
 import type { EngineerRun, TaskManifestContent } from "./contracts.js";
 import { sha256 } from "./hash.js";
-import { PlanProposalSchema } from "./planning.js";
+import { PlanProposalSchema, planProposalContentHash } from "./planning.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 
 /** Test-only fixture that exercises the real artifact, context, proposal, and PLAN_READY guards. */
@@ -74,20 +74,23 @@ export function transitionToPlanReadyForTest(input: {
     reasonCode: "TEST_PLANNING_STARTED",
     idempotencyKey: `${key}:planning`,
   }).run;
-  const proposalHash = sha256(manifest);
+  const planningAnalysis = { architectureSummary: "Test fixture", assumptions: [], unresolvedQuestions: [], touchedFileEstimates: [] };
+  const proposalHash = planProposalContentHash({ manifest, planningAnalysis, contextManifestHash: context.manifestHash });
   const proposalArtifact = supervisor.recordArtifact(store.put({
     runId: run.runId,
     type: "PLAN_PROPOSAL",
-    bytes: JSON.stringify(manifest),
+    bytes: JSON.stringify({ proposalSchemaVersion: "plan-proposal-v2", plannerPolicyVersion: "engineer-planner-v1", manifest, planningAnalysis, contextManifestHash: context.manifestHash }),
     producerType: "SYSTEM",
     producerId: "test-fixture",
     trusted: true,
   }));
   supervisor.recordPlanProposal(PlanProposalSchema.parse({
+    proposalSchemaVersion: "plan-proposal-v2",
+    plannerPolicyVersion: "engineer-planner-v1",
     planProposalId: `${key}:proposal`,
     runId: run.runId,
     manifest,
-    planningAnalysis: { architectureSummary: "Test fixture", assumptions: [], unresolvedQuestions: [], touchedFileEstimates: [] },
+    planningAnalysis,
     proposalHash,
     artifactId: proposalArtifact.artifactId,
     contextManifestHash: context.manifestHash,
@@ -115,20 +118,24 @@ export function transitionReplanToPlanReadyForTest(input: {
   const context = supervisor.latestContextSnapshot(replanning.runId);
   if (!context) throw new Error("test replan fixture requires existing context");
   const store = new LocalArtifactStore({ root: input.artifactRoot ?? mkdtempSync(join(tmpdir(), "zintus-replan-evidence-")) });
+  const planningAnalysis = { architectureSummary: "Test replan fixture", assumptions: [], unresolvedQuestions: [], touchedFileEstimates: [] };
+  const proposalHash = planProposalContentHash({ manifest, planningAnalysis, contextManifestHash: context.manifest.manifestHash });
   const artifact = supervisor.recordArtifact(store.put({
     runId: replanning.runId,
     type: "PLAN_PROPOSAL",
-    bytes: JSON.stringify(manifest),
+    bytes: JSON.stringify({ proposalSchemaVersion: "plan-proposal-v2", plannerPolicyVersion: "engineer-planner-v1", manifest, planningAnalysis, contextManifestHash: context.manifest.manifestHash }),
     producerType: "SYSTEM",
     producerId: "test-fixture",
     trusted: true,
   }));
   supervisor.recordPlanProposal(PlanProposalSchema.parse({
+    proposalSchemaVersion: "plan-proposal-v2",
+    plannerPolicyVersion: "engineer-planner-v1",
     planProposalId: `${key}:proposal`,
     runId: replanning.runId,
     manifest,
-    planningAnalysis: { architectureSummary: "Test replan fixture", assumptions: [], unresolvedQuestions: [], touchedFileEstimates: [] },
-    proposalHash: sha256(manifest),
+    planningAnalysis,
+    proposalHash,
     artifactId: artifact.artifactId,
     contextManifestHash: context.manifest.manifestHash,
     createdAt: manifest.createdAt,

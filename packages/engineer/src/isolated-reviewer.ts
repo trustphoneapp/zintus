@@ -96,7 +96,20 @@ export interface IsolatedReviewerOptions {
     latencyMs: number;
     inputTokens: number | null;
     outputTokens: number | null;
+    reservationId?: string;
+    retryCount: number;
   }) => void;
+  safetyIdentifier?: string;
+  reserveModelCall?: (input: { model: string; inputTokenUpperBound: number; maxOutputTokens: number; attempt: number }) => string;
+  authorizeModelRetry?: (input: {
+    attempt: number;
+    failedAttempt: number;
+    error: unknown;
+    inputHash: string;
+    cacheKey: string;
+    reservationId?: string;
+    latencyMs: number;
+  }) => boolean;
 }
 
 export interface IsolatedReviewResult {
@@ -154,7 +167,8 @@ export class IsolatedReviewer {
     });
     const startedAt = (this.options.now ?? (() => new Date()))().toISOString();
     const callStarted = Date.now();
-    const response = await this.options.transport.create({
+    const maxOutputTokens = 12_000;
+    const request = {
       model: route.model,
       instructions: FIXED_REVIEWER_POLICY,
       input: [{ role: "user", content: [{ type: "input_text", text: JSON.stringify(input) }] }],
@@ -168,15 +182,48 @@ export class IsolatedReviewer {
       tool_choice: { type: "function", name: "submit_review" },
       parallel_tool_calls: false,
       reasoning: { effort: "high", summary: "auto" },
-      max_output_tokens: 12_000,
+      max_output_tokens: maxOutputTokens,
       store: false,
-      safety_identifier: sha256(input.runId),
+      prompt_cache_key: cacheKey,
+      safety_identifier: this.options.safetyIdentifier ?? sha256(input.runId),
       metadata: { run_id: input.runId, role: "reviewer", policy_version: REVIEWER_POLICY_VERSION },
+    };
+    let transportAttempt = 0;
+    let reservationId: string | undefined;
+    let response: Awaited<ReturnType<ResponsesTransport["create"]>>;
+    while (true) {
+      reservationId = this.options.reserveModelCall?.({
+        model: route.model,
+        inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
+        maxOutputTokens,
+        attempt: transportAttempt,
+      });
+      const attemptStarted = Date.now();
+      try {
+        response = await this.options.transport.create(request);
+        break;
+      } catch (error) {
+        if (!this.options.authorizeModelRetry?.({
+          attempt: transportAttempt + 1, failedAttempt: transportAttempt, error, inputHash, cacheKey, reservationId,
+          latencyMs: Math.max(0, Date.now() - attemptStarted),
+        })) throw error;
+        transportAttempt += 1;
+      }
+    }
+    this.options.onModelCall?.({
+      responseId: response.id,
+      inputHash,
+      dynamicInputHash,
+      cacheKey,
+      latencyMs: Math.max(0, Date.now() - callStarted),
+      inputTokens: response.usage?.input_tokens ?? null,
+      outputTokens: response.usage?.output_tokens ?? null,
+      reservationId,
+      retryCount: transportAttempt,
     });
-    const call = response.output
-      .map((item) => FunctionCallSchema.safeParse(item))
-      .find((item): item is { success: true; data: z.infer<typeof FunctionCallSchema> } => item.success)?.data;
-    if (!call) throw new Error("isolated Reviewer did not submit a structured review");
+    const rawCalls = response.output.filter((item) => typeof item === "object" && item !== null && (item as { type?: unknown }).type === "function_call");
+    if (rawCalls.length !== 1) throw new Error("isolated Reviewer must submit exactly one structured review call");
+    const call = FunctionCallSchema.parse(rawCalls[0]);
     const output = ReviewerOutputSchema.parse(JSON.parse(call.arguments)) as ReviewerOutput;
     validateApprovalSemantics(input, output);
     if (output.reviewedDiffHash !== input.diffHash || output.reviewedEvidenceBundleHash !== input.evidenceBundleHash) {
@@ -186,15 +233,6 @@ export class IsolatedReviewer {
       throw new Error("Reviewer output policy version does not match its isolated input");
     }
     const completedAt = (this.options.now ?? (() => new Date()))().toISOString();
-    this.options.onModelCall?.({
-      responseId: response.id,
-      inputHash,
-      dynamicInputHash,
-      cacheKey,
-      latencyMs: Math.max(0, Date.now() - callStarted),
-      inputTokens: response.usage?.input_tokens ?? null,
-      outputTokens: response.usage?.output_tokens ?? null,
-    });
     const reviewerSessionId = input.reviewSessionId;
     const findings = output.findings.map((finding) => ReviewFindingRecordSchema.parse({
       reviewerSessionId,
@@ -220,7 +258,7 @@ export class IsolatedReviewer {
       evidenceBundleHash: input.evidenceBundleHash,
       policyVersion: REVIEWER_POLICY_VERSION,
       cacheKey,
-      cacheHit: false,
+      cacheHit: null,
       startedAt,
       completedAt,
       decision: output.decision,

@@ -70,7 +70,21 @@ export interface TerraAdvisoryOptions {
     latencyMs: number;
     inputTokens: number | null;
     outputTokens: number | null;
+    reservationId?: string;
+    retryCount: number;
   }) => void;
+  safetyIdentifier?: string;
+  reserveModelCall?: (input: { role: "TESTER" | "SECURITY"; model: string; inputTokenUpperBound: number; maxOutputTokens: number; attempt: number }) => string;
+  authorizeModelRetry?: (input: {
+    role: "TESTER" | "SECURITY";
+    attempt: number;
+    failedAttempt: number;
+    error: unknown;
+    inputHash: string;
+    cacheKey: string;
+    reservationId?: string;
+    latencyMs: number;
+  }) => boolean;
 }
 
 /** Terra supplies bounded advisory analysis; objective tools and the Supervisor remain authoritative. */
@@ -114,22 +128,44 @@ export class TerraAdvisors {
       manifestHash: (dynamicInput as { manifest: TaskManifest }).manifest.manifestHash,
     });
     const started = Date.now();
-    const response = await (await this.options.transportForRole(role)).create({
+    const instructions = `Zintus Engineer ${role} advisory (${TERRA_ADVISOR_POLICY_VERSION}). ${task}`;
+    const maxOutputTokens = 4_000;
+    const transport = await this.options.transportForRole(role);
+    const request = {
       model: route.model,
-      instructions: `Zintus Engineer ${role} advisory (${TERRA_ADVISOR_POLICY_VERSION}). ${task}`,
+      instructions,
       input: [{ role: "user", content: [{ type: "input_text", text: JSON.stringify(dynamicInput) }] }],
       tools: [{ type: "function", name: toolName, description: task, strict: true, parameters }],
       tool_choice: { type: "function", name: toolName },
       parallel_tool_calls: false,
       reasoning: { effort: "medium", summary: "auto" },
-      max_output_tokens: 4_000,
+      max_output_tokens: maxOutputTokens,
       store: false,
-      safety_identifier: sha256((dynamicInput as { manifest: TaskManifest }).manifest.runId),
+      prompt_cache_key: cacheKey,
+      safety_identifier: this.options.safetyIdentifier ?? sha256((dynamicInput as { manifest: TaskManifest }).manifest.runId),
       metadata: { role: role.toLowerCase(), policy_version: TERRA_ADVISOR_POLICY_VERSION },
-    });
-    const call = response.output.map((item) => FunctionCallSchema.safeParse(item))
-      .find((item) => item.success && item.data.name === toolName);
-    if (!call?.success) throw new Error(`${role} did not submit its structured advisory`);
+    };
+    let attempt = 0;
+    let reservationId: string | undefined;
+    let response: Awaited<ReturnType<typeof transport.create>>;
+    while (true) {
+      reservationId = this.options.reserveModelCall?.({
+        role, model: route.model,
+        inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
+        maxOutputTokens, attempt,
+      });
+      const attemptStarted = Date.now();
+      try {
+        response = await transport.create(request);
+        break;
+      } catch (error) {
+        if (!this.options.authorizeModelRetry?.({
+          role, attempt: attempt + 1, failedAttempt: attempt, error, inputHash, cacheKey, reservationId,
+          latencyMs: Math.max(0, Date.now() - attemptStarted),
+        })) throw error;
+        attempt += 1;
+      }
+    }
     this.options.onModelCall?.({
       role,
       responseId: response.id,
@@ -138,7 +174,13 @@ export class TerraAdvisors {
       latencyMs: Math.max(0, Date.now() - started),
       inputTokens: response.usage?.input_tokens ?? null,
       outputTokens: response.usage?.output_tokens ?? null,
+      reservationId,
+      retryCount: attempt,
     });
-    return outputSchema.parse(JSON.parse(call.data.arguments));
+    const rawCalls = response.output.filter((item) => typeof item === "object" && item !== null && (item as { type?: unknown }).type === "function_call");
+    if (rawCalls.length !== 1) throw new Error(`${role} must submit exactly one structured advisory call`);
+    const call = FunctionCallSchema.parse(rawCalls[0]);
+    if (call.name !== toolName) throw new Error(`${role} submitted an unexpected advisory tool`);
+    return outputSchema.parse(JSON.parse(call.arguments));
   }
 }

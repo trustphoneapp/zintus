@@ -5,6 +5,7 @@ import {
   createEngineerRun,
   engineerDecision,
   freezeEngineerPlan,
+  getEngineerEvidenceExport,
   getEngineerData,
   getEngineerPlan,
   getEngineerRunStatus,
@@ -23,6 +24,7 @@ import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresen
 type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
 const RUN_STORAGE_KEY = "zintus-engineer-active-run";
+const cursorKey = (runId: string) => `zintus-engineer-event-cursor:${runId}`;
 const STATE_PROGRESS: Record<string, number> = { REQUEST_RECEIVED: 2, REQUEST_NORMALIZED: 5, PLANNING: 7, PLAN_READY: 10, PLAN_FROZEN: 12, QUEUED: 15, SANDBOX_WARM_CLAIMING: 18, SANDBOX_COLD_PROVISIONING: 18, SANDBOX_PREFLIGHT: 22, SANDBOX_READY: 25, CONTEXT_BUILDING: 30, IMPLEMENTING: 42, FAST_CHECKS: 50, UNIT_TESTING: 58, INTEGRATION_TESTING: 66, E2E_TESTING: 72, SECURITY_REVIEW: 78, REVIEWING: 86, REVIEW_APPROVED: 90, HUMAN_APPROVAL_PENDING: 94, HUMAN_APPROVED: 96, PR_PREFLIGHT: 97, PR_CREATING: 98, PR_CREATED: 99 };
 
 export default function EngineerPage() {
@@ -57,7 +59,11 @@ export default function EngineerPage() {
       setEvents((current) => current.some((item) => item.eventId === event.eventId) ? current : [...current, event]);
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
       refreshTimerRef.current = setTimeout(() => { refreshTimerRef.current = null; void refresh(runId); }, 100);
-    }, controller.signal).then(() => refresh(runId)).catch((cause) => {
+    }, controller.signal, {
+      // Rebuild the visible timeline after reload; reconnects within the stream still resume from its live cursor.
+      afterSequence: 0,
+      onCursor: (sequence) => window.localStorage.setItem(cursorKey(runId), String(sequence)),
+    }).then(() => refresh(runId)).catch((cause) => {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Timeline disconnected");
     });
   }, [refresh]);
@@ -69,7 +75,7 @@ export default function EngineerPage() {
     void Promise.all([getEngineerRunStatus(runId), getEngineerPlan(runId).catch(() => null), getEngineerData(runId)]).then(([status, storedPlan, storedData]) => {
       if (!active) return;
       setRun(status.run); setPlan(storedPlan); setData(storedData); setManagerError(status.lastError);
-      if (!TERMINAL.has(status.run.state)) watch(runId);
+      watch(runId);
     }).catch(() => { window.localStorage.removeItem(RUN_STORAGE_KEY); });
     return () => { active = false; };
   }, [watch]);
@@ -82,7 +88,7 @@ export default function EngineerPage() {
       setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
       const proposal = await planEngineerRun(created.runId);
       setPlan(proposal);
-      const status = await getEngineerRunStatus(created.runId); setRun(status.run); setManagerError(status.lastError);
+      const [status, nextData] = await Promise.all([getEngineerRunStatus(created.runId), getEngineerData(created.runId)]); setRun(status.run); setData(nextData); setManagerError(status.lastError);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create Engineer run"); }
     finally { setBusy(false); }
   };
@@ -90,8 +96,20 @@ export default function EngineerPage() {
   const retryPlanning = async () => {
     if (!run) return;
     setBusy(true); setError(null); setManagerError(null);
-    try { const proposal = await planEngineerRun(run.runId); setPlan(proposal); const status = await getEngineerRunStatus(run.runId); setRun(status.run); setManagerError(status.lastError); }
+    try { const proposal = await planEngineerRun(run.runId); setPlan(proposal); const [status, nextData] = await Promise.all([getEngineerRunStatus(run.runId), getEngineerData(run.runId)]); setRun(status.run); setData(nextData); setManagerError(status.lastError); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
+    finally { setBusy(false); }
+  };
+
+  const downloadEvidence = async () => {
+    if (!run) return;
+    setBusy(true); setError(null);
+    try {
+      const aggregate = await getEngineerEvidenceExport(run.runId);
+      const url = URL.createObjectURL(new Blob([JSON.stringify(aggregate, null, 2)], { type: "application/json" }));
+      const link = document.createElement("a"); link.href = url; link.download = `zintus-engineer-${run.runId}-evidence.json`; link.click();
+      URL.revokeObjectURL(url);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to export evidence"); }
     finally { setBusy(false); }
   };
 
@@ -99,7 +117,9 @@ export default function EngineerPage() {
     if (!run) return;
     setBusy(true); setError(null);
     try {
-      await resolveEngineerDecision(run, decisionId, optionId, "Selected through the Zintus decision inbox.");
+      const result = await resolveEngineerDecision(run, decisionId, optionId, "Selected through the Zintus decision inbox.");
+      if (result.plan) setPlan(result.plan);
+      if (result.planningError) setError(result.planningError);
       await refresh(run.runId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to resolve decision");
@@ -181,19 +201,24 @@ export default function EngineerPage() {
           <div><span>Human gate</span><strong>{plan.manifest.humanGateRequired ? "Required" : "Policy dependent"}</strong></div>
           <div><span>Allowed paths</span>{plan.manifest.allowedPaths.map((path) => <code key={path}>{path}</code>)}</div>
           <div><span>Commands</span>{plan.manifest.allowedCommands.map((command) => <code key={command}>{command}</code>)}</div>
+          <div><span>Architecture</span><p>{plan.planningAnalysis.architectureSummary}</p></div>
+          <div><span>Assumptions</span>{plan.planningAnalysis.assumptions.length ? plan.planningAnalysis.assumptions.map((item) => <p key={item.assumptionId}>{item.statement} · {Math.round(item.confidence * 100)}% confidence</p>) : <p>None recorded.</p>}</div>
+          <div><span>Estimated files</span>{plan.planningAnalysis.touchedFileEstimates.map((item) => <code key={item.path}>{item.path}</code>)}</div>
           {error ? <p className="engineer-error">{error}</p> : null}
           {managerError ? <p className="engineer-error">{managerError}</p> : null}
           <button className="engineer-primary" onClick={() => void freezeAndStart()} disabled={busy}>{busy ? "Starting…" : "Freeze plan and start"}</button>
         </aside>
       </section>
+      <DecisionPresentation decisions={decisions} onResolve={busy ? undefined : resolveDecision} />
     </main>
   );
 
   return (
     <main className="engineer-screen">
       <RunHeader run={run} progress={TERMINAL.has(latestState) ? 100 : progress} />
+      {data?.errors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {data.errors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
       <nav className="engineer-tabs" aria-label="Engineer run views">{(["timeline", "diff", "evidence"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
-      {latestState === "REQUEST_RECEIVED" && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The durable run is intact. Planning can be retried without creating a duplicate run.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{busy ? "Planning…" : "Retry planning"}</button></section> : null}
+      {(["REQUEST_RECEIVED", "PLANNING", "REPLANNING"].includes(latestState) && (latestState !== "REQUEST_RECEIVED" || !plan)) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The durable run and prior human answers are intact. Planning can be retried without creating a duplicate run.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{busy ? "Planning…" : "Retry planning"}</button></section> : null}
       {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{busy ? "Starting…" : "Start frozen plan"}</button></section> : null}
       <DecisionPresentation decisions={decisions} onResolve={busy ? undefined : resolveDecision} />
       {tab === "timeline" ? <section className="engineer-run-grid">
@@ -201,7 +226,7 @@ export default function EngineerPage() {
         <aside className="engineer-card engineer-verification"><h2>Verification</h2><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /><Metric label="Failures" value={String(failures.length)} /></aside>
       </section> : null}
       {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><h2>Reviewed diff</h2><span className="engineer-chip">hash-bound</span></div><pre className="engineer-diff">{data?.diff || "The exact diff appears after implementation begins."}</pre></section> : null}
-      {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><h2>Acceptance evidence</h2>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}</div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div></section> : null}
+      {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed JSON</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div></section> : null}
       {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>{approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>Approve and publish</button><button disabled={busy} onClick={() => void decide("request-changes")}>Request changes</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>Reject</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}

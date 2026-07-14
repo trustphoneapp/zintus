@@ -11,6 +11,8 @@ import { sha256 } from "./hash.js";
 import { FailureRecordSchema } from "./control-contracts.js";
 import { executionFailureDomain, operationalFailurePolicy } from "./failure-policy.js";
 import type { EngineerWorkerLeaseManager, WorkerLeaseGrant } from "./worker-lease.js";
+import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
+import { canTransition } from "./state-machine.js";
 
 export interface EngineerExecutionManagerOptions {
   supervisor: EngineerSupervisor;
@@ -25,6 +27,7 @@ export interface EngineerExecutionManagerOptions {
   workerOwnerId?: string;
   leaseTtlMs?: number;
   heartbeatIntervalMs?: number;
+  safetyIdentifierForUser?: (userId: string) => string;
 }
 
 /** Phase-2 worker: one Builder per run, deterministic state promotions, durable evidence records. */
@@ -196,11 +199,23 @@ export class EngineerExecutionManager {
         }
       }
       if (!provisioned) {
-        provisioned = this.options.sandboxManager.provisionCold({
-          runId,
-          repositoryRoot,
-          baseCommitSha: initial.repository.baseCommitSha,
-        });
+        while (!provisioned) {
+          try {
+            provisioned = this.options.sandboxManager.provisionCold({
+              runId,
+              repositoryRoot,
+              baseCommitSha: initial.repository.baseCommitSha,
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const current = supervisor.getRun(runId);
+            const retry = supervisor.authorizeRetry({
+              runId, expectedStateVersion: current.stateVersion, kind: "SANDBOX_PROVISIONING",
+              failureFingerprint: sha256({ phase: "COLD_PROVISIONING", message }), patchHash: null, progressMetric: null,
+            });
+            if (!retry.allowed) throw error;
+          }
+        }
         transition("SANDBOX_PREFLIGHT", "SANDBOX_PROVISIONED");
         supervisor.recordSandbox(provisioned.record);
         transition("SANDBOX_READY", "SANDBOX_PREFLIGHT_PASSED", [provisioned.record.sandboxId]);
@@ -226,6 +241,7 @@ export class EngineerExecutionManager {
       supervisor.recordModelRouting({
         routingDecisionId: (this.options.idFactory ?? randomUUID)(),
         runId,
+        agentExecutionId,
         agentRole: "BUILDER",
         logicalTier: route.logicalTier,
         resolvedModel: route.model,
@@ -254,6 +270,33 @@ export class EngineerExecutionManager {
         ...this.options.builderOptions,
         now: this.options.now,
         signal,
+        safetyIdentifier: this.options.safetyIdentifierForUser?.(supervisor.getRun(runId).userId),
+        reserveModelCall: ({ model, inputTokenUpperBound, maxOutputTokens, round, attempt }) => supervisor.reserveModelBudget({
+          runId, reservationId: sha256({ runId, agentExecutionId, round, attempt, purpose: "builder-model-call" }),
+          agentExecutionId: agentExecutionId!,
+          model, inputTokenUpperBound, maxOutputTokens,
+        }),
+        authorizeModelRetry: ({ error, attempt, failedAttempt, inputHash, cacheKey, reservationId, latencyMs }) => {
+          if (signal.aborted) return false;
+          const message = error instanceof Error ? error.message : String(error);
+          const current = supervisor.getRun(runId);
+          supervisor.recordModelCall({
+            modelCallId: (this.options.idFactory ?? randomUUID)(), runId, agentExecutionId: agentExecutionId!,
+            logicalTier: route.logicalTier, resolvedModel: route.model,
+            promptTemplateVersion: CODEX_BUILDER_PROMPT_VERSION, inputContextRefs: [manifest.manifestHash, inputHash],
+            outputSchemaVersion: null, cacheKey, cacheHit: null, latencyMs,
+            inputTokens: null, outputTokens: null, retryCount: failedAttempt, status: "FAILED",
+            createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+          }, reservationId);
+          const retry = supervisor.authorizeRetry({
+            runId, expectedStateVersion: current.stateVersion, kind: "TRANSIENT_MODEL",
+            failureFingerprint: sha256({ role: "BUILDER", message }), patchHash: null, progressMetric: attempt,
+          });
+          if (!retry.allowed && current.state === "IMPLEMENTING") {
+            transition("RETRY_BUDGET_EXHAUSTED", retry.reasonCode);
+          }
+          return retry.allowed;
+        },
         onModelCall: (observation) => {
           supervisor.recordModelCall({
             modelCallId: (this.options.idFactory ?? randomUUID)(),
@@ -269,12 +312,13 @@ export class EngineerExecutionManager {
             latencyMs: observation.latencyMs,
             inputTokens: observation.inputTokens,
             outputTokens: observation.outputTokens,
-            retryCount: 0,
+            retryCount: observation.retryCount,
             status: "SUCCEEDED",
             createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
-          });
+          }, observation.reservationId);
         },
       });
+      supervisor.assertRuntimeBudget(runId);
       const result = await builder.run();
       assertLease();
       const artifact = supervisor.recordArtifact(this.options.artifactStore.put({
@@ -300,8 +344,11 @@ export class EngineerExecutionManager {
       return result;
     } catch (error) {
       const run = supervisor.getRun(runId);
+      const budgetExhausted = error instanceof RuntimeBudgetExhaustedError;
       const domain = executionFailureDomain(run.state, error);
-      const policy = operationalFailurePolicy(domain);
+      const policy = budgetExhausted
+        ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }
+        : operationalFailurePolicy(domain);
       const message = error instanceof Error ? error.message : String(error);
       supervisor.recordFailure(FailureRecordSchema.parse({
         failureId: (this.options.idFactory ?? randomUUID)(),
@@ -328,7 +375,9 @@ export class EngineerExecutionManager {
         "SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED",
         "SANDBOX_COLD_PROVISIONING", "SANDBOX_PROVISIONING", "SANDBOX_PREFLIGHT", "SANDBOX_PREWARM_INVALID",
       ]);
-      const next = sandboxStates.has(run.state) || run.state === "CONTEXT_BUILDING"
+      const next = budgetExhausted && canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")
+        ? "RETRY_BUDGET_EXHAUSTED"
+        : sandboxStates.has(run.state) || run.state === "CONTEXT_BUILDING"
         ? "BLOCKED_BY_ENVIRONMENT"
         : run.state === "IMPLEMENTING"
           ? "FAILED"
@@ -338,7 +387,9 @@ export class EngineerExecutionManager {
           runId,
           expectedStateVersion: run.stateVersion,
           nextState: next,
-          reasonCode: next === "FAILED" ? "CODEX_BUILDER_FAILED" : "SANDBOX_OR_CONTEXT_FAILED",
+          reasonCode: next === "RETRY_BUDGET_EXHAUSTED"
+            ? "RUNTIME_BUDGET_EXHAUSTED"
+            : next === "FAILED" ? "CODEX_BUILDER_FAILED" : "SANDBOX_OR_CONTEXT_FAILED",
           manifestHash: run.manifestHash,
           idempotencyKey: `phase2:failure:${run.stateVersion + 1}`,
         });

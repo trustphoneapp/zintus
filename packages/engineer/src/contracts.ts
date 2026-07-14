@@ -160,7 +160,23 @@ export const PlannerQuestionSchema = z.object({
   question: z.string().min(1).max(4_000),
   impact: z.string().min(1).max(4_000),
   sourceRefs: z.array(z.string().min(1).max(4_000)).max(20),
-}).strict();
+  options: z.array(z.object({
+    optionId: IdentifierSchema,
+    label: z.string().min(1).max(500),
+    impact: z.string().min(1).max(4_000),
+    reversibility: z.enum(["REVERSIBLE", "PARTIALLY_REVERSIBLE", "IRREVERSIBLE"]),
+    riskTier: RiskTierSchema,
+  }).strict()).min(2).max(3),
+  recommendedOptionId: IdentifierSchema,
+}).strict().superRefine((question, context) => {
+  const ids = new Set(question.options.map((option) => option.optionId));
+  if (ids.size !== question.options.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "planner question option IDs must be unique", path: ["options"] });
+  }
+  if (!ids.has(question.recommendedOptionId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "planner question recommendation must reference an option", path: ["recommendedOptionId"] });
+  }
+});
 
 export const TouchedFileEstimateSchema = z.object({
   path: z.string().min(1).max(2_000),
@@ -173,7 +189,12 @@ export const PlanningAnalysisSchema = z.object({
   assumptions: z.array(PlannerAssumptionSchema).max(50),
   unresolvedQuestions: z.array(PlannerQuestionSchema).max(30),
   touchedFileEstimates: z.array(TouchedFileEstimateSchema).max(100),
-}).strict();
+}).strict().superRefine((analysis, context) => {
+  const questionIds = new Set(analysis.unresolvedQuestions.map((question) => question.questionId));
+  if (questionIds.size !== analysis.unresolvedQuestions.length) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "planner question IDs must be unique", path: ["unresolvedQuestions"] });
+  }
+});
 
 export const RetryBudgetsSchema = z
   .object({
@@ -387,12 +408,14 @@ export function reviewerEvidenceBundleHash(input: {
   diffHash: string;
   resultCommitSha: string;
   trustedEvidence: TrustedEvidence[];
+  riskAssessment?: RiskAssessment | null;
 }): string {
   return sha256({
     manifestHash: input.manifestHash,
     diffHash: input.diffHash,
     resultCommitSha: input.resultCommitSha,
     trustedEvidence: input.trustedEvidence,
+    riskAssessment: input.riskAssessment ?? null,
   });
 }
 
@@ -405,6 +428,7 @@ export const ReviewerInputSchema = z.object({
   finalDiff: z.string().max(5_000_000),
   diffHash: HashSchema,
   trustedEvidence: z.array(TrustedEvidenceSchema),
+  riskAssessment: RiskAssessmentSchema.nullable().default(null),
   evidenceBundleHash: HashSchema,
   resultCommitSha: ShaSchema,
   reviewPolicyVersion: z.string().min(1).max(200),
@@ -548,6 +572,7 @@ export const SupervisorPrCommandSchema = z.object({
 export const ModelRoutingDecisionSchema = z.object({
   routingDecisionId: IdentifierSchema,
   runId: IdentifierSchema,
+  agentExecutionId: IdentifierSchema,
   agentRole: ModelRoleSchema,
   logicalTier: LogicalModelTierSchema,
   resolvedModel: z.string().min(1).max(500),

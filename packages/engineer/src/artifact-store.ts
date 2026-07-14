@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, openSync, closeSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, openSync, closeSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { ArtifactRecordSchema, type ArtifactRecord } from "./execution-contracts.js";
 import { sha256 } from "./hash.js";
+import { DEFAULT_RUN_ARTIFACT_BUDGET_BYTES } from "./runtime-budget.js";
 
 export const DEFAULT_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_MAX_RUN_ARTIFACT_BYTES = DEFAULT_RUN_ARTIFACT_BUDGET_BYTES;
 
 function safeIdentifier(value: string, label: string): string {
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(value)) throw new TypeError(`${label} contains unsafe characters`);
@@ -14,6 +16,7 @@ function safeIdentifier(value: string, label: string): string {
 export interface ArtifactStoreOptions {
   root: string;
   maxArtifactBytes?: number;
+  maxRunArtifactBytes?: number;
   now?: () => Date;
   idFactory?: () => string;
 }
@@ -22,12 +25,17 @@ export interface ArtifactStoreOptions {
 export class LocalArtifactStore {
   private readonly root: string;
   private readonly maxArtifactBytes: number;
+  private readonly maxRunArtifactBytes: number;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
 
   constructor(options: ArtifactStoreOptions) {
     this.root = resolve(options.root);
     this.maxArtifactBytes = options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
+    this.maxRunArtifactBytes = Math.min(
+      options.maxRunArtifactBytes ?? DEFAULT_MAX_RUN_ARTIFACT_BYTES,
+      DEFAULT_MAX_RUN_ARTIFACT_BYTES,
+    );
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
@@ -53,6 +61,12 @@ export class LocalArtifactStore {
     const storageReference = join(runRoot, hex);
     const resolved = resolve(storageReference);
     if (!resolved.startsWith(`${runRoot}${sep}`)) throw new TypeError("artifact path escaped run root");
+    const entries = readdirSync(runRoot, { withFileTypes: true });
+    const existingRunBytes = entries.reduce((total, entry) =>
+      entry.isFile() ? total + statSync(join(runRoot, entry.name)).size : total, 0);
+    if (!entries.some((entry) => entry.name === hex) && existingRunBytes + bytes.byteLength >= this.maxRunArtifactBytes) {
+      throw new RangeError(`run artifacts exceed ${this.maxRunArtifactBytes} byte limit`);
+    }
 
     let fd: number | null = null;
     try {

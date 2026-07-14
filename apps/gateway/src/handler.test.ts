@@ -181,12 +181,25 @@ describe("gateway handler", () => {
       totalRuns: 1,
       runsByState: { REQUEST_RECEIVED: 1 },
     });
+    const runList = await handler(new Request("http://x/v1/engineer/runs", { headers: { Authorization: "Bearer secret" } }));
+    expect(((await runList.json()) as { runs: Array<{ runId: string }> }).runs.map((run) => run.runId)).toEqual(["gateway-run-1"]);
     const cancelled = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/cancel", {
       method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
       body: JSON.stringify({ actorId: "another-user", reason: "Attempt to cancel another user's run." }),
     }));
     expect(cancelled.status).toBe(200);
     expect(((await cancelled.json()) as { run: { state: string } }).run.state).toBe("CANCELLED");
+    const resumed = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/events?afterSequence=1", { headers: { Authorization: "Bearer secret", "Last-Event-ID": "0" } }));
+    expect(resumed.headers.get("X-Zintus-Engineer-Review-Approved-Terminal")).toBe("true");
+    expect(resumed.headers.get("Access-Control-Expose-Headers")).toContain("X-Zintus-Engineer-Review-Approved-Terminal");
+    expect(resumed.headers.get("Access-Control-Allow-Headers")).toContain("Last-Event-ID");
+    const resumedText = await resumed.text();
+    expect(resumedText).not.toContain("id: 1\n");
+    expect(resumedText).toContain("id: 2\n");
+    expect(resumedText).toContain("retry: 1000");
+    const exported = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/evidence-export", { headers: { Authorization: "Bearer secret" } }));
+    expect(exported.headers.get("content-disposition")).toContain("gateway-run-1");
+    expect((await exported.json()) as { exportHash?: string }).toMatchObject({ exportHash: expect.stringMatching(/^sha256:/) });
     supervisor.close();
     rmSync(root, { recursive: true, force: true });
   });

@@ -178,7 +178,13 @@ export function extractDecisionFactors(rawInput: z.input<typeof DecisionFeatureI
       sourceId: question.questionId,
       sourceKind: "PLANNER_QUESTION",
       sourceTrust: "UNTRUSTED_MODEL_OUTPUT",
-      sourceHash: sha256({ question: question.question, impact: question.impact, sourceRefs: question.sourceRefs }),
+      sourceHash: sha256({
+        question: question.question,
+        impact: question.impact,
+        sourceRefs: question.sourceRefs,
+        options: question.options,
+        recommendedOptionId: question.recommendedOptionId,
+      }),
       rules: new Set(["UNRESOLVED_QUESTION"]),
       raisedFactors: new Set(),
     };

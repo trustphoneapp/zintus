@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 4;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 8;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -219,6 +219,7 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     input_tokens INTEGER,
     output_tokens INTEGER,
     retry_count INTEGER NOT NULL DEFAULT 0,
+    budget_reservation_id TEXT,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
@@ -346,6 +347,7 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     policy_version TEXT NOT NULL,
     cache_key TEXT,
     cache_hit INTEGER NOT NULL CHECK(cache_hit IN (0, 1)),
+    cache_observed INTEGER NOT NULL DEFAULT 0 CHECK(cache_observed IN (0, 1)),
     started_at TEXT NOT NULL,
     completed_at TEXT,
     decision TEXT,
@@ -440,6 +442,11 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     estimated_cost_usd REAL NOT NULL DEFAULT 0,
+    agent_execution_id TEXT,
+    resolved_model TEXT,
+    routing_decision_id TEXT,
+    pricing_version TEXT,
+    currency TEXT,
     created_at TEXT NOT NULL
   );
 
@@ -474,6 +481,7 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS model_routing_decisions (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    agent_execution_id TEXT REFERENCES agent_executions(id) ON DELETE RESTRICT,
     agent_role TEXT NOT NULL,
     logical_tier TEXT NOT NULL,
     resolved_model TEXT NOT NULL,

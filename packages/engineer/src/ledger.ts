@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 import {
   EngineerRunSchema,
+  RiskAssessmentSchema,
   RunStateEventSchema,
   TaskManifestContentSchema,
   TaskManifestSchema,
@@ -67,6 +68,7 @@ import {
 } from "./errors.js";
 import { canonicalJson, sha256 } from "./hash.js";
 import { PlanProposalSchema, type PlanProposal } from "./planning.js";
+import { estimateGpt56CostUsd, OPENAI_GPT56_PRICING_2026_07_14, RunBudgetUsageSchema, type RunBudgetUsage } from "./runtime-budget.js";
 import { ContextManifestSchema, StoredContextSnapshotSchema, type StoredContextSnapshot } from "./context-contracts.js";
 import {
   DecisionRecordSchema,
@@ -226,6 +228,21 @@ export class EngineerLedger {
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec(ENGINEER_DATABASE_SCHEMA_SQL);
+    const reviewerColumns = this.db.query("PRAGMA table_info(reviewer_sessions)").all() as Array<{ name: string }>;
+    if (!reviewerColumns.some((column) => column.name === "cache_observed")) {
+      this.db.exec("ALTER TABLE reviewer_sessions ADD COLUMN cache_observed INTEGER NOT NULL DEFAULT 0 CHECK(cache_observed IN (0, 1))");
+    }
+    const costColumns = new Set((this.db.query("PRAGMA table_info(cost_records)").all() as Array<{ name: string }>).map((column) => column.name));
+    for (const [name, type] of [
+      ["agent_execution_id", "TEXT"], ["resolved_model", "TEXT"], ["routing_decision_id", "TEXT"],
+      ["pricing_version", "TEXT"], ["currency", "TEXT"],
+    ] as const) {
+      if (!costColumns.has(name)) this.db.exec(`ALTER TABLE cost_records ADD COLUMN ${name} ${type}`);
+    }
+    const routingColumns = new Set((this.db.query("PRAGMA table_info(model_routing_decisions)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!routingColumns.has("agent_execution_id")) this.db.exec("ALTER TABLE model_routing_decisions ADD COLUMN agent_execution_id TEXT");
+    const modelCallColumns = new Set((this.db.query("PRAGMA table_info(model_calls)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!modelCallColumns.has("budget_reservation_id")) this.db.exec("ALTER TABLE model_calls ADD COLUMN budget_reservation_id TEXT");
     const proposalColumns = this.db.query("PRAGMA table_info(plan_proposals)").all() as Array<{ name: string }>;
     if (!proposalColumns.some((column) => column.name === "context_manifest_hash")) {
       this.db.exec("ALTER TABLE plan_proposals ADD COLUMN context_manifest_hash TEXT");
@@ -236,6 +253,10 @@ export class EngineerLedger {
     this.db
       .query("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
       .run(ENGINEER_DATABASE_SCHEMA_VERSION, new Date().toISOString());
+  }
+
+  atomic<T>(operation: () => T): T {
+    return this.db.transaction(operation)();
   }
 
   createRun(input: LedgerCreateRunInput): EngineerRun {
@@ -304,12 +325,43 @@ export class EngineerLedger {
     return (rows as RunRow[]).map(rowToRun);
   }
 
-  listEvents(runId: string): RunStateEvent[] {
+  listEvents(runId: string, afterSequence = 0, limit = 1_000): RunStateEvent[] {
     this.getRun(runId);
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new TypeError("event cursor must be a non-negative safe integer");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new TypeError("event page limit must be between 1 and 10000");
     const rows = this.db
-      .query("SELECT * FROM run_state_events WHERE run_id = ? ORDER BY sequence")
-      .all(runId) as EventRow[];
+      .query("SELECT * FROM run_state_events WHERE run_id = ? AND sequence > ? ORDER BY sequence LIMIT ?")
+      .all(runId, afterSequence, limit) as EventRow[];
     return rows.map(rowToEvent);
+  }
+
+  exportRunRecords(runId: string): Record<string, Array<Record<string, unknown>>> {
+    this.getRun(runId);
+    const directTables = [
+      "task_manifest_versions", "plan_proposals", "context_manifests", "context_sources",
+      "context_warnings", "decisions", "decision_evidence", "decision_resolutions",
+      "run_state_events", "acceptance_criteria", "agent_executions", "model_calls",
+      "sandboxes", "command_executions", "artifacts", "evidence_bundles",
+      "claim_evidence", "test_executions", "security_findings", "reviewer_sessions",
+      "risk_assessments", "approval_requests", "retry_attempts", "failure_records",
+      "cost_records", "audit_events", "git_operations", "model_routing_decisions",
+    ] as const;
+    const records: Record<string, Array<Record<string, unknown>>> = {};
+    for (const table of directTables) {
+      records[table] = this.db.query(`SELECT * FROM ${table} WHERE run_id = ? ORDER BY rowid`).all(runId) as Array<Record<string, unknown>>;
+    }
+    records.sandbox_heartbeats = this.db.query(`SELECT h.* FROM sandbox_heartbeats h JOIN sandboxes s ON s.id = h.sandbox_id WHERE s.run_id = ? ORDER BY h.rowid`).all(runId) as Array<Record<string, unknown>>;
+    records.test_results = this.db.query(`SELECT r.* FROM test_results r JOIN test_executions e ON e.id = r.test_execution_id WHERE e.run_id = ? ORDER BY r.rowid`).all(runId) as Array<Record<string, unknown>>;
+    records.review_findings = this.db.query(`SELECT f.* FROM review_findings f JOIN reviewer_sessions s ON s.id = f.reviewer_session_id WHERE s.run_id = ? ORDER BY f.rowid`).all(runId) as Array<Record<string, unknown>>;
+    records.approval_decisions = this.db.query(`SELECT d.* FROM approval_decisions d JOIN approval_requests r ON r.id = d.approval_request_id WHERE r.run_id = ? ORDER BY d.rowid`).all(runId) as Array<Record<string, unknown>>;
+    return records;
+  }
+
+  latestEventSequence(runId: string): number {
+    this.getRun(runId);
+    const row = this.db.query("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM run_state_events WHERE run_id = ?")
+      .get(runId) as { sequence: number };
+    return Number(row.sequence);
   }
 
   replayTransition(input: {
@@ -355,8 +407,25 @@ export class EngineerLedger {
 
   recordPlanProposal(proposal: PlanProposal): PlanProposal {
     this.getRun(proposal.runId);
-    const artifact = this.db.query("SELECT run_id FROM artifacts WHERE id = ?").get(proposal.artifactId) as { run_id: string } | null;
+    const artifact = this.db.query("SELECT run_id, type, sha256, storage_reference, size_bytes FROM artifacts WHERE id = ?")
+      .get(proposal.artifactId) as { run_id: string; type: string; sha256: string; storage_reference: string; size_bytes: number } | null;
     if (!artifact || artifact.run_id !== proposal.runId) throw new EngineerNotFoundError("plan artifact", proposal.artifactId);
+    if (artifact.type !== "PLAN_PROPOSAL") throw new TypeError("plan proposal must reference a PLAN_PROPOSAL artifact");
+    const artifactBytes = readFileSync(artifact.storage_reference);
+    if (artifactBytes.byteLength !== artifact.size_bytes || sha256(artifactBytes) !== artifact.sha256) {
+      throw new TypeError("plan proposal artifact failed its content-addressed integrity check");
+    }
+    const artifactContent = JSON.parse(artifactBytes.toString("utf8")) as unknown;
+    const expectedArtifactContent = {
+      proposalSchemaVersion: proposal.proposalSchemaVersion,
+      plannerPolicyVersion: proposal.plannerPolicyVersion,
+      manifest: proposal.manifest,
+      planningAnalysis: proposal.planningAnalysis,
+      contextManifestHash: proposal.contextManifestHash,
+    };
+    if (canonicalJson(artifactContent) !== canonicalJson(expectedArtifactContent)) {
+      throw new TypeError("plan proposal artifact does not match its hash-bound proposal content");
+    }
     const existing = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? AND proposal_hash = ?")
       .get(proposal.runId, proposal.proposalHash) as Record<string, unknown> | null;
     if (existing) return this.planProposalFromRow(existing);
@@ -690,6 +759,22 @@ export class EngineerLedger {
     transact();
   }
 
+  latestRiskAssessment(runId: string): RiskAssessment | null {
+    this.getRun(runId);
+    const row = this.db.query("SELECT * FROM risk_assessments WHERE run_id = ? ORDER BY assessed_at DESC, rowid DESC LIMIT 1")
+      .get(runId) as Record<string, unknown> | null;
+    return row ? RiskAssessmentSchema.parse({
+      assessmentId: row.id,
+      runId: row.run_id,
+      riskTier: row.risk_tier,
+      humanGateRequired: row.human_gate_required === 1,
+      ruleVersion: row.rule_version,
+      matchedRules: JSON.parse(String(row.matched_rules_json)),
+      features: JSON.parse(String(row.features_json)),
+      assessedAt: row.assessed_at,
+    }) : null;
+  }
+
   listRetryHistory(runId: string): StoredRetryAttempt[] {
     this.getRun(runId);
     const rows = this.db.query(`SELECT kind, failure_fingerprint, patch_hash,
@@ -708,6 +793,12 @@ export class EngineerLedger {
       progressMetric: row.progress_metric,
       allowed: row.allowed === 1,
     }));
+  }
+
+  retryAttemptCount(runId: string): number {
+    this.getRun(runId);
+    const row = this.db.query("SELECT COUNT(*) AS count FROM retry_attempts WHERE run_id = ?").get(runId) as { count: number };
+    return row.count;
   }
 
   recordRetry(input: {
@@ -827,11 +918,16 @@ export class EngineerLedger {
 
   recordModelRouting(input: import("./contracts.js").ModelRoutingDecision): void {
     this.getRun(input.runId);
+    const agent = this.db.query("SELECT run_id, role, model_tier FROM agent_executions WHERE id = ?")
+      .get(input.agentExecutionId) as { run_id: string; role: string; model_tier: string } | null;
+    if (!agent || agent.run_id !== input.runId || agent.role !== input.agentRole || agent.model_tier !== input.logicalTier) {
+      throw new TypeError("model routing decision does not match its agent execution");
+    }
     this.db.query(`INSERT INTO model_routing_decisions
-      (id, run_id, agent_role, logical_tier, resolved_model, routing_policy_version,
+      (id, run_id, agent_execution_id, agent_role, logical_tier, resolved_model, routing_policy_version,
        fallback_used, fallback_reason, cache_key, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      input.routingDecisionId, input.runId, input.agentRole, input.logicalTier, input.resolvedModel,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      input.routingDecisionId, input.runId, input.agentExecutionId, input.agentRole, input.logicalTier, input.resolvedModel,
       input.routingPolicyVersion, input.fallbackUsed ? 1 : 0, input.fallbackReason, input.cacheKey, input.timestamp,
     );
   }
@@ -857,19 +953,137 @@ export class EngineerLedger {
     );
   }
 
-  recordModelCall(record: ModelCallRecord): void {
+  recordModelCall(record: ModelCallRecord, budgetReservationId?: string): void {
     const parsed = ModelCallRecordSchema.parse(record);
     this.getRun(parsed.runId);
+    const agent = this.db.query("SELECT run_id, role, model_tier FROM agent_executions WHERE id = ?")
+      .get(parsed.agentExecutionId) as { run_id: string; role: string; model_tier: string } | null;
+    if (!agent || agent.run_id !== parsed.runId) {
+      throw new TypeError("model call agent execution does not belong to the run");
+    }
+    if (agent.model_tier !== parsed.logicalTier) {
+      throw new TypeError("model call logical tier does not match its agent execution");
+    }
+    const routing = this.db.query(`SELECT logical_tier, resolved_model FROM model_routing_decisions
+      WHERE run_id = ? AND agent_execution_id = ? ORDER BY rowid DESC LIMIT 1`)
+      .get(parsed.runId, parsed.agentExecutionId) as { logical_tier: string; resolved_model: string } | null;
+    if (!routing || routing.logical_tier !== parsed.logicalTier || routing.resolved_model !== parsed.resolvedModel) {
+      throw new TypeError("model call does not match the recorded routing decision");
+    }
     this.db.query(`INSERT INTO model_calls
       (id, run_id, agent_execution_id, logical_tier, resolved_model, prompt_template_version,
        input_context_refs_json, output_schema_version, cache_key, cache_hit, latency_ms,
-       input_tokens, output_tokens, retry_count, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+       input_tokens, output_tokens, retry_count, budget_reservation_id, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       parsed.modelCallId, parsed.runId, parsed.agentExecutionId, parsed.logicalTier, parsed.resolvedModel,
       parsed.promptTemplateVersion, canonicalJson(parsed.inputContextRefs), parsed.outputSchemaVersion,
       parsed.cacheKey, parsed.cacheHit === null ? null : parsed.cacheHit ? 1 : 0, parsed.latencyMs,
-      parsed.inputTokens, parsed.outputTokens, parsed.retryCount, parsed.status, parsed.createdAt,
+      parsed.inputTokens, parsed.outputTokens, parsed.retryCount, budgetReservationId ?? null, parsed.status, parsed.createdAt,
     );
+    if (parsed.inputTokens !== null && parsed.outputTokens !== null) {
+      try {
+        const estimatedCostUsd = estimateGpt56CostUsd(parsed.resolvedModel, parsed.inputTokens, parsed.outputTokens);
+        const routing = this.modelRouteForAgent(parsed.runId, parsed.agentExecutionId, parsed.resolvedModel);
+        this.db.query(`INSERT OR IGNORE INTO cost_records
+          (id, run_id, source_type, source_id, input_tokens, output_tokens, estimated_cost_usd,
+           agent_execution_id, resolved_model, routing_decision_id, pricing_version, currency, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          sha256({ sourceType: "MODEL_CALL", sourceId: parsed.modelCallId }), parsed.runId,
+          "MODEL_CALL", parsed.modelCallId, parsed.inputTokens, parsed.outputTokens,
+          estimatedCostUsd, parsed.agentExecutionId, parsed.resolvedModel, routing.routingDecisionId,
+          OPENAI_GPT56_PRICING_2026_07_14.version, OPENAI_GPT56_PRICING_2026_07_14.currency, parsed.createdAt,
+        );
+      } catch {
+        // The budget authority detects the missing cost record and fails closed.
+      }
+    }
+  }
+
+  reserveModelBudget(input: {
+    runId: string;
+    reservationId: string;
+    inputTokens: number;
+    outputTokens: number;
+    estimatedCostUsd: number;
+    agentExecutionId: string;
+    model: string;
+    routingDecisionId: string;
+    createdAt: string;
+  }): void {
+    this.getRun(input.runId);
+    this.db.query(`INSERT INTO cost_records
+      (id, run_id, source_type, source_id, input_tokens, output_tokens, estimated_cost_usd,
+       agent_execution_id, resolved_model, routing_decision_id, pricing_version, currency, created_at)
+      VALUES (?, ?, 'MODEL_RESERVATION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(input.reservationId, input.runId, input.reservationId, input.inputTokens, input.outputTokens,
+        input.estimatedCostUsd, input.agentExecutionId, input.model, input.routingDecisionId,
+        OPENAI_GPT56_PRICING_2026_07_14.version, OPENAI_GPT56_PRICING_2026_07_14.currency, input.createdAt);
+  }
+
+  modelRouteForAgent(runId: string, agentExecutionId: string, model: string): { routingDecisionId: string } {
+    this.getRun(runId);
+    const agent = this.db.query("SELECT role, model_tier FROM agent_executions WHERE id = ? AND run_id = ?")
+      .get(agentExecutionId, runId) as { role: string; model_tier: string } | null;
+    if (!agent) throw new TypeError("model budget reservation agent does not belong to the run");
+    const route = this.db.query(`SELECT id, logical_tier FROM model_routing_decisions
+      WHERE run_id = ? AND agent_execution_id = ? AND agent_role = ? AND resolved_model = ? ORDER BY rowid DESC LIMIT 1`)
+      .get(runId, agentExecutionId, agent.role, model) as { id: string; logical_tier: string } | null;
+    if (!route) throw new TypeError("model budget reservation does not match a recorded route");
+    if (route.logical_tier !== agent.model_tier) throw new TypeError("model budget reservation route does not match its agent tier");
+    return { routingDecisionId: route.id };
+  }
+
+  modelBudgetReservation(runId: string, reservationId: string): { inputTokens: number; outputTokens: number; estimatedCostUsd: number; agentExecutionId: string; model: string; routingDecisionId: string } {
+    const row = this.db.query(`SELECT input_tokens, output_tokens, estimated_cost_usd, agent_execution_id, resolved_model, routing_decision_id FROM cost_records
+      WHERE id = ? AND run_id = ? AND source_type = 'MODEL_RESERVATION'`)
+      .get(reservationId, runId) as { input_tokens: number; output_tokens: number; estimated_cost_usd: number; agent_execution_id: string | null; resolved_model: string | null; routing_decision_id: string | null } | null;
+    if (!row) throw new Error("model budget reservation is missing or already finalized");
+    if (!row.agent_execution_id || !row.resolved_model || !row.routing_decision_id) throw new Error("legacy model reservation cannot authorize a new call");
+    return { inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens), estimatedCostUsd: Number(row.estimated_cost_usd), agentExecutionId: row.agent_execution_id, model: row.resolved_model, routingDecisionId: row.routing_decision_id };
+  }
+
+  releaseModelBudgetReservation(runId: string, reservationId: string): void {
+    const result = this.db.query("DELETE FROM cost_records WHERE id = ? AND run_id = ? AND source_type = 'MODEL_RESERVATION'")
+      .run(reservationId, runId);
+    if (Number(result.changes) !== 1) throw new Error("model budget reservation is missing or already finalized");
+  }
+
+  runtimeBudgetUsage(runId: string, now = new Date()): RunBudgetUsage {
+    const run = this.db.query("SELECT created_at FROM engineer_runs WHERE id = ?").get(runId) as { created_at: string } | null;
+    if (!run) throw new EngineerNotFoundError("run", runId);
+    const models = this.db.query(`SELECT COUNT(*) AS calls,
+      COALESCE(SUM(input_tokens), 0) AS input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS output_tokens,
+      SUM(CASE WHEN input_tokens IS NOT NULL AND output_tokens IS NOT NULL THEN 1 ELSE 0 END) AS known_calls,
+      SUM(CASE WHEN (input_tokens IS NULL OR output_tokens IS NULL) AND NOT EXISTS (
+        SELECT 1 FROM cost_records c WHERE c.id = model_calls.budget_reservation_id
+          AND c.run_id = model_calls.run_id AND c.source_type = 'MODEL_RESERVATION'
+      ) THEN 1 ELSE 0 END) AS unknown_uncovered
+      FROM model_calls WHERE run_id = ? AND status = 'SUCCEEDED'`).get(runId) as { calls: number; input_tokens: number; output_tokens: number; known_calls: number; unknown_uncovered: number };
+    const costs = this.db.query(`SELECT COUNT(*) AS records,
+      SUM(CASE WHEN source_type = 'MODEL_CALL' THEN 1 ELSE 0 END) AS model_call_records,
+      COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens,
+      COALESCE(SUM(estimated_cost_usd), 0) AS cost FROM cost_records WHERE run_id = ?`)
+      .get(runId) as { records: number; model_call_records: number; input_tokens: number; output_tokens: number; cost: number };
+    const reservations = this.db.query("SELECT COUNT(*) AS count, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens FROM cost_records WHERE run_id = ? AND source_type = 'MODEL_RESERVATION'")
+      .get(runId) as { count: number; input_tokens: number; output_tokens: number };
+    const commands = this.db.query("SELECT started_at, finished_at FROM command_executions WHERE run_id = ?").all(runId) as Array<{ started_at: string; finished_at: string | null }>;
+    const artifact = this.db.query(`SELECT COALESCE(SUM(size_bytes), 0) AS bytes FROM (
+      SELECT MAX(size_bytes) AS size_bytes FROM artifacts WHERE run_id = ? GROUP BY sha256
+    )`).get(runId) as { bytes: number };
+    const agents = this.db.query("SELECT COUNT(*) AS count FROM agent_executions WHERE run_id = ? AND status = 'RUNNING'").get(runId) as { count: number };
+    const longestCommandSeconds = commands.reduce((longest, command) => command.finished_at
+      ? Math.max(longest, Math.max(0, (Date.parse(command.finished_at) - Date.parse(command.started_at)) / 1_000))
+      : longest, 0);
+    return RunBudgetUsageSchema.parse({
+      elapsedSeconds: Math.max(0, (now.getTime() - Date.parse(run.created_at)) / 1_000),
+      modelCalls: Number(models.calls) + Number(reservations.count),
+      inputTokens: Number(models.input_tokens) + Number(reservations.input_tokens),
+      outputTokens: Number(models.output_tokens) + Number(reservations.output_tokens),
+      estimatedCostUsd: Number(costs.cost),
+      costKnown: Number(models.unknown_uncovered) === 0 && Number(costs.model_call_records) === Number(models.known_calls),
+      longestCommandSeconds, diffLines: 0, artifactBytes: Number(artifact.bytes), activeAgents: Number(agents.count),
+    });
   }
 
   recordVerificationExecution(record: VerificationExecutionRecord): VerificationExecutionRecord {
@@ -937,12 +1151,12 @@ export class EngineerLedger {
     const transact = this.db.transaction(() => {
       this.db.query(`INSERT INTO reviewer_sessions
         (id, run_id, attempt, model_tier, resolved_model, input_hash, manifest_hash, diff_hash,
-         evidence_bundle_hash, policy_version, cache_key, cache_hit, started_at, completed_at,
+         evidence_bundle_hash, policy_version, cache_key, cache_hit, cache_observed, started_at, completed_at,
          decision, isolation_verified)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         parsed.reviewerSessionId, parsed.runId, parsed.attempt, parsed.modelTier, parsed.resolvedModel,
         parsed.inputHash, parsed.manifestHash, parsed.diffHash, parsed.evidenceBundleHash,
-        parsed.policyVersion, parsed.cacheKey, parsed.cacheHit ? 1 : 0, parsed.startedAt,
+        parsed.policyVersion, parsed.cacheKey, parsed.cacheHit ? 1 : 0, parsed.cacheHit === null ? 0 : 1, parsed.startedAt,
         parsed.completedAt, parsed.decision, parsed.isolationVerified ? 1 : 0,
       );
       const statement = this.db.query(`INSERT INTO review_findings
@@ -1255,13 +1469,17 @@ export class EngineerLedger {
     if (row.context_manifest_hash === null || row.context_manifest_hash === undefined) {
       throw new Error("legacy ungrounded plan proposal is not eligible for Engineer execution");
     }
+    const manifest = TaskManifestContentSchema.parse(JSON.parse(String(row.proposal_json)));
+    const planningAnalysis = row.planning_analysis_json === null || row.planning_analysis_json === undefined
+      ? { architectureSummary: "", assumptions: [], unresolvedQuestions: [], touchedFileEstimates: [] }
+      : JSON.parse(String(row.planning_analysis_json));
+    const proposalHash = String(row.proposal_hash);
     return PlanProposalSchema.parse({
+      proposalSchemaVersion: proposalHash === sha256(manifest) ? "plan-proposal-v1" : "plan-proposal-v2",
+      plannerPolicyVersion: "engineer-planner-v1",
       planProposalId: String(row.id), runId: String(row.run_id),
-      manifest: TaskManifestContentSchema.parse(JSON.parse(String(row.proposal_json))),
-      planningAnalysis: row.planning_analysis_json === null || row.planning_analysis_json === undefined
-        ? { architectureSummary: "", assumptions: [], unresolvedQuestions: [], touchedFileEstimates: [] }
-        : JSON.parse(String(row.planning_analysis_json)),
-      proposalHash: String(row.proposal_hash), contextManifestHash: String(row.context_manifest_hash), artifactId: String(row.artifact_id), createdAt: String(row.created_at),
+      manifest, planningAnalysis,
+      proposalHash, contextManifestHash: String(row.context_manifest_hash), artifactId: String(row.artifact_id), createdAt: String(row.created_at),
     });
   }
 

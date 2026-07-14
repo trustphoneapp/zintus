@@ -41,7 +41,11 @@ Run the web client with `bun run dev:web` or the desktop shell with
 ## Operational checks
 
 - `GET /v1/engineer/observability` reports durable state/risk/failure counts.
-- `GET /v1/engineer/runs/{runId}/events` replays the append-only SSE timeline.
+- `GET /v1/engineer/runs/{runId}/events?afterSequence=N` resumes the append-only
+  SSE timeline; `Last-Event-ID` is also accepted.
+- `GET /v1/engineer/runs` lists runs owned by the authenticated local principal.
+- `GET /v1/engineer/runs/{runId}/evidence-export` downloads a canonical-hash-bound
+  JSON aggregate for offline inspection.
 - A non-terminal run after process loss remains visible; queued work is reclaimed
   on gateway restart.
 - Warm workspaces are one-use. Invalid, expired, and excess entries are quarantined

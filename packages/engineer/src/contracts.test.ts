@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   ReviewerInputSchema,
+  PlanningAnalysisSchema,
   TaskManifestSchema,
   TrustedEvidenceSchema,
   reviewerEvidenceBundleHash,
@@ -113,5 +114,20 @@ describe("mandatory isolation contracts", () => {
     expect(modelTierForRole("TESTER")).toBe("GPT-5.6_TERRA");
     expect(modelTierForRole("SECURITY")).toBe("GPT-5.6_TERRA");
     expect(modelTierForRole("RISK_FEATURE_EXTRACTOR")).toBe("GPT-5.6_LUNA");
+  });
+
+  test("planning analysis rejects duplicate question identifiers", () => {
+    const question = {
+      questionId: "duplicate-question", question: "Choose a label", impact: "Changes wording", sourceRefs: [],
+      options: [
+        { optionId: "one", label: "One", impact: "First", reversibility: "REVERSIBLE", riskTier: "LOW" },
+        { optionId: "two", label: "Two", impact: "Second", reversibility: "REVERSIBLE", riskTier: "LOW" },
+      ], recommendedOptionId: "one",
+    };
+    expect(PlanningAnalysisSchema.safeParse({
+      architectureSummary: "Bounded change", assumptions: [],
+      unresolvedQuestions: [question, { ...question, question: "A different question" }],
+      touchedFileEstimates: [],
+    }).success).toBe(false);
   });
 });
