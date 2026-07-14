@@ -39,3 +39,5 @@ apps/cli/npm-dist/
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/gen/schemas/
 apps/desktop/src-tauri/target/
+.gstack/
+docs/design/redesign-shots/
