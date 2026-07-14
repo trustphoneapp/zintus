@@ -140,7 +140,7 @@ function setupFastChecks(
 }
 
 describe("Phase 3 independent verification", () => {
-  test("executes the frozen test plan independently and persists objective evidence", () => {
+  test("executes the frozen test plan independently and persists objective evidence", async () => {
     const path = root();
     const setup = setupFastChecks(path);
     const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
@@ -150,7 +150,7 @@ describe("Phase 3 independent verification", () => {
       runner: () => ({ status: 0, stdout: "1 pass", stderr: "" }),
       onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
     });
-    const result = new IndependentVerifier({
+    const result = await new IndependentVerifier({
       supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor,
       diff: () => "diff --git a/src/value.ts b/src/value.ts\n+++ b/src/value.ts\n@@ -1 +1 @@\n+export const value = 2;\n",
     }).run();
@@ -164,7 +164,7 @@ describe("Phase 3 independent verification", () => {
     setup.supervisor.close();
   });
 
-  test("records executable SECURITY plan evidence while in SECURITY_REVIEW", () => {
+  test("records executable SECURITY plan evidence while in SECURITY_REVIEW", async () => {
     const path = root();
     const setup = setupFastChecks(path, "SECURITY");
     const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
@@ -174,14 +174,14 @@ describe("Phase 3 independent verification", () => {
       runner: () => ({ status: 0, stdout: "security pass", stderr: "" }),
       onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
     });
-    const result = new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
+    const result = await new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
     expect(result.executions).toHaveLength(1);
     expect(result.executions[0]).toMatchObject({ type: "SECURITY", status: "PASSED" });
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_REVIEW");
     setup.supervisor.close();
   });
 
-  test("quarantines mixed outcomes instead of sending a flaky check to Builder repair", () => {
+  test("quarantines mixed outcomes instead of sending a flaky check to Builder repair", async () => {
     const path = root();
     const setup = setupFastChecks(path);
     const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
@@ -194,7 +194,7 @@ describe("Phase 3 independent verification", () => {
     });
     let thrown: unknown;
     try {
-      new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
+      await new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
     } catch (error) {
       thrown = error;
     }
@@ -210,7 +210,7 @@ describe("Phase 3 independent verification", () => {
     setup.supervisor.close();
   });
 
-  test("escalates a failed security check instead of sending it to Builder repair", () => {
+  test("escalates a failed security check instead of sending it to Builder repair", async () => {
     const path = root();
     const setup = setupFastChecks(path, "SECURITY");
     const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
@@ -222,7 +222,7 @@ describe("Phase 3 independent verification", () => {
     });
     let thrown: unknown;
     try {
-      new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
+      await new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
     } catch (error) {
       thrown = error;
     }
@@ -238,7 +238,7 @@ describe("Phase 3 independent verification", () => {
     setup.supervisor.close();
   });
 
-  test("durably records a critical deterministic diff finding with its report evidence", () => {
+  test("durably records a critical deterministic diff finding with its report evidence", async () => {
     const path = root();
     const setup = setupFastChecks(path);
     const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
@@ -248,10 +248,10 @@ describe("Phase 3 independent verification", () => {
       runner: () => ({ status: 0, stdout: "test pass", stderr: "" }),
       onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
     });
-    expect(() => new IndependentVerifier({
+    await expect(new IndependentVerifier({
       supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor,
       diff: () => 'diff --git a/src/value.ts b/src/value.ts\n+++ b/src/value.ts\n@@ -1 +1 @@\n+const api_key = "hard-coded-secret";\n',
-    }).run()).toThrow("critical deterministic security finding");
+    }).run()).rejects.toThrow("critical deterministic security finding");
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_ESCALATION");
     const failures = setup.supervisor.listFailures(setup.manifest.runId);
     expect(failures).toMatchObject([{

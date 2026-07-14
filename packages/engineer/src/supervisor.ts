@@ -621,6 +621,10 @@ export class EngineerSupervisor {
     return this.ledger.recordSandbox(record);
   }
 
+  markRunSandboxesDestroyed(runId: string, destroyedAt: string, reason: string): number {
+    return this.ledger.markRunSandboxesDestroyed(runId, destroyedAt, reason);
+  }
+
   recordArtifact(record: ArtifactRecord): ArtifactRecord {
     return this.ledger.atomic(() => {
       const artifact = this.ledger.recordArtifact(record);

@@ -42,7 +42,6 @@ import {
   EngineerContextManager,
   EngineerExecutionManager,
   EngineerWorkerLeaseManager,
-  FailureRecordSchema,
   EngineerPublicationManager,
   EngineerPlanningManager,
   EngineerVerificationManager,
@@ -51,9 +50,11 @@ import {
   GitHubGitService,
   LocalArtifactStore,
   OpenAIResponsesTransport,
+  OfflineDependencyBundle,
+  NO_LOCKFILE_HASH,
   resolveEngineerModel,
-  sha256,
   WarmSandboxPool,
+  workspaceLockfileHash,
 } from "@zintus/engineer";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -144,6 +145,13 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const engineerBaseBranch = process.env.ZINTUS_ENGINEER_BASE_BRANCH;
   const engineerBaseCommitSha = process.env.ZINTUS_ENGINEER_BASE_COMMIT_SHA;
   const engineerOriginUrl = process.env.ZINTUS_ENGINEER_REPOSITORY_ORIGIN_URL;
+  const engineerDependencyBundleRoot = process.env.ZINTUS_ENGINEER_DEPENDENCY_BUNDLE_ROOT;
+  const engineerToolchainHash = process.env.ZINTUS_ENGINEER_TOOLCHAIN_HASH;
+  const engineerRepositoryLockfileHash = engineerRepositoryRoot
+    ? workspaceLockfileHash(engineerRepositoryRoot)
+    : NO_LOCKFILE_HASH;
+  const engineerDependenciesReady = engineerRepositoryLockfileHash === NO_LOCKFILE_HASH ||
+    Boolean(engineerDependencyBundleRoot && engineerToolchainHash);
   const engineerArtifactStore = new LocalArtifactStore({ root: join(engineerRoot, "artifacts") });
   const engineerPrincipal = loadOrCreateEngineerPrincipal(join(engineerRoot, "identity.json"));
   const transportForRole = async () => {
@@ -189,7 +197,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     unavailableReason: "canonical repository, exact base, model, Docker, and image configuration is incomplete",
   });
   let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor, planning: engineerPlanning, artifactStore: engineerArtifactStore, principal: engineerPrincipal, preflight: unavailablePreflight });
-  if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest &&
+  if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest && engineerDependenciesReady &&
       (engineerRepositoryProvider === "local" || engineerRepositoryProvider === "github") &&
       engineerRepositoryOwner && engineerRepositoryName && engineerBaseBranch && engineerBaseCommitSha && engineerOriginUrl) {
     const engineerPreflight = new EngineerCapabilityPreflight({
@@ -230,6 +238,13 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     });
     const warmLockfileHash = process.env.ZINTUS_ENGINEER_LOCKFILE_HASH;
     const warmToolchainHash = process.env.ZINTUS_ENGINEER_TOOLCHAIN_HASH;
+    const offlineDependencies = engineerDependencyBundleRoot && engineerToolchainHash
+      ? new OfflineDependencyBundle({
+          root: engineerDependencyBundleRoot,
+          expectedLockfileHash: engineerRepositoryLockfileHash,
+          expectedToolchainHash: engineerToolchainHash,
+        })
+      : undefined;
     engineerWarmPool = warmLockfileHash && warmToolchainHash
       ? new WarmSandboxPool({ root: join(engineerRoot, "warm-pool") })
       : undefined;
@@ -245,6 +260,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       imageReference: engineerImage,
       imageDigest: engineerImageDigest,
       ...(warmPool ? { warmPool } : {}),
+      ...(offlineDependencies ? { offlineDependencies } : {}),
     });
     const prewarmBaseCommit = process.env.ZINTUS_ENGINEER_PREWARM_BASE_COMMIT_SHA;
     if (prewarmBaseCommit && warmPool) {
@@ -262,36 +278,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       tokenSecret: loadOrCreateEngineerWorkerLeaseSecret(join(engineerRoot, "worker-lease.secret")),
       maxConcurrentLeases: workerConcurrency,
       watchdogIntervalMs: 10_000,
-      recoverExpiredLease: (lease) => {
+      recoverExpiredLease: async (lease) => {
         const runId = lease.resourceKey.startsWith("run:") ? lease.resourceKey.slice(4) : "";
         if (!runId) return;
-        engineerExecution?.destroy(runId);
         const run = engineerSupervisor.getRun(runId);
         if (run.terminalAt) return;
-        const nextState = run.state === "QUEUED" ? "TIMED_OUT"
-          : run.state === "IMPLEMENTING" ? "FAILED"
-            : ["SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED", "SANDBOX_COLD_PROVISIONING", "SANDBOX_PROVISIONING", "SANDBOX_PREFLIGHT", "SANDBOX_PREWARM_INVALID", "CONTEXT_BUILDING"].includes(run.state)
-              ? "BLOCKED_BY_ENVIRONMENT" : null;
-        if (!nextState) return;
-        engineerSupervisor.recordFailure(FailureRecordSchema.parse({
-          failureId: `${lease.leaseId}:expired`,
-          runId,
-          failureClass: "WORKFLOW_FAILURE",
-          reasonCode: "WORKER_LEASE_EXPIRED",
-          fingerprint: sha256({ leaseId: lease.leaseId, fencingToken: lease.fencingToken, state: run.state }),
-          evidenceIds: [lease.leaseId],
-          retryable: true,
-          createdAt: new Date().toISOString(),
-        }));
-        engineerSupervisor.transition({
-          runId,
-          expectedStateVersion: run.stateVersion,
-          nextState,
-          reasonCode: "WORKER_LEASE_EXPIRED",
-          manifestHash: run.manifestHash,
-          evidenceIds: [lease.leaseId],
-          idempotencyKey: `worker-expired:${lease.fencingToken}`,
-        });
+        if (run.state === "QUEUED") {
+          engineerExecution?.resumeRecovered(runId);
+          return;
+        }
+        const outcome = await engineerExecution?.recoverInterrupted(runId, lease.leaseId);
+        if (outcome === "REQUEUED") engineerExecution?.resumeRecovered(runId);
       },
     });
     engineerExecution = new EngineerExecutionManager({

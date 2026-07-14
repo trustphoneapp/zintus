@@ -47,6 +47,8 @@ export function workspaceLockfileHash(workspaceRoot: string): string {
   return sha256(entries.length > 0 ? entries : "NO_LOCKFILE");
 }
 
+export const NO_LOCKFILE_HASH = sha256("NO_LOCKFILE");
+
 export interface WarmSandboxPoolOptions {
   root: string;
   now?: () => Date;

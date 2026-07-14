@@ -15,11 +15,26 @@ Supervisor publish.
 ```bash
 export ZINTUS_ENGINEER_REPOSITORY_ID=local-repository
 export ZINTUS_ENGINEER_REPOSITORY_ROOT=/absolute/path/to/repository
+export ZINTUS_ENGINEER_REPOSITORY_PROVIDER=local
+export ZINTUS_ENGINEER_REPOSITORY_OWNER=local
+export ZINTUS_ENGINEER_REPOSITORY_NAME=zintus
+export ZINTUS_ENGINEER_REPOSITORY_ORIGIN_URL=https://github.com/example/zintus.git
+export ZINTUS_ENGINEER_BASE_BRANCH=main
+export ZINTUS_ENGINEER_BASE_COMMIT_SHA=<exact-40-or-64-character-commit>
 export ZINTUS_ENGINEER_IMAGE='oven/bun@sha256:<digest>'
 export ZINTUS_ENGINEER_IMAGE_DIGEST='sha256:<digest>'
+# Required when the exact base contains a supported lockfile:
+export ZINTUS_ENGINEER_DEPENDENCY_BUNDLE_ROOT=/absolute/path/to/verified-bundle
+export ZINTUS_ENGINEER_TOOLCHAIN_HASH='sha256:<toolchain-hash>'
 export GATEWAY_TOKEN="$(openssl rand -hex 24)"
+bun run doctor:engineer
 bun run dev:gateway
 ```
+
+The dependency bundle contains `zintus-engineer-dependencies.json` and its
+`node_modules` tree. The manifest binds the complete dependency byte tree to the
+exact repository lockfile and toolchain hashes. The doctor must return `ok: true`
+before execution is considered activated.
 
 `GATEWAY_TOKEN` mode is currently suitable for direct API clients only. The web
 Engineer client does not inject this operator secret, and disabling gateway

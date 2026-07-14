@@ -3,6 +3,7 @@ import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { TaskManifest } from "./contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
+import { runProcessAsync } from "./async-process.js";
 import {
   CommandExecutionRecordSchema,
   type CommandExecutionRecord,
@@ -35,6 +36,12 @@ export type CommandRunner = (
   options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv },
 ) => CommandProcessResult;
 
+export type AsyncCommandRunner = (
+  executable: string,
+  args: string[],
+  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv },
+) => Promise<CommandProcessResult>;
+
 function defaultRunner(
   executable: string,
   args: string[],
@@ -55,6 +62,14 @@ function defaultRunner(
     stderr: result.stderr ?? "",
     ...(result.error ? { error: result.error } : {}),
   };
+}
+
+function defaultAsyncRunner(
+  executable: string,
+  args: string[],
+  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv },
+): Promise<CommandProcessResult> {
+  return runProcessAsync(executable, args, options);
 }
 
 export function parseTrustedCommand(command: string): string[] {
@@ -86,11 +101,13 @@ export interface TrustedCommandExecutorOptions {
   sandbox: SandboxRecord;
   manifest: TaskManifest;
   runner?: CommandRunner;
+  runnerAsync?: AsyncCommandRunner;
   timeoutMs?: number;
   maxOutputBytes?: number;
   now?: () => Date;
   idFactory?: () => string;
   currentCommit: () => string;
+  currentCommitAsync?: () => Promise<string>;
   onRecord?: (record: CommandExecutionRecord) => void;
 }
 
@@ -98,6 +115,7 @@ export interface TrustedCommandExecutorOptions {
 export class TrustedCommandExecutor {
   private readonly options: TrustedCommandExecutorOptions;
   private readonly seen = new Map<string, CommandExecutionRecord>();
+  private readonly active = new Map<string, { command: string; promise: Promise<CommandExecutionRecord> }>();
 
   constructor(options: TrustedCommandExecutorOptions) {
     if (options.manifest.runId !== options.workspace.runId || options.manifest.runId !== options.sandbox.runId) {
@@ -115,18 +133,11 @@ export class TrustedCommandExecutor {
       if (previous.command !== command) throw new Error(`idempotency key reused for another command: ${idempotencyKey}`);
       return previous;
     }
-    if (!this.options.manifest.allowedCommands.includes(command)) {
-      throw new Error("command is not present in the frozen manifest allowlist");
-    }
-    if (this.options.manifest.prohibitedCommands.includes(command)) {
-      throw new Error("command is explicitly prohibited by the frozen manifest");
-    }
-    const argv = parseTrustedCommand(command);
+    const argv = this.validate(command);
     const now = this.options.now ?? (() => new Date());
     const idFactory = this.options.idFactory ?? randomUUID;
     const commandExecutionId = idFactory();
     const startedAt = now().toISOString();
-    const environmentDigest = this.options.sandbox.environmentDigest;
     const runner = this.options.runner ?? defaultRunner;
     const result = runner(argv[0]!, argv.slice(1), {
       cwd: this.options.workspace.workspaceRoot,
@@ -134,6 +145,65 @@ export class TrustedCommandExecutor {
       maxOutputBytes: this.options.maxOutputBytes ?? DEFAULT_MAX_COMMAND_OUTPUT_BYTES,
       env: runtimeEnvironment(this.options.manifest.runId),
     });
+    return this.finalize(command, idempotencyKey, commandExecutionId, startedAt, result, this.options.currentCommit());
+  }
+
+  executeAsync(command: string, idempotencyKey: string): Promise<CommandExecutionRecord> {
+    const previous = this.seen.get(idempotencyKey);
+    if (previous) {
+      if (previous.command !== command) return Promise.reject(new Error(`idempotency key reused for another command: ${idempotencyKey}`));
+      return Promise.resolve(previous);
+    }
+    const running = this.active.get(idempotencyKey);
+    if (running) {
+      if (running.command !== command) return Promise.reject(new Error(`idempotency key reused for another command: ${idempotencyKey}`));
+      return running.promise;
+    }
+    const argv = this.validate(command);
+    const now = this.options.now ?? (() => new Date());
+    const idFactory = this.options.idFactory ?? randomUUID;
+    const commandExecutionId = idFactory();
+    const startedAt = now().toISOString();
+    const runner = this.options.runnerAsync ?? (this.options.runner
+      ? async (executable, args, options) => this.options.runner!(executable, args, options)
+      : defaultAsyncRunner);
+    const promise = runner(argv[0]!, argv.slice(1), {
+      cwd: this.options.workspace.workspaceRoot,
+      timeoutMs: this.options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+      maxOutputBytes: this.options.maxOutputBytes ?? DEFAULT_MAX_COMMAND_OUTPUT_BYTES,
+      env: runtimeEnvironment(this.options.manifest.runId),
+    }).then(async (result) => this.finalize(
+      command,
+      idempotencyKey,
+      commandExecutionId,
+      startedAt,
+      result,
+      this.options.currentCommitAsync ? await this.options.currentCommitAsync() : this.options.currentCommit(),
+    )).finally(() => this.active.delete(idempotencyKey));
+    this.active.set(idempotencyKey, { command, promise });
+    return promise;
+  }
+
+  private validate(command: string): string[] {
+    if (!this.options.manifest.allowedCommands.includes(command)) {
+      throw new Error("command is not present in the frozen manifest allowlist");
+    }
+    if (this.options.manifest.prohibitedCommands.includes(command)) {
+      throw new Error("command is explicitly prohibited by the frozen manifest");
+    }
+    return parseTrustedCommand(command);
+  }
+
+  private finalize(
+    command: string,
+    idempotencyKey: string,
+    commandExecutionId: string,
+    startedAt: string,
+    result: CommandProcessResult,
+    commitSha: string,
+  ): CommandExecutionRecord {
+    const now = this.options.now ?? (() => new Date());
+    const environmentDigest = this.options.sandbox.environmentDigest;
     const timedOut = result.error != null && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
     const stderr = result.error && !timedOut
       ? `${result.stderr}\n${result.error.message}`.trim()
@@ -174,7 +244,7 @@ export class TrustedCommandExecutor {
       stdoutArtifact,
       stderrArtifact,
       environmentDigest,
-      commitSha: this.options.currentCommit(),
+      commitSha,
       status,
       idempotencyKey,
     });

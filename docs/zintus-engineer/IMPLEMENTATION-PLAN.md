@@ -100,9 +100,11 @@ changed; no model, sandbox, command, PR, or UI result is mocked as complete.
 
 ### Phase 2 — execution
 
-Status: partial for the local single-repository execution slice. The implemented
-boundary is useful, but live Docker proof, offline dependency provisioning,
-non-blocking workers, complete recovery, and watchdogs remain release blockers.
+Status: implementation complete for the local single-repository execution slice.
+Activation remains fail-closed until the live Phase 2 doctor proves the configured
+Docker daemon, immutable image, exact repository base, and offline dependency
+bundle. That proof cannot pass on a machine without Docker and is never replaced
+by a mock result.
 
 Delivered:
 
@@ -121,6 +123,23 @@ Delivered:
    function tools, bounded rounds/mutations, model-call metadata, and real Git diff output.
 9. Supervisor-owned persistence of sandboxes, agent executions, model routing/model
    calls, command executions, stdout/stderr artifacts, and Builder result metadata.
+10. Non-blocking argv-only Git, Docker, and trusted-command processes on the
+    authoritative Builder and independent-verifier paths.
+11. A lockfile/toolchain/content-addressed offline dependency bundle whose complete
+    byte tree is re-hashed before use and mounted read-only over
+    `/workspace/node_modules` while container networking remains disabled.
+12. Durable fenced worker leases with bounded heartbeats and watchdog recovery for
+    every Phase 2 in-progress state. Interrupted partial worktrees are destroyed,
+    stale sandbox rows are closed, and a clean exact-base attempt is requeued only
+    through the authoritative retry budget.
+13. A fail-closed activation doctor that runs a real pinned-image container with
+    the production network, filesystem, identity, capability, CPU, memory, PID,
+    temporary-filesystem, timeout, and output boundaries.
+
+Phase 2 code exit criteria: package/gateway typechecks, execution, tamper,
+non-blocking, lease, crash-recovery, state-graph, and doctor fault-injection tests
+must pass. Phase 2 activation additionally requires `bun run doctor:engineer` to
+return `ok: true` on the target host.
 
 The worker deliberately stops at `FAST_CHECKS`. Builder-requested commands are recorded,
 but they do not satisfy Phase-3 independent verification gates.

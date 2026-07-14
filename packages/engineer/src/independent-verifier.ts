@@ -100,7 +100,7 @@ export class IndependentVerifier {
     this.options = options;
   }
 
-  run(): IndependentVerificationOutput {
+  async run(): Promise<IndependentVerificationOutput> {
     const executions: VerificationExecutionRecord[] = [];
     const trustedEvidence: TrustedEvidence[] = [];
     for (let groupIndex = 0; groupIndex < GROUPS.length; groupIndex += 1) {
@@ -109,13 +109,13 @@ export class IndependentVerifier {
       if (group.state === "E2E_TESTING" && items.length === 0) continue;
       this.ensureState(group.state);
       for (const item of items) {
-        const result = this.runItem(item, 1);
+        const result = await this.runItem(item, 1);
         executions.push(result.execution);
         trustedEvidence.push(result.evidence);
         if (result.execution.status !== "PASSED") {
           const repeated = [result];
           for (let attempt = 2; attempt <= 3; attempt += 1) {
-            const confirmation = this.runItem(item, attempt);
+            const confirmation = await this.runItem(item, attempt);
             repeated.push(confirmation);
             executions.push(confirmation.execution);
             trustedEvidence.push(confirmation.evidence);
@@ -163,7 +163,7 @@ export class IndependentVerifier {
     }
     this.ensureState("SECURITY_REVIEW");
     for (const item of this.options.manifest.testPlan.filter((candidate) => candidate.type === "SECURITY")) {
-      const result = this.runItem(item, 1);
+      const result = await this.runItem(item, 1);
       executions.push(result.execution);
       trustedEvidence.push(result.evidence);
       if (result.execution.status !== "PASSED") {
@@ -214,9 +214,9 @@ export class IndependentVerifier {
     return { executions, securityFindings, trustedEvidence, securityReportArtifact };
   }
 
-  private runItem(item: TestPlanItem, repeatAttempt: number): { execution: VerificationExecutionRecord; evidence: TrustedEvidence; command: CommandExecutionRecord } {
+  private async runItem(item: TestPlanItem, repeatAttempt: number): Promise<{ execution: VerificationExecutionRecord; evidence: TrustedEvidence; command: CommandExecutionRecord }> {
     if (!item.command) throw new Error(`test plan item ${item.testId} has no executable command`);
-    const command = this.options.executor.execute(
+    const command = await this.options.executor.executeAsync(
       item.command,
       `verify:${this.options.verificationPass ?? 1}:${item.testId}:${repeatAttempt}:${sha256(item).slice(7, 23)}`,
     );

@@ -96,8 +96,8 @@ export class EngineerVerificationManager {
     const sandbox = this.options.executionManager.getSandbox(runId);
     if (!sandbox) throw new Error("Phase 3 requires the retained Phase 2 sandbox");
     const workspaceManager = this.options.sandboxManager.workspaceManager();
-    const resultCommitSha = workspaceManager.checkpoint(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
-    const diff = workspaceManager.diff(sandbox.workspace);
+    const resultCommitSha = await workspaceManager.checkpointAsync(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
+    const diff = await workspaceManager.diffAsync(sandbox.workspace);
     const pass = supervisor.nextReviewerAttempt(runId);
     const executor = this.executor(manifest, sandbox);
     let verified;
@@ -114,6 +114,7 @@ export class EngineerVerificationManager {
         now: this.options.now,
         idFactory: this.options.idFactory,
       }).run();
+      verified = await verified;
     } catch (error) {
       if (error instanceof StableRequiredTestFailure) {
         return this.repairStableRequiredTest(manifest, sandbox, resultCommitSha, diff, error);
@@ -479,7 +480,9 @@ export class EngineerVerificationManager {
       sandbox: sandbox.record,
       manifest,
       runner: sandbox.commandRunner,
+      ...(sandbox.commandRunnerAsync ? { runnerAsync: sandbox.commandRunnerAsync } : {}),
       currentCommit: () => this.options.sandboxManager.currentCommit(sandbox.workspace),
+      currentCommitAsync: () => this.options.sandboxManager.currentCommitAsync(sandbox.workspace),
       onRecord: (record) => { this.options.supervisor.recordCommandExecution(record); },
       now: this.options.now,
       idFactory: this.options.idFactory,

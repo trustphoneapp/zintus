@@ -12,6 +12,16 @@ import {
 } from "./state-machine.js";
 
 describe("Engineer state machine", () => {
+  test("every interrupted Phase 2 worker state has bounded requeue and exhaustion exits", () => {
+    for (const state of [
+      "SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED",
+      "SANDBOX_COLD_PROVISIONING", "SANDBOX_PREWARM_INVALID", "SANDBOX_PROVISIONING",
+      "SANDBOX_PREFLIGHT", "SANDBOX_READY", "CONTEXT_BUILDING", "IMPLEMENTING",
+    ] as const) {
+      expect(canTransition(state, "QUEUED")).toBe(true);
+      expect(canTransition(state, "RETRY_BUDGET_EXHAUSTED")).toBe(true);
+    }
+  });
   test("mandatory corrected flows are explicit", () => {
     expect(canTransition("REVIEWING", "REVIEW_CHANGES_REQUESTED")).toBe(true);
     expect(canTransition("REVIEW_CHANGES_REQUESTED", "REVIEW_FIX_PREPARING")).toBe(true);

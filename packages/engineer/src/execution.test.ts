@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
@@ -13,6 +13,8 @@ import {
   GitWorkspaceManager,
   LocalArtifactStore,
   OpenAIResponsesTransport,
+  OfflineDependencyBundle,
+  OFFLINE_DEPENDENCY_MANIFEST,
   TaskManifestSchema,
   TrustedCommandExecutor,
   WarmSandboxPool,
@@ -21,6 +23,7 @@ import {
   resolveManifestPath,
   sha256,
   workspaceLockfileHash,
+  hashDependencyTree,
   type ResponsesTransport,
   type SandboxRecord,
   type TaskManifest,
@@ -61,10 +64,11 @@ function temporaryRoot(): string {
   return root;
 }
 
-function initRepository(root: string): { sha: string; path: string } {
+function initRepository(root: string, includeLockfile = false): { sha: string; path: string } {
   const path = join(root, "repository");
   mkdirSync(join(path, "src"), { recursive: true });
   writeFileSync(join(path, "src", "value.ts"), "export const value = 1;\n");
+  if (includeLockfile) writeFileSync(join(path, "bun.lock"), '{"lockfileVersion":1}\n');
   execFileSync("git", ["init", "-q", path]);
   execFileSync("git", ["-C", path, "config", "user.email", "test@zintus.local"]);
   execFileSync("git", ["-C", path, "config", "user.name", "Zintus Test"]);
@@ -315,6 +319,62 @@ describe("Phase 2 Docker sandbox", () => {
   });
 });
 
+describe("Phase 2 offline dependency bundle", () => {
+  test("binds dependency bytes to the exact lockfile and detects later tampering", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root, true);
+    const bundleRoot = join(root, "dependency-bundle");
+    mkdirSync(join(bundleRoot, "node_modules", "fixture"), { recursive: true });
+    writeFileSync(join(bundleRoot, "node_modules", "fixture", "index.js"), "export const fixture = true;\n");
+    const contentHash = await hashDependencyTree(join(bundleRoot, "node_modules"));
+    const lockfileHash = workspaceLockfileHash(repository.path);
+    const toolchainHash = sha256("bun-test-toolchain");
+    writeFileSync(join(bundleRoot, OFFLINE_DEPENDENCY_MANIFEST), JSON.stringify({
+      schemaVersion: 1, lockfileHash, toolchainHash, contentHash, nodeModulesPath: "node_modules",
+    }));
+    const bundle = new OfflineDependencyBundle({ root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash });
+    await expect(bundle.verify()).resolves.toBeUndefined();
+    writeFileSync(join(bundle.nodeModulesRoot, "fixture", "index.js"), "tampered\n");
+    await expect(bundle.verify()).rejects.toThrow("content hash mismatch");
+  });
+
+  test("fails closed without a bundle and mounts an admitted bundle read-only", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root, true);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "workspaces"), gitSpawn: bunGitSpawn });
+    const digest = `sha256:${"d".repeat(64)}`;
+    const imageReference = `oven/bun@${digest}`;
+    const dockerCalls: string[][] = [];
+    const dockerRunAsync = async (args: string[]) => {
+      dockerCalls.push(args);
+      if (args[0] === "info") return { status: 0, signal: null, stdout: "27.0", stderr: "" };
+      if (args[0] === "image") return { status: 0, signal: null, stdout: JSON.stringify([`oven/bun@${digest}`]), stderr: "" };
+      return { status: 0, signal: null, stdout: "ok", stderr: "" };
+    };
+    const withoutBundle = new DockerSandboxManager({ workspaceManager, imageReference, imageDigest: digest, dockerRunAsync });
+    await expect(withoutBundle.provisionColdAsync({ runId: "run-no-deps", repositoryRoot: repository.path, baseCommitSha: repository.sha }))
+      .rejects.toThrow("require an immutable offline dependency bundle");
+
+    const bundleRoot = join(root, "dependency-bundle");
+    mkdirSync(join(bundleRoot, "node_modules", "fixture"), { recursive: true });
+    writeFileSync(join(bundleRoot, "node_modules", "fixture", "index.js"), "export {};\n");
+    const lockfileHash = workspaceLockfileHash(repository.path);
+    const toolchainHash = sha256("bun-test-toolchain");
+    writeFileSync(join(bundleRoot, OFFLINE_DEPENDENCY_MANIFEST), JSON.stringify({
+      schemaVersion: 1, lockfileHash, toolchainHash,
+      contentHash: await hashDependencyTree(join(bundleRoot, "node_modules")), nodeModulesPath: "node_modules",
+    }));
+    const offlineDependencies = new OfflineDependencyBundle({ root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash });
+    const manager = new DockerSandboxManager({ workspaceManager, imageReference, imageDigest: digest, dockerRunAsync, offlineDependencies });
+    const sandbox = await manager.provisionColdAsync({ runId: "run-with-deps", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    await sandbox.commandRunnerAsync!("bun", ["test"], { cwd: sandbox.workspace.workspaceRoot, timeoutMs: 1_000, maxOutputBytes: 1024, env: {} });
+    const runArgs = dockerCalls.find((args) => args[0] === "run") ?? [];
+    expect(runArgs).toContain("--network=none");
+    expect(runArgs).toContain(`type=bind,src=${offlineDependencies.nodeModulesRoot},dst=/workspace/node_modules,readonly`);
+    await manager.destroyAsync(sandbox);
+  });
+});
+
 describe("Phase 2 Codex Builder", () => {
   test("keeps the OpenAI credential in the transport header and requests no provider storage", async () => {
     let observedBody = "";
@@ -381,6 +441,62 @@ describe("Phase 2 Codex Builder", () => {
 });
 
 describe("Phase 2 authoritative execution worker", () => {
+  test("cleans an interrupted workspace and durably requeues from IMPLEMENTING", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "recovery.db") });
+    const received = supervisor.receiveRequest({
+      runId: "run-recovery", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: repository.sha },
+      request: "Change value",
+    });
+    const taskForRun = manifest(received.runId, repository.sha);
+    const { manifestHash: _proposalHash, ...proposal } = taskForRun;
+    const planReady = transitionToPlanReadyForTest({
+      supervisor, received, normalizedRequest: proposal.request.normalized, manifest: proposal,
+      key: "recovery", artifactRoot: join(root, "recovery-planning-artifacts"),
+    });
+    let run = supervisor.freezePlan({
+      runId: planReady.runId, expectedStateVersion: planReady.stateVersion, manifest: proposal,
+      actorId: "test-planner", idempotencyKey: "freeze-recovery",
+    }).run;
+    for (const nextState of ["QUEUED", "SANDBOX_COLD_PROVISIONING", "SANDBOX_PREFLIGHT", "SANDBOX_READY", "CONTEXT_BUILDING", "IMPLEMENTING"] as const) {
+      run = supervisor.transition({
+        runId: run.runId, expectedStateVersion: run.stateVersion, nextState,
+        reasonCode: `TEST_${nextState}`, manifestHash: run.manifestHash,
+        idempotencyKey: `recovery-state:${nextState}`,
+      }).run;
+    }
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "recovery-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = await workspaceManager.createAsync({ runId: run.runId, repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    supervisor.recordSandbox({
+      sandboxId: "recovery-sandbox", runId: run.runId, workspaceIdentity: workspace.workspaceIdentity,
+      imageReference: `oven/bun@sha256:${"a".repeat(64)}`, imageDigest: `sha256:${"a".repeat(64)}`,
+      environmentDigest: `sha256:${"b".repeat(64)}`, networkPolicyVersion: "network-v1", sandboxPolicyVersion: "sandbox-v1",
+      status: "READY", source: "COLD", createdAt: "2026-07-14T12:00:00.000Z", destroyedAt: null,
+    });
+    const sandboxManager = new DockerSandboxManager({
+      workspaceManager, imageReference: `oven/bun@sha256:${"a".repeat(64)}`, imageDigest: `sha256:${"a".repeat(64)}`,
+      dockerRunAsync: async () => ({ status: 0, signal: null, stdout: "", stderr: "" }),
+    });
+    const manager = new EngineerExecutionManager({
+      supervisor, sandboxManager, artifactStore: new LocalArtifactStore({ root: join(root, "recovery-artifacts") }),
+      repositoryRootFor: () => repository.path,
+      transportForRun: async () => ({ create: async () => ({ id: "unused", output: [] }) }),
+    });
+    expect(await manager.recoverInterrupted(run.runId, "expired-lease-1")).toBe("REQUEUED");
+    expect(existsSync(workspace.workspaceRoot)).toBe(false);
+    expect(supervisor.getRun(run.runId).state).toBe("QUEUED");
+    expect(supervisor.listFailures(run.runId)).toMatchObject([{
+      reasonCode: "WORKER_PROCESS_INTERRUPTED", retryable: true, evidenceIds: ["expired-lease-1"],
+    }]);
+    const audit = new Database(join(root, "recovery.db"), { readonly: true });
+    expect(audit.query("SELECT status FROM sandboxes WHERE run_id = ?").get(run.runId)).toEqual({ status: "DESTROYED" });
+    audit.close();
+    expect(await manager.recoverInterrupted(run.runId, "expired-lease-1")).toBe("IGNORED");
+    supervisor.close();
+  });
+
   test("moves a frozen run to FAST_CHECKS and persists executor artifacts", async () => {
     const root = temporaryRoot();
     const repository = initRepository(root);

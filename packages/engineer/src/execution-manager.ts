@@ -14,6 +14,12 @@ import type { EngineerWorkerLeaseManager, WorkerLeaseGrant } from "./worker-leas
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import { canTransition } from "./state-machine.js";
 
+const PHASE2_RECOVERABLE_STATES = new Set([
+  "SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED",
+  "SANDBOX_COLD_PROVISIONING", "SANDBOX_PREWARM_INVALID", "SANDBOX_PROVISIONING",
+  "SANDBOX_PREFLIGHT", "SANDBOX_READY", "CONTEXT_BUILDING", "IMPLEMENTING",
+]);
+
 export interface EngineerExecutionManagerOptions {
   supervisor: EngineerSupervisor;
   sandboxManager: DockerSandboxManager;
@@ -79,16 +85,75 @@ export class EngineerExecutionManager {
   async drain(cleanupSandboxes = true): Promise<void> {
     for (const controller of this.abortControllers.values()) controller.abort(new Error("Engineer gateway is draining"));
     await Promise.allSettled([...this.active.values()]);
-    if (cleanupSandboxes) this.destroyAll();
+    if (cleanupSandboxes) await this.destroyAllAsync();
   }
 
   destroyAll(): void { for (const runId of [...this.sandboxes.keys()]) this.destroy(runId); }
+
+  async destroyAllAsync(): Promise<void> {
+    await Promise.allSettled([...this.sandboxes.keys()].map((runId) => this.destroyAsync(runId)));
+  }
 
   recoverQueued(): Array<{ runId: string; promise: Promise<BuilderResult> }> {
     return this.options.supervisor.listRuns(["QUEUED"]).map((run) => ({
       runId: run.runId,
       promise: this.runQueued(run.runId),
     }));
+  }
+
+  async recoverInterrupted(runId: string, leaseEvidenceId: string): Promise<"REQUEUED" | "EXHAUSTED" | "IGNORED"> {
+    const supervisor = this.options.supervisor;
+    const interrupted = supervisor.getRun(runId);
+    if (!PHASE2_RECOVERABLE_STATES.has(interrupted.state)) return "IGNORED";
+    this.abortControllers.get(runId)?.abort(new Error("Engineer worker lease expired"));
+    const repositoryRoot = this.options.repositoryRootFor(interrupted.repository.repositoryId);
+    await this.options.sandboxManager.workspaceManager().cleanupRunAsync(runId, repositoryRoot);
+    this.sandboxes.delete(runId);
+    const now = (this.options.now ?? (() => new Date()))().toISOString();
+    supervisor.markRunSandboxesDestroyed(runId, now, "WORKER_PROCESS_INTERRUPTED");
+    const fingerprint = sha256({ phase: "PHASE_2", reason: "WORKER_PROCESS_INTERRUPTED", state: interrupted.state });
+    supervisor.recordFailure(FailureRecordSchema.parse({
+      failureId: sha256({ leaseEvidenceId, interruptedStateVersion: interrupted.stateVersion, record: "worker-interrupted" }),
+      runId,
+      failureClass: "WORKFLOW_FAILURE",
+      reasonCode: "WORKER_PROCESS_INTERRUPTED",
+      fingerprint,
+      evidenceIds: [leaseEvidenceId],
+      retryable: true,
+      createdAt: now,
+    }));
+    const retry = supervisor.authorizeRetry({
+      runId,
+      expectedStateVersion: interrupted.stateVersion,
+      kind: "SANDBOX_PROVISIONING",
+      failureFingerprint: fingerprint,
+      patchHash: null,
+      progressMetric: null,
+    });
+    const current = supervisor.getRun(runId);
+    const nextState = retry.allowed ? "QUEUED" : "RETRY_BUDGET_EXHAUSTED";
+    supervisor.transition({
+      runId,
+      expectedStateVersion: current.stateVersion,
+      nextState,
+      reasonCode: retry.allowed ? "WORKER_PROCESS_RECOVERED" : retry.reasonCode,
+      manifestHash: current.manifestHash,
+      evidenceIds: [leaseEvidenceId],
+      idempotencyKey: sha256({ leaseEvidenceId, interruptedStateVersion: interrupted.stateVersion, command: "phase2-recover" }),
+    });
+    return retry.allowed ? "REQUEUED" : "EXHAUSTED";
+  }
+
+  resumeRecovered(runId: string): void {
+    const existing = this.active.get(runId);
+    if (existing) {
+      this.abortControllers.get(runId)?.abort(new Error("Engineer worker is being replaced after lease recovery"));
+      void existing.finally(() => {
+        if (this.options.supervisor.getRun(runId).state === "QUEUED") void this.runQueued(runId).catch(() => undefined);
+      });
+      return;
+    }
+    if (this.options.supervisor.getRun(runId).state === "QUEUED") void this.runQueued(runId).catch(() => undefined);
   }
 
   getSandbox(runId: string): ProvisionedSandbox | null {
@@ -99,6 +164,15 @@ export class EngineerExecutionManager {
     const sandbox = this.sandboxes.get(runId);
     if (!sandbox) return null;
     const destroyed = this.options.sandboxManager.destroy(sandbox);
+    this.options.supervisor.recordSandbox(destroyed);
+    this.sandboxes.delete(runId);
+    return destroyed;
+  }
+
+  async destroyAsync(runId: string): Promise<SandboxRecord | null> {
+    const sandbox = this.sandboxes.get(runId);
+    if (!sandbox) return null;
+    const destroyed = await this.options.sandboxManager.destroyAsync(sandbox);
     this.options.supervisor.recordSandbox(destroyed);
     this.sandboxes.delete(runId);
     return destroyed;
@@ -179,7 +253,7 @@ export class EngineerExecutionManager {
       }
       const repositoryRoot = this.options.repositoryRootFor(initial.repository.repositoryId);
       if (this.options.sandboxManager.warmEnabled()) {
-        const warmClaim = this.options.sandboxManager.claimWarm({
+        const warmClaim = await this.options.sandboxManager.claimWarmAsync({
           runId,
           repositoryId: initial.repository.repositoryId,
           repositoryRoot,
@@ -201,7 +275,7 @@ export class EngineerExecutionManager {
       if (!provisioned) {
         while (!provisioned) {
           try {
-            provisioned = this.options.sandboxManager.provisionCold({
+            provisioned = await this.options.sandboxManager.provisionColdAsync({
               runId,
               repositoryRoot,
               baseCommitSha: initial.repository.baseCommitSha,
@@ -258,7 +332,9 @@ export class EngineerExecutionManager {
         sandbox: provisioned.record,
         manifest,
         runner: provisioned.commandRunner,
+        ...(provisioned.commandRunnerAsync ? { runnerAsync: provisioned.commandRunnerAsync } : {}),
         currentCommit: () => this.options.sandboxManager.currentCommit(provisioned!.workspace),
+        currentCommitAsync: () => this.options.sandboxManager.currentCommitAsync(provisioned!.workspace),
         onRecord: (record) => { supervisor.recordCommandExecution(record); },
       });
       const builder = new CodexBuilder({
@@ -396,7 +472,7 @@ export class EngineerExecutionManager {
       }
       if (provisioned && next === "BLOCKED_BY_ENVIRONMENT") {
         try {
-          supervisor.recordSandbox(this.options.sandboxManager.destroy(provisioned));
+          supervisor.recordSandbox(await this.options.sandboxManager.destroyAsync(provisioned));
         } catch { /* preserve original failure */ }
       }
       throw error;

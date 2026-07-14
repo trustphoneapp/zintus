@@ -854,6 +854,15 @@ export class EngineerLedger {
     return parsed;
   }
 
+  markRunSandboxesDestroyed(runId: string, destroyedAt: string, reason: string): number {
+    this.getRun(runId);
+    if (!Number.isFinite(new Date(destroyedAt).getTime())) throw new TypeError("sandbox recovery timestamp must be ISO-8601");
+    const changed = this.db.query("UPDATE sandboxes SET status = 'DESTROYED', destroyed_at = ? WHERE run_id = ? AND status != 'DESTROYED'")
+      .run(destroyedAt, runId).changes;
+    if (changed > 0) this.insertAudit(runId, "SANDBOX_RECOVERY_DESTROYED", "SYSTEM", "worker-watchdog", { reason, count: changed }, destroyedAt);
+    return changed;
+  }
+
   recordArtifact(record: ArtifactRecord): ArtifactRecord {
     const parsed = ArtifactRecordSchema.parse(record);
     this.getRun(parsed.runId);

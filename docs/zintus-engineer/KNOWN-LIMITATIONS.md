@@ -8,9 +8,10 @@
 - The current execution slice supports one explicitly configured local checkout.
   Supervisor-only GitHub publication is available, but multi-repository connection
   management is not yet implemented.
-- `QUEUED` dispatch survives restart. Execution now uses durable fenced leases,
-  bounded heartbeats, watchdog recovery, and shutdown draining. Recovery for every
-  verification/publication state and every orphaned container/worktree is not yet complete.
+- `QUEUED` dispatch and every Phase 2 in-progress execution state survive restart
+  through durable fenced leases, bounded heartbeats, watchdog recovery, clean
+  exact-base requeue, and orphaned Phase 2 worktree cleanup. Recovery for later
+  verification/publication states remains a separate Phase 3/4 concern.
 - The warm pool provides atomic one-time claims, TTL rejection, validation,
   quarantine, cold fallback, one-time destruction after claim, and a periodic
   maximum/health sweep. It does not yet replenish to a configured minimum or
@@ -18,6 +19,13 @@
 - Docker storage quota enforcement relies on the host Docker/runtime configuration;
   the feature directly enforces CPU, memory, PIDs, time, output, privilege, and
   network limits.
+- Dependency-bearing repositories require a verified offline bundle bound to the
+  exact lockfile and toolchain hashes. Zintus does not fall back to a networked
+  install or an unverified host `node_modules` tree.
+- This checkout has not produced live Phase 2 activation evidence because the
+  current host has no Docker-compatible runtime or canonical
+  `ZINTUS_ENGINEER_*` execution configuration. `bun run doctor:engineer` fails
+  closed until those external prerequisites are supplied.
 - GitHub publication requires `ZINTUS_ENGINEER_PUBLICATION_SECRET` and
   `ZINTUS_ENGINEER_GITHUB_TOKEN`, plus a configured Git remote that accepts the
   verified commit. Tests use an in-memory Git-service boundary and do not create a

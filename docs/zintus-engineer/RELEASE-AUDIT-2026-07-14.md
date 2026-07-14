@@ -12,6 +12,16 @@ identity, budget, context, and operational paths remain incomplete.
 Do not enable real repository mutation or GitHub publication until every release
 blocker below is closed and the end-to-end Docker/OpenAI/GitHub evaluation passes.
 
+## Post-audit Phase 2 closure
+
+The later Phase 2 closure batch removed blocking Git/Docker/test processes from
+the authoritative worker path, added immutable offline dependency provisioning,
+and added clean exact-base watchdog recovery for every Phase 2 active state.
+Automated fault-injection and typecheck evidence now covers those boundaries.
+The release verdict remains fail-closed because this host has no Docker runtime;
+the strengthened `bun run doctor:engineer` requires a real hardened container and
+currently returns `ok: false` rather than accepting simulated activation evidence.
+
 ## Fixed during this audit
 
 - A client can no longer downgrade Supervisor risk or remove a human gate while

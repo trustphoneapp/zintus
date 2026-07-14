@@ -315,7 +315,7 @@ export class CodexBuilder {
           } else if (call.name === "run_command") {
             const args = z.object({ command: z.string() }).strict().parse(JSON.parse(call.arguments));
             requestedCommands.push(args.command);
-            const record = this.options.executor.execute(args.command, `builder:${call.call_id}`);
+            const record = await this.options.executor.executeAsync(args.command, `builder:${call.call_id}`);
             commandExecutionIds.push(record.commandExecutionId);
             output = JSON.stringify({
               commandExecutionId: record.commandExecutionId,
@@ -327,7 +327,7 @@ export class CodexBuilder {
             });
           } else if (call.name === "git_diff") {
             z.object({}).strict().parse(JSON.parse(call.arguments));
-            output = this.options.workspaceManager.diff(this.options.workspace);
+            output = await this.options.workspaceManager.diffAsync(this.options.workspace);
           } else {
             throw new Error(`unknown Builder tool: ${call.name}`);
           }
@@ -343,13 +343,13 @@ export class CodexBuilder {
       }
     }
 
-    const changedFiles = this.options.workspaceManager.changedFiles(this.options.workspace);
+    const changedFiles = await this.options.workspaceManager.changedFilesAsync(this.options.workspace);
     for (const path of changedFiles) {
       if (!isManifestPathAllowed(path, this.options.manifest)) {
         throw new Error(`Builder produced an out-of-scope change: ${path}`);
       }
     }
-    const diff = this.options.workspaceManager.diff(this.options.workspace);
+    const diff = await this.options.workspaceManager.diffAsync(this.options.workspace);
     return BuilderResultSchema.parse({
       runId: this.options.manifest.runId,
       manifestHash: this.options.manifest.manifestHash,
