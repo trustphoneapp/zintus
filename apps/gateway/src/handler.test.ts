@@ -109,7 +109,7 @@ describe("gateway handler", () => {
   test("Engineer run intake and reads use the gateway bearer boundary", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-gateway-engineer-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
-    const engineerRuns = new EngineerRunManager({ supervisor });
+    const engineerRuns = new EngineerRunManager({ supervisor, diffForRun: () => "diff --git a/a b/a" });
     const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
     const body = JSON.stringify({
       runId: "gateway-run-1",
@@ -145,6 +145,16 @@ describe("gateway handler", () => {
     }));
     expect(evidence.status).toBe(200);
     expect((await evidence.json()) as unknown).toEqual({ evidenceBundles: [] });
+    const tests = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/tests", { headers: { Authorization: "Bearer secret" } }));
+    expect((await tests.json()) as unknown).toEqual({ tests: [] });
+    const security = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/security", { headers: { Authorization: "Bearer secret" } }));
+    expect((await security.json()) as unknown).toEqual({ securityFindings: [] });
+    const failures = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/failures", { headers: { Authorization: "Bearer secret" } }));
+    expect((await failures.json()) as unknown).toEqual({ failures: [] });
+    const diff = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/diff", { headers: { Authorization: "Bearer secret" } }));
+    expect((await diff.json()) as unknown).toEqual({ diff: "diff --git a/a b/a" });
+    const approval = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/approval", { headers: { Authorization: "Bearer secret" } }));
+    expect((await approval.json()) as unknown).toEqual({ approval: null });
     supervisor.close();
     rmSync(root, { recursive: true, force: true });
   });

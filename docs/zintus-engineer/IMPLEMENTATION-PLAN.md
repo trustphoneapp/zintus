@@ -154,9 +154,31 @@ and repair-loop tests pass; publication remains unavailable.
 
 ### Phase 4 — human control and publication
 
-Add risk-aware approval deadlines, cancellation/recovery, retry exhaustion,
-supervisor-only Git service and PR preflight/idempotency, stale-base re-verification,
-and explicit failure presentation.
+Status: complete for the configured GitHub publication slice.
+
+Delivered:
+
+1. Hash-bound approval requests with assigned reviewer, risk tier, reminders,
+   deadline, timeout action, and exact manifest/diff/evidence hashes.
+2. Human approve, request-changes, reject, deadline-extension, and cancellation
+   APIs. Expired approvals fail closed as `HUMAN_REVIEW_REQUIRED`.
+3. Periodic gateway recovery/sweeping of overdue approval requests.
+4. Cancellation evidence, sandbox cleanup, and terminal cancellation/failure paths.
+5. A narrow `GitService` interface unavailable to agents, plus a GitHub adapter
+   whose credential remains inside the gateway publication boundary.
+6. HMAC-authenticated Supervisor PR commands, trusted command artifacts, and
+   immutable Git-operation records.
+7. Preflight checks for fresh isolated review, exact current diff, passing tests,
+   no open critical security findings, complete evidence, human approval when
+   required, result commit, and current base branch.
+8. Idempotent branch/push/PR operations and trusted-record PR descriptions that
+   exclude Builder narrative.
+9. Stale-base blocking before remote mutation, with an explicit transition into
+   mandatory re-verification.
+10. Authenticated approval, diff, tests, security, failures, and control routes.
+
+Live publication is enabled only when the gateway receives an explicit GitHub
+credential and a stable publication-command signing secret.
 
 ### Phase 5 — Zintus experience
 

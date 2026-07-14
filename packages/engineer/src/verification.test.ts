@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   EngineerSupervisor,
+  EngineerPublicationManager,
   EngineerVerificationManager,
   DockerSandboxManager,
   GitWorkspaceManager,
@@ -21,6 +22,7 @@ import {
   sha256,
   type ResponsesTransport,
   type EngineerExecutionManager,
+  type GitService,
   type ProvisionedSandbox,
   type SandboxRecord,
   type TaskManifest,
@@ -244,11 +246,12 @@ describe("Phase 3 authoritative verification manager", () => {
         }] };
       },
     });
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
     const manager = new EngineerVerificationManager({
       supervisor: setup.supervisor,
       executionManager,
       sandboxManager,
-      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
+      artifactStore,
       transportForRole,
     });
     const result = await manager.verify(setup.manifest.runId);
@@ -259,6 +262,34 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(setup.supervisor.listClaimEvidence(setup.manifest.runId)).toEqual(result.claims);
     expect(setup.supervisor.listEvidenceBundles(setup.manifest.runId)).toEqual([result.evidenceBundle]);
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
+    let pullRequestCalls = 0;
+    let cleanupCalls = 0;
+    const gitService: GitService = {
+      async inspectBaseBranch(input) {
+        return { currentCommitSha: input.expectedBaseCommitSha, matchesExpected: true, protectionEnforced: true };
+      },
+      async createRunBranch(input) {
+        return { branchName: `zintus/engineer/${input.runId}`, remoteReference: `refs/heads/zintus/engineer/${input.runId}` };
+      },
+      async pushVerifiedCommit(input) { return { remoteReference: `refs/heads/${input.branchName}` }; },
+      async createPullRequest() { pullRequestCalls += 1; return { id: "pr-1", number: 17, url: "https://github.test/pull/17" }; },
+    };
+    const publication = new EngineerPublicationManager({
+      supervisor: setup.supervisor, gitService, artifactStore,
+      diffForRun: () => workspaceManager.diff(setup.workspace),
+      commandSigningSecret: "phase4-test-signing-secret-at-least-32-bytes",
+      cleanupRun: () => { cleanupCalls += 1; },
+    });
+    const pending = await publication.start(setup.manifest.runId, "reviewer@example.test");
+    expect(pending.status).toBe("AWAITING_APPROVAL");
+    expect(pullRequestCalls).toBe(0);
+    const published = await publication.approve(setup.manifest.runId, "human-1", "Evidence is sufficient.");
+    expect(published.status).toBe("PUBLISHED");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("COMPLETED");
+    const replay = await publication.resume(setup.manifest.runId);
+    expect(replay.status).toBe("PUBLISHED");
+    expect(pullRequestCalls).toBe(1);
+    expect(cleanupCalls).toBe(1);
     const db = new Database(setup.dbPath, { readonly: true });
     expect((db.query("SELECT COUNT(*) AS count FROM reviewer_sessions").get() as { count: number }).count).toBe(1);
     expect((db.query("SELECT COUNT(*) AS count FROM model_calls").get() as { count: number }).count).toBe(3);
@@ -320,20 +351,66 @@ describe("Phase 3 authoritative verification manager", () => {
         }] };
       },
     });
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
     const manager = new EngineerVerificationManager({
       supervisor: setup.supervisor, executionManager, sandboxManager,
-      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }), transportForRole,
+      artifactStore, transportForRole,
     });
     const result = await manager.verify(setup.manifest.runId);
     expect(reviewAttempt).toBe(2);
     expect(builderRound).toBe(2);
     expect(result.reviewerSession.attempt).toBe(2);
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
+    let mutationCalls = 0;
+    const stalePublication = new EngineerPublicationManager({
+      supervisor: setup.supervisor, artifactStore,
+      diffForRun: () => workspaceManager.diff(setup.workspace),
+      commandSigningSecret: "phase4-stale-signing-secret-at-least-32-bytes",
+      gitService: {
+        async inspectBaseBranch() { return { currentCommitSha: "f".repeat(40), matchesExpected: false, protectionEnforced: true }; },
+        async createRunBranch() { mutationCalls += 1; throw new Error("must not create branch on stale base"); },
+        async pushVerifiedCommit() { mutationCalls += 1; throw new Error("must not push on stale base"); },
+        async createPullRequest() { mutationCalls += 1; throw new Error("must not create PR on stale base"); },
+      },
+    });
+    await stalePublication.start(setup.manifest.runId, "human-2");
+    const stale = await stalePublication.approve(setup.manifest.runId, "human-2", "Approve exact reviewed diff.");
+    expect(stale).toEqual({ status: "BASE_STALE", currentBaseCommitSha: "f".repeat(40) });
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("BASE_BRANCH_STALE");
+    expect(mutationCalls).toBe(0);
+    stalePublication.authorizeStaleReverification(setup.manifest.runId);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVERIFYING");
     const db = new Database(setup.dbPath, { readonly: true });
     expect((db.query("SELECT COUNT(*) AS count FROM reviewer_sessions").get() as { count: number }).count).toBe(2);
     expect((db.query("SELECT COUNT(*) AS count FROM retry_attempts").get() as { count: number }).count).toBe(1);
     expect((db.query("SELECT COUNT(*) AS count FROM test_executions").get() as { count: number }).count).toBe(2);
     db.close();
+    setup.supervisor.close();
+  });
+});
+
+describe("Phase 4 human control", () => {
+  test("cancellation is Supervisor-controlled, cleans the sandbox, and becomes terminal", async () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    let cleaned = 0;
+    const publication = new EngineerPublicationManager({
+      supervisor: setup.supervisor,
+      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
+      diffForRun: () => "",
+      commandSigningSecret: "phase4-cancel-signing-secret-at-least-32-bytes",
+      cleanupRun: () => { cleaned += 1; },
+      gitService: {
+        async inspectBaseBranch() { throw new Error("not used"); },
+        async createRunBranch() { throw new Error("not used"); },
+        async pushVerifiedCommit() { throw new Error("not used"); },
+        async createPullRequest() { throw new Error("not used"); },
+      },
+    });
+    await publication.cancel(setup.manifest.runId, "human-1", "Stop this run.");
+    expect(cleaned).toBe(1);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("CANCELLED");
+    expect(() => publication.requestChanges(setup.manifest.runId, "human-1", "too late")).toThrow();
     setup.supervisor.close();
   });
 });

@@ -2,6 +2,7 @@ import {
   RepositoryReferenceSchema,
   TaskManifestContentSchema,
   type EngineerExecutionManager,
+  type EngineerPublicationManager,
   type EngineerVerificationManager,
   type EngineerRun,
   type EngineerSupervisor,
@@ -13,6 +14,8 @@ export interface EngineerRunManagerOptions {
   supervisor: EngineerSupervisor;
   execution?: EngineerExecutionManager;
   verification?: EngineerVerificationManager;
+  publication?: EngineerPublicationManager;
+  diffForRun?: (runId: string) => string;
 }
 
 /** Gateway facade. It exposes no generic state-transition endpoint. */
@@ -63,6 +66,9 @@ export class EngineerRunManager {
     setTimeout(() => {
       this.options.execution!.runQueued(runId).then(async () => {
         if (this.options.verification) await this.options.verification.verify(runId);
+        if (this.options.publication && this.options.supervisor.getRun(runId).state === "REVIEW_APPROVED") {
+          await this.options.publication.start(runId);
+        }
       }).catch((error) => {
         this.errors.set(runId, error instanceof Error ? error.message : String(error));
       });
@@ -86,6 +92,46 @@ export class EngineerRunManager {
     return this.options.supervisor.listEvidenceBundles(runId);
   }
 
+  tests(runId: string) { return this.options.supervisor.listTestExecutions(runId); }
+
+  security(runId: string) { return this.options.supervisor.listSecurityFindings(runId); }
+
+  failures(runId: string) { return this.options.supervisor.listFailures(runId); }
+
+  diff(runId: string) {
+    if (!this.options.diffForRun) throw new Error("Engineer diff is not available on this gateway");
+    return this.options.diffForRun(runId);
+  }
+
+  approval(runId: string) {
+    return this.options.supervisor.latestApprovalRequest(runId);
+  }
+
+  approve(runId: string, actorId: string, reason: string) {
+    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    return this.options.publication.approve(runId, actorId, reason);
+  }
+
+  requestChanges(runId: string, actorId: string, reason: string): void {
+    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    this.options.publication.requestChanges(runId, actorId, reason);
+  }
+
+  reject(runId: string, actorId: string, reason: string): void {
+    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    this.options.publication.reject(runId, actorId, reason);
+  }
+
+  extendApproval(runId: string, actorId: string, reason: string, extensionSeconds: number) {
+    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    return this.options.publication.extend(runId, actorId, reason, extensionSeconds);
+  }
+
+  cancel(runId: string, actorId: string, reason: string): Promise<void> {
+    if (!this.options.publication) throw new Error("Engineer control is not configured on this gateway");
+    return this.options.publication.cancel(runId, actorId, reason);
+  }
+
   subscribe(runId: string): ReadableStream<Uint8Array> {
     this.options.supervisor.getRun(runId);
     const encoder = new TextEncoder();
@@ -101,7 +147,7 @@ export class EngineerRunManager {
       }
       const state = this.options.supervisor.getRun(runId).state;
       if ([
-        "REVIEW_APPROVED",
+        ...(!this.options.publication ? ["REVIEW_APPROVED"] : []),
         "COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED",
         "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION",
         "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED",

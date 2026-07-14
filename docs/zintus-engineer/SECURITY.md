@@ -68,4 +68,13 @@ be marked `VERIFIED` without known trusted evidence IDs.
 ## Remaining security gates
 
 Phase 4 adds the narrow credentialed publication service and risk-aware human
-control. Phase 3 stops at `REVIEW_APPROVED` and still cannot push or publish.
+control. Publication remains disabled unless both a stable command-signing secret
+and GitHub credential are explicitly configured. Those values never enter model
+input, artifacts, child command arguments, or the Builder sandbox.
+
+The publication manager recalculates the current diff hash, checks trusted test
+and security records, validates the exact approval binding and deadline, and
+inspects the remote base before any mutation. It persists a signed Supervisor
+command and idempotent Git operations. A stale base blocks all branch, push, and
+PR methods. The Git service can create a branch, push the verified commit, and
+open a PR, but exposes no merge, force-push, branch-protection, or deployment API.

@@ -37,9 +37,11 @@ import { getKey as getProviderKey } from "@zintus/keychain";
 import {
   DockerSandboxManager,
   EngineerExecutionManager,
+  EngineerPublicationManager,
   EngineerVerificationManager,
   EngineerSupervisor,
   GitWorkspaceManager,
+  GitHubGitService,
   LocalArtifactStore,
   OpenAIResponsesTransport,
   WarmSandboxPool,
@@ -128,6 +130,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const engineerArtifactStore = new LocalArtifactStore({ root: join(engineerRoot, "artifacts") });
   let engineerExecution: EngineerExecutionManager | undefined;
   let engineerVerification: EngineerVerificationManager | undefined;
+  let engineerPublication: EngineerPublicationManager | undefined;
   let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor });
   if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest) {
     const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(engineerRoot, "workspaces") });
@@ -185,10 +188,36 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       transportForRole: async () => transportForRole(),
       modelConfiguration,
     });
+    const publicationSecret = process.env.ZINTUS_ENGINEER_PUBLICATION_SECRET;
+    const githubToken = process.env.ZINTUS_ENGINEER_GITHUB_TOKEN;
+    engineerPublication = publicationSecret && githubToken
+      ? new EngineerPublicationManager({
+          supervisor: engineerSupervisor,
+          gitService: new GitHubGitService({
+            repositoryRoot: engineerRepositoryRoot,
+            token: () => githubToken,
+          }),
+          artifactStore: engineerArtifactStore,
+          diffForRun: (runId) => {
+            const sandbox = engineerExecution?.getSandbox(runId);
+            if (!sandbox) throw new Error("Engineer sandbox is unavailable for publication");
+            return workspaceManager.diff(sandbox.workspace);
+          },
+          commandSigningSecret: publicationSecret,
+          autoPublishLowRisk: /^(1|true)$/i.test(process.env.ZINTUS_ENGINEER_AUTO_PUBLISH_LOW_RISK ?? ""),
+          cleanupRun: (runId) => { engineerExecution?.destroy(runId); },
+        })
+      : undefined;
     engineerRuns = new EngineerRunManager({
       supervisor: engineerSupervisor,
       execution: engineerExecution,
       verification: engineerVerification,
+      ...(engineerPublication ? { publication: engineerPublication } : {}),
+      diffForRun: (runId) => {
+        const sandbox = engineerExecution?.getSandbox(runId);
+        if (!sandbox) throw new Error("Engineer sandbox is unavailable");
+        return workspaceManager.diff(sandbox.workspace);
+      },
     });
   }
 
@@ -298,6 +327,20 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // so an unreachable provider is demoted by health-aware routing before a real
   // request hits it. Off by default.
   let probeTimer: ReturnType<typeof setInterval> | null = null;
+  let engineerApprovalTimer: ReturnType<typeof setInterval> | null = null;
+  if (engineerPublication) {
+    const sweep = () => {
+      try {
+        const expired = engineerPublication?.sweepExpired() ?? [];
+        if (expired.length > 0) log("info", "engineer.approvals_expired", { runIds: expired.join(",") });
+      } catch (error) {
+        log("error", "engineer.approval_sweep_failed", { error: error instanceof Error ? error.message : String(error) });
+      }
+    };
+    engineerApprovalTimer = setInterval(sweep, 30_000);
+    engineerApprovalTimer.unref?.();
+    sweep();
+  }
   const probeIntervalMs = Number(process.env.PROVIDER_PROBE_INTERVAL_MS);
   if (Number.isFinite(probeIntervalMs) && probeIntervalMs >= 1000) {
     const runProbe = () => {
@@ -362,6 +405,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       if (probeTimer) {
         clearInterval(probeTimer);
         probeTimer = null;
+      }
+      if (engineerApprovalTimer) {
+        clearInterval(engineerApprovalTimer);
+        engineerApprovalTimer = null;
       }
       // Drain hosted MCP connections (stop the idle sweep + disconnect every
       // cached client, killing any stdio children) so a deploy doesn't leak them.

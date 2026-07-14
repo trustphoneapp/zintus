@@ -89,6 +89,20 @@ Verified claims must reference trusted evidence owned by the run. The resulting
 bundle is immutable and available through the authenticated gateway read API.
 Phase 3 stops at `REVIEW_APPROVED`; only Phase 4 may publish.
 
+Phase 4 creates a hash-bound approval request for work that cannot use the
+explicit low-risk bypass. Human decisions are durable records, and approval is
+valid only while its manifest, diff, evidence bundle, deadline, and result commit
+still match. A gateway sweep converts expired requests into a fail-closed terminal
+state. Cancellation passes through `CANCELLATION_PENDING`, destroys the retained
+single-use sandbox, and records cleanup failure separately from code failure.
+
+Publication is owned by `EngineerPublicationManager` and a narrow `GitService`.
+The Supervisor signs the exact PR command with an internal HMAC key, persists it
+as trusted evidence, checks the remote base before mutation, and records every
+inspect/branch/push/PR operation under an idempotency key. PR text is synthesized
+from the normalized request, frozen criteria, exact diff, claims, risk, and
+evidence bundle. A stale base cannot publish and must enter `REVERIFYING`.
+
 ## Core invariants
 
 - Model text is data and never directly mutates workflow state.
@@ -132,6 +146,5 @@ are marked by producer and filtered before Reviewer input construction.
 
 ## Deferred integrations
 
-Human approval, remote branch push, stale-base preflight, PR creation, client
-workflow screens, and production-scale recovery remain deferred. The Builder and
-Reviewer have no credentials for publication operations.
+Client workflow screens and production-scale recovery remain deferred. The
+Builder and Reviewer have no credentials for publication operations.

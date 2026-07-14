@@ -2791,6 +2791,28 @@ export function createGatewayHandler(
         if (action === "start" && request.method === "POST") {
           return json(request, { run: engineerRuns.start(runId), accepted: true }, 202);
         }
+        if (action === "approval" && request.method === "GET") {
+          return json(request, { approval: engineerRuns.approval(runId) });
+        }
+        if (["approve", "request-changes", "reject", "extend-approval", "cancel"].includes(action ?? "") && request.method === "POST") {
+          const body = await request.json() as { actorId?: string; reason?: string; extensionSeconds?: number };
+          if (!body.actorId || typeof body.reason !== "string") throw new Error("actorId and reason are required");
+          if (action === "approve") return json(request, { result: await engineerRuns.approve(runId, body.actorId, body.reason) });
+          if (action === "request-changes") {
+            engineerRuns.requestChanges(runId, body.actorId, body.reason);
+            return json(request, { run: engineerRuns.get(runId).run });
+          }
+          if (action === "reject") {
+            engineerRuns.reject(runId, body.actorId, body.reason);
+            return json(request, { run: engineerRuns.get(runId).run });
+          }
+          if (action === "extend-approval") {
+            if (typeof body.extensionSeconds !== "number") throw new Error("extensionSeconds is required");
+            return json(request, { approval: engineerRuns.extendApproval(runId, body.actorId, body.reason, body.extensionSeconds) });
+          }
+          await engineerRuns.cancel(runId, body.actorId, body.reason);
+          return json(request, { run: engineerRuns.get(runId).run });
+        }
         if (action === "events" && request.method === "GET") {
           return new Response(engineerRuns.subscribe(runId), {
             headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", ...corsHeaders(request) },
@@ -2804,6 +2826,18 @@ export function createGatewayHandler(
         }
         if (action === "evidence" && request.method === "GET") {
           return json(request, { evidenceBundles: engineerRuns.evidenceBundles(runId) });
+        }
+        if (action === "tests" && request.method === "GET") {
+          return json(request, { tests: engineerRuns.tests(runId) });
+        }
+        if (action === "security" && request.method === "GET") {
+          return json(request, { securityFindings: engineerRuns.security(runId) });
+        }
+        if (action === "failures" && request.method === "GET") {
+          return json(request, { failures: engineerRuns.failures(runId) });
+        }
+        if (action === "diff" && request.method === "GET") {
+          return json(request, { diff: engineerRuns.diff(runId) });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

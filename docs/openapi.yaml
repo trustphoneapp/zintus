@@ -392,6 +392,133 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Run not found. }
 
+  /v1/engineer/runs/{runId}/tests:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRunTests
+      summary: List independently executed verification records
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Ordered trusted test execution summaries. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/security:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRunSecurity
+      summary: List deterministic and advisory security findings
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Security findings with provenance evidence IDs. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/failures:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRunFailures
+      summary: List classified workflow failures
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Durable classified failures and retryability. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/diff:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerRunDiff
+      summary: Get the exact candidate diff used for review and approval
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Git diff text from the retained isolated workspace. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run or retained workspace not found. }
+
+  /v1/engineer/runs/{runId}/approval:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerRunApproval
+      summary: Get the latest hash-bound human approval request
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Latest approval request, or null. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/approve:
+    post:
+      tags: [Engineer]
+      operationId: approveEngineerRun
+      summary: Approve the exact reviewed diff and continue Supervisor publication
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
+      responses:
+        "200": { description: Approval recorded and publication result returned. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: Publication is unavailable or the approval no longer matches current evidence. }
+
+  /v1/engineer/runs/{runId}/request-changes:
+    post:
+      tags: [Engineer]
+      operationId: requestEngineerRunChanges
+      summary: Request human changes without granting publication authority
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
+      responses:
+        "200": { description: Run moved to FIX_REQUESTED. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/engineer/runs/{runId}/reject:
+    post:
+      tags: [Engineer]
+      operationId: rejectEngineerRun
+      summary: Reject a run at the human gate
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
+      responses:
+        "200": { description: Run rejected. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/engineer/runs/{runId}/extend-approval:
+    post:
+      tags: [Engineer]
+      operationId: extendEngineerRunApproval
+      summary: Extend a pending approval deadline within policy bounds
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actorId, reason, extensionSeconds]
+              additionalProperties: false
+              properties:
+                actorId: { type: string, minLength: 1, maxLength: 200 }
+                reason: { type: string, maxLength: 10000 }
+                extensionSeconds: { type: integer, minimum: 60, maximum: 604800 }
+      responses:
+        "200": { description: Updated approval deadline. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/engineer/runs/{runId}/cancel:
+    post:
+      tags: [Engineer]
+      operationId: cancelEngineerRun
+      summary: Cancel a non-terminal run and clean its isolated workspace
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
+      responses:
+        "200": { description: Run cancellation and cleanup completed. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /v1/agents:
     post:
       tags: [Agents]
@@ -1591,7 +1718,22 @@ components:
       description: Durable Engineer run identifier.
       schema: { type: string, minLength: 1, maxLength: 200 }
 
+  requestBodies:
+    EngineerHumanDecision:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/EngineerHumanDecisionRequest" }
+
   schemas:
+    EngineerHumanDecisionRequest:
+      type: object
+      required: [actorId, reason]
+      additionalProperties: false
+      properties:
+        actorId: { type: string, minLength: 1, maxLength: 200 }
+        reason: { type: string, maxLength: 10000 }
+
     EngineerRepositoryReference:
       type: object
       required: [repositoryId, provider, owner, name, baseBranch, baseCommitSha]

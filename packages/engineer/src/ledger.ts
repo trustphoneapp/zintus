@@ -42,6 +42,20 @@ import {
   type VerificationExecutionRecord,
 } from "./verification-contracts.js";
 import {
+  ApprovalDecisionRecordSchema,
+  ApprovalRequestRecordSchema,
+  FailureRecordSchema,
+  GitOperationRecordSchema,
+  PublicationEvidenceSchema,
+  TestExecutionViewSchema,
+  type ApprovalDecisionRecord,
+  type ApprovalRequestRecord,
+  type FailureRecord,
+  type GitOperationRecord,
+  type PublicationEvidence,
+  type TestExecutionView,
+} from "./control-contracts.js";
+import {
   ENGINEER_DATABASE_SCHEMA_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
 } from "./database-schema.js";
@@ -788,6 +802,174 @@ export class EngineerLedger {
     }));
   }
 
+  listTestExecutions(runId: string): TestExecutionView[] {
+    this.getRun(runId);
+    const rows = this.db.query("SELECT * FROM test_executions WHERE run_id = ? ORDER BY started_at, rowid").all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => TestExecutionViewSchema.parse({
+      testExecutionId: row.id, runId: row.run_id, commandExecutionId: row.command_execution_id,
+      type: row.type, status: row.status, startedAt: row.started_at, completedAt: row.completed_at,
+    }));
+  }
+
+  listSecurityFindings(runId: string): SecurityFindingRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query("SELECT * FROM security_findings WHERE run_id = ? ORDER BY created_at, rowid").all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => SecurityFindingRecordSchema.parse({
+      securityFindingId: row.id, runId: row.run_id, severity: row.severity, category: row.category,
+      description: row.description, file: row.file, lineStart: row.line_start, lineEnd: row.line_end,
+      evidenceIds: JSON.parse(String(row.evidence_ids_json)), status: row.status, createdAt: row.created_at,
+    }));
+  }
+
+  recordApprovalRequest(record: ApprovalRequestRecord): ApprovalRequestRecord {
+    const parsed = ApprovalRequestRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    const existing = this.db.query("SELECT * FROM approval_requests WHERE id = ?").get(parsed.approvalRequestId) as Record<string, unknown> | null;
+    if (existing) return this.approvalRequestFromRow(existing);
+    this.db.query(`INSERT INTO approval_requests
+      (id, run_id, risk_tier, assigned_reviewer_id, requested_at, deadline_at,
+       reminder_schedule_json, timeout_action, manifest_hash, diff_hash, evidence_bundle_hash, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.approvalRequestId, parsed.runId, parsed.riskTier, parsed.assignedReviewerId,
+      parsed.requestedAt, parsed.deadlineAt, canonicalJson(parsed.reminderSchedule), parsed.timeoutAction,
+      parsed.manifestHash, parsed.diffHash, parsed.evidenceBundleHash, parsed.status,
+    );
+    this.insertAudit(parsed.runId, "HUMAN_APPROVAL_REQUESTED", "SUPERVISOR", "engineer-supervisor", {
+      approvalRequestId: parsed.approvalRequestId, riskTier: parsed.riskTier,
+      deadlineAt: parsed.deadlineAt, manifestHash: parsed.manifestHash,
+      diffHash: parsed.diffHash, evidenceBundleHash: parsed.evidenceBundleHash,
+    }, parsed.requestedAt);
+    return parsed;
+  }
+
+  latestApprovalRequest(runId: string): ApprovalRequestRecord | null {
+    this.getRun(runId);
+    const row = this.db.query("SELECT * FROM approval_requests WHERE run_id = ? ORDER BY requested_at DESC, rowid DESC LIMIT 1")
+      .get(runId) as Record<string, unknown> | null;
+    return row ? this.approvalRequestFromRow(row) : null;
+  }
+
+  decideApproval(record: ApprovalDecisionRecord, requestStatus: ApprovalRequestRecord["status"]): ApprovalDecisionRecord {
+    const parsed = ApprovalDecisionRecordSchema.parse(record);
+    const request = this.db.query("SELECT run_id, status FROM approval_requests WHERE id = ?")
+      .get(parsed.approvalRequestId) as { run_id: string; status: string } | null;
+    if (!request) throw new EngineerNotFoundError("approval request", parsed.approvalRequestId);
+    const existing = this.db.query("SELECT * FROM approval_decisions WHERE id = ?").get(parsed.approvalDecisionId) as Record<string, unknown> | null;
+    if (existing) return ApprovalDecisionRecordSchema.parse({
+      approvalDecisionId: existing.id, approvalRequestId: existing.approval_request_id,
+      actorId: existing.actor_id, decision: existing.decision, reason: existing.reason, decidedAt: existing.decided_at,
+    });
+    if (request.status !== "PENDING") throw new IdempotencyConflictError(request.run_id, `approval:${parsed.approvalRequestId}`);
+    const transact = this.db.transaction(() => {
+      this.db.query(`INSERT INTO approval_decisions
+        (id, approval_request_id, actor_id, decision, reason, decided_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
+        parsed.approvalDecisionId, parsed.approvalRequestId, parsed.actorId, parsed.decision, parsed.reason, parsed.decidedAt,
+      );
+      this.db.query("UPDATE approval_requests SET status = ? WHERE id = ?").run(requestStatus, parsed.approvalRequestId);
+      this.insertAudit(request.run_id, `HUMAN_${parsed.decision}`, "HUMAN", parsed.actorId, {
+        approvalRequestId: parsed.approvalRequestId, approvalDecisionId: parsed.approvalDecisionId, reason: parsed.reason,
+      }, parsed.decidedAt);
+      return parsed;
+    });
+    return transact();
+  }
+
+  extendApproval(record: ApprovalDecisionRecord, deadlineAt: string, reminders: string[]): ApprovalRequestRecord {
+    const parsed = ApprovalDecisionRecordSchema.parse(record);
+    if (parsed.decision !== "EXTEND") throw new TypeError("approval extension requires EXTEND decision");
+    const request = this.latestApprovalRequestById(parsed.approvalRequestId);
+    if (request.status !== "PENDING") throw new IdempotencyConflictError(request.runId, `approval:${request.approvalRequestId}`);
+    this.db.transaction(() => {
+      this.db.query(`INSERT INTO approval_decisions
+        (id, approval_request_id, actor_id, decision, reason, decided_at) VALUES (?, ?, ?, ?, ?, ?)`).run(
+        parsed.approvalDecisionId, parsed.approvalRequestId, parsed.actorId, parsed.decision, parsed.reason, parsed.decidedAt,
+      );
+      this.db.query("UPDATE approval_requests SET deadline_at = ?, reminder_schedule_json = ? WHERE id = ?")
+        .run(deadlineAt, canonicalJson(reminders), parsed.approvalRequestId);
+    })();
+    return { ...request, deadlineAt, reminderSchedule: reminders };
+  }
+
+  getPublicationEvidence(runId: string): PublicationEvidence {
+    this.getRun(runId);
+    const reviewer = this.db.query(`SELECT id, decision, diff_hash, evidence_bundle_hash, isolation_verified
+      FROM reviewer_sessions WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`).get(runId) as Record<string, unknown> | null;
+    const bundle = this.db.query(`SELECT id, bundle_hash, manifest_json FROM evidence_bundles
+      WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(runId) as Record<string, unknown> | null;
+    if (!reviewer || !bundle) throw new EngineerNotFoundError("publication evidence", runId);
+    const bundleManifest = EvidenceBundleRecordSchema.parse({
+      evidenceBundleId: bundle.id, bundleHash: bundle.bundle_hash, bundle: JSON.parse(String(bundle.manifest_json)),
+    });
+    const testCounts = this.db.query(`SELECT COUNT(*) AS total,
+      SUM(CASE WHEN status <> 'PASSED' THEN 1 ELSE 0 END) AS failed FROM test_executions WHERE run_id = ?`)
+      .get(runId) as { total: number; failed: number | null };
+    const critical = this.db.query(`SELECT COUNT(*) AS count FROM security_findings
+      WHERE run_id = ? AND severity = 'CRITICAL' AND status = 'OPEN'`).get(runId) as { count: number };
+    return PublicationEvidenceSchema.parse({
+      runId, reviewerSessionId: reviewer.id, reviewerDecision: reviewer.decision,
+      reviewerDiffHash: reviewer.diff_hash, reviewerEvidenceBundleHash: reviewer.evidence_bundle_hash,
+      reviewerIsolationVerified: reviewer.isolation_verified === 1,
+      evidenceBundleId: bundleManifest.evidenceBundleId, evidenceBundleHash: bundleManifest.bundleHash,
+      resultCommitSha: bundleManifest.bundle.resultCommitSha,
+      allRequiredChecksPassed: testCounts.total > 0 && (testCounts.failed ?? 0) === 0,
+      openCriticalSecurityFindings: critical.count,
+    });
+  }
+
+  recordGitOperation(record: GitOperationRecord): GitOperationRecord {
+    const parsed = GitOperationRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    const existing = this.db.query("SELECT * FROM git_operations WHERE run_id = ? AND idempotency_key = ?")
+      .get(parsed.runId, parsed.idempotencyKey) as Record<string, unknown> | null;
+    if (existing) {
+      const current = this.gitOperationFromRow(existing);
+      if (current.gitOperationId !== parsed.gitOperationId || current.operationType !== parsed.operationType) {
+        throw new IdempotencyConflictError(parsed.runId, parsed.idempotencyKey);
+      }
+      this.db.query(`UPDATE git_operations SET status = ?, remote_reference = ?, completed_at = ?, error_code = ?
+        WHERE id = ?`).run(parsed.status, parsed.remoteReference, parsed.completedAt, parsed.errorCode, parsed.gitOperationId);
+      return parsed;
+    }
+    this.db.query(`INSERT INTO git_operations
+      (id, run_id, operation_type, requested_by, idempotency_key, expected_base_commit_sha,
+       result_commit_sha, approval_id, evidence_bundle_hash, status, remote_reference,
+       started_at, completed_at, error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.gitOperationId, parsed.runId, parsed.operationType, parsed.requestedBy, parsed.idempotencyKey,
+      parsed.expectedBaseCommitSha, parsed.resultCommitSha, parsed.approvalId, parsed.evidenceBundleHash,
+      parsed.status, parsed.remoteReference, parsed.startedAt, parsed.completedAt, parsed.errorCode,
+    );
+    return parsed;
+  }
+
+  findGitOperation(runId: string, idempotencyKey: string): GitOperationRecord | null {
+    this.getRun(runId);
+    const row = this.db.query("SELECT * FROM git_operations WHERE run_id = ? AND idempotency_key = ?")
+      .get(runId, idempotencyKey) as Record<string, unknown> | null;
+    return row ? this.gitOperationFromRow(row) : null;
+  }
+
+  recordFailure(record: FailureRecord): FailureRecord {
+    const parsed = FailureRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    this.db.query(`INSERT INTO failure_records
+      (id, run_id, failure_class, reason_code, fingerprint, evidence_ids_json, retryable, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.failureId, parsed.runId, parsed.failureClass, parsed.reasonCode, parsed.fingerprint,
+      canonicalJson(parsed.evidenceIds), parsed.retryable ? 1 : 0, parsed.createdAt,
+    );
+    return parsed;
+  }
+
+  listFailures(runId: string): FailureRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query("SELECT * FROM failure_records WHERE run_id = ? ORDER BY created_at, rowid").all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => FailureRecordSchema.parse({
+      failureId: row.id, runId: row.run_id, failureClass: row.failure_class, reasonCode: row.reason_code,
+      fingerprint: row.fingerprint, evidenceIds: JSON.parse(String(row.evidence_ids_json)),
+      retryable: row.retryable === 1, createdAt: row.created_at,
+    }));
+  }
+
   close(): void {
     this.db.close();
   }
@@ -804,6 +986,33 @@ export class EngineerLedger {
       sizeBytes: row.size_bytes,
       trusted: row.trusted === 1,
       createdAt: row.created_at,
+    });
+  }
+
+  private latestApprovalRequestById(approvalRequestId: string): ApprovalRequestRecord {
+    const row = this.db.query("SELECT * FROM approval_requests WHERE id = ?").get(approvalRequestId) as Record<string, unknown> | null;
+    if (!row) throw new EngineerNotFoundError("approval request", approvalRequestId);
+    return this.approvalRequestFromRow(row);
+  }
+
+  private approvalRequestFromRow(row: Record<string, unknown>): ApprovalRequestRecord {
+    return ApprovalRequestRecordSchema.parse({
+      approvalRequestId: row.id, runId: row.run_id, riskTier: row.risk_tier,
+      assignedReviewerId: row.assigned_reviewer_id, requestedAt: row.requested_at,
+      deadlineAt: row.deadline_at, reminderSchedule: JSON.parse(String(row.reminder_schedule_json)),
+      timeoutAction: row.timeout_action, manifestHash: row.manifest_hash, diffHash: row.diff_hash,
+      evidenceBundleHash: row.evidence_bundle_hash, status: row.status,
+    });
+  }
+
+  private gitOperationFromRow(row: Record<string, unknown>): GitOperationRecord {
+    return GitOperationRecordSchema.parse({
+      gitOperationId: row.id, runId: row.run_id, operationType: row.operation_type,
+      requestedBy: row.requested_by, idempotencyKey: row.idempotency_key,
+      expectedBaseCommitSha: row.expected_base_commit_sha, resultCommitSha: row.result_commit_sha,
+      approvalId: row.approval_id, evidenceBundleHash: row.evidence_bundle_hash,
+      status: row.status, remoteReference: row.remote_reference, startedAt: row.started_at,
+      completedAt: row.completed_at, errorCode: row.error_code,
     });
   }
 

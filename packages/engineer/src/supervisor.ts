@@ -37,6 +37,14 @@ import type {
   SecurityFindingRecord,
   VerificationExecutionRecord,
 } from "./verification-contracts.js";
+import type {
+  ApprovalDecisionRecord,
+  ApprovalRequestRecord,
+  FailureRecord,
+  GitOperationRecord,
+  PublicationEvidence,
+  TestExecutionView,
+} from "./control-contracts.js";
 import { IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
 import { sha256 } from "./hash.js";
 import { EngineerLedger, type LedgerTransitionResult } from "./ledger.js";
@@ -403,6 +411,52 @@ export class EngineerSupervisor {
 
   listEvidenceBundles(runId: string): EvidenceBundleRecord[] {
     return this.ledger.listEvidenceBundles(runId);
+  }
+
+  listTestExecutions(runId: string): TestExecutionView[] {
+    return this.ledger.listTestExecutions(runId);
+  }
+
+  listSecurityFindings(runId: string): SecurityFindingRecord[] {
+    return this.ledger.listSecurityFindings(runId);
+  }
+
+  recordApprovalRequest(record: ApprovalRequestRecord): ApprovalRequestRecord {
+    const run = this.ledger.getRun(record.runId);
+    if (run.state !== "REVIEW_APPROVED") throw new InvalidTransitionError("approval may only be requested after review approval");
+    return this.ledger.recordApprovalRequest(record);
+  }
+
+  latestApprovalRequest(runId: string): ApprovalRequestRecord | null {
+    return this.ledger.latestApprovalRequest(runId);
+  }
+
+  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): ApprovalDecisionRecord {
+    return this.ledger.decideApproval(record, status);
+  }
+
+  extendApproval(record: ApprovalDecisionRecord, deadlineAt: string, reminders: string[]): ApprovalRequestRecord {
+    return this.ledger.extendApproval(record, deadlineAt, reminders);
+  }
+
+  getPublicationEvidence(runId: string): PublicationEvidence {
+    return this.ledger.getPublicationEvidence(runId);
+  }
+
+  recordGitOperation(record: GitOperationRecord): GitOperationRecord {
+    return this.ledger.recordGitOperation(record);
+  }
+
+  findGitOperation(runId: string, idempotencyKey: string): GitOperationRecord | null {
+    return this.ledger.findGitOperation(runId, idempotencyKey);
+  }
+
+  recordFailure(record: FailureRecord): FailureRecord {
+    return this.ledger.recordFailure(record);
+  }
+
+  listFailures(runId: string): FailureRecord[] {
+    return this.ledger.listFailures(runId);
   }
 
   close(): void {
