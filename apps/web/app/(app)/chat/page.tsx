@@ -31,6 +31,12 @@ import {
   STRUCTURED_SCHEMA_KEY,
   type StructuredMode,
 } from "@/lib/structured-output";
+import {
+  suggestTool,
+  recordToolSuggestEvent,
+  type ToolSuggestKind,
+  type ToolSuggestion,
+} from "@/lib/tool-suggest";
 import { ThemeToggle } from "@/components/marketing/ThemeToggle";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { ConsentDialog } from "@/app/_components/ConsentDialog";
@@ -230,6 +236,14 @@ function historyHasImages(msgs: ChatMessage[]): boolean {
 /** Stable empty reference so the per-thread artifact-edits selector doesn't
  *  return a fresh object each render (which would thrash zustand subscribers). */
 const EMPTY_ARTIFACT_EDITS: Record<string, ArtifactVersion[]> = {};
+
+// Tool auto-suggest chip: the human-readable name for each toggle, used in
+// the chip's "Enable {name} for this message" copy and its aria-labels.
+const TOOL_SUGGEST_KIND_LABEL: Record<ToolSuggestKind, string> = {
+  search: "Search",
+  json: "JSON",
+  research: "Research",
+};
 
 /** Client opt-in for artifact mode (re-feed + tag-authoring). Off by default —
  *  same posture as goal 1's per-request flag. Toggled in settings. */
@@ -462,6 +476,134 @@ export default function ChatPage() {
   const schemaError =
     jsonMode === "json_schema" ? (structuredBuild.error ?? null) : null;
 
+  // ── Tool auto-suggest chip (Option A) ───────────────────────────────────────
+  // Pure client-side intent detection (lib/tool-suggest.ts) — zero model calls,
+  // zero silent spend. The chip only ever proposes; the user always taps
+  // "Enable" before a toggle changes, and the cost is disclosed in the copy.
+  // Dismissals are session-scoped (component state, resets on remount/reload).
+  const [toolSuggestDismissed, setToolSuggestDismissed] = useState<
+    Set<ToolSuggestKind>
+  >(() => new Set());
+  const [toolSuggestion, setToolSuggestion] = useState<ToolSuggestion | null>(
+    null,
+  );
+  const [composerFocused, setComposerFocused] = useState(false);
+  // Guards the "shown" stat so it increments once per appearance, not once per
+  // keystroke while the same kind keeps matching as the user keeps typing.
+  const toolSuggestShownRef = useRef<ToolSuggestKind | null>(null);
+  // Holds the prior toggle value + a restore closure while an "Enable" tap is
+  // in effect FOR THIS SEND ONLY — cleared once the send lifecycle finishes
+  // (success, error, or abort) or once the user manually flips that toggle.
+  const toolSuggestRestoreRef = useRef<{
+    kind: ToolSuggestKind;
+    restore: () => void;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!composerFocused || !input.trim()) {
+      setToolSuggestion(null);
+      return;
+    }
+    const handle = setTimeout(() => {
+      setToolSuggestion(
+        suggestTool(input, {
+          searchOn: webSearchEnabled,
+          researchOn: researchMode,
+          jsonMode,
+          dismissed: toolSuggestDismissed,
+        }),
+      );
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [input, composerFocused, webSearchEnabled, researchMode, jsonMode, toolSuggestDismissed]);
+
+  useEffect(() => {
+    if (toolSuggestion) {
+      if (toolSuggestShownRef.current !== toolSuggestion.kind) {
+        recordToolSuggestEvent(toolSuggestion.kind, "shown");
+        toolSuggestShownRef.current = toolSuggestion.kind;
+      }
+    } else {
+      toolSuggestShownRef.current = null;
+    }
+  }, [toolSuggestion]);
+
+  // If the user manually flips the toggle a pending chip-enable targeted,
+  // the manual action wins — don't let a later send() stomp it back.
+  const clearToolSuggestRestore = useCallback((kind: ToolSuggestKind) => {
+    if (toolSuggestRestoreRef.current?.kind === kind) {
+      toolSuggestRestoreRef.current = null;
+    }
+  }, []);
+
+  const enableToolSuggestion = useCallback(
+    (suggestion: ToolSuggestion) => {
+      recordToolSuggestEvent(suggestion.kind, "accepted");
+      if (suggestion.kind === "search") {
+        const prev = webSearchEnabled;
+        setWebSearchEnabled(true);
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem("zintus:web-search", "true");
+        }
+        toolSuggestRestoreRef.current = {
+          kind: "search",
+          restore: () => {
+            setWebSearchEnabled(prev);
+            if (typeof localStorage !== "undefined") {
+              localStorage.setItem("zintus:web-search", String(prev));
+            }
+          },
+        };
+      } else if (suggestion.kind === "json") {
+        const prev = jsonMode;
+        setJsonMode("json_object");
+        toolSuggestRestoreRef.current = {
+          kind: "json",
+          restore: () => setJsonMode(prev),
+        };
+      } else {
+        const prev = researchMode;
+        setResearchMode(true);
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem("zintus:research-mode", "true");
+        }
+        toolSuggestRestoreRef.current = {
+          kind: "research",
+          restore: () => {
+            setResearchMode(prev);
+            if (typeof localStorage !== "undefined") {
+              localStorage.setItem("zintus:research-mode", String(prev));
+            }
+          },
+        };
+      }
+      setToolSuggestion(null);
+    },
+    [webSearchEnabled, jsonMode, researchMode],
+  );
+
+  const dismissToolSuggestion = useCallback((kind: ToolSuggestKind) => {
+    recordToolSuggestEvent(kind, "dismissed");
+    setToolSuggestDismissed((prev) => {
+      const next = new Set(prev);
+      next.add(kind);
+      return next;
+    });
+    setToolSuggestion(null);
+  }, []);
+
+  // Restores whatever toggle a chip-enable changed, back to its prior value.
+  // Called from every terminal path of the send lifecycle (streamAssistant's
+  // success/error/abort finally blocks, and the research-mode redirect in
+  // send() which never reaches streamAssistant at all).
+  const restoreToolSuggestOverride = useCallback(() => {
+    const pending = toolSuggestRestoreRef.current;
+    if (pending) {
+      pending.restore();
+      toolSuggestRestoreRef.current = null;
+    }
+  }, []);
+
   // ── Artifacts / canvas side panel ─────────────────────────────────────────
   // The panel lists every artifact-worthy block (substantial code, full HTML,
   // SVG, long markdown doc) across the conversation. Detection is pure (see
@@ -677,6 +819,52 @@ export default function ChatPage() {
     atBottomRef.current = true;
     setShowJump(false);
   }, []);
+
+  // Contain text selection to the message where the drag starts (Slack-style).
+  // Browsers have no `user-select: contain`, and Chromium ignores user-select
+  // changes made mid-gesture — so we clamp the live Selection instead: while a
+  // drag that began inside one bubble is active, any selectionchange whose
+  // focus escapes that bubble is extended back to the bubble's boundary.
+  useEffect(() => {
+    const container = messagesRef.current;
+    if (!container) return;
+    let origin: Element | null = null;
+    const clamp = () => {
+      if (!origin) return;
+      const sel = document.getSelection();
+      if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+      const focus = sel.focusNode;
+      if (!focus || origin.contains(focus)) return;
+      try {
+        const bounds = document.createRange();
+        bounds.selectNodeContents(origin);
+        const before =
+          origin.compareDocumentPosition(focus) &
+          Node.DOCUMENT_POSITION_PRECEDING;
+        if (before) sel.extend(bounds.startContainer, bounds.startOffset);
+        else sel.extend(bounds.endContainer, bounds.endOffset);
+      } catch {
+        /* extend can throw on exotic nodes — leave the selection as-is */
+      }
+    };
+    const end = () => {
+      origin = null;
+      document.removeEventListener("selectionchange", clamp);
+    };
+    const start = (event: MouseEvent) => {
+      const bubble = (event.target as HTMLElement).closest?.(".message-bubble");
+      if (!bubble) return;
+      origin = bubble;
+      document.addEventListener("selectionchange", clamp);
+      window.addEventListener("mouseup", end, { once: true });
+    };
+    container.addEventListener("mousedown", start);
+    return () => {
+      container.removeEventListener("mousedown", start);
+      window.removeEventListener("mouseup", end);
+      end();
+    };
+  }, [activeThreadId]);
 
   // Auto-grow the composer textarea (1 → ~8 lines) as the user types, then let
   // it scroll. Keyed to `input` so it also collapses back after send/clear.
@@ -1007,6 +1195,7 @@ export default function ChatPage() {
           pushTerminalLine({ text: `✗ ${message}`, tone: "warning" });
         } finally {
           setLoading(false);
+          restoreToolSuggestOverride();
         }
         return;
       }
@@ -1219,6 +1408,7 @@ export default function ChatPage() {
         pushTerminalLine({ text: `✗ ${message}`, tone: "warning" });
       } finally {
         setLoading(false);
+        restoreToolSuggestOverride();
       }
     },
     [
@@ -1226,6 +1416,7 @@ export default function ChatPage() {
       loadLastTrace,
       patchMessage,
       pushTerminalLine,
+      restoreToolSuggestOverride,
       selectedProvider,
       setActiveProvider,
       setThreadId,
@@ -1256,6 +1447,11 @@ export default function ChatPage() {
         `/research?q=${encodeURIComponent(input.trim())}&depth=${researchDepth}`,
       );
       setInput("");
+      // This path never reaches streamAssistant — restore a chip-enabled
+      // toggle here instead (research mode itself doesn't need restoring,
+      // it's a real navigation, but json/search overrides set earlier this
+      // turn still need to be unwound).
+      restoreToolSuggestOverride();
       return;
     }
     // A pinned managed model routes via the relay against plan tokens — it needs
@@ -1434,6 +1630,7 @@ export default function ChatPage() {
     toolsEnabled,
     researchMode,
     researchDepth,
+    restoreToolSuggestOverride,
     router,
     managedModel,
     billing,
@@ -2044,6 +2241,47 @@ export default function ChatPage() {
             </button>
           </div>
         ) : null}
+        {/* Tool auto-suggest chip (Option A) — pure client-side intent
+            detection (lib/tool-suggest.ts). Zero model calls, zero silent
+            spend: it only ever proposes, the user always taps Enable, and
+            the cost is disclosed in the copy before that tap. Sits below the
+            pinned-provider notice, in the same slot family, when both show. */}
+        {mounted && toolSuggestion ? (
+          <div
+            className="tool-suggest-chip"
+            role="status"
+            onMouseDown={(e) => e.preventDefault()}
+          >
+            <span className="tsc-icon" aria-hidden="true">
+              {toolSuggestion.kind === "json" ? (
+                "{}"
+              ) : (
+                <Icon name="globe" size={12} />
+              )}
+            </span>
+            <span className="tsc-text">
+              {toolSuggestion.label} — Enable{" "}
+              {TOOL_SUGGEST_KIND_LABEL[toolSuggestion.kind]} for this message (
+              {toolSuggestion.costHint})
+            </span>
+            <button
+              type="button"
+              className="tsc-action"
+              aria-label={`Enable ${TOOL_SUGGEST_KIND_LABEL[toolSuggestion.kind]} for this message`}
+              onClick={() => enableToolSuggestion(toolSuggestion)}
+            >
+              Enable
+            </button>
+            <button
+              type="button"
+              className="tsc-dismiss"
+              aria-label={`Dismiss ${TOOL_SUGGEST_KIND_LABEL[toolSuggestion.kind]} suggestion`}
+              onClick={() => dismissToolSuggestion(toolSuggestion.kind)}
+            >
+              <Icon name="x" size={10} />
+            </button>
+          </div>
+        ) : null}
         <div
           className="chat-composer"
           onDragOver={(e) => e.preventDefault()}
@@ -2157,6 +2395,8 @@ export default function ChatPage() {
                 void handleFiles(e.clipboardData.files);
               }
             }}
+            onFocus={() => setComposerFocused(true)}
+            onBlur={() => setComposerFocused(false)}
             placeholder={
               mounted && researchMode
                 ? `Research mode (${researchDepth}) — ⏎ runs Deep Research on this prompt`
@@ -2341,6 +2581,7 @@ export default function ChatPage() {
                         aria-pressed={webSearchEnabled}
                         aria-label="Toggle web search"
                         onClick={() => {
+                          clearToolSuggestRestore("search");
                           setWebSearchEnabled((v) => {
                             const next = !v;
                             if (typeof localStorage !== "undefined") {
@@ -2397,6 +2638,7 @@ export default function ChatPage() {
                         aria-pressed={researchMode}
                         aria-label="Toggle research mode"
                         onClick={() => {
+                          clearToolSuggestRestore("research");
                           setResearchMode((v) => {
                             const next = !v;
                             if (typeof localStorage !== "undefined") {
@@ -2452,7 +2694,10 @@ export default function ChatPage() {
                       mode={jsonMode}
                       schemaText={jsonSchemaText}
                       error={schemaError}
-                      onModeChange={setJsonMode}
+                      onModeChange={(mode) => {
+                        clearToolSuggestRestore("json");
+                        setJsonMode(mode);
+                      }}
                       onSchemaTextChange={setJsonSchemaText}
                     />
 

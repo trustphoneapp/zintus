@@ -256,9 +256,8 @@ function ProvidersPageInner() {
   return (
     <div className="screen providers-screen">
       <div
+        className="section-shell section-shell-wide"
         style={{
-          width: "100%",
-          maxWidth: 820,
           display: "flex",
           flexDirection: "column",
           gap: 12,

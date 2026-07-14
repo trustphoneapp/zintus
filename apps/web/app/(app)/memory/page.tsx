@@ -32,8 +32,6 @@ const SCOPES: { id: MemoryScope; label: string; hint: string }[] = [
 ];
 
 const pageStyle: CSSProperties = {
-  maxWidth: 820,
-  width: "100%",
   display: "flex",
   flexDirection: "column",
   gap: 16,
@@ -245,7 +243,8 @@ export default function MemoryPage() {
   const activeHint = SCOPES.find((s) => s.id === scope)?.hint ?? "";
 
   return (
-    <div style={pageStyle}>
+    <div className="screen section-scroll">
+      <div className="section-shell section-shell-wide" style={pageStyle}>
       <div>
         <h1 style={{ margin: "0 0 4px", fontSize: 22 }}>Memory</h1>
         <p style={{ margin: 0, color: "var(--color-text-sub)", fontSize: 13.5 }}>
@@ -575,6 +574,7 @@ export default function MemoryPage() {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

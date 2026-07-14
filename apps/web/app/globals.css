@@ -334,6 +334,7 @@ code {
 .chat-local-banner,
 .transparency-summary,
 .pinned-provider-notice,
+.tool-suggest-chip,
 .chat-composer-actions,
 .chat-composer-hint,
 .message-footer,
@@ -356,13 +357,31 @@ code {
   user-select: none;
 }
 
-/* Deliberate selection styling (all four theme modes share these tokens via
-   their .dark/.obsidian/.graphite/.light class on <html>) instead of the
-   browser's default grey. */
+/* Deliberate selection styling — a VISIBLY designed highlight, distinct from
+   the browser's default grey (the earlier --c-accent-mid tint resolved to a
+   near-identical white wash in dark modes). Selection is a functional state
+   like the green status dots, so it's exempt from the no-chroma chat rule;
+   Obsidian stays achromatic by identity. */
+:root {
+  --selection: rgba(77, 107, 254, 0.3);
+}
+.light {
+  --selection: rgba(77, 107, 254, 0.18);
+}
+.obsidian {
+  --selection: rgba(245, 245, 247, 0.25);
+}
+.graphite {
+  --selection: rgba(32, 168, 184, 0.28);
+}
 ::selection {
-  background: var(--c-accent-mid);
+  background: var(--selection);
   color: inherit;
 }
+
+/* Slack-style selection containment lives in the chat page's selectionchange
+   clamp (Chromium ignores user-select changes mid-gesture, so CSS can't do
+   this) — see the messagesRef effect in chat/page.tsx. */
 
 .app-root {
   /* Dynamic viewport height — accounts for the mobile URL bar so the app shell
@@ -1944,6 +1963,50 @@ code {
 .compare-screen > *,
 .research-screen > * {
   flex-shrink: 0;
+}
+
+/* ── Centered section canvas (Claude.ai pattern) ─────────────────────────────
+   A shared column primitive applied INSIDE a scroll-owning .screen. It centers
+   each section's content within .app-content (margin-inline:auto) — independent
+   of the sidebar state (full 264 / laptop 240 / tablet rail / mobile drawer) and
+   window width, so the column never left-anchors to the sidebar edge. Two width
+   tiers: WIDE for list/table sections, NARROW for form-ish ones. It owns width +
+   centering only; each page keeps its own vertical flow (flex-column + the
+   density gap per §13.1) so this stays composition, not sizing. */
+.section-shell {
+  width: 100%;
+  margin-inline: auto;
+}
+
+.section-shell-wide {
+  max-width: min(1060px, 100% - 48px);
+}
+
+.section-shell-narrow {
+  max-width: min(760px, 100% - 48px);
+}
+
+/* Generic scroll owner for a bare .screen with no page-specific variant (e.g.
+   /memory). Mirrors the .providers-screen / .usage-screen recipe: the .screen
+   itself owns overflow-y and every direct child keeps its content height so the
+   scroll never collapses (see the flex-shrink note above). */
+.section-scroll {
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.section-scroll > * {
+  flex-shrink: 0;
+}
+
+/* Shared section header row: page title left, primary actions right, on one row;
+   the actions wrap below the title at narrow widths. */
+.section-head-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 
 .providers-grid {
@@ -7523,6 +7586,61 @@ body:has(.dashboard-container) {
   padding: 2px;
 }
 .pinned-provider-notice .ppn-dismiss:hover {
+  color: var(--color-text);
+}
+/* ── Tool auto-suggest chip (Option A) ─────────────────────────────────────
+   Pure client-side intent detector (lib/tool-suggest.ts) proposes enabling a
+   tool for the current message. Same slim, informational styling family as
+   .pinned-provider-notice — quiet grey, mono, never blocks send — and lives
+   in the same slot, directly below it when both are present. */
+.tool-suggest-chip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+.tool-suggest-chip .tsc-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+.tool-suggest-chip .tsc-text {
+  color: var(--color-text-muted);
+}
+.tool-suggest-chip .tsc-action {
+  color: var(--color-text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.tool-suggest-chip .tsc-action:hover {
+  color: var(--color-text);
+}
+.tool-suggest-chip .tsc-dismiss {
+  margin-left: auto;
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: flex;
+  padding: 2px;
+}
+.tool-suggest-chip .tsc-dismiss:hover {
   color: var(--color-text);
 }
 /* ── Web search toggle ──────────────────────────────────────────────────── */

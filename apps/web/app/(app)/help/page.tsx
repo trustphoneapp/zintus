@@ -10,7 +10,6 @@ export const metadata = {
     "Get Zintus running: gateway troubleshooting, bring-your-own-key setup, MCP servers, and privacy.",
 };
 
-const pageStyle: CSSProperties = { maxWidth: 720, width: "100%" };
 
 const sectionHeadStyle: CSSProperties = {
   display: "flex",
@@ -141,7 +140,8 @@ export default function HelpPage() {
   return (
     <div className="screen settings-screen">
       <div
-        style={{ ...pageStyle, display: "flex", flexDirection: "column", gap: 24 }}
+        className="section-shell section-shell-narrow"
+        style={{ display: "flex", flexDirection: "column", gap: 24 }}
       >
         <div style={sectionHeadStyle}>
           <span style={sectionTitleStyle}>Help &amp; docs</span>

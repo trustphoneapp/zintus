@@ -89,7 +89,7 @@ export default function ProjectsPage() {
 
   return (
     <div className="screen" style={{ padding: 0, overflow: "auto" }}>
-      <div style={{ maxWidth: 940, margin: "0 auto", padding: "28px 24px 48px" }}>
+      <div className="section-shell section-shell-wide" style={{ padding: "28px 24px 48px" }}>
         <div
           style={{
             display: "flex",

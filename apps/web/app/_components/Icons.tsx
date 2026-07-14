@@ -27,7 +27,8 @@ type IconName =
   | "image"
   | "plug"
   | "pin"
-  | "database";
+  | "database"
+  | "bot";
 
 const paths: Record<IconName, ReactNode> = {
   database: (
@@ -172,6 +173,16 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M9 8V2" />
       <path d="M15 8V2" />
       <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z" />
+    </>
+  ),
+  bot: (
+    <>
+      <path d="M12 8V4H8" />
+      <rect x="4" y="8" width="16" height="12" rx="2" ry="2" />
+      <path d="M2 14h2" />
+      <path d="M20 14h2" />
+      <path d="M15 13v2" />
+      <path d="M9 13v2" />
     </>
   ),
 };

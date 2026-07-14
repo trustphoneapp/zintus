@@ -32,7 +32,6 @@ const THEMES: Array<{ value: string; label: string }> = [
   { value: "dark", label: "Dark" },
 ];
 
-const pageStyle: CSSProperties = { maxWidth: 720, width: "100%" };
 
 const sectionStyle: CSSProperties = {
   display: "flex",
@@ -178,7 +177,10 @@ export default function SettingsPage() {
 
   return (
     <div className="screen settings-screen">
-      <div style={{ ...pageStyle, display: "flex", flexDirection: "column", gap: 24 }}>
+      <div
+        className="section-shell section-shell-narrow"
+        style={{ display: "flex", flexDirection: "column", gap: 24 }}
+      >
         <Section
           title="Appearance"
           description="Choose how the interface looks on this device."

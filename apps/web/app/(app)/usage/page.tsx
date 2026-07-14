@@ -15,8 +15,6 @@ import {
 const MONO = "ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo, monospace";
 
 const pageStyle: CSSProperties = {
-  maxWidth: 900,
-  width: "100%",
   display: "flex",
   flexDirection: "column",
   gap: 18,
@@ -219,7 +217,7 @@ export default function UsagePage() {
 
   return (
     <div className="screen usage-screen">
-      <div style={pageStyle}>
+      <div className="section-shell section-shell-wide" style={pageStyle}>
         <div
           style={{
             display: "flex",

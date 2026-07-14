@@ -265,6 +265,10 @@ export default function ComparePage() {
 
   return (
     <div className="screen compare-screen">
+      <div
+        className="section-shell section-shell-wide"
+        style={{ display: "flex", flexDirection: "column", gap: 14 }}
+      >
       <div>
         <h1
           style={{
@@ -599,6 +603,7 @@ export default function ComparePage() {
           void runCompare();
         }}
       />
+      </div>
     </div>
   );
 }

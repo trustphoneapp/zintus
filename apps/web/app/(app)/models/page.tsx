@@ -317,6 +317,10 @@ export default function ModelsPage() {
 
   return (
     <div className="screen providers-screen">
+      <div
+        className="section-shell section-shell-wide"
+        style={{ display: "flex", flexDirection: "column", gap: 12 }}
+      >
       <div>
         <h1 style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.01em", margin: 0 }}>
           Models
@@ -602,6 +606,7 @@ export default function ModelsPage() {
       {showCompare && compareModels.length >= 2 ? (
         <CompareTable models={compareModels} onClose={() => setShowCompare(false)} />
       ) : null}
+      </div>
     </div>
   );
 }

@@ -23,7 +23,6 @@ import {
   type StoredMcpServer,
 } from "@/lib/mcp-config";
 
-const pageStyle: CSSProperties = { maxWidth: 720, width: "100%" };
 
 const sectionStyle: CSSProperties = {
   display: "flex",
@@ -243,7 +242,8 @@ export default function McpSettingsPage() {
   return (
     <div className="screen settings-screen">
       <div
-        style={{ ...pageStyle, display: "flex", flexDirection: "column", gap: 24 }}
+        className="section-shell section-shell-narrow"
+        style={{ display: "flex", flexDirection: "column", gap: 24 }}
       >
         {/* Gateway status banner (design parity): MCP servers run on the local
             gateway, so its reachability is the first thing to surface. */}
