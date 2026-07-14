@@ -676,6 +676,19 @@ export interface ChatMeta {
    * as the "memory used this turn" footer — transparency, never authority.
    */
   memoryUsed?: Array<{ id: string; content: string }>;
+  /**
+   * Managed-membership turn (served relay-side against plan tokens, not the local
+   * gateway). When true the receipt reads plan tokens instead of BYOK USD cost:
+   *   - `planTokensDebited` — plan tokens this turn debited for the member's tier
+   *     (PRICING-FINAL Part 6), or `undefined` when the relay omitted the header
+   *     or never reported usage (honest blank, never a guessed 0).
+   *   - `servedBy` — the upstream that actually served it (X-Zintus-Served-By).
+   * `costUsd`/`savedUsd` are 0 on a managed turn (there is no per-token USD charge
+   * to the member — the plan-token debit is the whole story).
+   */
+  managed?: boolean;
+  planTokensDebited?: number;
+  servedBy?: string;
 }
 
 /** One actionable provider suggestion from the gateway's capability error. */

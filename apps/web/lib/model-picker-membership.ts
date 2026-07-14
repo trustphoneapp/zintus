@@ -4,14 +4,12 @@
  * member gets the managed group, everyone else gets one quiet upsell row — is
  * unit-testable without mounting the picker (same pattern as chat-top-strip.ts).
  *
- * HONESTY BOUNDARY. The web chat send path routes ONLY through the local gateway
- * (`streamChat` → `GATEWAY_URL/v1/chat/completions`). It has no managed-membership
- * client — that lives solely in the desktop app (apps/desktop/lib/managed-chat.ts,
- * `POST /v1/managed/chat/completions` with relay session auth). So on web today we
- * surface managed models to an active member with their real plan-token cost, but
- * we do NOT let them pin one (no dead sends). `MANAGED_ROUTING_ON_WEB` is the one
- * switch: flip it true the day the web send path gains a managed-chat client and
- * the rows become pinnable automatically.
+ * The web chat send path now has a managed-membership client (lib/managed-chat.ts,
+ * `POST /v1/managed/chat/completions` with the relay session cookie), so an active
+ * member can pin a managed model and it is served relay-side against plan tokens —
+ * no local gateway, no BYOK key. `MANAGED_ROUTING_ON_WEB` reflects that: it is the
+ * one switch that turns the member rows selectable and swaps the footer from the
+ * old "arrives on web soon" note to the live plan-token quota line.
  */
 import type { BillingStatus, ManagedModelDto } from "./billing";
 import { isManagedMember, TIER_LABEL } from "./membership";
@@ -23,15 +21,26 @@ import {
 
 /**
  * Can the web chat send path actually route a managed-membership model
- * end-to-end today? NO — see the module header. Keep this `false` until a web
- * managed-chat client exists; the moment it does, flip this and the member rows
- * become selectable with zero other changes.
+ * end-to-end? YES — lib/managed-chat.ts streams `POST /v1/managed/chat/completions`
+ * with the session cookie, so member rows are pinnable and billed against plan
+ * tokens. (Left as a named seam so tests can force the pre-client behavior.)
  */
-export const MANAGED_ROUTING_ON_WEB = false;
+export const MANAGED_ROUTING_ON_WEB = true;
 
-/** The single quiet footer line shown while managed routing isn't web-routable. */
+/** The quiet footer line shown when managed routing isn't web-routable (seam
+ *  off). With the client live this is superseded by the plan-token quota line. */
 export const MANAGED_SOON_NOTE =
   "Managed routing arrives on web soon — available in the desktop app today";
+
+/** Live plan-token quota footer for a member, e.g. "Plan tokens: 12,345 / 10M".
+ *  Falls back to a used-only line when the relay reports no limit. */
+export function planTokensFooter(billing: BillingStatus): string {
+  const used = billing.tokens_used.toLocaleString();
+  if (billing.tokens_limit && billing.tokens_limit > 0) {
+    return `Plan tokens: ${used} / ${billing.tokens_limit.toLocaleString()}`;
+  }
+  return `Plan tokens: ${used} used`;
+}
 
 /** The quiet upsell row for signed-out / free / cancelled visitors. Mirrors the
  *  providers-page upsell grammar ("no keys needed · from $15/mo" → /pricing). */
@@ -113,7 +122,8 @@ export function resolveModelPickerMembership(
     kind: "member",
     title: `Membership — ${TIER_LABEL[billing!.tier]}`,
     rows,
-    footer: routingOnWeb ? null : MANAGED_SOON_NOTE,
+    // Routable now → the live plan-token quota line; seam off → the old note.
+    footer: routingOnWeb ? planTokensFooter(billing!) : MANAGED_SOON_NOTE,
   };
 }
 

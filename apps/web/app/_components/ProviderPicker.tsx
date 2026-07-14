@@ -69,7 +69,13 @@ function isT0(model: CatalogModelDto): boolean {
  * the provider; "Auto" clears the pin and returns to per-message routing.
  */
 export function ProviderPicker() {
-  const { gatewayConnected, gatewayProviders, setSelectedProvider } = useAppStore();
+  const {
+    gatewayConnected,
+    gatewayProviders,
+    setSelectedProvider,
+    managedModel,
+    setManagedModel,
+  } = useAppStore();
   const vaultProviders = useProviderStatusStore((s) => s.providers);
   const unlock = useProviderStatusStore((s) => s.unlock);
   const [open, setOpen] = useState(false);
@@ -197,8 +203,25 @@ export function ProviderPicker() {
     setOpen(false);
   }
 
+  // Pin a managed-membership model. Mutually exclusive with a BYOK pin: clear the
+  // catalog pin, then set the managed model in the store (which clears
+  // selectedProvider). The chat send path routes this via the relay's managed
+  // endpoint against plan tokens — no local gateway, no key.
+  function pickManaged(row: { id: string; selectable: boolean }) {
+    if (!row.selectable) return;
+    try {
+      localStorage.removeItem(SELECTED_MODEL_KEY);
+    } catch {
+      /* storage unavailable — managed pin is still set below */
+    }
+    setPinnedId(null);
+    setManagedModel(row.id);
+    setOpen(false);
+  }
+
   function clearPin() {
     unpinModel(setSelectedProvider);
+    setManagedModel(null);
     setPinnedId(null);
     setOpen(false);
   }
@@ -229,10 +252,19 @@ export function ProviderPicker() {
     );
   }
 
+  // A pinned managed-membership model takes over the pill (accent dot + its
+  // display name), since it routes independently of the BYOK catalog.
+  const managedPinned = managedModel
+    ? (managedModels.find((m) => m.id === managedModel) ?? null)
+    : null;
+  const managedPillName = managedModel
+    ? (managedPinned?.display_name ?? managedModel.replace(/^zintus\//, ""))
+    : null;
+
   // The routing badge ("Auto") is redundant when the name is already "Auto"
   // (no pinned/default model resolved yet) — show only one "Auto" in that case.
-  const pillName = shown ? shown.id : "Auto";
-  const rawBadge = !pinned ? "Auto" : null;
+  const pillName = managedPillName ?? (shown ? shown.id : "Auto");
+  const rawBadge = !pinned && !managedModel ? "Auto" : null;
   const pillBadge =
     rawBadge && rawBadge.toLowerCase() !== pillName.toLowerCase() ? rawBadge : null;
 
@@ -248,7 +280,13 @@ export function ProviderPicker() {
       >
         <span
           className="model-pill-dot"
-          style={{ background: shown ? dotColor(shown.owned_by) : "var(--color-text-muted)" }}
+          style={{
+            background: managedModel
+              ? "var(--c-accent)"
+              : shown
+                ? dotColor(shown.owned_by)
+                : "var(--color-text-muted)",
+          }}
         />
         <span className="model-pill-name">{pillName}</span>
         {pillBadge ? <span className="model-pill-badge">{pillBadge}</span> : null}
@@ -264,7 +302,7 @@ export function ProviderPicker() {
 
           <button
             type="button"
-            className={`model-pick-auto${!pinned ? " active" : ""}`}
+            className={`model-pick-auto${!pinned && !managedModel ? " active" : ""}`}
             onClick={clearPin}
           >
             <span aria-hidden>⚡</span>
@@ -296,32 +334,59 @@ export function ProviderPicker() {
           {membership.kind === "member" ? (
             <>
               <div className="model-pick-section">{membership.title}</div>
-              {membership.rows.map((m) => (
-                <div
-                  key={m.id}
-                  className="model-pick-row model-pick-row-managed"
-                  aria-disabled={!m.selectable}
-                >
+              {membership.rows.map((m) => {
+                const active = managedModel === m.id;
+                const planChip = m.planCost ? (
                   <span
-                    className="model-pick-dot"
-                    style={{ background: "var(--c-accent)" }}
-                  />
-                  <span className="model-pick-id">{m.displayName}</span>
-                  <span className="model-pick-meta">
-                    {m.planCost ? (
-                      <span
-                        className={
-                          m.locked
-                            ? "model-pick-plan model-pick-plan-locked"
-                            : "model-pick-plan"
-                        }
-                      >
-                        {m.planCost}
-                      </span>
-                    ) : null}
+                    className={
+                      m.locked
+                        ? "model-pick-plan model-pick-plan-locked"
+                        : "model-pick-plan"
+                    }
+                  >
+                    {m.planCost}
                   </span>
-                </div>
-              ))}
+                ) : null;
+                // Tier-gated (locked) rows are an Upgrade link, never pinnable.
+                if (m.locked) {
+                  return (
+                    <Link
+                      key={m.id}
+                      href="/pricing"
+                      className="model-pick-row model-pick-row-managed"
+                      onClick={() => setOpen(false)}
+                      aria-disabled
+                    >
+                      <span
+                        className="model-pick-dot"
+                        style={{ background: "var(--c-accent)" }}
+                      />
+                      <span className="model-pick-id">{m.displayName}</span>
+                      <span className="model-pick-meta">{planChip}</span>
+                    </Link>
+                  );
+                }
+                // Reachable rows pin the managed model (routes via the relay).
+                return (
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="model-pick-row model-pick-row-managed"
+                    onClick={() => pickManaged(m)}
+                    aria-pressed={active}
+                  >
+                    <span
+                      className="model-pick-dot"
+                      style={{ background: "var(--c-accent)" }}
+                    />
+                    <span className="model-pick-id">{m.displayName}</span>
+                    <span className="model-pick-meta">
+                      {planChip}
+                      {active ? <Icon name="check" size={14} /> : null}
+                    </span>
+                  </button>
+                );
+              })}
               {membership.footer ? (
                 <p className="model-pick-membership-note">{membership.footer}</p>
               ) : null}

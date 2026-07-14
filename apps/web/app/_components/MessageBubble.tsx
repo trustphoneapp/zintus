@@ -556,9 +556,17 @@ export function MessageBubble({
           const m = message.meta!;
           const pct = savedPercent(m.costUsd, m.savedUsd);
           const modelLabel = shortModel(message.model ?? m.model);
+          // Managed-membership turns are billed in plan tokens, not BYOK USD —
+          // the receipt reads the plan-token debit (honest "—" when the relay
+          // didn't report it) instead of a meaningless $0.00 cost / savings.
+          const managed = m.managed === true;
+          const planDebitLabel =
+            m.planTokensDebited != null
+              ? `plan −${m.planTokensDebited.toLocaleString()} tok`
+              : "plan tokens — not reported";
           return (
             <div className="message-details">
-              {/* Metrics summary row — model · tokens · latency · cost · ↓saved. */}
+              {/* Metrics summary row — model · tokens · latency · cost/plan · ↓saved. */}
               <div className="message-metrics">
                 <span className="message-metrics-model">
                   {provider ? (
@@ -574,9 +582,9 @@ export function MessageBubble({
                   <span className="sep">·</span>
                   <span>{m.latencyMs}ms</span>
                   <span className="sep">·</span>
-                  <span>{fmtCost(m.costUsd)}</span>
+                  <span>{managed ? planDebitLabel : fmtCost(m.costUsd)}</span>
                 </span>
-                {pct > 0 ? (
+                {!managed && pct > 0 ? (
                   <span className="message-saved-pill">↓ {pct}% saved</span>
                 ) : null}
               </div>
@@ -584,7 +592,11 @@ export function MessageBubble({
               {/* Receipt grid — the route metadata, one click away. */}
               <div className="message-details-grid">
                 <span className="k">Provider</span>
-                <span className="v">{provider?.name ?? m.provider}</span>
+                <span className="v">
+                  {managed
+                    ? `Zintus membership${m.servedBy ? ` · ${m.servedBy}` : ""}`
+                    : (provider?.name ?? m.provider)}
+                </span>
                 <span className="k">Model</span>
                 <span className="v mono">{message.model ?? m.model}</span>
                 <span className="k">Input tokens</span>
@@ -593,10 +605,25 @@ export function MessageBubble({
                 <span className="v mono">{m.outputTokens.toLocaleString()}</span>
                 <span className="k">Latency</span>
                 <span className="v mono">{m.latencyMs}ms</span>
-                <span className="k">Cost</span>
-                <span className="v mono">{fmtCost(m.costUsd)}</span>
-                <span className="k">Saved vs Claude Sonnet</span>
-                <span className="v mono green">{pct > 0 ? `↓ ${pct}% saved` : "—"}</span>
+                {managed ? (
+                  <>
+                    <span className="k">Plan tokens</span>
+                    <span className="v mono">
+                      {m.planTokensDebited != null
+                        ? `−${m.planTokensDebited.toLocaleString()}`
+                        : "—"}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="k">Cost</span>
+                    <span className="v mono">{fmtCost(m.costUsd)}</span>
+                    <span className="k">Saved vs Claude Sonnet</span>
+                    <span className="v mono green">
+                      {pct > 0 ? `↓ ${pct}% saved` : "—"}
+                    </span>
+                  </>
+                )}
                 <span className="k">Routing strategy</span>
                 <span className="v">{m.routingStrategy}</span>
               </div>

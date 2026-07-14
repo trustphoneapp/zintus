@@ -72,3 +72,30 @@ describe("artifact budget + consent (quota gate)", () => {
     expect(c?.autoApproveUnderUsd).toBe(0.01);
   });
 });
+
+describe("managed model pin (mutual exclusivity with BYOK provider)", () => {
+  test("pinning a managed model clears the BYOK provider", () => {
+    useAppStore.getState().setSelectedProvider("groq");
+    expect(useAppStore.getState().selectedProvider).toBe("groq");
+    useAppStore.getState().setManagedModel("zintus/llama-3.3-70b");
+    // This is what makes the composer's pinned-provider "needs a key" notice
+    // impossible for a managed pin: that notice keys off selectedProvider, which
+    // is now null. The managed branch shows a quiet "routes via membership" note.
+    expect(useAppStore.getState().managedModel).toBe("zintus/llama-3.3-70b");
+    expect(useAppStore.getState().selectedProvider).toBeNull();
+  });
+
+  test("picking a BYOK provider clears the managed pin", () => {
+    useAppStore.getState().setManagedModel("zintus/gpt-4o-mini");
+    expect(useAppStore.getState().managedModel).toBe("zintus/gpt-4o-mini");
+    useAppStore.getState().setSelectedProvider("gemini");
+    expect(useAppStore.getState().selectedProvider).toBe("gemini");
+    expect(useAppStore.getState().managedModel).toBeNull();
+  });
+
+  test("clearing to Auto (null) drops the managed pin without forcing a provider", () => {
+    useAppStore.getState().setManagedModel("zintus/kimi-k2");
+    useAppStore.getState().setManagedModel(null);
+    expect(useAppStore.getState().managedModel).toBeNull();
+  });
+});

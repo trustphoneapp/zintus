@@ -99,6 +99,15 @@ import {
 import { getMe } from "@/lib/cloud";
 import { fetchBillingStatus, type BillingStatus } from "@/lib/billing";
 import { resolveChatTopStrip } from "@/lib/chat-top-strip";
+import { isManagedMember } from "@/lib/membership";
+import { MANAGED_ROUTING_ON_WEB } from "@/lib/model-picker-membership";
+import {
+  streamManagedChat,
+  ManagedChatFailure,
+  managedFailureMessage,
+  type ManagedChatMessage,
+} from "@/lib/managed-chat";
+import type { ChatMeta } from "@/lib/gateway";
 
 const PROMPT_CARDS = [
   { title: "Explain this code", body: "Walk through a snippet step by step" },
@@ -195,6 +204,29 @@ function searchTooltip(provider: string | null): string {
   }
 }
 
+/** Flatten the send history into the relay's managed shape (role + string
+ *  content). Managed v1 models are text-only, so any content-block array is
+ *  reduced to its text parts (images are guarded before we get here). */
+function toManagedMessages(msgs: ChatMessage[]): ManagedChatMessage[] {
+  return msgs.map((m) => ({
+    role: m.role,
+    content:
+      typeof m.content === "string"
+        ? m.content
+        : m.content
+            .map((b) => (b.type === "text" ? b.text : ""))
+            .join("")
+            .trim(),
+  }));
+}
+
+/** True when any turn carries an image block (managed models can't read them). */
+function historyHasImages(msgs: ChatMessage[]): boolean {
+  return msgs.some(
+    (m) => Array.isArray(m.content) && m.content.some((b) => b.type === "image"),
+  );
+}
+
 /** Stable empty reference so the per-thread artifact-edits selector doesn't
  *  return a fresh object each render (which would thrash zustand subscribers). */
 const EMPTY_ARTIFACT_EDITS: Record<string, ArtifactVersion[]> = {};
@@ -221,6 +253,7 @@ export default function ChatPage() {
   const threadId = useAppStore((s) => s.threadId);
   const activeThreadId = useAppStore((s) => s.activeThreadId);
   const selectedProvider = useAppStore((s) => s.selectedProvider);
+  const managedModel = useAppStore((s) => s.managedModel);
   const gatewayConnected = useAppStore((s) => s.gatewayConnected);
   const gatewayProviders = useAppStore((s) => s.gatewayProviders);
   const vaultProviders = useProviderStatusStore((s) => s.providers);
@@ -236,6 +269,7 @@ export default function ChatPage() {
     dropLastAssistant,
     newChat,
     setSelectedProvider,
+    setManagedModel,
     switchThread,
   } = useAppStore(
     useShallow((s) => ({
@@ -249,6 +283,7 @@ export default function ChatPage() {
       dropLastAssistant: s.dropLastAssistant,
       newChat: s.newChat,
       setSelectedProvider: s.setSelectedProvider,
+      setManagedModel: s.setManagedModel,
       switchThread: s.switchThread,
     })),
   );
@@ -879,6 +914,103 @@ export default function ChatPage() {
       // provider and ignores the pinned catalog model; otherwise use the
       // composer's selected provider.
       const overrideActive = override !== undefined;
+
+      // ── Zintus MANAGED membership path ──────────────────────────────────────
+      // A pinned managed model is served by the relay with Zintus-owned keys and
+      // plan tokens — it never touches the local gateway (so "No gateway connected"
+      // never blocks it). v1 managed turns are plain streaming chat (+ JSON mode +
+      // relay-side search); local tools/MCP stay a BYOK/gateway feature. Forced off
+      // under a regenerate-with-provider override (that menu only lists BYOK routes).
+      const managedTarget =
+        !overrideActive &&
+        MANAGED_ROUTING_ON_WEB &&
+        managedModel &&
+        isManagedMember(billing)
+          ? managedModel
+          : null;
+      if (managedTarget) {
+        if (historyHasImages(convo)) {
+          updateMessage(
+            currentAssistantId,
+            "Membership models are text-only for now — switch to a vision-capable provider (e.g. Gemini) to send an image.",
+          );
+          setLoading(false);
+          return;
+        }
+        try {
+          let streamedText = "";
+          const result = await streamManagedChat({
+            model: managedTarget,
+            messages: toManagedMessages(convo),
+            ...(structuredBuild.responseFormat?.type === "json_object"
+              ? { responseFormat: { type: "json_object" } }
+              : {}),
+            ...(webSearchEnabled ? { search: { enabled: true } } : {}),
+            signal: controller.signal,
+            onChunk: (delta) => {
+              if (controller.signal.aborted) return;
+              streamedText += delta;
+              updateMessage(currentAssistantId, streamedText);
+            },
+          });
+          const managedMeta: ChatMeta = {
+            provider: (result.servedBy ?? "zintus") as ProviderId,
+            model: result.model,
+            inputTokens: result.usage?.inputTokens ?? 0,
+            outputTokens: result.usage?.outputTokens ?? 0,
+            latencyMs: result.latencyMs,
+            costUsd: 0,
+            savedUsd: 0,
+            routingStrategy: "membership",
+            routeReason: result.servedBy
+              ? `Zintus membership — served by ${result.servedBy}, billed from plan tokens`
+              : "Zintus membership — billed from plan tokens",
+            managed: true,
+            ...(result.servedBy ? { servedBy: result.servedBy } : {}),
+            ...(result.planTokensDebited != null
+              ? { planTokensDebited: result.planTokensDebited }
+              : {}),
+          };
+          patchMessage(currentAssistantId, {
+            model: result.model,
+            meta: managedMeta,
+          });
+          pushTerminalLine({
+            text: `→ routed to Zintus membership (${result.model})${result.servedBy ? ` via ${result.servedBy}` : ""}`,
+            tone: "success",
+          });
+          // Refresh the plan-token balance so the picker footer reflects the debit.
+          void fetchBillingStatus().then((status) => {
+            if (status) setBilling(status);
+          });
+        } catch (error) {
+          // Abort (Stop / Esc): keep whatever streamed — never overwrite it.
+          if (error instanceof Error && error.name === "AbortError") return;
+          if (error instanceof ManagedChatFailure) {
+            // Honest, no-upsell message (incl. session-expiry → sign-in). The
+            // failure rides ONLY in `error`; MessageBubble keeps the partial
+            // answer and renders a compact card beneath it.
+            patchMessage(currentAssistantId, {
+              error: managedFailureMessage(error.detail),
+            });
+            pushTerminalLine({
+              text: `✗ managed: ${error.detail.kind}`,
+              tone: "warning",
+            });
+            return;
+          }
+          const message = error instanceof Error ? error.message : "Request failed";
+          patchMessage(currentAssistantId, {
+            error:
+              error instanceof Error ? (error.stack ?? error.message) : String(error),
+          });
+          pushTerminalLine({ text: `✗ ${message}`, tone: "warning" });
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+
       const effectiveProvider = overrideActive
         ? (override.provider ?? undefined)
         : (selectedProvider ?? undefined);
@@ -1105,6 +1237,8 @@ export default function ChatPage() {
       webSearchEnabled,
       incognito,
       activePreset,
+      managedModel,
+      billing,
     ],
   );
 
@@ -1124,16 +1258,24 @@ export default function ChatPage() {
       setInput("");
       return;
     }
+    // A pinned managed model routes via the relay against plan tokens — it needs
+    // NO local key and NO gateway, so it skips the key gate below entirely.
+    const managedRouteActive =
+      MANAGED_ROUTING_ON_WEB && !!managedModel && isManagedMember(billing);
+
     // No usable keys anywhere (browser vault locked/empty AND gateway unconfigured)
-    // → guide the user to add one, then retry. Input is preserved.
-    const haveBrowserKeys =
-      Object.keys(useProviderStatusStore.getState().keys).length > 0;
-    const gatewayHasKeys = useAppStore
-      .getState()
-      .gatewayProviders.some((provider) => provider.hasKey);
-    if (!haveBrowserKeys && !gatewayHasKeys) {
-      setKeyManagerOpen(true);
-      return;
+    // → guide the user to add one, then retry. Input is preserved. Skipped on the
+    // managed path (Zintus supplies the key server-side).
+    if (!managedRouteActive) {
+      const haveBrowserKeys =
+        Object.keys(useProviderStatusStore.getState().keys).length > 0;
+      const gatewayHasKeys = useAppStore
+        .getState()
+        .gatewayProviders.some((provider) => provider.hasKey);
+      if (!haveBrowserKeys && !gatewayHasKeys) {
+        setKeyManagerOpen(true);
+        return;
+      }
     }
     // Consent before the first send to a third-party provider (parity w/ mobile+desktop).
     if (!hasProviderSendConsent()) {
@@ -1170,12 +1312,24 @@ export default function ChatPage() {
     // Remember this turn's images so Regenerate can re-send them (see regenerate()).
     lastSentImagesRef.current = imageBlocks;
 
+    // Managed models are text-only in v1 — hold an image rather than send a
+    // request the relay would reject (mirrors the desktop guard).
+    if (managedRouteActive && imageBlocks.length > 0) {
+      setNotice({
+        tone: "warn",
+        text: "Membership models are text-only for now — switch to a vision provider (e.g. Gemini) or remove the image.",
+      });
+      return;
+    }
+
     // Vision guard: a concrete non-vision provider can't read images — warn and
     // hold the message (don't waste a request, don't drop the image). Auto
     // routing (no explicit provider) is allowed; the router/gateway decides.
+    // Skipped on the managed path (handled above).
     const effectiveProvider =
       selectedProvider ?? settings.defaultProvider ?? null;
     if (
+      !managedRouteActive &&
       imageBlocks.length > 0 &&
       effectiveProvider &&
       !providerCanSeeImages(effectiveProvider)
@@ -1281,6 +1435,8 @@ export default function ChatPage() {
     researchMode,
     researchDepth,
     router,
+    managedModel,
+    billing,
   ]);
 
   const regenerate = useCallback(async (override?: ProviderId | null) => {
@@ -1821,6 +1977,25 @@ export default function ChatPage() {
       ) : null}
 
       <div className="chat-composer-wrap">
+        {/* Managed membership pin: a quiet, non-blocking note — never the BYOK
+            "needs a key" warning (managed routes via Zintus, no key required).
+            Only shown to an active member whose pin can actually route. */}
+        {MANAGED_ROUTING_ON_WEB && managedModel && isManagedMember(billing) ? (
+          <div className="pinned-provider-notice" role="status">
+            <span className="ppn-dot" aria-hidden="true" />
+            <span className="ppn-text">
+              Routes via your Zintus membership — no key needed, billed from plan
+              tokens.{" "}
+            </span>
+            <button
+              type="button"
+              className="ppn-action"
+              onClick={() => setManagedModel(null)}
+            >
+              use Auto instead
+            </button>
+          </div>
+        ) : null}
         {showPinnedNotice && pinnedProviderId && pinnedModel ? (
           <div
             className={`pinned-provider-notice${pinnedNoticeKind === "key" ? " is-key" : ""}`}

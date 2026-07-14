@@ -4,6 +4,7 @@ import {
   MANAGED_SOON_NOTE,
   MEMBERSHIP_UPSELL_HREF,
   MEMBERSHIP_UPSELL_TEXT,
+  planTokensFooter,
   resolveModelPickerMembership,
 } from "./model-picker-membership";
 import type { BillingStatus, ManagedModelDto } from "./billing";
@@ -34,10 +35,11 @@ function model(overrides: Partial<ManagedModelDto> = {}): ManagedModelDto {
 }
 
 describe("resolveModelPickerMembership", () => {
-  test("honesty invariant: managed routing is NOT web-supported today", () => {
-    // This is the whole reason the member rows are non-pinnable. If someone ships
-    // a web managed-chat client they must flip this AND wire pin — the test flags it.
-    expect(MANAGED_ROUTING_ON_WEB).toBe(false);
+  test("managed routing is now web-supported (client shipped)", () => {
+    // The web managed-chat client (lib/managed-chat.ts) is live, so member rows
+    // are pinnable and billed against plan tokens. If this ever regresses to a
+    // false seam, the selectable-rows + quota-footer tests below flag it.
+    expect(MANAGED_ROUTING_ON_WEB).toBe(true);
   });
 
   test("hidden until billing has loaded (no flash of the wrong state)", () => {
@@ -68,18 +70,40 @@ describe("resolveModelPickerMembership", () => {
     ).toMatchObject({ kind: "upsell" });
   });
 
-  test("active Pro member → managed group titled with the tier, honest soon-note footer", () => {
+  test("active Pro member → managed group titled with the tier, live plan-token footer", () => {
     const view = resolveModelPickerMembership(
       true,
-      billing({ tier: "pro" }),
+      billing({ tier: "pro", tokens_used: 12_345, tokens_limit: 10_000_000 }),
       [model({ id: "gpt-x", display_name: "GPT-X", class: "premium" })],
     );
     if (view.kind !== "member") throw new Error("expected member");
     expect(view.title).toBe("Membership — Pro");
+    // Footer is the live quota line, not the old "arrives soon" note.
+    expect(view.footer).toBe("Plan tokens: 12,345 / 10,000,000");
+  });
+
+  test("planTokensFooter: with a limit → used / limit; without → used only", () => {
+    expect(
+      planTokensFooter(billing({ tokens_used: 500, tokens_limit: 1_000_000 })),
+    ).toBe("Plan tokens: 500 / 1,000,000");
+    expect(
+      planTokensFooter(billing({ tokens_used: 42, tokens_limit: null })),
+    ).toBe("Plan tokens: 42 used");
+  });
+
+  test("seam OFF (routingOnWeb=false) → old soon-note footer, nothing selectable", () => {
+    const view = resolveModelPickerMembership(
+      true,
+      billing({ tier: "pro" }),
+      [model({ id: "cheap-m", class: "cheap" })],
+      false,
+    );
+    if (view.kind !== "member") throw new Error("expected member");
     expect(view.footer).toBe(MANAGED_SOON_NOTE);
     expect(MANAGED_SOON_NOTE).toBe(
       "Managed routing arrives on web soon — available in the desktop app today",
     );
+    expect(view.rows.every((r) => r.selectable === false)).toBe(true);
   });
 
   test("row plan-cost chips mirror economics: reachable → −N/1K, gated → Upgrade, unpriceable → null; none selectable while not routable", () => {
@@ -106,8 +130,11 @@ describe("resolveModelPickerMembership", () => {
 
     expect(byId.get("weird-m")!.planCost).toBeNull();
 
-    // Nothing is pinnable today — that is the honesty boundary.
-    expect(view.rows.every((r) => r.selectable === false)).toBe(true);
+    // With the web client live, reachable rows are pinnable; locked ones never.
+    expect(byId.get("cheap-m")!.selectable).toBe(true);
+    expect(byId.get("gift-m")!.selectable).toBe(true);
+    expect(byId.get("weird-m")!.selectable).toBe(true); // unpriceable but reachable
+    expect(byId.get("frontier-m")!.selectable).toBe(false); // locked below Max
   });
 
   test("rows sort reachable-cheapest-first, locked Upgrade rows last", () => {
@@ -128,10 +155,10 @@ describe("resolveModelPickerMembership", () => {
     ]);
   });
 
-  test("routingOnWeb seam flips rows selectable (only the unlocked ones) and drops the footer", () => {
+  test("routingOnWeb seam ON: unlocked rows selectable, footer is the quota line", () => {
     const view = resolveModelPickerMembership(
       true,
-      billing({ tier: "pro" }),
+      billing({ tier: "pro", tokens_used: 0, tokens_limit: null }),
       [
         model({ id: "cheap-m", class: "cheap" }),
         model({ id: "frontier-m", class: "frontier" }), // still locked
@@ -139,7 +166,7 @@ describe("resolveModelPickerMembership", () => {
       true,
     );
     if (view.kind !== "member") throw new Error("expected member");
-    expect(view.footer).toBeNull();
+    expect(view.footer).toBe("Plan tokens: 0 used");
     const byId = new Map(view.rows.map((r) => [r.id, r]));
     expect(byId.get("cheap-m")!.selectable).toBe(true);
     expect(byId.get("frontier-m")!.selectable).toBe(false); // locked never routable

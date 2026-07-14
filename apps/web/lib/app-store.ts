@@ -112,6 +112,14 @@ interface AppState {
   threadId?: string;
   activeProvider: ProviderId | null;
   selectedProvider: ProviderId | null;
+  /**
+   * Pinned managed-membership model id (`zintus/…`), or null. Mutually exclusive
+   * with `selectedProvider`: a managed turn is served by the relay with plan
+   * tokens and never touches the local gateway, so pinning one clears the BYOK
+   * provider and vice-versa. Session-only (not persisted — same posture as
+   * selectedProvider) so a reload returns to Auto.
+   */
+  managedModel: string | null;
   gatewayConnected: boolean;
   gatewayHealthLoaded: boolean;
   gatewayProviders: GatewayProviderStatus[];
@@ -123,6 +131,8 @@ interface AppState {
   setThreadId: (threadId?: string) => void;
   setActiveProvider: (providerId: ProviderId | null) => void;
   setSelectedProvider: (providerId: ProviderId | null) => void;
+  /** Pin/clear the managed-membership model; clears selectedProvider when set. */
+  setManagedModel: (modelId: string | null) => void;
   setGatewayStatus: (
     connected: boolean,
     providers: GatewayProviderStatus[],
@@ -201,6 +211,7 @@ export const useAppStore = create<AppState>()(
       threadId: undefined,
       activeProvider: null,
       selectedProvider: null,
+      managedModel: null,
       gatewayConnected: false,
       gatewayHealthLoaded: false,
       gatewayProviders: [],
@@ -290,7 +301,12 @@ export const useAppStore = create<AppState>()(
             },
           };
         }),
-      setSelectedProvider: (selectedProvider) => set({ selectedProvider }),
+      // Picking a BYOK provider clears any managed pin (mutual exclusivity).
+      setSelectedProvider: (selectedProvider) =>
+        set(selectedProvider ? { selectedProvider, managedModel: null } : { selectedProvider }),
+      // Picking a managed model clears the BYOK provider (mutual exclusivity).
+      setManagedModel: (managedModel) =>
+        set(managedModel ? { managedModel, selectedProvider: null } : { managedModel }),
       setGatewayStatus: (gatewayConnected, gatewayProviders, gatewaySavings) =>
         set({
           gatewayConnected,
