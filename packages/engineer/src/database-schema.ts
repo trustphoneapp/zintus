@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 1;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 2;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -57,6 +57,16 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     created_at TEXT NOT NULL,
     UNIQUE(run_id, version),
     UNIQUE(run_id, manifest_hash)
+  );
+
+  CREATE TABLE IF NOT EXISTS plan_proposals (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    proposal_json TEXT NOT NULL,
+    proposal_hash TEXT NOT NULL,
+    artifact_id TEXT REFERENCES artifacts(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, proposal_hash)
   );
 
   CREATE TABLE IF NOT EXISTS run_state_events (

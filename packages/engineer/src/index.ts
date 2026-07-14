@@ -16,6 +16,7 @@ export * from "./verification-manager.js";
 export * from "./control-contracts.js";
 export * from "./git-service.js";
 export * from "./publication-manager.js";
+export * from "./planning.js";
 export * from "./database-schema.js";
 export * from "./errors.js";
 export * from "./hash.js";

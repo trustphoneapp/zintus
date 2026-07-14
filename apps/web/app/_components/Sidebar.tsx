@@ -41,6 +41,7 @@ const SECTIONS: Array<{
       { href: "/projects", icon: "layers", label: "Projects" },
       { href: "/research", icon: "globe", label: "Research" },
       { href: "/agent", icon: "bot", label: "Agent" },
+      { href: "/engineer", icon: "zap", label: "Engineer" },
       { href: "/terminal", icon: "terminal", label: "Terminal" },
     ],
   },

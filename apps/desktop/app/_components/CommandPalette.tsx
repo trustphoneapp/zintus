@@ -33,6 +33,7 @@ const PAGES: Array<{ href: string; label: string }> = [
   { href: "/projects", label: "Go to Projects" },
   { href: "/research", label: "Go to Research" },
   { href: "/agent", label: "Go to Agent" },
+  { href: "/engineer", label: "Go to Engineer" },
   { href: "/usage", label: "Go to Usage" },
   { href: "/settings", label: "Go to Settings" },
 ];

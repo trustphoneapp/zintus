@@ -5,6 +5,7 @@ import { Database } from "bun:sqlite";
 import {
   EngineerRunSchema,
   RunStateEventSchema,
+  TaskManifestContentSchema,
   TaskManifestSchema,
   type ActorType,
   type EngineerRun,
@@ -65,6 +66,7 @@ import {
   StateVersionConflictError,
 } from "./errors.js";
 import { canonicalJson } from "./hash.js";
+import type { PlanProposal } from "./planning.js";
 
 interface RunRow {
   id: string;
@@ -334,6 +336,25 @@ export class EngineerLedger {
       .query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? ORDER BY version")
       .all(runId) as Array<{ manifest_json: string }>;
     return rows.map((row) => TaskManifestSchema.parse(JSON.parse(row.manifest_json)));
+  }
+
+  recordPlanProposal(proposal: PlanProposal): PlanProposal {
+    this.getRun(proposal.runId);
+    const artifact = this.db.query("SELECT run_id FROM artifacts WHERE id = ?").get(proposal.artifactId) as { run_id: string } | null;
+    if (!artifact || artifact.run_id !== proposal.runId) throw new EngineerNotFoundError("plan artifact", proposal.artifactId);
+    const existing = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? AND proposal_hash = ?")
+      .get(proposal.runId, proposal.proposalHash) as Record<string, unknown> | null;
+    if (existing) return this.planProposalFromRow(existing);
+    this.db.query(`INSERT INTO plan_proposals (id, run_id, proposal_json, proposal_hash, artifact_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(proposal.planProposalId, proposal.runId, canonicalJson(proposal.manifest), proposal.proposalHash, proposal.artifactId, proposal.createdAt);
+    return proposal;
+  }
+
+  latestPlanProposal(runId: string): PlanProposal | null {
+    this.getRun(runId);
+    const row = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(runId) as Record<string, unknown> | null;
+    return row ? this.planProposalFromRow(row) : null;
   }
 
   appendTransition(command: LedgerTransitionCommand): LedgerTransitionResult {
@@ -987,6 +1008,14 @@ export class EngineerLedger {
       trusted: row.trusted === 1,
       createdAt: row.created_at,
     });
+  }
+
+  private planProposalFromRow(row: Record<string, unknown>): PlanProposal {
+    return {
+      planProposalId: String(row.id), runId: String(row.run_id),
+      manifest: TaskManifestContentSchema.parse(JSON.parse(String(row.proposal_json))),
+      proposalHash: String(row.proposal_hash), artifactId: String(row.artifact_id), createdAt: String(row.created_at),
+    };
   }
 
   private latestApprovalRequestById(approvalRequestId: string): ApprovalRequestRecord {

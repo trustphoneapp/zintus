@@ -51,6 +51,7 @@ import { EngineerLedger, type LedgerTransitionResult } from "./ledger.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
 import { evaluateRetry, type RetryDecision } from "./retry.js";
 import { canTransition, isTerminalState } from "./state-machine.js";
+import type { PlanProposal } from "./planning.js";
 
 export interface SupervisorOptions {
   dbPath?: string;
@@ -325,6 +326,16 @@ export class EngineerSupervisor {
 
   listManifestVersions(runId: string): TaskManifest[] {
     return this.ledger.listManifestVersions(runId);
+  }
+
+  recordPlanProposal(proposal: PlanProposal): PlanProposal {
+    const run = this.ledger.getRun(proposal.runId);
+    if (run.state !== "PLANNING") throw new InvalidTransitionError("plan proposals may only be recorded while PLANNING");
+    return this.ledger.recordPlanProposal(proposal);
+  }
+
+  latestPlanProposal(runId: string): PlanProposal | null {
+    return this.ledger.latestPlanProposal(runId);
   }
 
   listEvents(runId: string): RunStateEvent[] {

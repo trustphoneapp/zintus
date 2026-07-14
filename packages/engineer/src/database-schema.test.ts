@@ -12,6 +12,7 @@ describe("Engineer database schema", () => {
     for (const table of [
       "engineer_runs",
       "task_manifest_versions",
+      "plan_proposals",
       "run_state_events",
       "risk_assessments",
       "retry_attempts",
@@ -25,7 +26,7 @@ describe("Engineer database schema", () => {
     ]) {
       expect(tables.has(table)).toBe(true);
     }
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(1);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(2);
     db.close();
   });
 });

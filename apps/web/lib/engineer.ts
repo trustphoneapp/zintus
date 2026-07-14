@@ -1,0 +1,37 @@
+import { GATEWAY_URL, gatewayAuthHeaders } from "./gateway";
+
+export type EngineerState = string;
+export interface EngineerRun { runId: string; state: EngineerState; stateVersion: number; manifestHash: string | null; riskTier: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"; humanGateRequired: boolean; requestOriginal: string; requestNormalized: string; repository: EngineerRepository; terminalAt: string | null; }
+export interface EngineerRepository { repositoryId: string; provider: "github" | "local"; owner: string; name: string; url?: string; baseBranch: string; baseCommitSha: string; }
+export interface EngineerManifest { manifestVersion: number; runId: string; repository: EngineerRepository; request: { original: string; normalized: string }; acceptanceCriteria: Array<{ criterionId: string; statement: string; verificationMethod: string; priority: string }>; testPlan: Array<{ testId: string; criterionIds: string[]; type: string; description: string; command?: string }>; allowedPaths: string[]; deniedPaths: string[]; allowedCommands: string[]; prohibitedCommands: string[]; riskTier: EngineerRun["riskTier"]; humanGateRequired: boolean; retryBudgets: Record<string, number>; timeBudgetSeconds: number; tokenBudget: number; costBudgetUsd: number; createdAt: string; }
+export interface PlanProposal { planProposalId: string; runId: string; manifest: EngineerManifest; proposalHash: string; artifactId: string; createdAt: string; }
+export interface RunEvent { eventId: string; sequence: number; previousState: string; nextState: string; reasonCode: string; timestamp: string; evidenceIds: string[]; }
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${GATEWAY_URL}${path}`, { ...init, cache: "no-store", headers: { "Content-Type": "application/json", ...gatewayAuthHeaders(), ...init?.headers } });
+  const body = await response.json().catch(() => ({})) as { error?: string | { message?: string } };
+  if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : body.error?.message ?? `Engineer request failed (${response.status})`);
+  return body as T;
+}
+
+export async function createEngineerRun(input: { userId: string; repository: EngineerRepository; request: string }): Promise<EngineerRun> {
+  return (await request<{ run: EngineerRun }>("/v1/engineer/runs", { method: "POST", body: JSON.stringify(input) })).run;
+}
+export async function planEngineerRun(runId: string): Promise<PlanProposal> { return (await request<{ plan: PlanProposal }>(`/v1/engineer/runs/${runId}/plan`, { method: "POST" })).plan; }
+export async function freezeEngineerPlan(run: EngineerRun, manifest: EngineerManifest): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${run.runId}/freeze-plan`, { method: "POST", body: JSON.stringify({ expectedStateVersion: run.stateVersion, manifest, actorId: "zintus-user", idempotencyKey: `ui:freeze:${run.runId}:${manifest.manifestVersion}` }) })).run; }
+export async function startEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST" })).run; }
+export async function getEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}`)).run; }
+export async function getEngineerData(runId: string) { const [claims, evidence, tests, security, failures, diff, approval] = await Promise.all([
+  request<{ claims: unknown[] }>(`/v1/engineer/runs/${runId}/claims`), request<{ evidenceBundles: unknown[] }>(`/v1/engineer/runs/${runId}/evidence`),
+  request<{ tests: unknown[] }>(`/v1/engineer/runs/${runId}/tests`), request<{ securityFindings: unknown[] }>(`/v1/engineer/runs/${runId}/security`),
+  request<{ failures: unknown[] }>(`/v1/engineer/runs/${runId}/failures`), request<{ diff: string }>(`/v1/engineer/runs/${runId}/diff`).catch(() => ({ diff: "" })),
+  request<{ approval: unknown | null }>(`/v1/engineer/runs/${runId}/approval`),
+]); return { ...claims, ...evidence, ...tests, ...security, ...failures, ...diff, ...approval }; }
+export async function engineerDecision(runId: string, action: "approve" | "request-changes" | "reject" | "cancel", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/${action}`, { method: "POST", body: JSON.stringify({ actorId: "zintus-user", reason }) }); }
+
+export async function streamEngineerEvents(runId: string, onEvent: (event: RunEvent) => void, signal: AbortSignal): Promise<void> {
+  const response = await fetch(`${GATEWAY_URL}/v1/engineer/runs/${runId}/events`, { headers: gatewayAuthHeaders(), signal });
+  if (!response.ok || !response.body) throw new Error("Engineer event stream is unavailable");
+  const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+  try { while (true) { const { done, value } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); const frames = buffer.split(/\n\n/); buffer = frames.pop() ?? ""; for (const frame of frames) { const line = frame.split(/\r?\n/).find((item) => item.startsWith("data:")); if (line) onEvent(JSON.parse(line.slice(5).trim()) as RunEvent); } } } finally { reader.releaseLock(); }
+}

@@ -182,8 +182,28 @@ credential and a stable publication-command signing secret.
 
 ### Phase 5 — Zintus experience
 
-Add plan review, live timeline, diff/evidence panels, human gate, and final result
-inside existing Zintus clients. The primary experience is a workflow, not chat.
+Status: complete for the web and desktop clients.
+
+Delivered:
+
+1. A TERRA planner using the Responses API with a forced strict structured tool,
+   `store:false`, fixed model routing, persisted model-call metadata, and no
+   workflow mutation authority beyond the Supervisor facade.
+2. Deterministic post-plan risk assignment, fixed prohibited commands, immutable
+   proposal artifacts, and a durable `plan_proposals` schema migration.
+3. Authenticated plan generation/read routes and an OpenAPI 3.1 contract.
+4. A new-run flow that binds the task to an exact base commit rather than a mutable
+   branch tip.
+5. Structured plan review for acceptance criteria, tests, scope, commands, risk,
+   human-gate policy, and the final freeze/start action.
+6. Live durable timeline, verification summary, hash-bound diff, acceptance
+   evidence, security findings, human decisions, cancellation, and explicit final
+   or safe-failure outcomes.
+7. Engineer navigation and command-palette entries in the existing responsive web
+   and desktop Zintus shells, using their current design tokens and reduced-motion
+   behavior.
+
+The experience remains intentionally workflow-shaped rather than chat-shaped.
 
 ### Phase 6 — hardening and demo
 

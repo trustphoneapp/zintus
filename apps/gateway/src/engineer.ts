@@ -3,6 +3,7 @@ import {
   TaskManifestContentSchema,
   type EngineerExecutionManager,
   type EngineerPublicationManager,
+  type EngineerPlanningManager,
   type EngineerVerificationManager,
   type EngineerRun,
   type EngineerSupervisor,
@@ -16,6 +17,7 @@ export interface EngineerRunManagerOptions {
   verification?: EngineerVerificationManager;
   publication?: EngineerPublicationManager;
   diffForRun?: (runId: string) => string;
+  planning?: EngineerPlanningManager;
 }
 
 /** Gateway facade. It exposes no generic state-transition endpoint. */
@@ -57,6 +59,15 @@ export class EngineerRunManager {
       actorId: input.actorId,
       idempotencyKey: input.idempotencyKey,
     }).run;
+  }
+
+  plan(runId: string) {
+    if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
+    return this.options.planning.plan(runId);
+  }
+
+  planProposal(runId: string) {
+    return this.options.supervisor.latestPlanProposal(runId);
   }
 
   start(runId: string): EngineerRun {

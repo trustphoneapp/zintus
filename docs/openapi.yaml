@@ -246,6 +246,51 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Run not found. }
 
+  /v1/engineer/runs/{runId}/plan:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerRunPlan
+      summary: Get the latest structured plan proposal
+      parameters:
+        - $ref: "#/components/parameters/EngineerRunId"
+      responses:
+        "200":
+          description: The latest proposal, or null before planning completes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plan]
+                properties:
+                  plan:
+                    oneOf:
+                      - $ref: "#/components/schemas/EngineerPlanProposal"
+                      - type: "null"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+    post:
+      tags: [Engineer]
+      operationId: planEngineerRun
+      summary: Generate and persist a bounded structured plan with TERRA
+      description: |
+        Runs only from REQUEST_RECEIVED. Model output is schema constrained;
+        risk and the human-gate requirement are assigned by deterministic policy.
+      parameters:
+        - $ref: "#/components/parameters/EngineerRunId"
+      responses:
+        "200":
+          description: Plan persisted and run advanced to PLAN_READY.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [plan]
+                properties:
+                  plan: { $ref: "#/components/schemas/EngineerPlanProposal" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+        "409": { description: Planning is unavailable or the run is not in REQUEST_RECEIVED. }
+
   /v1/engineer/runs/{runId}/freeze-plan:
     post:
       tags: [Engineer]
@@ -1896,6 +1941,20 @@ components:
         timeBudgetSeconds: { type: integer, minimum: 1 }
         tokenBudget: { type: integer, minimum: 0 }
         costBudgetUsd: { type: number, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+
+    EngineerPlanProposal:
+      type: object
+      required: [planProposalId, runId, manifest, proposalHash, artifactId, createdAt]
+      additionalProperties: false
+      properties:
+        planProposalId: { type: string }
+        runId: { type: string }
+        manifest: { $ref: "#/components/schemas/EngineerTaskManifest" }
+        proposalHash:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        artifactId: { type: string }
         createdAt: { type: string, format: date-time }
 
     EngineerArtifact:

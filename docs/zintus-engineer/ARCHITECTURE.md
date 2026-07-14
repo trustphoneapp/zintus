@@ -103,6 +103,14 @@ inspect/branch/push/PR operation under an idempotency key. PR text is synthesize
 from the normalized request, frozen criteria, exact diff, claims, risk, and
 evidence bundle. A stale base cannot publish and must enter `REVERIFYING`.
 
+Phase 5 adds a structured TERRA planner ahead of manifest freeze. The model proposes
+criteria, test commands, and scope through one strict forced function call; the
+Supervisor independently computes risk, adds non-negotiable denials, persists the
+proposal, and advances the durable state. Web and desktop consume the same
+authenticated workflow API for plan review, timeline replay, exact diff, evidence,
+security, human decisions, cancellation, and final outcomes. UI labels are derived
+from ledger truth and never manufacture progress or success.
+
 ## Core invariants
 
 - Model text is data and never directly mutates workflow state.
@@ -146,5 +154,5 @@ are marked by producer and filtered before Reviewer input construction.
 
 ## Deferred integrations
 
-Client workflow screens and production-scale recovery remain deferred. The
-Builder and Reviewer have no credentials for publication operations.
+Mobile-specific Engineer screens and production-scale recovery remain deferred.
+The Builder and Reviewer have no credentials for publication operations.

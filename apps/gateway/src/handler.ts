@@ -2774,6 +2774,12 @@ export function createGatewayHandler(
       const action = parts[5];
       try {
         if (!action && request.method === "GET") return json(request, engineerRuns.get(runId));
+        if (action === "plan" && request.method === "POST") {
+          return json(request, { plan: await engineerRuns.plan(runId) });
+        }
+        if (action === "plan" && request.method === "GET") {
+          return json(request, { plan: engineerRuns.planProposal(runId) });
+        }
         if (action === "freeze-plan" && request.method === "POST") {
           const body = await request.json() as {
             expectedStateVersion?: number; manifest?: unknown; actorId?: string; idempotencyKey?: string;
@@ -2841,7 +2847,7 @@ export function createGatewayHandler(
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const status = /not found/i.test(message) ? 404 : /not configured|PLAN_FROZEN/i.test(message) ? 409 : 400;
+        const status = /not found/i.test(message) ? 404 : /not configured|PLAN_FROZEN|planning requires/i.test(message) ? 409 : 400;
         return json(request, { error: { message } }, status);
       }
     }

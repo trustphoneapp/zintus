@@ -22,5 +22,9 @@
 - TERRA Tester and Security outputs are intentionally advisory. Deterministic
   checks and trusted command records remain authoritative, so the current security
   scan depth is limited to the frozen commands plus the built-in diff scanner.
-- SSE recovery replays the durable event ledger, but relay/mobile UX for reconnect
-  cursors is part of the later Zintus experience phase.
+- Web and desktop now replay the durable SSE ledger, but mobile-specific Engineer
+  screens and explicit relay reconnect-cursor UX are not yet implemented.
+- New-run repository metadata and the exact base commit are entered directly in
+  this local-first slice. A connected repository picker and automatic branch-tip
+  resolution require the future repository-connection service; the server still
+  validates and records the exact submitted commit.

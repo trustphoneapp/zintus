@@ -130,6 +130,11 @@ describe("gateway handler", () => {
     }));
     expect(read.status).toBe(200);
     expect(((await read.json()) as { run: { state: string } }).run.state).toBe("REQUEST_RECEIVED");
+    const plan = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/plan", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(plan.status).toBe(200);
+    expect((await plan.json()) as unknown).toEqual({ plan: null });
     const artifacts = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/artifacts", {
       headers: { Authorization: "Bearer secret" },
     }));

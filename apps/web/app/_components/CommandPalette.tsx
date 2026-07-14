@@ -74,6 +74,7 @@ export function CommandPalette() {
       },
       { id: "open-compare", label: "Open Compare", group: "Actions", run: () => go("/compare") },
       { id: "open-research", label: "Open Research", group: "Actions", run: () => go("/research") },
+      { id: "open-engineer", label: "Open Engineer", group: "Actions", run: () => go("/engineer") },
       { id: "nav-providers", label: "Go to Providers", group: "Navigate", run: () => go("/providers") },
       { id: "nav-usage", label: "Go to Usage", group: "Navigate", run: () => go("/usage") },
       { id: "nav-settings", label: "Go to Settings", group: "Navigate", run: () => go("/settings") },

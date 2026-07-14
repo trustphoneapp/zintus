@@ -69,6 +69,7 @@ const NAV = [
   { href: "/projects", label: "Projects", icon: FolderOpen },
   { href: "/research", label: "Research", icon: Globe },
   { href: "/agent", label: "Agent", icon: Bot },
+  { href: "/engineer", label: "Engineer", icon: ShieldCheck },
 ];
 
 /** Per-thread hover action button (rename / delete). Shown on row hover via CSS. */

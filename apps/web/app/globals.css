@@ -5,6 +5,79 @@
    and any unknown class all render Indigo. `.obsidian` and `.graphite` override
    the set. The marketing surfaces are dark-only now — the light marketing theme
    is retired (`.light` keeps only the app-shell @zintus/ui tokens). */
+/* Zintus Engineer — evidence workflow, not a chat surface. */
+.engineer-screen { width: min(1240px, 100%); margin: 0 auto; padding: 36px clamp(18px, 4vw, 52px) 72px; color: var(--color-text); }
+.engineer-hero { max-width: 820px; margin: 36px 0 32px; }
+.engineer-kicker { display: block; color: var(--c-accent); font-size: 11px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; margin-bottom: 10px; }
+.engineer-hero h1, .engineer-run-header h1 { margin: 0; max-width: 18ch; font-size: clamp(34px, 5vw, 60px); line-height: .98; letter-spacing: -.045em; }
+.engineer-hero p { max-width: 66ch; margin: 20px 0 0; color: var(--color-text-sub); font-size: 16px; line-height: 1.7; }
+.engineer-card { border: .5px solid var(--c-border); border-radius: 18px; background: var(--color-surface); padding: clamp(18px, 3vw, 28px); box-shadow: var(--c-shadow-sm); }
+.engineer-new-run { max-width: 920px; }
+.engineer-section-title { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 24px; }
+.engineer-section-title > span { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; background: var(--c-accent-subtle); color: var(--c-accent); font: 700 11px var(--font-mono); }
+.engineer-section-title h2, .engineer-card h2, .engineer-card h3 { margin: 0; }
+.engineer-section-title p, .engineer-card-heading p { margin: 4px 0 0; color: var(--color-text-muted); }
+.engineer-card label { display: grid; gap: 8px; color: var(--color-text-sub); font-size: 12px; font-weight: 650; }
+.engineer-card input, .engineer-card textarea, .engineer-card select, .engineer-gate textarea { width: 100%; box-sizing: border-box; border: .5px solid var(--c-border); border-radius: 10px; background: var(--color-elevated); color: var(--color-text); padding: 11px 12px; font: inherit; outline: none; }
+.engineer-card input:focus, .engineer-card textarea:focus, .engineer-card select:focus { box-shadow: var(--c-focus); border-color: var(--c-accent); }
+.engineer-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 18px 0 22px; }
+.engineer-mono, .engineer-card code, .engineer-run-meta code { font-family: var(--font-mono); }
+.engineer-primary, .engineer-actions button, .engineer-cancel { border: .5px solid var(--c-border); border-radius: 10px; padding: 10px 16px; font-weight: 700; cursor: pointer; background: var(--color-elevated); color: var(--color-text); }
+.engineer-primary { border-color: transparent; background: var(--c-accent); color: white; }
+.engineer-primary:disabled, .engineer-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.engineer-error { padding: 10px 12px; border-radius: 9px; background: color-mix(in srgb, var(--color-red) 12%, transparent); color: var(--color-red); font-size: 13px; }
+.engineer-plan-grid, .engineer-run-grid, .engineer-evidence-grid { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(280px, .8fr); gap: 18px; }
+.engineer-criteria { display: grid; gap: 12px; padding-left: 22px; }
+.engineer-criteria li { padding-left: 6px; }
+.engineer-criteria strong, .engineer-criteria small { display: block; }
+.engineer-criteria small { margin-top: 4px; color: var(--color-text-muted); }
+.engineer-list { display: grid; gap: 10px; margin-top: 14px; }
+.engineer-list > div { display: flex; gap: 10px; padding: 12px; border: .5px solid var(--c-border); border-radius: 12px; }
+.engineer-list strong, .engineer-list code { display: block; }
+.engineer-list code { margin-top: 5px; color: var(--color-text-muted); font-size: 11px; }
+.engineer-chip, .engineer-status { display: inline-flex; align-items: center; width: fit-content; height: 22px; padding: 0 8px; border-radius: 999px; background: var(--c-accent-subtle); color: var(--c-accent); font-size: 10px; font-weight: 750; letter-spacing: .05em; }
+.engineer-scope { display: grid; align-content: start; gap: 18px; }
+.engineer-scope > div { display: grid; gap: 7px; }
+.engineer-scope span, .engineer-metric span { color: var(--color-text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.engineer-scope code { display: block; overflow-wrap: anywhere; font-size: 11px; color: var(--color-text-sub); }
+.engineer-risk { display: inline-flex; width: fit-content; border-radius: 999px; padding: 4px 9px; font-size: 10px; letter-spacing: .08em; }
+.engineer-risk--low { background: color-mix(in srgb, var(--color-green) 14%, transparent); color: var(--color-green); }
+.engineer-risk--medium { background: color-mix(in srgb, var(--c-warn) 16%, transparent); color: var(--c-warn); }
+.engineer-risk--high, .engineer-risk--critical { background: color-mix(in srgb, var(--color-red) 14%, transparent); color: var(--color-red); }
+.engineer-run-header { display: flex; justify-content: space-between; gap: 30px; align-items: end; margin: 22px 0 30px; }
+.engineer-run-header h1 { max-width: 22ch; font-size: clamp(28px, 4vw, 48px); }
+.engineer-run-meta { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+.engineer-run-meta code { color: var(--color-text-muted); font-size: 10px; }
+.engineer-progress { width: min(340px, 35vw); }
+.engineer-progress > div { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 11px; color: var(--color-text-sub); }
+.engineer-progress progress { width: 100%; height: 7px; accent-color: var(--c-accent); }
+.engineer-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: .5px solid var(--c-border); }
+.engineer-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--color-text-muted); padding: 10px 14px; text-transform: capitalize; cursor: pointer; }
+.engineer-tabs button.active { color: var(--color-text); border-bottom-color: var(--c-accent); }
+.engineer-timeline { display: grid; margin-top: 18px; }
+.engineer-event { display: grid; grid-template-columns: 12px 72px 1fr; gap: 10px; min-height: 52px; position: relative; }
+.engineer-event > span { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--c-accent); box-shadow: 0 0 0 4px var(--c-accent-subtle); }
+.engineer-event:not(:last-child)::before { content: ""; position: absolute; left: 3.5px; top: 16px; bottom: 2px; border-left: .5px solid var(--c-border); }
+.engineer-event time, .engineer-event small { color: var(--color-text-muted); font-size: 10px; }
+.engineer-event strong, .engineer-event small { display: block; }
+.engineer-verification { align-self: start; display: grid; gap: 0; }
+.engineer-metric { display: flex; justify-content: space-between; padding: 14px 0; border-bottom: .5px solid var(--c-border); }
+.engineer-card-heading { display: flex; justify-content: space-between; align-items: center; }
+.engineer-diff { max-height: 65vh; overflow: auto; margin: 18px -10px -10px; padding: 18px; border-radius: 12px; background: var(--color-elevated); font: 12px/1.65 var(--font-mono); color: var(--color-text-sub); white-space: pre; }
+.engineer-claim, .engineer-finding { display: grid; gap: 7px; padding: 14px 0; border-bottom: .5px solid var(--c-border); }
+.engineer-claim p, .engineer-finding p { margin: 0; color: var(--color-text-muted); font-size: 12px; line-height: 1.5; }
+.engineer-gate { margin-top: 18px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 18px; border-color: color-mix(in srgb, var(--c-accent) 40%, var(--c-border)); }
+.engineer-gate h2 { font-size: 24px; }
+.engineer-gate code { display: block; margin-top: 12px; overflow-wrap: anywhere; color: var(--color-text-muted); font-size: 10px; }
+.engineer-actions { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
+.engineer-actions .danger { color: var(--color-red); }
+.engineer-final { margin-top: 18px; border-left: 4px solid var(--color-green); }
+.engineer-final--blocked { border-left-color: var(--color-red); }
+.engineer-cancel { margin-top: 16px; color: var(--color-text-muted); background: transparent; }
+.engineer-muted { color: var(--color-text-muted); font-size: 13px; }
+@media (max-width: 820px) { .engineer-form-grid, .engineer-plan-grid, .engineer-run-grid, .engineer-evidence-grid, .engineer-gate { grid-template-columns: 1fr; } .engineer-run-header { align-items: stretch; flex-direction: column; } .engineer-progress { width: 100%; } }
+@media (max-width: 520px) { .engineer-screen { padding-inline: 14px; } .engineer-form-grid { grid-template-columns: 1fr; } .engineer-event { grid-template-columns: 12px 58px 1fr; } }
+ @media (prefers-reduced-motion: reduce) { .engineer-screen * { scroll-behavior: auto !important; } }
 :root {
   color-scheme: dark;
   --font-display: var(--font-syne), var(--font-plus-jakarta-sans), system-ui, sans-serif;
