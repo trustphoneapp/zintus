@@ -111,6 +111,14 @@ authenticated workflow API for plan review, timeline replay, exact diff, evidenc
 security, human decisions, cancellation, and final outcomes. UI labels are derived
 from ledger truth and never manufacture progress or success.
 
+Phase 6 adds operational hardening around those boundaries. The planner now rejects
+commands that the trusted argv policy cannot execute. Failed correctness checks are
+confirmed three times at the same result commit and environment; mixed results are
+classified as flaky, quarantined, and remain non-authoritative. The filesystem warm
+pool performs periodic invalid/expired/capacity sweeps without ever returning a
+claimed workspace. An authenticated observability snapshot aggregates only durable
+run, approval, risk, and failure records.
+
 ## Core invariants
 
 - Model text is data and never directly mutates workflow state.

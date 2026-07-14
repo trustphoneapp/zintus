@@ -207,9 +207,28 @@ The experience remains intentionally workflow-shaped rather than chat-shaped.
 
 ### Phase 6 — hardening and demo
 
-Add prompt-injection, sandbox, loop, flaky, concurrency, artifact-tamper, and
-cross-run isolation fixtures; observability; the sample repository; README; and
-three-minute demo assets.
+Status: complete for the local-first release candidate.
+
+Delivered:
+
+1. Executed fixtures for prompt-injection command attempts, sandbox timeouts,
+   infinite repair loops, flaky tests, concurrent Supervisor writers, artifact
+   tampering/cross-run references, and poisoned warm-pool entries.
+2. Planner-time command-policy rejection in addition to the executor's frozen
+   allowlist, argv-only parsing, and no-shell enforcement.
+3. Fail-closed flaky-test confirmation: a failed non-security test is repeated at
+   the same commit/environment; mixed or incomparable evidence is quarantined and
+   cannot satisfy a correctness gate.
+4. Periodic warm-pool health sweeping with invalid, expired, and over-capacity
+   quarantine. Claimed workspaces remain one-use and are never returned.
+5. An authenticated durable observability snapshot for run states, risk tiers,
+   pending approvals, and failure classes.
+6. A deliberately failing password-reset demo repository, operator README,
+   recording checklist, and safe-failure alternate.
+
+Exit criteria: 51 Engineer package tests, 81 gateway/OpenAPI tests, package,
+gateway, web, and desktop typechecks pass. The demo fixture's one intentional
+single-use-token failure is separately confirmed.
 
 ## Commit strategy
 

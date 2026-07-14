@@ -148,14 +148,18 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerExecution: EngineerExecutionManager | undefined;
   let engineerVerification: EngineerVerificationManager | undefined;
   let engineerPublication: EngineerPublicationManager | undefined;
+  let engineerWarmPool: WarmSandboxPool | undefined;
   let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor, planning: engineerPlanning });
   if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest) {
     const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(engineerRoot, "workspaces") });
     const warmLockfileHash = process.env.ZINTUS_ENGINEER_LOCKFILE_HASH;
     const warmToolchainHash = process.env.ZINTUS_ENGINEER_TOOLCHAIN_HASH;
-    const warmPool = warmLockfileHash && warmToolchainHash
+    engineerWarmPool = warmLockfileHash && warmToolchainHash
+      ? new WarmSandboxPool({ root: join(engineerRoot, "warm-pool") })
+      : undefined;
+    const warmPool = warmLockfileHash && warmToolchainHash && engineerWarmPool
       ? {
-          pool: new WarmSandboxPool({ root: join(engineerRoot, "warm-pool") }),
+          pool: engineerWarmPool,
           lockfileHash: warmLockfileHash,
           toolchainHash: warmToolchainHash,
         }
@@ -336,6 +340,24 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // request hits it. Off by default.
   let probeTimer: ReturnType<typeof setInterval> | null = null;
   let engineerApprovalTimer: ReturnType<typeof setInterval> | null = null;
+  let engineerWarmPoolTimer: ReturnType<typeof setInterval> | null = null;
+  if (engineerWarmPool) {
+    const configuredMaximum = Number(process.env.ZINTUS_ENGINEER_WARM_POOL_MAX);
+    const maximum = Number.isInteger(configuredMaximum) && configuredMaximum >= 0 ? configuredMaximum : 8;
+    const sweep = () => {
+      try {
+        const health = engineerWarmPool?.sweep(maximum);
+        if (health && (health.expiredQuarantined + health.invalidQuarantined + health.excessQuarantined > 0)) {
+          log("info", "engineer.warm_pool_quarantined", { ...health });
+        }
+      } catch (error) {
+        log("error", "engineer.warm_pool_sweep_failed", { error: error instanceof Error ? error.message : String(error) });
+      }
+    };
+    engineerWarmPoolTimer = setInterval(sweep, 60_000);
+    engineerWarmPoolTimer.unref?.();
+    sweep();
+  }
   if (engineerPublication) {
     const sweep = () => {
       try {
@@ -417,6 +439,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       if (engineerApprovalTimer) {
         clearInterval(engineerApprovalTimer);
         engineerApprovalTimer = null;
+      }
+      if (engineerWarmPoolTimer) {
+        clearInterval(engineerWarmPoolTimer);
+        engineerWarmPoolTimer = null;
       }
       // Drain hosted MCP connections (stop the idle sweep + disconnect every
       // cached client, killing any stdio children) so a deploy doesn't leak them.

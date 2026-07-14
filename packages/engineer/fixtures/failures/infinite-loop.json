@@ -1,0 +1,6 @@
+{
+  "kind": "BUILDER_REPAIR",
+  "failureFingerprint": "same-failing-test",
+  "patches": ["patch-1", "patch-2", "patch-3"],
+  "expectedStopReason": "SAME_FAILURE_LIMIT_REACHED"
+}

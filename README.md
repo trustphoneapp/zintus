@@ -113,6 +113,18 @@ bun run typecheck
 bun run test
 ```
 
+## Zintus Engineer
+
+Engineer is Zintus's evidence-driven coding workflow: TERRA proposes a bounded
+plan, Codex SOL builds in a pinned offline sandbox, trusted executors verify it,
+a fresh SOL session reviews only the exact diff and evidence, and the Supervisor
+alone owns approval and pull-request publication. Web and desktop expose it under
+**Engineer**; it is a workflow, not another chat surface.
+
+Start with the [operator guide](docs/zintus-engineer/README.md), the
+[security architecture](docs/zintus-engineer/SECURITY.md), and the intentionally
+failing [demo fixture](examples/zintus-engineer-demo/README.md).
+
 ## Run commands
 
 ### CLI

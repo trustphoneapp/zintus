@@ -43,3 +43,17 @@ failure and shows cold fallback or `BLOCKED_BY_ENVIRONMENT`, never code blame.
 - Duplicate PR delivery demonstrates idempotency rather than creating two PRs.
 - The final UI uses an explicit result such as `READY FOR REVIEW` or a safe failure,
   never a generic green “Done.”
+
+## Recording preparation
+
+1. Copy `examples/zintus-engineer-demo` outside the monorepo, initialize Git, and
+   commit the untouched baseline. Record the exact SHA in the new-run form.
+2. Run `bun test` once on camera-ready hardware. Confirm only the intentional
+   single-use assertion fails.
+3. Pre-pull and pin the Docker image by digest. Record the lockfile/toolchain hashes
+   if warm-pool mode is used; otherwise show the truthful cold-provisioning event.
+4. Seed no success data. Clear `~/.zintus/engineer` only before the rehearsal, then
+   let the real ledger, command executor, Reviewer, and publication boundary drive
+   every status shown.
+5. Rehearse the safe-failure alternate using the prompt-injection fixture at
+   `packages/engineer/fixtures/prompt-injection/README.md`.

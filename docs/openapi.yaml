@@ -191,6 +191,25 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/engineer/observability:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerObservability
+      summary: Get a durable Engineer operations snapshot
+      description: Aggregates ledger states, risk tiers, pending approvals, and failure classes without trusting agent narrative.
+      responses:
+        "200":
+          description: Current Engineer control-plane snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [snapshot]
+                properties:
+                  snapshot: { $ref: "#/components/schemas/EngineerObservabilitySnapshot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Engineer is not configured. }
+
   /v1/engineer/runs:
     post:
       tags: [Engineer]
@@ -1778,6 +1797,20 @@ components:
       properties:
         actorId: { type: string, minLength: 1, maxLength: 200 }
         reason: { type: string, maxLength: 10000 }
+
+    EngineerObservabilitySnapshot:
+      type: object
+      required: [generatedAt, totalRuns, activeRuns, terminalRuns, pendingApprovals, runsByState, runsByRisk, failuresByClass]
+      additionalProperties: false
+      properties:
+        generatedAt: { type: string, format: date-time }
+        totalRuns: { type: integer, minimum: 0 }
+        activeRuns: { type: integer, minimum: 0 }
+        terminalRuns: { type: integer, minimum: 0 }
+        pendingApprovals: { type: integer, minimum: 0 }
+        runsByState: { type: object, additionalProperties: { type: integer, minimum: 0 } }
+        runsByRisk: { type: object, additionalProperties: { type: integer, minimum: 0 } }
+        failuresByClass: { type: object, additionalProperties: { type: integer, minimum: 0 } }
 
     EngineerRepositoryReference:
       type: object

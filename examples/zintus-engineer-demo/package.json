@@ -1,0 +1,8 @@
+{
+  "name": "zintus-engineer-demo-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test test/"
+  }
+}

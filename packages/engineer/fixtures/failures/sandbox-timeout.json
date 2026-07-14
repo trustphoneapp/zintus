@@ -1,0 +1,6 @@
+{
+  "name": "sandbox command timeout",
+  "errorCode": "ETIMEDOUT",
+  "expectedStatus": "TIMED_OUT",
+  "expectedExitCode": null
+}

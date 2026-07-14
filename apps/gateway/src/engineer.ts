@@ -9,6 +9,7 @@ import {
   type EngineerSupervisor,
   type RepositoryReference,
   type TaskManifestContent,
+  engineerObservabilitySnapshot,
 } from "@zintus/engineer";
 
 export interface EngineerRunManagerOptions {
@@ -45,6 +46,8 @@ export class EngineerRunManager {
   get(runId: string): { run: EngineerRun; lastError: string | null } {
     return { run: this.options.supervisor.getRun(runId), lastError: this.errors.get(runId) ?? null };
   }
+
+  observability() { return engineerObservabilitySnapshot(this.options.supervisor); }
 
   freeze(runId: string, input: {
     expectedStateVersion: number;

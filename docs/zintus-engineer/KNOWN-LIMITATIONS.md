@@ -1,13 +1,15 @@
 # Zintus Engineer known limitations
 
-- The current execution slice supports one explicitly configured local repository.
-  GitHub connection and supervisor-only PR publication arrive in Phase 4.
+- The current execution slice supports one explicitly configured local checkout.
+  Supervisor-only GitHub publication is available, but multi-repository connection
+  management is not yet implemented.
 - `QUEUED` dispatch survives restart. A process that dies after sandbox claim is
-  visible in the ledger, but automated orphan reconciliation and heartbeat-driven
-  cleanup are Phase-6 hardening work.
+  visible in the ledger, but heartbeat leases and automatic reconciliation of
+  every mid-command orphan are not yet implemented.
 - The warm pool provides atomic one-time claims, TTL rejection, validation,
-  quarantine, and cold fallback. Minimum/maximum pool maintenance, periodic health
-  replacement, and poisoned-cache quarantine automation are not yet scheduled.
+  quarantine, cold fallback, one-time destruction after claim, and a periodic
+  maximum/health sweep. It does not yet replenish to a configured minimum or
+  proactively rebuild quarantined capacity.
 - Docker storage quota enforcement relies on the host Docker/runtime configuration;
   the feature directly enforces CPU, memory, PIDs, time, output, privilege, and
   network limits.
@@ -28,3 +30,6 @@
   this local-first slice. A connected repository picker and automatic branch-tip
   resolution require the future repository-connection service; the server still
   validates and records the exact submitted commit.
+- Flake confirmation runs after an initial failed non-security check and blocks
+  mixed outcomes. It is intentionally not a broad statistical flake service and
+  does not make a failing security check retryable.

@@ -2748,6 +2748,11 @@ export function createGatewayHandler(
     }
 
     // ── P2: gateway-hosted agent runtime ─────────────────────────────────────
+    if (url.pathname === "/v1/engineer/observability" && request.method === "GET") {
+      if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
+      return json(request, { snapshot: engineerRuns.observability() });
+    }
+
     if (url.pathname === "/v1/engineer/runs" && request.method === "POST") {
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
       try {

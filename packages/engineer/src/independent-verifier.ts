@@ -4,6 +4,7 @@ import { TrustedEvidenceSchema } from "./contracts.js";
 import type { ArtifactRecord, CommandExecutionRecord } from "./execution-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import { sha256 } from "./hash.js";
+import { assessRepeatedTest } from "./hardening.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import type { TrustedCommandExecutor } from "./trusted-executor.js";
 import {
@@ -70,18 +71,32 @@ export class IndependentVerifier {
       if (group.state === "E2E_TESTING" && items.length === 0) continue;
       this.ensureState(group.state);
       for (const item of items) {
-        const result = this.runItem(item);
+        const result = this.runItem(item, 1);
         executions.push(result.execution);
         trustedEvidence.push(result.evidence);
         if (result.execution.status !== "PASSED") {
-          this.transition("VERIFICATION_INCOMPLETE", "INDEPENDENT_VERIFICATION_FAILED", [result.evidence.evidenceId]);
+          const repeated = [result];
+          for (let attempt = 2; attempt <= 3; attempt += 1) {
+            const confirmation = this.runItem(item, attempt);
+            repeated.push(confirmation);
+            executions.push(confirmation.execution);
+            trustedEvidence.push(confirmation.evidence);
+          }
+          const flake = assessRepeatedTest(repeated.map((attempt, index) => ({
+            attempt: index + 1,
+            passed: attempt.execution.status === "PASSED",
+            commitSha: attempt.command.commitSha,
+            environmentDigest: attempt.command.environmentDigest,
+          })));
+          const reasonCode = flake.quarantineRequired ? "FLAKY_TEST_QUARANTINED" : "INDEPENDENT_VERIFICATION_FAILED";
+          this.transition("VERIFICATION_INCOMPLETE", reasonCode, repeated.map((attempt) => attempt.evidence.evidenceId));
           throw new Error(`independent verification failed for ${item.testId}: ${result.execution.status}`);
         }
       }
     }
     this.ensureState("SECURITY_REVIEW");
     for (const item of this.options.manifest.testPlan.filter((candidate) => candidate.type === "SECURITY")) {
-      const result = this.runItem(item);
+      const result = this.runItem(item, 1);
       executions.push(result.execution);
       trustedEvidence.push(result.evidence);
       if (result.execution.status !== "PASSED") {
@@ -122,11 +137,11 @@ export class IndependentVerifier {
     return { executions, securityFindings, trustedEvidence, securityReportArtifact };
   }
 
-  private runItem(item: TestPlanItem): { execution: VerificationExecutionRecord; evidence: TrustedEvidence } {
+  private runItem(item: TestPlanItem, repeatAttempt: number): { execution: VerificationExecutionRecord; evidence: TrustedEvidence; command: CommandExecutionRecord } {
     if (!item.command) throw new Error(`test plan item ${item.testId} has no executable command`);
     const command = this.options.executor.execute(
       item.command,
-      `verify:${this.options.verificationPass ?? 1}:${item.testId}:${sha256(item).slice(7, 23)}`,
+      `verify:${this.options.verificationPass ?? 1}:${item.testId}:${repeatAttempt}:${sha256(item).slice(7, 23)}`,
     );
     const execution = this.options.supervisor.recordVerificationExecution(VerificationExecutionRecordSchema.parse({
       verificationExecutionId: (this.options.idFactory ?? randomUUID)(),
@@ -157,6 +172,7 @@ export class IndependentVerifier {
     };
     return {
       execution,
+      command,
       evidence: TrustedEvidenceSchema.parse({
         evidenceId: execution.verificationExecutionId,
         runId: this.options.manifest.runId,

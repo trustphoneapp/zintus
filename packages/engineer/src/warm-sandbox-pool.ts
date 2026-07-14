@@ -53,6 +53,15 @@ export interface WarmSandboxPoolOptions {
   idFactory?: () => string;
 }
 
+export interface WarmSandboxPoolHealth {
+  available: number;
+  claimed: number;
+  quarantined: number;
+  expiredQuarantined: number;
+  invalidQuarantined: number;
+  excessQuarantined: number;
+}
+
 /** Filesystem-backed atomic warm claim registry. Claimed workspaces are never returned. */
 export class WarmSandboxPool {
   private readonly root: string;
@@ -112,6 +121,43 @@ export class WarmSandboxPool {
       this.path("claimed", descriptor.warmSandboxId),
       this.path("quarantined", descriptor.warmSandboxId),
     );
+  }
+
+  /** Periodic fail-closed maintenance. It never promotes or reuses a workspace. */
+  sweep(maxAvailable = Number.POSITIVE_INFINITY): WarmSandboxPoolHealth {
+    if (maxAvailable < 0 || (!Number.isInteger(maxAvailable) && maxAvailable !== Number.POSITIVE_INFINITY)) {
+      throw new TypeError("maxAvailable must be a non-negative integer");
+    }
+    let expiredQuarantined = 0;
+    let invalidQuarantined = 0;
+    let excessQuarantined = 0;
+    const valid: Array<{ file: string; descriptor: WarmSandboxDescriptor }> = [];
+    for (const file of readdirSync(join(this.root, "available")).filter((name) => name.endsWith(".json")).sort()) {
+      const source = join(this.root, "available", file);
+      try {
+        const descriptor = WarmSandboxDescriptorSchema.parse(JSON.parse(readFileSync(source, "utf8")));
+        if (new Date(descriptor.expiresAt).getTime() <= this.now().getTime()) {
+          this.renameBestEffort(source, join(this.root, "quarantined", file));
+          expiredQuarantined += 1;
+        } else {
+          valid.push({ file, descriptor });
+        }
+      } catch {
+        this.renameBestEffort(source, join(this.root, "quarantined", file));
+        invalidQuarantined += 1;
+      }
+    }
+    valid.sort((left, right) => right.descriptor.createdAt.localeCompare(left.descriptor.createdAt));
+    for (const entry of valid.slice(maxAvailable)) {
+      this.renameBestEffort(join(this.root, "available", entry.file), join(this.root, "quarantined", entry.file));
+      excessQuarantined += 1;
+    }
+    return {
+      available: readdirSync(join(this.root, "available")).filter((name) => name.endsWith(".json")).length,
+      claimed: readdirSync(join(this.root, "claimed")).filter((name) => name.endsWith(".json")).length,
+      quarantined: readdirSync(join(this.root, "quarantined")).filter((name) => name.endsWith(".json")).length,
+      expiredQuarantined, invalidQuarantined, excessQuarantined,
+    };
   }
 
   private path(state: "available" | "claimed" | "quarantined", id: string): string {

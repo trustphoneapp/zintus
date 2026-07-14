@@ -57,7 +57,7 @@ function defaultRunner(
   };
 }
 
-function parseTrustedCommand(command: string): string[] {
+export function parseTrustedCommand(command: string): string[] {
   if (command !== command.trim() || /[\r\n\0]/.test(command)) throw new Error("command must be a single trimmed line");
   const tokens = command.split(/\s+/);
   if (tokens.length < 2 || tokens.some((token) => !SAFE_TOKEN.test(token))) {

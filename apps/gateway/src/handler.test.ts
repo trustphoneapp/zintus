@@ -160,6 +160,12 @@ describe("gateway handler", () => {
     expect((await diff.json()) as unknown).toEqual({ diff: "diff --git a/a b/a" });
     const approval = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/approval", { headers: { Authorization: "Bearer secret" } }));
     expect((await approval.json()) as unknown).toEqual({ approval: null });
+    const observability = await handler(new Request("http://x/v1/engineer/observability", { headers: { Authorization: "Bearer secret" } }));
+    expect(observability.status).toBe(200);
+    expect(((await observability.json()) as { snapshot: { totalRuns: number; runsByState: Record<string, number> } }).snapshot).toMatchObject({
+      totalRuns: 1,
+      runsByState: { REQUEST_RECEIVED: 1 },
+    });
     supervisor.close();
     rmSync(root, { recursive: true, force: true });
   });
