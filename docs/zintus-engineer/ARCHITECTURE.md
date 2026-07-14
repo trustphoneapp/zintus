@@ -13,10 +13,11 @@ Existing Zintus gateway
           |
           +--> @zintus/engineer (authoritative supervisor + ledger)
           +--> @zintus/router (central model resolution)
-          +--> OpenAI Responses API (Codex Builder, fixed SOL tier)
+          +--> OpenAI Responses API (SOL Builder/Reviewer; TERRA Tester/Security)
           +--> context/index packages (untrusted repository data)
           +--> exact-base Git worktree + Docker trusted executor + artifact store
-          +--> evidence / publication Git service (later phases)
+          +--> hash-bound claims and evidence bundles
+          +--> publication Git service (phase 4)
 ```
 
 The existing generic agent remains available, but an Engineer run cannot be
@@ -74,7 +75,19 @@ The command executor independently checks the frozen command allowlist and a nar
 package-runner policy, spawns argv with `shell:false`, executes inside a pinned
 offline Docker image, and stores stdout/stderr as immutable trusted artifacts. A
 Builder summary and diff remain untrusted model output. Phase 2 ends at
-`FAST_CHECKS`; Phase 3 owns all correctness promotion.
+`FAST_CHECKS`; Phase 3 independently reruns the frozen test plan and security
+checks, captures TERRA advisories without granting them authority, then constructs
+a hash-bound Reviewer input from the manifest, exact result commit/diff, and
+filtered trusted evidence.
+
+Every Reviewer attempt is a fresh SOL request with no previous response, memory,
+repository map, Builder narrative, or file/command tools. Strict structured output
+is bound to the reviewed diff, evidence hash, and fixed review policy. A requested
+repair consumes a Supervisor-owned retry, gives a restricted Builder only
+structured findings, and requires full re-verification plus another fresh review.
+Verified claims must reference trusted evidence owned by the run. The resulting
+bundle is immutable and available through the authenticated gateway read API.
+Phase 3 stops at `REVIEW_APPROVED`; only Phase 4 may publish.
 
 ## Core invariants
 
@@ -119,6 +132,6 @@ are marked by producer and filtered before Reviewer input construction.
 
 ## Deferred integrations
 
-Independent test/security execution, claim synthesis, isolated Reviewer sessions,
-evidence bundles, human approval, remote branch push, and PR creation remain
-deferred. The Builder has no credentials for those operations.
+Human approval, remote branch push, stale-base preflight, PR creation, client
+workflow screens, and production-scale recovery remain deferred. The Builder and
+Reviewer have no credentials for publication operations.

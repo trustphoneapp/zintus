@@ -11,8 +11,11 @@
 - Docker storage quota enforcement relies on the host Docker/runtime configuration;
   the feature directly enforces CPU, memory, PIDs, time, output, privilege, and
   network limits.
-- Phase 2 Builder results are not verified completion. The run ends this slice at
-  `FAST_CHECKS`; Phase 3 must independently test, scan, review, and construct the
-  evidence bundle.
+- Phase 3 can reach `REVIEW_APPROVED`, but that is a verification boundary rather
+  than published completion. Human approval, stale-base checks, remote push, and
+  PR creation arrive in Phase 4.
+- TERRA Tester and Security outputs are intentionally advisory. Deterministic
+  checks and trusted command records remain authoritative, so the current security
+  scan depth is limited to the frozen commands plus the built-in diff scanner.
 - SSE recovery replays the durable event ledger, but relay/mobile UX for reconnect
   cursors is part of the later Zintus experience phase.

@@ -28,6 +28,20 @@ import {
   type SandboxRecord,
 } from "./execution-contracts.js";
 import {
+  ClaimEvidenceRecordSchema,
+  EvidenceBundleRecordSchema,
+  ReviewFindingRecordSchema,
+  ReviewerSessionRecordSchema,
+  SecurityFindingRecordSchema,
+  VerificationExecutionRecordSchema,
+  type ClaimEvidenceRecord,
+  type EvidenceBundleRecord,
+  type ReviewFindingRecord,
+  type ReviewerSessionRecord,
+  type SecurityFindingRecord,
+  type VerificationExecutionRecord,
+} from "./verification-contracts.js";
+import {
   ENGINEER_DATABASE_SCHEMA_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
 } from "./database-schema.js";
@@ -611,6 +625,167 @@ export class EngineerLedger {
       parsed.cacheKey, parsed.cacheHit === null ? null : parsed.cacheHit ? 1 : 0, parsed.latencyMs,
       parsed.inputTokens, parsed.outputTokens, parsed.retryCount, parsed.status, parsed.createdAt,
     );
+  }
+
+  recordVerificationExecution(record: VerificationExecutionRecord): VerificationExecutionRecord {
+    const parsed = VerificationExecutionRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    const command = this.db.query("SELECT run_id FROM command_executions WHERE id = ?")
+      .get(parsed.commandExecutionId) as { run_id: string } | null;
+    if (!command || command.run_id !== parsed.runId) {
+      throw new EngineerNotFoundError("command execution", parsed.commandExecutionId);
+    }
+    const existing = this.db.query("SELECT run_id, command_execution_id FROM test_executions WHERE id = ?")
+      .get(parsed.verificationExecutionId) as { run_id: string; command_execution_id: string } | null;
+    if (existing) {
+      if (existing.run_id !== parsed.runId || existing.command_execution_id !== parsed.commandExecutionId) {
+        throw new IdempotencyConflictError(parsed.runId, `verification:${parsed.verificationExecutionId}`);
+      }
+      return parsed;
+    }
+    this.db.query(`INSERT INTO test_executions
+      (id, run_id, command_execution_id, type, random_seed, status, started_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.verificationExecutionId, parsed.runId, parsed.commandExecutionId, parsed.type,
+      parsed.randomSeed, parsed.status, parsed.startedAt, parsed.completedAt,
+    );
+    this.insertAudit(parsed.runId, "VERIFICATION_EXECUTED", "EXECUTOR", "trusted-verifier", {
+      verificationExecutionId: parsed.verificationExecutionId,
+      testId: parsed.testId,
+      criterionIds: parsed.criterionIds,
+      commandExecutionId: parsed.commandExecutionId,
+      type: parsed.type,
+      status: parsed.status,
+    }, parsed.completedAt);
+    return parsed;
+  }
+
+  recordSecurityFinding(record: SecurityFindingRecord): SecurityFindingRecord {
+    const parsed = SecurityFindingRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    const existing = this.db.query("SELECT run_id FROM security_findings WHERE id = ?")
+      .get(parsed.securityFindingId) as { run_id: string } | null;
+    if (existing) {
+      if (existing.run_id !== parsed.runId) throw new IdempotencyConflictError(parsed.runId, `security:${parsed.securityFindingId}`);
+      return parsed;
+    }
+    this.db.query(`INSERT INTO security_findings
+      (id, run_id, severity, category, description, file, line_start, line_end,
+       evidence_ids_json, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.securityFindingId, parsed.runId, parsed.severity, parsed.category, parsed.description,
+      parsed.file, parsed.lineStart, parsed.lineEnd, canonicalJson(parsed.evidenceIds), parsed.status, parsed.createdAt,
+    );
+    return parsed;
+  }
+
+  recordReviewerSession(
+    record: ReviewerSessionRecord,
+    findings: ReviewFindingRecord[],
+  ): ReviewerSessionRecord {
+    const parsed = ReviewerSessionRecordSchema.parse(record);
+    const parsedFindings = findings.map((finding) => ReviewFindingRecordSchema.parse(finding));
+    this.getRun(parsed.runId);
+    if (parsedFindings.some((finding) => finding.reviewerSessionId !== parsed.reviewerSessionId)) {
+      throw new IdempotencyConflictError(parsed.runId, `reviewer-findings:${parsed.reviewerSessionId}`);
+    }
+    const transact = this.db.transaction(() => {
+      this.db.query(`INSERT INTO reviewer_sessions
+        (id, run_id, attempt, model_tier, resolved_model, input_hash, manifest_hash, diff_hash,
+         evidence_bundle_hash, policy_version, cache_key, cache_hit, started_at, completed_at,
+         decision, isolation_verified)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        parsed.reviewerSessionId, parsed.runId, parsed.attempt, parsed.modelTier, parsed.resolvedModel,
+        parsed.inputHash, parsed.manifestHash, parsed.diffHash, parsed.evidenceBundleHash,
+        parsed.policyVersion, parsed.cacheKey, parsed.cacheHit ? 1 : 0, parsed.startedAt,
+        parsed.completedAt, parsed.decision, parsed.isolationVerified ? 1 : 0,
+      );
+      const statement = this.db.query(`INSERT INTO review_findings
+        (id, reviewer_session_id, fingerprint, severity, category, file, line_start, line_end,
+         description, required_change, criterion_ids_json, evidence_ids_json, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const finding of parsedFindings) {
+        statement.run(
+          finding.findingId, finding.reviewerSessionId, finding.fingerprint, finding.severity,
+          finding.category, finding.file, finding.lineStart, finding.lineEnd, finding.description,
+          finding.requiredChange, canonicalJson(finding.criterionIds), canonicalJson(finding.evidenceIds), finding.status,
+        );
+      }
+      this.insertAudit(parsed.runId, "REVIEWER_SESSION_COMPLETED", "AGENT", parsed.reviewerSessionId, {
+        attempt: parsed.attempt,
+        modelTier: parsed.modelTier,
+        resolvedModel: parsed.resolvedModel,
+        inputHash: parsed.inputHash,
+        diffHash: parsed.diffHash,
+        evidenceBundleHash: parsed.evidenceBundleHash,
+        decision: parsed.decision,
+        isolationVerified: parsed.isolationVerified,
+        findingIds: parsedFindings.map((finding) => finding.findingId),
+      }, parsed.completedAt);
+      return parsed;
+    });
+    return transact();
+  }
+
+  nextReviewerAttempt(runId: string): number {
+    this.getRun(runId);
+    const row = this.db.query("SELECT COALESCE(MAX(attempt), 0) AS attempt FROM reviewer_sessions WHERE run_id = ?")
+      .get(runId) as { attempt: number };
+    return row.attempt + 1;
+  }
+
+  recordClaimEvidence(record: ClaimEvidenceRecord): ClaimEvidenceRecord {
+    const parsed = ClaimEvidenceRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    this.db.query(`INSERT INTO claim_evidence
+      (id, run_id, criterion_id, claim, status, evidence_ids_json, notes, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.claimId, parsed.runId, parsed.criterionId, parsed.claim, parsed.status,
+      canonicalJson(parsed.evidenceIds), parsed.notes, parsed.createdAt,
+    );
+    return parsed;
+  }
+
+  listClaimEvidence(runId: string): ClaimEvidenceRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query(`SELECT id, run_id, criterion_id, claim, status,
+      evidence_ids_json, notes, created_at FROM claim_evidence
+      WHERE run_id = ? ORDER BY created_at ASC, id ASC`).all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ClaimEvidenceRecordSchema.parse({
+      claimId: row.id,
+      runId: row.run_id,
+      criterionId: row.criterion_id,
+      claim: row.claim,
+      status: row.status,
+      evidenceIds: JSON.parse(String(row.evidence_ids_json)),
+      notes: row.notes,
+      createdAt: row.created_at,
+    }));
+  }
+
+  recordEvidenceBundle(record: EvidenceBundleRecord): EvidenceBundleRecord {
+    const parsed = EvidenceBundleRecordSchema.parse(record);
+    this.getRun(parsed.bundle.runId);
+    this.db.query(`INSERT INTO evidence_bundles
+      (id, run_id, manifest_hash, bundle_hash, base_commit_sha, result_commit_sha,
+       environment_digest, manifest_json, final_decision, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.evidenceBundleId, parsed.bundle.runId, parsed.bundle.manifestHash, parsed.bundleHash,
+      parsed.bundle.baseCommitSha, parsed.bundle.resultCommitSha, parsed.bundle.environmentDigest,
+      canonicalJson(parsed.bundle), parsed.bundle.finalDecision, parsed.bundle.createdAt,
+    );
+    return parsed;
+  }
+
+  listEvidenceBundles(runId: string): EvidenceBundleRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query(`SELECT id, bundle_hash, manifest_json
+      FROM evidence_bundles WHERE run_id = ? ORDER BY created_at ASC, id ASC`).all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => EvidenceBundleRecordSchema.parse({
+      evidenceBundleId: row.id,
+      bundleHash: row.bundle_hash,
+      bundle: JSON.parse(String(row.manifest_json)),
+    }));
   }
 
   close(): void {

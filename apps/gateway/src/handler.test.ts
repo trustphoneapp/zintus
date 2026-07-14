@@ -135,6 +135,16 @@ describe("gateway handler", () => {
     }));
     expect(artifacts.status).toBe(200);
     expect((await artifacts.json()) as unknown).toEqual({ artifacts: [] });
+    const claims = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/claims", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(claims.status).toBe(200);
+    expect((await claims.json()) as unknown).toEqual({ claims: [] });
+    const evidence = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/evidence", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(evidence.status).toBe(200);
+    expect((await evidence.json()) as unknown).toEqual({ evidenceBundles: [] });
     supervisor.close();
     rmSync(root, { recursive: true, force: true });
   });

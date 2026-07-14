@@ -37,6 +37,7 @@ import { getKey as getProviderKey } from "@zintus/keychain";
 import {
   DockerSandboxManager,
   EngineerExecutionManager,
+  EngineerVerificationManager,
   EngineerSupervisor,
   GitWorkspaceManager,
   LocalArtifactStore,
@@ -126,6 +127,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const engineerImageDigest = process.env.ZINTUS_ENGINEER_IMAGE_DIGEST;
   const engineerArtifactStore = new LocalArtifactStore({ root: join(engineerRoot, "artifacts") });
   let engineerExecution: EngineerExecutionManager | undefined;
+  let engineerVerification: EngineerVerificationManager | undefined;
+  let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor });
   if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest) {
     const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(engineerRoot, "workspaces") });
     const warmLockfileHash = process.env.ZINTUS_ENGINEER_LOCKFILE_HASH;
@@ -151,6 +154,16 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         baseCommitSha: prewarmBaseCommit,
       });
     }
+    const transportForRole = async () => {
+      const apiKey = await getProviderKey("openai");
+      if (!apiKey) throw new Error("OpenAI BYOK key is required for Zintus Engineer");
+      return new OpenAIResponsesTransport({ apiKey });
+    };
+    const modelConfiguration = {
+      sol: process.env.ZINTUS_ENGINEER_MODEL_SOL,
+      terra: process.env.ZINTUS_ENGINEER_MODEL_TERRA,
+      luna: process.env.ZINTUS_ENGINEER_MODEL_LUNA,
+    };
     engineerExecution = new EngineerExecutionManager({
       supervisor: engineerSupervisor,
       sandboxManager,
@@ -159,24 +172,25 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         if (repositoryId !== engineerRepositoryId) throw new Error("run repository is not the configured Engineer repository");
         return engineerRepositoryRoot;
       },
-      transportForRun: async () => {
-        const apiKey = await getProviderKey("openai");
-        if (!apiKey) throw new Error("OpenAI BYOK key is required for the Codex Builder");
-        return new OpenAIResponsesTransport({ apiKey });
-      },
+      transportForRun: transportForRole,
       builderOptions: {
-        modelConfiguration: {
-          sol: process.env.ZINTUS_ENGINEER_MODEL_SOL,
-          terra: process.env.ZINTUS_ENGINEER_MODEL_TERRA,
-          luna: process.env.ZINTUS_ENGINEER_MODEL_LUNA,
-        },
+        modelConfiguration,
       },
     });
+    engineerVerification = new EngineerVerificationManager({
+      supervisor: engineerSupervisor,
+      executionManager: engineerExecution,
+      sandboxManager,
+      artifactStore: engineerArtifactStore,
+      transportForRole: async () => transportForRole(),
+      modelConfiguration,
+    });
+    engineerRuns = new EngineerRunManager({
+      supervisor: engineerSupervisor,
+      execution: engineerExecution,
+      verification: engineerVerification,
+    });
   }
-  const engineerRuns = new EngineerRunManager({
-    supervisor: engineerSupervisor,
-    ...(engineerExecution ? { execution: engineerExecution } : {}),
-  });
 
   const log: LogFn = (level, message, fields = {}) => {
     // Redact any provider/secret token before the structured line is emitted —
@@ -213,6 +227,14 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   for (const recovery of engineerExecution?.recoverQueued() ?? []) {
     recovery.promise.catch((error) => {
       log("error", "engineer.recovery_failed", {
+        runId: recovery.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  for (const recovery of engineerVerification?.recoverReady() ?? []) {
+    recovery.promise.catch((error) => {
+      log("error", "engineer.verification_recovery_failed", {
         runId: recovery.runId,
         error: error instanceof Error ? error.message : String(error),
       });

@@ -20,7 +20,7 @@ or reformat those changes.
 | Package manager | Bun workspaces and `bun.lock` | Add a workspace package and use existing scripts |
 | Database | Machine-local `bun:sqlite`; Drizzle-backed stores; Cloudflare D1/KV for cloud | Use owner-only SQLite/WAL for the local phase-1 ledger; keep a storage interface suitable for a later D1/Postgres adapter |
 | Authentication | Gateway bearer token; relay email/Google sessions and scoped gateway credentials | Reuse the gateway boundary; persist the authenticated user ID on every run |
-| Model routing | `@zintus/router` with capability, quota, failover, and structured-output routing | Add centrally enforced Engineer role-to-tier routing in a later phase; agents never pick their tier |
+| Model routing | `@zintus/router` with capability, quota, failover, and structured-output routing | Centrally enforce Engineer role-to-tier routing; agents never pick their tier |
 | Streaming | Existing SSE chat, research, and agent event streams; relay WebSocket | Reuse SSE for run timelines and the relay for remote clients |
 | Queue/workers | No external general-purpose queue; gateway agent tasks are in-process with persisted checkpoints | Engineer uses the authoritative `QUEUED` ledger state as the durable local dispatch record, acknowledges only after commit, and reclaims queued work after restart |
 | Repository integration | Local repository map, sandboxed file tools, Docker command runner; no narrow PR service | Reuse read/write sandbox primitives; build a supervisor-only Git service in phase 2/4 |
@@ -125,9 +125,32 @@ but they do not satisfy Phase-3 independent verification gates.
 
 ### Phase 3 — verification
 
-Add independent test/security execution, fresh isolated Reviewer sessions,
-sentinel isolation tests, Reviewer-triggered bounded repair loops, claim-to-evidence
-mapping, and hash-bound evidence bundles.
+Status: complete for the local single-repository verification slice.
+
+Delivered:
+
+1. Independent execution of every frozen test-plan command through the trusted
+   executor, with ordered fast, unit, integration/migration/regression, optional
+   E2E, and security gates.
+2. Deterministic diff security checks plus a separate TERRA Security advisory;
+   only trusted executor/system evidence can satisfy a correctness gate.
+3. TERRA Tester and Security calls with strict structured tools and no workflow
+   mutation authority.
+4. A fresh SOL Reviewer request per attempt using `store:false`, no previous
+   response, no repository map or Builder narrative, and only the manifest,
+   exact final diff, and filtered trusted evidence.
+5. Hash binding across the manifest, result commit, diff, and Reviewer evidence;
+   tampering invalidates the Reviewer input before a decision can be accepted.
+6. Structured Reviewer decisions and normalized findings persisted in the ledger.
+7. Bounded `REQUEST_CHANGES` repair loops that pass only structured findings to a
+   restricted Builder, then rerun all verification and start a new Reviewer session.
+8. Acceptance claims that default to `UNVERIFIED` when evidence is missing or
+   untrusted, plus immutable hash-bound evidence bundles.
+9. Gateway orchestration through the `REVIEW_APPROVED` phase boundary and
+   authenticated claims/evidence read endpoints.
+
+Exit criteria: package and gateway typechecks, isolation/tamper tests, approval,
+and repair-loop tests pass; publication remains unavailable.
 
 ### Phase 4 — human control and publication
 

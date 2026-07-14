@@ -354,6 +354,20 @@ export const TrustedEvidenceSchema = z.object({
   createdAt: IsoTimestampSchema,
 }).strict();
 
+export function reviewerEvidenceBundleHash(input: {
+  manifestHash: string;
+  diffHash: string;
+  resultCommitSha: string;
+  trustedEvidence: TrustedEvidence[];
+}): string {
+  return sha256({
+    manifestHash: input.manifestHash,
+    diffHash: input.diffHash,
+    resultCommitSha: input.resultCommitSha,
+    trustedEvidence: input.trustedEvidence,
+  });
+}
+
 export const ReviewerInputSchema = z.object({
   reviewSessionId: IdentifierSchema,
   runId: IdentifierSchema,
@@ -385,6 +399,13 @@ export const ReviewerInputSchema = z.object({
         path: ["trustedEvidence", index, "runId"],
       });
     }
+  }
+  if (reviewerEvidenceBundleHash(input) !== input.evidenceBundleHash) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "evidence bundle hash mismatch",
+      path: ["evidenceBundleHash"],
+    });
   }
 });
 

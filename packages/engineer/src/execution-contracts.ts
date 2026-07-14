@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { LogicalModelTierSchema, ModelRoleSchema } from "./contracts.js";
+import { modelTierForRole } from "./model-routing.js";
 
 const IdentifierSchema = z.string().min(1).max(200);
 const HashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -80,20 +82,24 @@ export const BuilderResultSchema = z.object({
 export const AgentExecutionRecordSchema = z.object({
   agentExecutionId: IdentifierSchema,
   runId: IdentifierSchema,
-  role: z.literal("BUILDER"),
-  modelTier: z.literal("GPT-5.6_SOL"),
+  role: ModelRoleSchema,
+  modelTier: LogicalModelTierSchema,
   status: z.enum(["RUNNING", "SUCCEEDED", "FAILED"]),
   inputHash: HashSchema,
   outputArtifactId: IdentifierSchema.nullable(),
   startedAt: IsoTimestampSchema,
   completedAt: IsoTimestampSchema.nullable(),
-}).strict();
+}).strict().superRefine((record, context) => {
+  if (modelTierForRole(record.role) !== record.modelTier) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "agent role/model tier violates central routing policy", path: ["modelTier"] });
+  }
+});
 
 export const ModelCallRecordSchema = z.object({
   modelCallId: IdentifierSchema,
   runId: IdentifierSchema,
   agentExecutionId: IdentifierSchema,
-  logicalTier: z.literal("GPT-5.6_SOL"),
+  logicalTier: LogicalModelTierSchema,
   resolvedModel: z.string().min(1).max(500),
   promptTemplateVersion: z.string().min(1).max(200),
   inputContextRefs: z.array(z.string().min(1).max(2_000)),

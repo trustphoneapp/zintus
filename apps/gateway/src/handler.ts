@@ -2799,6 +2799,12 @@ export function createGatewayHandler(
         if (action === "artifacts" && request.method === "GET") {
           return json(request, { artifacts: engineerRuns.artifacts(runId) });
         }
+        if (action === "claims" && request.method === "GET") {
+          return json(request, { claims: engineerRuns.claims(runId) });
+        }
+        if (action === "evidence" && request.method === "GET") {
+          return json(request, { evidenceBundles: engineerRuns.evidenceBundles(runId) });
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const status = /not found/i.test(message) ? 404 : /not configured|PLAN_FROZEN/i.test(message) ? 409 : 400;

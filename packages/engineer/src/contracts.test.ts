@@ -3,6 +3,7 @@ import {
   ReviewerInputSchema,
   TaskManifestSchema,
   TrustedEvidenceSchema,
+  reviewerEvidenceBundleHash,
   type TaskManifestContent,
 } from "./contracts.js";
 import { sha256 } from "./hash.js";
@@ -78,7 +79,12 @@ describe("mandatory isolation contracts", () => {
       finalDiff,
       diffHash: sha256(finalDiff),
       trustedEvidence: [evidence],
-      evidenceBundleHash: `sha256:${"d".repeat(64)}`,
+      evidenceBundleHash: reviewerEvidenceBundleHash({
+        manifestHash: taskManifest.manifestHash,
+        diffHash: sha256(finalDiff),
+        resultCommitSha: "e".repeat(40),
+        trustedEvidence: [evidence],
+      }),
       resultCommitSha: "e".repeat(40),
       reviewPolicyVersion: "review-policy-v1",
       createdAt: "2026-07-14T12:02:00.000Z",

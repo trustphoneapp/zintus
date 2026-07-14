@@ -285,7 +285,7 @@ paths:
     post:
       tags: [Engineer]
       operationId: startEngineerRun
-      summary: Durably enqueue an Engineer run for Phase 2 execution
+      summary: Durably enqueue an Engineer run for execution and independent verification
       parameters:
         - $ref: "#/components/parameters/EngineerRunId"
       responses:
@@ -314,8 +314,8 @@ paths:
       responses:
         "200":
           description: |
-            SSE stream of ordered state events. Phase 2 closes the stream when
-            FAST_CHECKS or a terminal state is reached.
+            SSE stream of ordered state events. The stream closes at the Phase 3
+            REVIEW_APPROVED boundary or at a terminal state.
           content:
             text/event-stream:
               schema: { type: string }
@@ -342,6 +342,52 @@ paths:
                   artifacts:
                     type: array
                     items: { $ref: "#/components/schemas/EngineerArtifact" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/claims:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRunClaims
+      summary: List acceptance claims and their trusted evidence mappings
+      parameters:
+        - $ref: "#/components/parameters/EngineerRunId"
+      responses:
+        "200":
+          description: Claims remain UNVERIFIED unless their evidence IDs belong to trusted run artifacts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [claims]
+                properties:
+                  claims:
+                    type: array
+                    items: { $ref: "#/components/schemas/EngineerClaimEvidence" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/evidence:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRunEvidenceBundles
+      summary: List hash-bound verification and review evidence bundles
+      parameters:
+        - $ref: "#/components/parameters/EngineerRunId"
+      responses:
+        "200":
+          description: Immutable bundle manifests bound to the frozen manifest, result commit, diff, and trusted evidence.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [evidenceBundles]
+                properties:
+                  evidenceBundles:
+                    type: array
+                    items: { $ref: "#/components/schemas/EngineerEvidenceBundleRecord" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Run not found. }
@@ -1735,6 +1781,74 @@ components:
         sizeBytes: { type: integer, minimum: 0 }
         trusted: { type: boolean }
         createdAt: { type: string, format: date-time }
+
+    EngineerClaimEvidence:
+      type: object
+      required: [claimId, claim, status, evidenceIds, notes, runId, criterionId, createdAt]
+      additionalProperties: false
+      properties:
+        claimId: { type: string }
+        claim: { type: string }
+        status:
+          type: string
+          enum: [VERIFIED, PARTIALLY_VERIFIED, FAILED, UNVERIFIED, BLOCKED_BY_INFRASTRUCTURE, BLOCKED_BY_EXTERNAL_DEPENDENCY, HUMAN_REVIEW_REQUIRED]
+        evidenceIds:
+          type: array
+          items: { type: string }
+        notes: { type: string }
+        runId: { type: string }
+        criterionId: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+
+    EngineerEvidenceBundleRecord:
+      type: object
+      required: [evidenceBundleId, bundle, bundleHash]
+      additionalProperties: false
+      properties:
+        evidenceBundleId: { type: string }
+        bundleHash: { type: string, pattern: "^sha256:[a-f0-9]{64}$" }
+        bundle:
+          type: object
+          required: [bundleVersion, runId, manifestHash, baseCommitSha, resultCommitSha, environmentDigest, artifacts, claims, finalDecision, createdAt]
+          additionalProperties: false
+          properties:
+            bundleVersion: { type: integer, minimum: 1 }
+            runId: { type: string }
+            manifestHash: { type: string, pattern: "^sha256:[a-f0-9]{64}$" }
+            baseCommitSha: { type: string, pattern: "^[a-f0-9]{40,64}$" }
+            resultCommitSha: { type: string, pattern: "^[a-f0-9]{40,64}$" }
+            environmentDigest: { type: string, pattern: "^sha256:[a-f0-9]{64}$" }
+            artifacts:
+              type: array
+              items:
+                type: object
+                required: [artifactId, type, sha256, createdAt, producer, sizeBytes]
+                additionalProperties: false
+                properties:
+                  artifactId: { type: string }
+                  type: { type: string }
+                  sha256: { type: string, pattern: "^sha256:[a-f0-9]{64}$" }
+                  createdAt: { type: string, format: date-time }
+                  producer: { type: string }
+                  sizeBytes: { type: integer, minimum: 0 }
+            claims:
+              type: array
+              items:
+                type: object
+                required: [claimId, claim, status, evidenceIds, notes]
+                additionalProperties: false
+                properties:
+                  claimId: { type: string }
+                  claim: { type: string }
+                  status:
+                    type: string
+                    enum: [VERIFIED, PARTIALLY_VERIFIED, FAILED, UNVERIFIED, BLOCKED_BY_INFRASTRUCTURE, BLOCKED_BY_EXTERNAL_DEPENDENCY, HUMAN_REVIEW_REQUIRED]
+                  evidenceIds:
+                    type: array
+                    items: { type: string }
+                  notes: { type: string }
+            finalDecision: { type: string }
+            createdAt: { type: string, format: date-time }
 
     Health:
       type: object

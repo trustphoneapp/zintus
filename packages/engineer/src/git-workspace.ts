@@ -115,6 +115,18 @@ export class GitWorkspaceManager {
     return this.git(workspace.workspaceRoot, ["rev-parse", "HEAD"]);
   }
 
+  /** Creates a local evidence checkpoint only; this never pushes or contacts a remote. */
+  checkpoint(workspace: WorkspaceRecord, message = "zintus engineer result checkpoint"): string {
+    if (!this.diff(workspace)) return this.currentCommit(workspace);
+    this.git(workspace.workspaceRoot, ["add", "-A", "--"]);
+    this.git(workspace.workspaceRoot, [
+      "-c", "user.name=Zintus Engineer",
+      "-c", "user.email=engineer@zintus.local",
+      "commit", "--no-gpg-sign", "-m", message,
+    ]);
+    return this.currentCommit(workspace);
+  }
+
   diff(workspace: WorkspaceRecord): string {
     return this.git(workspace.workspaceRoot, ["diff", "--binary", "--no-ext-diff", workspace.baseCommitSha, "--"]);
   }

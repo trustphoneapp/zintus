@@ -29,6 +29,14 @@ import type {
   ModelCallRecord,
   SandboxRecord,
 } from "./execution-contracts.js";
+import type {
+  ClaimEvidenceRecord,
+  EvidenceBundleRecord,
+  ReviewFindingRecord,
+  ReviewerSessionRecord,
+  SecurityFindingRecord,
+  VerificationExecutionRecord,
+} from "./verification-contracts.js";
 import { IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
 import { sha256 } from "./hash.js";
 import { EngineerLedger, type LedgerTransitionResult } from "./ledger.js";
@@ -348,6 +356,53 @@ export class EngineerSupervisor {
 
   recordModelCall(record: ModelCallRecord): void {
     this.ledger.recordModelCall(record);
+  }
+
+  recordVerificationExecution(record: VerificationExecutionRecord): VerificationExecutionRecord {
+    const run = this.ledger.getRun(record.runId);
+    if (!["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "REVERIFYING"].includes(run.state)) {
+      throw new InvalidTransitionError(`verification cannot be recorded while run is ${run.state}`);
+    }
+    return this.ledger.recordVerificationExecution(record);
+  }
+
+  recordSecurityFinding(record: SecurityFindingRecord): SecurityFindingRecord {
+    const run = this.ledger.getRun(record.runId);
+    if (run.state !== "SECURITY_REVIEW") {
+      throw new InvalidTransitionError(`security findings cannot be recorded while run is ${run.state}`);
+    }
+    return this.ledger.recordSecurityFinding(record);
+  }
+
+  recordReviewerSession(record: ReviewerSessionRecord, findings: ReviewFindingRecord[]): ReviewerSessionRecord {
+    const run = this.ledger.getRun(record.runId);
+    if (run.state !== "REVIEWING") {
+      throw new InvalidTransitionError(`review sessions cannot be recorded while run is ${run.state}`);
+    }
+    if (!record.isolationVerified || record.modelTier !== "GPT-5.6_SOL") {
+      throw new InvalidTransitionError("Reviewer session must be fresh, isolated, and routed to SOL");
+    }
+    return this.ledger.recordReviewerSession(record, findings);
+  }
+
+  nextReviewerAttempt(runId: string): number {
+    return this.ledger.nextReviewerAttempt(runId);
+  }
+
+  recordClaimEvidence(record: ClaimEvidenceRecord): ClaimEvidenceRecord {
+    return this.ledger.recordClaimEvidence(record);
+  }
+
+  listClaimEvidence(runId: string): ClaimEvidenceRecord[] {
+    return this.ledger.listClaimEvidence(runId);
+  }
+
+  recordEvidenceBundle(record: EvidenceBundleRecord): EvidenceBundleRecord {
+    return this.ledger.recordEvidenceBundle(record);
+  }
+
+  listEvidenceBundles(runId: string): EvidenceBundleRecord[] {
+    return this.ledger.listEvidenceBundles(runId);
   }
 
   close(): void {

@@ -1,6 +1,7 @@
 # Zintus Engineer security boundary
 
-Phase 2 treats the repository and every model response as untrusted data.
+The execution and verification slices treat the repository and every model
+response as untrusted data.
 
 ## Builder permissions
 
@@ -45,8 +46,26 @@ exact base, repository origin, lockfile hash, image digest, toolchain hash, netw
 policy, and sandbox policy. Invalid claims are quarantined and fall back to cold
 provisioning. A claimed workspace is destroyed and never returned to the pool.
 
+## Independent verification and review
+
+Phase 3 reruns the frozen test plan independently of the Builder. TERRA Tester and
+Security agents return structured advisories, but neither may run commands, certify
+evidence, or transition state. Deterministic code orders the gates, invokes the
+trusted executor, records objective results, and blocks critical security findings.
+
+Each Reviewer attempt is a new SOL Responses request with `store:false`, no prior
+response identifier, and no access to the repository, memory, Builder narrative,
+or general tools. Its complete dynamic input is limited to the frozen manifest,
+exact final diff, result commit, and filtered trusted evidence. The evidence hash
+binds all of those inputs; changed diff or evidence is rejected before review.
+Reviewer output is validated through one forced strict function tool.
+
+`REQUEST_CHANGES` consumes a bounded retry and supplies only the manifest and
+structured findings to a restricted repair Builder. All verification gates rerun,
+and a different fresh Reviewer session must decide the new result. Claims cannot
+be marked `VERIFIED` without known trusted evidence IDs.
+
 ## Remaining security gates
 
-Phase 3 adds independent tests, security scans, fresh Reviewer isolation, and
-claim-to-evidence validation. Phase 4 adds the narrow credentialed publication
-service. Until those gates exist, Phase 2 stops at `FAST_CHECKS` and cannot publish.
+Phase 4 adds the narrow credentialed publication service and risk-aware human
+control. Phase 3 stops at `REVIEW_APPROVED` and still cannot push or publish.

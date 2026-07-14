@@ -2,6 +2,7 @@ import {
   RepositoryReferenceSchema,
   TaskManifestContentSchema,
   type EngineerExecutionManager,
+  type EngineerVerificationManager,
   type EngineerRun,
   type EngineerSupervisor,
   type RepositoryReference,
@@ -11,6 +12,7 @@ import {
 export interface EngineerRunManagerOptions {
   supervisor: EngineerSupervisor;
   execution?: EngineerExecutionManager;
+  verification?: EngineerVerificationManager;
 }
 
 /** Gateway facade. It exposes no generic state-transition endpoint. */
@@ -59,7 +61,9 @@ export class EngineerRunManager {
     const run = this.options.execution.enqueue(runId);
     this.errors.delete(runId);
     setTimeout(() => {
-      this.options.execution!.runQueued(runId).catch((error) => {
+      this.options.execution!.runQueued(runId).then(async () => {
+        if (this.options.verification) await this.options.verification.verify(runId);
+      }).catch((error) => {
         this.errors.set(runId, error instanceof Error ? error.message : String(error));
       });
     }, 0);
@@ -72,6 +76,14 @@ export class EngineerRunManager {
 
   artifacts(runId: string) {
     return this.options.supervisor.listArtifacts(runId);
+  }
+
+  claims(runId: string) {
+    return this.options.supervisor.listClaimEvidence(runId);
+  }
+
+  evidenceBundles(runId: string) {
+    return this.options.supervisor.listEvidenceBundles(runId);
   }
 
   subscribe(runId: string): ReadableStream<Uint8Array> {
@@ -88,7 +100,8 @@ export class EngineerRunManager {
         nextSequence = event.sequence + 1;
       }
       const state = this.options.supervisor.getRun(runId).state;
-      if (state === "FAST_CHECKS" || [
+      if ([
+        "REVIEW_APPROVED",
         "COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED",
         "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION",
         "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED",
