@@ -28,7 +28,9 @@ type IconName =
   | "plug"
   | "pin"
   | "database"
-  | "bot";
+  | "bot"
+  | "history"
+  | "sliders";
 
 const paths: Record<IconName, ReactNode> = {
   database: (
@@ -183,6 +185,26 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M20 14h2" />
       <path d="M15 13v2" />
       <path d="M9 13v2" />
+    </>
+  ),
+  history: (
+    <>
+      <path d="M3 3v5h5" />
+      <path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" />
+      <path d="M12 7v5l4 2" />
+    </>
+  ),
+  sliders: (
+    <>
+      <line x1="21" x2="14" y1="4" y2="4" />
+      <line x1="10" x2="3" y1="4" y2="4" />
+      <line x1="21" x2="12" y1="12" y2="12" />
+      <line x1="8" x2="3" y1="12" y2="12" />
+      <line x1="21" x2="16" y1="20" y2="20" />
+      <line x1="12" x2="3" y1="20" y2="20" />
+      <line x1="14" x2="14" y1="2" y2="6" />
+      <line x1="8" x2="8" y1="10" y2="14" />
+      <line x1="16" x2="16" y1="18" y2="22" />
     </>
   ),
 };

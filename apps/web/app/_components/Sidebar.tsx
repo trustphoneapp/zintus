@@ -9,6 +9,13 @@ import { useAppStore, type Thread } from "@/lib/app-store";
 import { signOut, getMe, googleSignInUrl } from "@/lib/cloud";
 import { fetchBillingStatus, type BillingStatus } from "@/lib/billing";
 import { TIER_LABEL } from "@/lib/chat-top-strip";
+import {
+  DEFAULT_RECENTS_FILTERS,
+  filterRecents,
+  isDefaultRecentsFilters,
+  type RecentsFilters,
+  type RecentsGroupBy,
+} from "@/lib/recents-filter";
 import { ZintusLogo } from "@/components/ZintusLogo";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { useDismissableMenu } from "./useDismissableMenu";
@@ -86,6 +93,158 @@ function groupThreadsByDate(
     if (buckets[label]!.length) groups.push({ label, threads: buckets[label]! });
   }
   return groups;
+}
+
+/** View-level grouping switch driven by the Recents filter popover's "Group"
+ *  row: "date" reuses groupThreadsByDate's PINNED/Today/Yesterday/Previous 7
+ *  days/Older buckets; "none" is a single pinned-first flat list — one
+ *  unlabeled group, so the group-label span simply renders nothing instead of
+ *  an empty pill. */
+function buildRecentGroups(
+  threads: Thread[],
+  pinned: Set<string>,
+  groupBy: RecentsGroupBy,
+): Array<{ label: string; threads: Thread[] }> {
+  if (groupBy === "date") return groupThreadsByDate(threads, pinned);
+  const pinnedThreads = threads.filter((t) => pinned.has(t.id));
+  const rest = threads.filter((t) => !pinned.has(t.id));
+  const flat = [...pinnedThreads, ...rest];
+  return flat.length ? [{ label: "", threads: flat }] : [];
+}
+
+/** Icon-button trigger for the Recents filter popover (RecentsFilterPanel) —
+ *  shared by the expanded sidebar's RECENTS header and the collapsed rail's
+ *  recents flyout header. The accent dot means "a filter is narrowing this
+ *  list", so an active filter is never invisible. */
+function RecentsFilterTrigger({
+  active,
+  open,
+  onClick,
+}: {
+  active: boolean;
+  open: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="sidebar-filter-trigger"
+      title="Filter chats"
+      aria-label="Filter chats"
+      aria-haspopup="menu"
+      aria-expanded={open}
+      onClick={onClick}
+    >
+      <Icon name="sliders" size={14} />
+      {active ? <span className="sidebar-filter-trigger-dot" aria-hidden /> : null}
+    </button>
+  );
+}
+
+/** One labeled segmented-control row (Pinned/Activity/Route/Group) inside the
+ *  Recents filter popover, styled like AccountBlock's Appearance toggle
+ *  (.sidebar-account-theme / -theme-opt) via the sidebar-filter-seg* classes. */
+function FilterSegmentRow<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: ReadonlyArray<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="sidebar-filter-row">
+      <span className="sidebar-filter-row-label">{label}</span>
+      <div className="sidebar-filter-seg">
+        {options.map((opt) => (
+          <button
+            key={opt.value}
+            type="button"
+            className={`sidebar-filter-seg-opt${value === opt.value ? " active" : ""}`}
+            aria-pressed={value === opt.value}
+            onClick={() => onChange(opt.value)}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Recents filter popover content — Pinned/Activity/Route/Group rows + a quiet
+ * Reset footer (visible only when something's non-default). Built ONLY from
+ * attributes Zintus threads really have (see lib/recents-filter) — there is
+ * deliberately no project filter, since threads carry no project linkage.
+ */
+function RecentsFilterPanel({
+  filters,
+  setFilters,
+  groupBy,
+  setGroupBy,
+  onReset,
+}: {
+  filters: RecentsFilters;
+  setFilters: (f: RecentsFilters) => void;
+  groupBy: RecentsGroupBy;
+  setGroupBy: (g: RecentsGroupBy) => void;
+  onReset: () => void;
+}) {
+  const showReset = !isDefaultRecentsFilters(filters) || groupBy !== "date";
+  return (
+    <div className="sidebar-filter-menu" role="menu">
+      <FilterSegmentRow
+        label="Pinned"
+        value={filters.pinned}
+        options={[
+          { value: "all", label: "All" },
+          { value: "pinned", label: "Pinned" },
+        ]}
+        onChange={(pinned) => setFilters({ ...filters, pinned })}
+      />
+      <FilterSegmentRow
+        label="Activity"
+        value={filters.activity}
+        options={[
+          { value: "all", label: "All" },
+          { value: "today", label: "Today" },
+          { value: "week", label: "7d" },
+          { value: "month", label: "30d" },
+        ]}
+        onChange={(activity) => setFilters({ ...filters, activity })}
+      />
+      <FilterSegmentRow
+        label="Route"
+        value={filters.route}
+        options={[
+          { value: "all", label: "All" },
+          { value: "membership", label: "Membership" },
+          { value: "byok", label: "BYOK" },
+        ]}
+        onChange={(route) => setFilters({ ...filters, route })}
+      />
+      <FilterSegmentRow
+        label="Group"
+        value={groupBy}
+        options={[
+          { value: "date", label: "Date" },
+          { value: "none", label: "None" },
+        ]}
+        onChange={setGroupBy}
+      />
+      <div className="sidebar-filter-menu-footer">
+        {showReset ? (
+          <button type="button" className="sidebar-filter-reset" onClick={onReset}>
+            Reset
+          </button>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 function ThreadRow({
@@ -258,6 +417,34 @@ function TierBadge({ tier }: { tier: BillingStatus["tier"] }) {
 }
 
 /**
+ * Identity for the sidebar's account UI (rail avatar + expanded account
+ * block). getMe() is a cheap authenticated GET, not a read of the session
+ * cookie client-side — zintus_session is HttpOnly, so document.cookie can
+ * never see it and a cookie-presence gate would never pass. getMe() fails
+ * silent to {authenticated:false} when signed out. Fetched once per mount
+ * (no polling — the popover's "Sign out" reload and the gateway heartbeat
+ * elsewhere cover staleness).
+ */
+function useAccountInitial() {
+  const [signedIn, setSignedIn] = useState(false);
+  const [email, setEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getMe().then((me) => {
+      if (!me.authenticated) return;
+      setSignedIn(true);
+      if (me.email) setEmail(me.email);
+    });
+  }, []);
+
+  // Two-letter email initials (matches the desktop account avatar) when known,
+  // otherwise a generic mark.
+  const initial = signedIn ? (email ? email.slice(0, 2).toUpperCase() : "A") : "L";
+
+  return { signedIn, email, initial };
+}
+
+/**
  * Bottom-of-sidebar account block (design parity). The design mocks a managed
  * "Starter plan" with a token quota + Top-up — but managed keys are gated off
  * (MANAGED_KEYS_AVAILABLE = false), so we show ONLY honest content here: real
@@ -270,30 +457,23 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
-  // Identity comes from getMe() (a cheap authenticated GET), not from reading
-  // the session cookie client-side — zintus_session is HttpOnly, so
-  // document.cookie can never see it and a cookie-presence gate would never
-  // pass. getMe() fails silent to {authenticated:false} when signed out.
-  const [signedIn, setSignedIn] = useState(false);
-  // Real identity/plan, fetched once per mount (no polling — the popover's
-  // "Sign out" reload and the gateway heartbeat elsewhere cover staleness).
-  // Both calls fail silent to `null`, so the footer just keeps showing
-  // "Local workspace" / no badge if the relay is unreachable.
-  const [email, setEmail] = useState<string | null>(null);
+  const { signedIn, email, initial } = useAccountInitial();
+  // Billing, fetched once per mount alongside identity (see useAccountInitial
+  // above) — fails silent to `null`, so the footer just keeps showing no
+  // badge if the relay is unreachable.
   const [billing, setBilling] = useState<BillingStatus | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setMounted(true);
-    void getMe().then((me) => {
-      if (!me.authenticated) return;
-      setSignedIn(true);
-      if (me.email) setEmail(me.email);
-      void fetchBillingStatus().then((status) => {
-        if (status) setBilling(status);
-      });
-    });
   }, []);
+
+  useEffect(() => {
+    if (!signedIn) return;
+    void fetchBillingStatus().then((status) => {
+      if (status) setBilling(status);
+    });
+  }, [signedIn]);
 
   // Escape (restores focus to the account trigger) + click / focus-out dismissal.
   useDismissableMenu(open, () => setOpen(false), ref);
@@ -303,9 +483,6 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
   // backend, so this copy must never claim chats sync across devices.
   const name = signedIn ? (email ?? "Signed in") : "Local workspace";
   const sub = signedIn ? "Account & billing synced" : "Chats stay on this device";
-  // Two-letter email initials (matches the desktop account avatar) when known,
-  // otherwise a generic mark.
-  const initial = signedIn ? (email ? email.slice(0, 2).toUpperCase() : "A") : "L";
   const tierActive = signedIn && billing?.status === "active";
   const savedUsd = gatewaySavings?.estimatedUsdSaved ?? 0;
   const isDark = !mounted || theme !== "light";
@@ -478,8 +655,32 @@ export function Sidebar({
   const activeThreadId = useAppStore((state) => state.activeThreadId);
   const pinnedThreadIds = useAppStore((state) => state.pinnedThreadIds);
   const togglePinThread = useAppStore((state) => state.togglePinThread);
+  const { initial } = useAccountInitial();
 
   const [search, setSearch] = useState("");
+  // One-click recents from the collapsed rail (Claude/ChatGPT parity — see
+  // the rail button below). Shares `search` with the expanded sidebar's
+  // input; harmless since only one of the two UIs is ever mounted.
+  const [recentsOpen, setRecentsOpen] = useState(false);
+  const recentsRef = useRef<HTMLDivElement>(null);
+  useDismissableMenu(recentsOpen, () => setRecentsOpen(false), recentsRef);
+
+  // Recents filter popover (see lib/recents-filter). Ephemeral view state —
+  // NOT persisted, so a reload always starts from the honest default (every
+  // chat visible, grouped by date). Shared across both the expanded sidebar
+  // and the collapsed rail's flyout — only one branch is ever mounted, so one
+  // set of state/handlers naturally applies to whichever is showing.
+  const [filters, setFilters] = useState<RecentsFilters>(DEFAULT_RECENTS_FILTERS);
+  const [groupBy, setGroupBy] = useState<RecentsGroupBy>("date");
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const filterMenuRef = useRef<HTMLDivElement>(null);
+  useDismissableMenu(filterMenuOpen, () => setFilterMenuOpen(false), filterMenuRef);
+  const filtersActive = !isDefaultRecentsFilters(filters) || groupBy !== "date";
+  function resetRecentsFilters() {
+    setFilters(DEFAULT_RECENTS_FILTERS);
+    setGroupBy("date");
+  }
+
   const sortedThreads = [...threads]
     .filter((t) => t.messages.length > 0 && !t.incognito)
     .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -502,9 +703,12 @@ export function Sidebar({
       )
     : sortedThreads;
 
-  // PINNED-first, date-grouped recents (10.5). Search still filters everything.
+  // PINNED-first, date-grouped recents (10.5). Search still filters everything;
+  // the Recents filter popover (pinned/activity/route) then narrows further,
+  // and Group (date vs flat) decides how the result is bucketed.
   const pinnedSet = new Set(pinnedThreadIds);
-  const recentGroups = groupThreadsByDate(visibleThreads, pinnedSet);
+  const filteredThreads = filterRecents(visibleThreads, pinnedSet, filters, Date.now());
+  const recentGroups = buildRecentGroups(filteredThreads, pinnedSet, groupBy);
 
   // Collapsed → a thin icon RAIL (nav stays mounted + functional). The logo and
   // the bottom avatar both expand the sidebar; the workspace nav reuses the SAME
@@ -537,6 +741,115 @@ export function Sidebar({
             <Icon name="plus" size={18} />
           </button>
 
+          <div className="sidebar-rail-recents" ref={recentsRef}>
+            <button
+              type="button"
+              className="sidebar-rail-item sidebar-rail-recents-trigger"
+              onClick={() => setRecentsOpen((v) => !v)}
+              title="Recent chats"
+              aria-label="Recent chats"
+              aria-haspopup="menu"
+              aria-expanded={recentsOpen}
+            >
+              <Icon name="history" size={19} />
+            </button>
+            {recentsOpen ? (
+              <div className="sidebar-rail-recents-panel" role="menu">
+                <div className="sidebar-rail-recents-header">
+                  <span className="sidebar-rail-recents-label">Recent chats</span>
+                  <div className="sidebar-rail-recents-searchrow">
+                    <input
+                      type="search"
+                      className="sidebar-search"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      placeholder="Search conversations…"
+                    />
+                    <div className="sidebar-filter-anchor" ref={filterMenuRef}>
+                      <RecentsFilterTrigger
+                        active={filtersActive}
+                        open={filterMenuOpen}
+                        onClick={() => setFilterMenuOpen((v) => !v)}
+                      />
+                      {filterMenuOpen ? (
+                        <RecentsFilterPanel
+                          filters={filters}
+                          setFilters={setFilters}
+                          groupBy={groupBy}
+                          setGroupBy={setGroupBy}
+                          onReset={resetRecentsFilters}
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+                <div className="sidebar-rail-recents-body">
+                  {recentGroups.length === 0 ? (
+                    <p className="sidebar-search-empty">
+                      {sortedThreads.length === 0 ? (
+                        "No chats yet"
+                      ) : visibleThreads.length === 0 ? (
+                        "No matches"
+                      ) : (
+                        <>
+                          No chats match these filters.{" "}
+                          <button
+                            type="button"
+                            className="sidebar-filter-inline-reset"
+                            onClick={resetRecentsFilters}
+                          >
+                            Reset
+                          </button>
+                        </>
+                      )}
+                    </p>
+                  ) : (
+                    recentGroups.map((group) => (
+                      <div key={group.label || "flat"} className="sidebar-thread-group">
+                        {group.label ? (
+                          <span className="sidebar-thread-group-label">{group.label}</span>
+                        ) : null}
+                        <div className="sidebar-threads">
+                          {group.threads.map((thread) => {
+                            const active =
+                              thread.id === activeThreadId && pathname === "/chat";
+                            return (
+                              <button
+                                key={thread.id}
+                                type="button"
+                                role="menuitem"
+                                className={`sidebar-thread-button sidebar-rail-recents-row${active ? " active" : ""}`}
+                                onClick={() => {
+                                  switchThread(thread.id);
+                                  router.push("/chat");
+                                  setRecentsOpen(false);
+                                }}
+                              >
+                                <span className="sidebar-thread-title">{thread.title}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <div className="sidebar-rail-recents-footer">
+                  <button
+                    type="button"
+                    className="sidebar-rail-recents-viewall"
+                    onClick={() => {
+                      onToggle();
+                      setRecentsOpen(false);
+                    }}
+                  >
+                    View all →
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+
           <div className="sidebar-rail-divider" />
 
           <nav className="sidebar-rail-nav">
@@ -565,8 +878,9 @@ export function Sidebar({
             title="Expand sidebar"
             aria-label="Expand sidebar"
           >
+            <span className="sidebar-rail-avatar-initial" aria-hidden>{initial}</span>
             <span
-              className={`status-dot${gatewayConnected ? " online" : ""}`}
+              className={`sidebar-rail-avatar-dot${gatewayConnected ? " online" : ""}`}
               aria-hidden
             />
           </button>
@@ -625,7 +939,25 @@ export function Sidebar({
 
         {!collapsed && sortedThreads.length > 0 ? (
           <div className="sidebar-section">
-            <span className="sidebar-section-label">Recents</span>
+            <div className="sidebar-section-label-row">
+              <span className="sidebar-section-label">Recents</span>
+              <div className="sidebar-filter-anchor" ref={filterMenuRef}>
+                <RecentsFilterTrigger
+                  active={filtersActive}
+                  open={filterMenuOpen}
+                  onClick={() => setFilterMenuOpen((v) => !v)}
+                />
+                {filterMenuOpen ? (
+                  <RecentsFilterPanel
+                    filters={filters}
+                    setFilters={setFilters}
+                    groupBy={groupBy}
+                    setGroupBy={setGroupBy}
+                    onReset={resetRecentsFilters}
+                  />
+                ) : null}
+              </div>
+            </div>
             <input
               type="search"
               className="sidebar-search"
@@ -633,12 +965,29 @@ export function Sidebar({
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search conversations…"
             />
-            {visibleThreads.length === 0 ? (
-              <p className="sidebar-search-empty">No matches</p>
+            {recentGroups.length === 0 ? (
+              <p className="sidebar-search-empty">
+                {visibleThreads.length === 0 ? (
+                  "No matches"
+                ) : (
+                  <>
+                    No chats match these filters.{" "}
+                    <button
+                      type="button"
+                      className="sidebar-filter-inline-reset"
+                      onClick={resetRecentsFilters}
+                    >
+                      Reset
+                    </button>
+                  </>
+                )}
+              </p>
             ) : null}
             {recentGroups.map((group) => (
-              <div key={group.label} className="sidebar-thread-group">
-                <span className="sidebar-thread-group-label">{group.label}</span>
+              <div key={group.label || "flat"} className="sidebar-thread-group">
+                {group.label ? (
+                  <span className="sidebar-thread-group-label">{group.label}</span>
+                ) : null}
                 <div className="sidebar-threads">
                   {group.threads.map((thread) => (
                     <ThreadRow

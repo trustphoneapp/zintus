@@ -51,6 +51,7 @@ import {
 } from "@/lib/app-store";
 import {
   streamChat,
+  isGatewayAvailable,
   sanitizeSendHistory,
   imageAwareHistory,
   UnsupportedCapabilityError,
@@ -75,6 +76,11 @@ import {
   providerCanSeeImages,
 } from "@/lib/image-attachments";
 import { extractPdfText } from "@/lib/extract-pdf";
+import {
+  formatCharCount,
+  nextPastedTextName,
+  shouldChipPaste,
+} from "@/lib/paste-attachments";
 import { memorySystemMessage } from "@/lib/memory";
 import { downloadFile } from "@/lib/download";
 import {
@@ -103,10 +109,19 @@ import {
   resolveProviderStatusInput,
 } from "@/app/(app)/providers/status";
 import { getMe } from "@/lib/cloud";
-import { fetchBillingStatus, type BillingStatus } from "@/lib/billing";
+import {
+  fetchBillingStatus,
+  fetchManagedModels,
+  type BillingStatus,
+} from "@/lib/billing";
 import { resolveChatTopStrip } from "@/lib/chat-top-strip";
 import { isManagedMember } from "@/lib/membership";
+import type { PlanTier } from "@/lib/economics";
 import { MANAGED_ROUTING_ON_WEB } from "@/lib/model-picker-membership";
+import {
+  pickAutoManagedModel,
+  canAutoManagedFallback,
+} from "@/lib/managed-auto";
 import {
   streamManagedChat,
   ManagedChatFailure,
@@ -129,7 +144,9 @@ const TEXT_EXTENSIONS = new Set([
 
 /** A text or PDF file: its text is extracted client-side and folded into the
  *  prompt. `pages` is set for PDFs so the chip can show "📄 extracted N pages";
- *  `truncated` flags a long PDF whose tail we stopped reading. */
+ *  `truncated` flags a long PDF whose tail we stopped reading. `pasted` marks a
+ *  long-paste chip (Claude.ai parity) — it has no real filename/extension, so
+ *  the send-path fold and chip UI treat it differently from an attached file. */
 interface TextAttachment {
   id: string;
   kind: "text";
@@ -138,6 +155,7 @@ interface TextAttachment {
   mimeType: string;
   pages?: number;
   truncated?: boolean;
+  pasted?: boolean;
 }
 
 /** An image is processed by @zintus/media into an `ImageContentBlock` that we
@@ -866,13 +884,16 @@ export default function ChatPage() {
     };
   }, [activeThreadId]);
 
-  // Auto-grow the composer textarea (1 → ~8 lines) as the user types, then let
-  // it scroll. Keyed to `input` so it also collapses back after send/clear.
+  // Auto-grow the composer textarea as the user types, then let it scroll.
+  // Ceiling is generous (Claude-like) — up to 400px or 40% of the viewport,
+  // whichever is smaller. Keyed to `input` so it also collapses back after
+  // send/clear.
   useEffect(() => {
     const el = inputRef.current;
     if (!el) return;
+    const max = Math.min(400, Math.round(window.innerHeight * 0.4));
     el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 184)}px`;
+    el.style.height = `${Math.min(el.scrollHeight, max)}px`;
   }, [input]);
 
   // Dismiss each composer popover consistently: mousedown-outside (unchanged),
@@ -1109,13 +1130,54 @@ export default function ChatPage() {
       // never blocks it). v1 managed turns are plain streaming chat (+ JSON mode +
       // relay-side search); local tools/MCP stay a BYOK/gateway feature. Forced off
       // under a regenerate-with-provider override (that menu only lists BYOK routes).
-      const managedTarget =
+      const pinnedManagedTarget =
         !overrideActive &&
         MANAGED_ROUTING_ON_WEB &&
         managedModel &&
         isManagedMember(billing)
           ? managedModel
           : null;
+
+      // Auto FALLBACK: a member on Auto (no pinned provider, no pinned managed
+      // model) whose LOCAL route can't serve them — no gateway, or no key
+      // anywhere — would otherwise dead-end on "No gateway connected". The relay
+      // can still serve their plan tokens, so pick one honest managed model and
+      // route through membership instead of failing. Off under an override (that
+      // menu only lists BYOK routes) and only when a pinned target didn't apply.
+      let managedAutoFallback = false;
+      let autoManagedTarget: string | null = null;
+      if (
+        !overrideActive &&
+        !pinnedManagedTarget &&
+        canAutoManagedFallback({
+          routingOnWeb: MANAGED_ROUTING_ON_WEB,
+          billing,
+          selectedProvider,
+          managedModel,
+        })
+      ) {
+        // Local route unusable = no gateway up, OR no key anywhere (the same two
+        // checks send()'s key gate uses). Only then spend a relay round-trip.
+        const haveBrowserKeys =
+          Object.keys(useProviderStatusStore.getState().keys).length > 0;
+        const gatewayHasKeys = useAppStore
+          .getState()
+          .gatewayProviders.some((provider) => provider.hasKey);
+        const localUnusable =
+          !(await isGatewayAvailable()) || (!haveBrowserKeys && !gatewayHasKeys);
+        if (localUnusable) {
+          const models = await fetchManagedModels().catch(() => null);
+          if (models) {
+            autoManagedTarget = pickAutoManagedModel(
+              models,
+              billing!.tier as PlanTier,
+            );
+            managedAutoFallback = autoManagedTarget != null;
+          }
+        }
+      }
+
+      const managedTarget = pinnedManagedTarget ?? autoManagedTarget;
       if (managedTarget) {
         if (historyHasImages(convo)) {
           updateMessage(
@@ -1141,6 +1203,12 @@ export default function ChatPage() {
               updateMessage(currentAssistantId, streamedText);
             },
           });
+          // The Auto-fallback turn says so honestly: it only happened because the
+          // local gateway/keys couldn't serve. A pinned turn keeps the original
+          // "Zintus membership" wording. Either way the served-by detail appends.
+          const routeReasonBase = managedAutoFallback
+            ? "Auto — no local gateway/keys, routed via Zintus membership"
+            : "Zintus membership";
           const managedMeta: ChatMeta = {
             provider: (result.servedBy ?? "zintus") as ProviderId,
             model: result.model,
@@ -1151,8 +1219,8 @@ export default function ChatPage() {
             savedUsd: 0,
             routingStrategy: "membership",
             routeReason: result.servedBy
-              ? `Zintus membership — served by ${result.servedBy}, billed from plan tokens`
-              : "Zintus membership — billed from plan tokens",
+              ? `${routeReasonBase} — served by ${result.servedBy}, billed from plan tokens`
+              : `${routeReasonBase} — billed from plan tokens`,
             managed: true,
             ...(result.servedBy ? { servedBy: result.servedBy } : {}),
             ...(result.planTokensDebited != null
@@ -1164,7 +1232,9 @@ export default function ChatPage() {
             meta: managedMeta,
           });
           pushTerminalLine({
-            text: `→ routed to Zintus membership (${result.model})${result.servedBy ? ` via ${result.servedBy}` : ""}`,
+            text: managedAutoFallback
+              ? `→ auto-routed to Zintus membership (${result.model}) — no local gateway`
+              : `→ routed to Zintus membership (${result.model})${result.servedBy ? ` via ${result.servedBy}` : ""}`,
             tone: "success",
           });
           // Refresh the plan-token balance so the picker footer reflects the debit.
@@ -1461,8 +1531,18 @@ export default function ChatPage() {
 
     // No usable keys anywhere (browser vault locked/empty AND gateway unconfigured)
     // → guide the user to add one, then retry. Input is preserved. Skipped on the
-    // managed path (Zintus supplies the key server-side).
-    if (!managedRouteActive) {
+    // managed path (Zintus supplies the key server-side): a pinned managed model,
+    // OR a member on Auto (no pin) who can fall back to membership routing. With
+    // zero keys the local path can't serve regardless of gateway liveness, so we
+    // let streamAssistant route those members via the relay rather than dead-end
+    // them at the key manager.
+    const autoManagedEligible = canAutoManagedFallback({
+      routingOnWeb: MANAGED_ROUTING_ON_WEB,
+      billing,
+      selectedProvider,
+      managedModel,
+    });
+    if (!managedRouteActive && !autoManagedEligible) {
       const haveBrowserKeys =
         Object.keys(useProviderStatusStore.getState().keys).length > 0;
       const gatewayHasKeys = useAppStore
@@ -1495,6 +1575,9 @@ export default function ChatPage() {
         // PDF: extracted text, not source — label honestly with the page count.
         const more = att.truncated ? ` (first ${att.pages}, truncated)` : "";
         textPrefix += `[PDF: ${att.name} — ${att.pages} page${att.pages === 1 ? "" : "s"}${more}]\n\`\`\`\n${att.content}\n\`\`\`\n\n`;
+      } else if (att.pasted) {
+        // A long paste, not a file — no filename, so no fake extension either.
+        textPrefix += `[Pasted text]\n\`\`\`\n${att.content}\n\`\`\`\n\n`;
       } else {
         const ext = att.name.split(".").pop() ?? "txt";
         textPrefix += `[File: ${att.name}]\n\`\`\`${ext}\n${att.content}\n\`\`\`\n\n`;
@@ -2341,6 +2424,10 @@ export default function ChatPage() {
                           📄 extracted {att.pages} page{att.pages === 1 ? "" : "s"}
                           {att.truncated ? " (truncated)" : ""}
                         </span>
+                      ) : att.pasted ? (
+                        <span className="chat-attachment-meta">
+                          {formatCharCount(att.content.length)}
+                        </span>
                       ) : null}
                     </>
                   )}
@@ -2393,6 +2480,29 @@ export default function ChatPage() {
             onPaste={(e) => {
               if (e.clipboardData.files.length > 0) {
                 void handleFiles(e.clipboardData.files);
+                return;
+              }
+              // A long paste becomes a "Pasted text" chip instead of dumping
+              // raw text into the composer (Claude.ai parity) — short pastes
+              // are untouched, native textarea behavior.
+              const text = e.clipboardData.getData("text/plain");
+              if (shouldChipPaste(text)) {
+                e.preventDefault();
+                const existingNames = attachmentsRef.current
+                  .filter((a): a is TextAttachment => a.kind === "text")
+                  .map((a) => a.name);
+                setAttachments((prev) => [
+                  ...prev,
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "text",
+                    name: nextPastedTextName(existingNames),
+                    content: text,
+                    mimeType: "text/plain",
+                    pasted: true,
+                  },
+                ]);
+                setNotice(null);
               }
             }}
             onFocus={() => setComposerFocused(true)}

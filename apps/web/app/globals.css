@@ -591,7 +591,6 @@ code {
 }
 .sidebar-rail-logo,
 .sidebar-rail-newchat,
-.sidebar-rail-avatar,
 .sidebar-rail-item {
   display: flex;
   align-items: center;
@@ -621,8 +620,7 @@ code {
   filter: brightness(1.06);
 }
 .sidebar-rail-item:hover,
-.sidebar-rail-logo:hover,
-.sidebar-rail-avatar:hover {
+.sidebar-rail-logo:hover {
   background: var(--color-elevated);
   color: var(--color-text);
 }
@@ -643,9 +641,51 @@ code {
   align-items: center;
   gap: 4px;
 }
+/* Rail account button: a circular initials avatar (matches
+   .sidebar-account-avatar's expanded-sidebar treatment) sized to fit inside
+   the 40px rail column, with the gateway-status dot as a corner badge —
+   see .sidebar-rail-avatar-dot below. */
 .sidebar-rail-avatar {
-  background: var(--color-elevated);
-  border: 0.5px solid var(--c-border);
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: none;
+  background: var(--c-accent);
+  color: var(--c-accent-contrast);
+  cursor: pointer;
+  transition: filter var(--t-fast);
+}
+.sidebar-rail-avatar:hover {
+  filter: brightness(1.06);
+}
+.sidebar-rail-avatar-initial {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+/* Corner badge, punched out of the rail's own background (--color-surface,
+   set on .app-sidebar — .sidebar-rail itself has none) so it reads as a
+   notch rather than a solid ring against the accent-filled avatar. */
+.sidebar-rail-avatar-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  box-shadow: 0 0 0 2px var(--color-surface);
+}
+.sidebar-rail-avatar-dot.online {
+  background: var(--color-green);
+  box-shadow:
+    0 0 0 2px var(--color-surface),
+    0 0 6px color-mix(in oklch, var(--color-green) 60%, transparent);
 }
 /* THE FIX (repo quirk): lone inline SVGs as flex items collapse to ~2px;
    force the box + no-shrink so the rail icons render at full size. Scoped to the
@@ -662,6 +702,230 @@ code {
   width: 22px;
   height: 22px;
   flex-shrink: 0;
+}
+
+/* ── Rail recents flyout: one-click "Claude/ChatGPT parity" access to recent
+   chats from the collapsed rail, without expanding the sidebar. Positioning
+   context for the panel below. */
+.sidebar-rail-recents {
+  position: relative;
+  flex-shrink: 0;
+}
+/* Same machined-dark surface/border/shadow/radius as .sidebar-account-menu —
+   no new tokens. Opens rightward off the rail (a fixed-width left column). */
+.sidebar-rail-recents-panel {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 0;
+  width: 260px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-elevated);
+  border: 0.5px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  z-index: 40;
+}
+.sidebar-rail-recents-header {
+  flex-shrink: 0;
+  padding: 8px 8px 4px;
+}
+.sidebar-rail-recents-label {
+  display: block;
+  padding: 3px 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.sidebar-rail-recents-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 6px;
+}
+/* Navigation-only row: no pin/rename/delete menu (that's the expanded list's
+   job) — a single click switches threads, so no hover-revealed affordances. */
+.sidebar-rail-recents-row {
+  width: 100%;
+  border-radius: 9px;
+}
+/* Panel bg is --color-elevated, so hover needs the accent-soft fill (same
+   choice as .sidebar-account-link:hover) rather than a same-tone elevated. */
+.sidebar-rail-recents-row:hover {
+  background: var(--c-accent-light);
+}
+.sidebar-rail-recents-row.active {
+  background: var(--c-accent-light);
+}
+.sidebar-rail-recents-row.active .sidebar-thread-title {
+  color: var(--c-accent);
+}
+.sidebar-rail-recents-footer {
+  flex-shrink: 0;
+  padding: 6px;
+  border-top: 0.5px solid var(--c-border);
+}
+.sidebar-rail-recents-viewall {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.sidebar-rail-recents-viewall:hover {
+  background: var(--color-elevated);
+  color: var(--color-text);
+}
+/* Search input + filter trigger side by side in the rail flyout header. */
+.sidebar-rail-recents-searchrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sidebar-rail-recents-searchrow .sidebar-search {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Recents filter popover (Claude/ChatGPT-inspired chat filters, built ONLY
+   from attributes Zintus threads really have — see lib/recents-filter). One
+   trigger lives in the expanded sidebar's RECENTS header, one in the
+   collapsed rail's recents flyout header; both share the same panel. ── */
+.sidebar-filter-anchor {
+  position: relative;
+  flex-shrink: 0;
+}
+.sidebar-filter-trigger {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.sidebar-filter-trigger:hover {
+  background: var(--c-accent-light);
+  color: var(--color-text);
+}
+/* Same repo quirk as the rail icons: a lone inline SVG flex item collapses
+   to 0 width — force the box + no-shrink. */
+.sidebar-filter-trigger svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  stroke: currentColor;
+}
+/* Marks "a filter is narrowing this list" — never invisible. */
+.sidebar-filter-trigger-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--c-accent);
+}
+
+/* Same machined-dark surface/border/shadow/radius as .sidebar-account-menu —
+   no new tokens. */
+.sidebar-filter-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 240px;
+  background: var(--color-elevated);
+  border: 0.5px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  padding: 8px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sidebar-filter-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px;
+}
+.sidebar-filter-row-label {
+  font-size: 11px;
+  color: var(--color-text-sub);
+  padding: 0 2px;
+}
+/* Segmented control — same visual grammar as .sidebar-account-theme /
+   .sidebar-account-theme-opt (the Appearance toggle), reused here as its own
+   class pair since it now appears outside the account menu too. */
+.sidebar-filter-seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--color-surface);
+  border: 0.5px solid var(--c-border);
+}
+.sidebar-filter-seg-opt {
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sidebar-filter-seg-opt.active {
+  background: var(--c-accent);
+  color: var(--c-accent-contrast);
+}
+.sidebar-filter-menu-footer {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 20px;
+  padding-top: 4px;
+  border-top: 0.5px solid var(--c-border);
+}
+.sidebar-filter-reset {
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  padding: 3px 6px;
+  cursor: pointer;
+  transition: color var(--t-fast);
+}
+.sidebar-filter-reset:hover {
+  color: var(--color-text);
+  text-decoration: underline;
+}
+/* Inline Reset inside the honest empty state ("No chats match these filters"). */
+.sidebar-filter-inline-reset {
+  border: none;
+  background: transparent;
+  color: var(--c-accent);
+  font-size: 12px;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
 }
 
 .sidebar-header {
@@ -1777,7 +2041,10 @@ code {
 }
 
 .chat-composer textarea {
-  flex: 1;
+  /* NOT flex: 1 — in the card's column layout that zeroes flex-basis and the
+     auto-grow inline height gets ignored, pinning the box at one line. Basis
+     auto lets the JS-set height win and the card grows with it. */
+  flex: 0 0 auto;
   width: 100%;
   resize: none;
   border: none;
@@ -1786,7 +2053,7 @@ code {
   color: var(--color-text);
   line-height: 1.6;
   min-height: 24px;
-  max-height: 184px;
+  max-height: min(400px, 40dvh);
   overflow-y: auto;
 }
 
@@ -4569,6 +4836,15 @@ select:focus-visible {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--color-text-muted);
+}
+/* RECENTS header row — label + the filter trigger, right-aligned. */
+.sidebar-section-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sidebar-section-label-row .sidebar-section-label {
+  padding-right: 0;
 }
 
 /* ── Redesign: sidebar thread list (RECENTS) ──────────────────────────── */
