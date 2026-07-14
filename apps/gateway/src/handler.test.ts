@@ -9,6 +9,8 @@ import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
 import { EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
+import { deriveEngineerPrincipal } from "./engineer-identity.js";
+import { EngineerCapabilityPreflight } from "./engineer-preflight.js";
 
 function fakeEngine(overrides: Partial<Engine> = {}): Engine {
   const base: Engine = {
@@ -109,7 +111,19 @@ describe("gateway handler", () => {
   test("Engineer run intake and reads use the gateway bearer boundary", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-gateway-engineer-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
-    const engineerRuns = new EngineerRunManager({ supervisor, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => "diff --git a/a b/a" });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "handler-test-install-secret" });
+    const preflight = new EngineerCapabilityPreflight({
+      models: ["test-model"], publicationEnabled: false,
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "1".repeat(40), originUrl: "file:///fixture" },
+      probe: {
+        model: async () => ({ available: true, responsesApi: true, strictStructuredOutputs: true }),
+        docker: async () => ({ available: true }), image: async () => ({ exactDigest: true }),
+        repository: async () => ({ readable: true, exactBaseCommit: true }),
+        publication: async () => ({ available: true, pullRequestsWritable: true }),
+      },
+    });
+    await preflight.assertStartup();
+    const engineerRuns = new EngineerRunManager({ supervisor, principal, preflight, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => "diff --git a/a b/a" });
     const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
     const body = JSON.stringify({
       runId: "gateway-run-1",
@@ -125,6 +139,7 @@ describe("gateway handler", () => {
       method: "POST", body, headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
     }));
     expect(created.status).toBe(201);
+    expect(supervisor.getRun("gateway-run-1").userId).not.toBe("user-1");
     const read = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1", {
       headers: { Authorization: "Bearer secret" },
     }));
@@ -166,18 +181,65 @@ describe("gateway handler", () => {
       totalRuns: 1,
       runsByState: { REQUEST_RECEIVED: 1 },
     });
-    const deniedCancellation = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/cancel", {
+    const cancelled = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/cancel", {
       method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
       body: JSON.stringify({ actorId: "another-user", reason: "Attempt to cancel another user's run." }),
     }));
-    expect(deniedCancellation.status).toBe(400);
-    expect(supervisor.getRun("gateway-run-1").state).toBe("REQUEST_RECEIVED");
-    const cancelled = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/cancel", {
-      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ actorId: "user-1", reason: "Stop the incomplete run." }),
-    }));
     expect(cancelled.status).toBe(200);
     expect(((await cancelled.json()) as { run: { state: string } }).run.state).toBe("CANCELLED");
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("Engineer startup readiness is fail-closed and recovers only through an explicit retry", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-gateway-engineer-readiness-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "readiness-test-install" });
+    let ready = false;
+    let repositoryReady = false;
+    const preflight = new EngineerCapabilityPreflight({
+      models: ["exact-model"], publicationEnabled: false,
+      repository: { repositoryId: "repo-ready", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "1".repeat(40), originUrl: "file:///fixture" },
+      probe: {
+        model: async () => ({ available: ready, responsesApi: ready, strictStructuredOutputs: ready }),
+        docker: async () => ({ available: ready }), image: async () => ({ exactDigest: ready }),
+        repository: async () => ({ readable: repositoryReady, exactBaseCommit: repositoryReady }),
+        publication: async () => ({ available: ready, pullRequestsWritable: ready }),
+      },
+    });
+    const manager = new EngineerRunManager({ supervisor, principal, preflight });
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns: manager });
+    expect((await handler(new Request("http://x/health"))).status).toBe(503);
+    const failed = await handler(new Request("http://x/v1/engineer/readiness/retry", { method: "POST", headers: { Authorization: "Bearer secret" } }));
+    expect(failed.status).toBe(503);
+    expect(supervisor.listRuns()).toEqual([]);
+    ready = true;
+    repositoryReady = true;
+    const recovered = await handler(new Request("http://x/v1/engineer/readiness/retry", { method: "POST", headers: { Authorization: "Bearer secret" } }));
+    expect(recovered.status).toBe(200);
+    expect((await handler(new Request("http://x/health"))).status).toBe(200);
+    const created = await handler(new Request("http://x/v1/engineer/runs", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: "ready-run", repository: { repositoryId: "repo-ready", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "1".repeat(40) }, request: "work" }),
+    }));
+    expect(created.status).toBe(201);
+    repositoryReady = false;
+    const blockedCreate = await handler(new Request("http://x/v1/engineer/runs", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ runId: "must-not-exist", repository: { repositoryId: "repo-ready", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "1".repeat(40) }, request: "work" }),
+    }));
+    expect(blockedCreate.status).toBe(503);
+    expect(supervisor.listRuns().map((run) => run.runId)).toEqual(["ready-run"]);
+    const blockedCancel = await handler(new Request("http://x/v1/engineer/runs/ready-run/cancel", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "must not mutate while repository capability is lost" }),
+    }));
+    expect(blockedCancel.status).toBe(503);
+    expect(supervisor.getRun("ready-run").state).toBe("REQUEST_RECEIVED");
+    expect((await handler(new Request("http://x/health"))).status).toBe(503);
+    expect((await handler(new Request("http://x/v1/engineer/readiness/retry", { method: "POST", headers: { Authorization: "Bearer secret" } }))).status).toBe(503);
+    repositoryReady = true;
+    expect((await handler(new Request("http://x/v1/engineer/readiness/retry", { method: "POST", headers: { Authorization: "Bearer secret" } }))).status).toBe(200);
     supervisor.close();
     rmSync(root, { recursive: true, force: true });
   });

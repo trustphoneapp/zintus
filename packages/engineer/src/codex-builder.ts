@@ -36,7 +36,7 @@ const ResponsesResultSchema = z.object({
 export type ResponsesResult = z.infer<typeof ResponsesResultSchema>;
 
 export interface ResponsesTransport {
-  create(request: Record<string, unknown>): Promise<ResponsesResult>;
+  create(request: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<ResponsesResult>;
 }
 
 export interface OpenAIResponsesTransportOptions {
@@ -61,10 +61,10 @@ export class OpenAIResponsesTransport implements ResponsesTransport {
     });
   }
 
-  async create(request: Record<string, unknown>): Promise<ResponsesResult> {
+  async create(request: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<ResponsesResult> {
     const response = await this.client.responses.create(
       request as unknown as OpenAI.Responses.ResponseCreateParamsNonStreaming,
-      { headers: { "X-Client-Request-Id": randomUUID() } },
+      { headers: { "X-Client-Request-Id": randomUUID() }, signal: options?.signal },
     );
     return ResponsesResultSchema.parse(response);
   }
@@ -159,6 +159,7 @@ export interface CodexBuilderOptions {
     inputTokens: number | null;
     outputTokens: number | null;
   }) => void;
+  signal?: AbortSignal;
 }
 
 export class CodexBuilder {
@@ -192,6 +193,7 @@ export class CodexBuilder {
     const maxRounds = Math.min(this.options.maxRounds ?? MAX_BUILDER_TOOL_ROUNDS, MAX_BUILDER_TOOL_ROUNDS);
 
     for (let round = 0; round <= maxRounds; round += 1) {
+      this.options.signal?.throwIfAborted();
       const inputHash = sha256(input);
       const cacheKey = sha256({
         promptVersion: CODEX_BUILDER_PROMPT_VERSION,
@@ -212,7 +214,7 @@ export class CodexBuilder {
         store: false,
         safety_identifier: sha256(this.options.manifest.runId),
         metadata: { run_id: this.options.manifest.runId, prompt_version: CODEX_BUILDER_PROMPT_VERSION },
-      });
+      }, { signal: this.options.signal });
       this.options.onModelCall?.({
         responseId: response.id,
         round,

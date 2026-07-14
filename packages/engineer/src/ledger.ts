@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 import {
@@ -65,8 +65,16 @@ import {
   IdempotencyConflictError,
   StateVersionConflictError,
 } from "./errors.js";
-import { canonicalJson } from "./hash.js";
-import type { PlanProposal } from "./planning.js";
+import { canonicalJson, sha256 } from "./hash.js";
+import { PlanProposalSchema, type PlanProposal } from "./planning.js";
+import { ContextManifestSchema, StoredContextSnapshotSchema, type StoredContextSnapshot } from "./context-contracts.js";
+import {
+  DecisionRecordSchema,
+  DecisionResolutionSchema,
+  type DecisionRecord,
+  type DecisionResolution,
+} from "./decision-contracts.js";
+import { DECISION_POLICY_VERSION } from "./decision-policy.js";
 
 interface RunRow {
   id: string;
@@ -218,6 +226,13 @@ export class EngineerLedger {
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec(ENGINEER_DATABASE_SCHEMA_SQL);
+    const proposalColumns = this.db.query("PRAGMA table_info(plan_proposals)").all() as Array<{ name: string }>;
+    if (!proposalColumns.some((column) => column.name === "context_manifest_hash")) {
+      this.db.exec("ALTER TABLE plan_proposals ADD COLUMN context_manifest_hash TEXT");
+    }
+    if (!proposalColumns.some((column) => column.name === "planning_analysis_json")) {
+      this.db.exec("ALTER TABLE plan_proposals ADD COLUMN planning_analysis_json TEXT");
+    }
     this.db
       .query("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
       .run(ENGINEER_DATABASE_SCHEMA_VERSION, new Date().toISOString());
@@ -345,8 +360,12 @@ export class EngineerLedger {
     const existing = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? AND proposal_hash = ?")
       .get(proposal.runId, proposal.proposalHash) as Record<string, unknown> | null;
     if (existing) return this.planProposalFromRow(existing);
-    this.db.query(`INSERT INTO plan_proposals (id, run_id, proposal_json, proposal_hash, artifact_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)`).run(proposal.planProposalId, proposal.runId, canonicalJson(proposal.manifest), proposal.proposalHash, proposal.artifactId, proposal.createdAt);
+    this.db.query(`INSERT INTO plan_proposals (id, run_id, proposal_json, planning_analysis_json, proposal_hash, context_manifest_hash, artifact_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        proposal.planProposalId, proposal.runId, canonicalJson(proposal.manifest),
+        canonicalJson(proposal.planningAnalysis), proposal.proposalHash,
+        proposal.contextManifestHash, proposal.artifactId, proposal.createdAt,
+      );
     return proposal;
   }
 
@@ -355,6 +374,197 @@ export class EngineerLedger {
     const row = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
       .get(runId) as Record<string, unknown> | null;
     return row ? this.planProposalFromRow(row) : null;
+  }
+
+  recordContextSnapshot(snapshot: StoredContextSnapshot): StoredContextSnapshot {
+    const parsed = StoredContextSnapshotSchema.parse(snapshot);
+    this.getRun(parsed.manifest.runId);
+    const artifact = this.db.query("SELECT run_id, type, sha256, storage_reference FROM artifacts WHERE id = ?").get(parsed.artifactId) as
+      { run_id: string; type: string; sha256: string; storage_reference: string } | null;
+    if (!artifact || artifact.run_id !== parsed.manifest.runId || artifact.type !== "CONTEXT_MANIFEST") {
+      throw new EngineerNotFoundError("context artifact", parsed.artifactId);
+    }
+    const artifactStat = lstatSync(artifact.storage_reference);
+    if (!artifactStat.isFile() || artifactStat.isSymbolicLink()) throw new Error("context artifact storage is not a regular file");
+    const artifactBytes = readFileSync(artifact.storage_reference);
+    if (sha256(artifactBytes) !== artifact.sha256) throw new Error("context artifact content hash mismatch");
+    const artifactManifest = ContextManifestSchema.parse(JSON.parse(artifactBytes.toString("utf8")));
+    if (canonicalJson(artifactManifest) !== canonicalJson(parsed.manifest)) throw new Error("context artifact bytes do not match the persisted manifest");
+    const existing = this.db.query("SELECT manifest_json, artifact_id, created_at FROM context_manifests WHERE manifest_hash = ?")
+      .get(parsed.manifest.manifestHash) as { manifest_json: string; artifact_id: string; created_at: string } | null;
+    if (existing) {
+      const replay = StoredContextSnapshotSchema.parse({ manifest: JSON.parse(existing.manifest_json), artifactId: existing.artifact_id, createdAt: existing.created_at });
+      if (canonicalJson(replay) !== canonicalJson(parsed)) throw new IdempotencyConflictError(parsed.manifest.runId, parsed.manifest.manifestHash);
+      return replay;
+    }
+    const runExisting = this.db.query("SELECT manifest_hash FROM context_manifests WHERE run_id = ?").get(parsed.manifest.runId) as { manifest_hash: string } | null;
+    if (runExisting) throw new IdempotencyConflictError(parsed.manifest.runId, "context-manifest-already-frozen");
+    const transaction = this.db.transaction(() => {
+      this.db.query(`INSERT INTO context_manifests
+        (manifest_hash, run_id, repository_id, base_commit_sha, request_hash, manifest_json, artifact_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        parsed.manifest.manifestHash, parsed.manifest.runId, parsed.manifest.repositoryId,
+        parsed.manifest.baseCommitSha, parsed.manifest.requestHash, canonicalJson(parsed.manifest),
+        parsed.artifactId, parsed.createdAt,
+      );
+      const sourceInsert = this.db.query(`INSERT INTO context_sources
+        (source_id, manifest_hash, run_id, path, kind, trust, object_id, content_hash, byte_size, excerpt_truncated, source_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const source of parsed.manifest.sources) {
+        sourceInsert.run(source.sourceId, parsed.manifest.manifestHash, parsed.manifest.runId, source.path,
+          source.kind, source.trust, source.objectId, source.contentHash, source.byteSize,
+          source.excerptTruncated ? 1 : 0, canonicalJson(source));
+      }
+      const warningInsert = this.db.query(`INSERT INTO context_warnings
+        (warning_id, manifest_hash, run_id, code, path, source_id, trust, warning_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      for (const warning of parsed.manifest.warnings) {
+        warningInsert.run(warning.warningId, parsed.manifest.manifestHash, parsed.manifest.runId,
+          warning.code, warning.path, warning.sourceId, warning.trust, canonicalJson(warning));
+      }
+    });
+    transaction();
+    return parsed;
+  }
+
+  latestContextSnapshot(runId: string): StoredContextSnapshot | null {
+    this.getRun(runId);
+    const row = this.db.query(`SELECT manifest_json, artifact_id, created_at FROM context_manifests
+      WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(runId) as
+      { manifest_json: string; artifact_id: string; created_at: string } | null;
+    if (!row) return null;
+    return StoredContextSnapshotSchema.parse({
+      manifest: ContextManifestSchema.parse(JSON.parse(row.manifest_json)),
+      artifactId: row.artifact_id,
+      createdAt: row.created_at,
+    });
+  }
+
+  recordDecision(record: DecisionRecord): DecisionRecord {
+    const parsed = DecisionRecordSchema.parse(record);
+    for (const evidence of parsed.sourceEvidence) this.assertDecisionEvidence(parsed.runId, evidence);
+    const keyed = this.db.query("SELECT decision_json FROM decisions WHERE run_id = ? AND idempotency_key = ?")
+      .get(parsed.runId, parsed.idempotencyKey) as { decision_json: string } | null;
+    if (keyed) {
+      const existing = DecisionRecordSchema.parse(JSON.parse(keyed.decision_json));
+      if (canonicalJson(existing) !== canonicalJson(parsed)) throw new IdempotencyConflictError(parsed.runId, parsed.idempotencyKey);
+      return existing;
+    }
+    const run = this.getRun(parsed.runId);
+    if (parsed.requestedState !== run.state) {
+      throw new TypeError("decision requested state no longer matches the run");
+    }
+    const duplicate = this.db.query("SELECT id FROM decisions WHERE run_id = ? AND (id = ? OR decision_hash = ?)")
+      .get(parsed.runId, parsed.decisionId, parsed.decisionHash) as { id: string } | null;
+    if (duplicate) throw new IdempotencyConflictError(parsed.runId, parsed.idempotencyKey);
+
+    const transaction = this.db.transaction(() => {
+      this.db.query(`INSERT INTO decisions
+        (id, run_id, decision_hash, classification, policy_version, requested_state,
+         resume_action, decision_json, idempotency_key, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        parsed.decisionId, parsed.runId, parsed.decisionHash, parsed.classification,
+        parsed.policyVersion, parsed.requestedState, parsed.resumeAction,
+        canonicalJson(parsed), parsed.idempotencyKey, parsed.createdAt,
+      );
+      const insertEvidence = this.db.query(`INSERT INTO decision_evidence
+        (decision_id, run_id, evidence_id, evidence_run_id, source_type, trust, summary)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      for (const evidence of parsed.sourceEvidence) {
+        insertEvidence.run(parsed.decisionId, parsed.runId, evidence.evidenceId, evidence.runId,
+          evidence.sourceType, evidence.trust, evidence.summary);
+      }
+      this.insertAudit(parsed.runId, "DECISION_RECORDED", "SUPERVISOR", "engineer-supervisor", {
+        decisionId: parsed.decisionId,
+        decisionHash: parsed.decisionHash,
+        classification: parsed.classification,
+        reasonCodes: parsed.reasonCodes,
+      }, parsed.createdAt);
+    });
+    transaction();
+    return parsed;
+  }
+
+  getDecision(runId: string, decisionId: string): DecisionRecord {
+    this.getRun(runId);
+    const row = this.db.query("SELECT decision_json FROM decisions WHERE run_id = ? AND id = ?")
+      .get(runId, decisionId) as { decision_json: string } | null;
+    if (!row) throw new EngineerNotFoundError("decision", decisionId);
+    return DecisionRecordSchema.parse(JSON.parse(row.decision_json));
+  }
+
+  findDecisionByIdempotency(runId: string, idempotencyKey: string): DecisionRecord | null {
+    this.getRun(runId);
+    const row = this.db.query("SELECT decision_json FROM decisions WHERE run_id = ? AND idempotency_key = ?")
+      .get(runId, idempotencyKey) as { decision_json: string } | null;
+    return row ? DecisionRecordSchema.parse(JSON.parse(row.decision_json)) : null;
+  }
+
+  listDecisions(runId: string): DecisionRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query("SELECT decision_json FROM decisions WHERE run_id = ? ORDER BY created_at, rowid")
+      .all(runId) as Array<{ decision_json: string }>;
+    return rows.map((row) => DecisionRecordSchema.parse(JSON.parse(row.decision_json)));
+  }
+
+  listOpenDecisions(runId: string): DecisionRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query(`SELECT d.decision_json FROM decisions d
+      LEFT JOIN decision_resolutions r ON r.decision_id = d.id
+      WHERE d.run_id = ? AND r.id IS NULL ORDER BY d.created_at, d.rowid`).all(runId) as Array<{ decision_json: string }>;
+    return rows.map((row) => DecisionRecordSchema.parse(JSON.parse(row.decision_json)));
+  }
+
+  recordDecisionResolution(record: DecisionResolution): DecisionResolution {
+    const parsed = DecisionResolutionSchema.parse(record);
+    for (const evidence of parsed.sourceEvidence) this.assertDecisionEvidence(parsed.runId, evidence);
+    const decision = this.getDecision(parsed.runId, parsed.decisionId);
+    if (!decision.options.some((option) => option.optionId === parsed.selectedOptionId)) {
+      throw new TypeError("decision resolution selected an unknown option");
+    }
+    if (decision.classification === "AUTO") {
+      if (parsed.actorType !== "SUPERVISOR" || parsed.selectedOptionId !== decision.recommendedOptionId) {
+        throw new TypeError("AUTO decisions may only resolve to the policy-recommended option by the Supervisor");
+      }
+    } else if (parsed.actorType !== "HUMAN") {
+      throw new TypeError("ASK_NOW and DEFER decisions require a human resolution");
+    }
+
+    const keyed = this.db.query("SELECT resolution_json FROM decision_resolutions WHERE run_id = ? AND idempotency_key = ?")
+      .get(parsed.runId, parsed.idempotencyKey) as { resolution_json: string } | null;
+    if (keyed) {
+      const existing = DecisionResolutionSchema.parse(JSON.parse(keyed.resolution_json));
+      if (canonicalJson(existing) !== canonicalJson(parsed)) throw new IdempotencyConflictError(parsed.runId, parsed.idempotencyKey);
+      return existing;
+    }
+    const prior = this.db.query("SELECT resolution_json FROM decision_resolutions WHERE decision_id = ?")
+      .get(parsed.decisionId) as { resolution_json: string } | null;
+    if (prior) {
+      // An exact payload with a new key is deliberately rejected as a non-idempotent replay.
+      throw new IdempotencyConflictError(parsed.runId, parsed.idempotencyKey);
+    }
+    this.db.query(`INSERT INTO decision_resolutions
+      (id, decision_id, run_id, resolution_hash, selected_option_id, actor_type,
+       actor_id, policy_version, resolution_json, idempotency_key, resolved_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      parsed.resolutionId, parsed.decisionId, parsed.runId, parsed.resolutionHash,
+      parsed.selectedOptionId, parsed.actorType, parsed.actorId, parsed.policyVersion,
+      canonicalJson(parsed), parsed.idempotencyKey, parsed.resolvedAt,
+    );
+    this.insertAudit(parsed.runId, "DECISION_RESOLVED", parsed.actorType, parsed.actorId, {
+      decisionId: parsed.decisionId,
+      resolutionId: parsed.resolutionId,
+      resolutionHash: parsed.resolutionHash,
+      selectedOptionId: parsed.selectedOptionId,
+    }, parsed.resolvedAt);
+    return parsed;
+  }
+
+  getDecisionResolution(runId: string, decisionId: string): DecisionResolution | null {
+    this.getDecision(runId, decisionId);
+    const row = this.db.query("SELECT resolution_json FROM decision_resolutions WHERE run_id = ? AND decision_id = ?")
+      .get(runId, decisionId) as { resolution_json: string } | null;
+    return row ? DecisionResolutionSchema.parse(JSON.parse(row.resolution_json)) : null;
   }
 
   appendTransition(command: LedgerTransitionCommand): LedgerTransitionResult {
@@ -1010,12 +1220,49 @@ export class EngineerLedger {
     });
   }
 
+  private assertDecisionEvidence(runId: string, evidence: DecisionRecord["sourceEvidence"][number]): void {
+    if (evidence.runId !== runId) throw new TypeError("cross-run decision evidence rejected");
+    if (evidence.sourceType === "ARTIFACT") {
+      const row = this.db.query("SELECT run_id, trusted FROM artifacts WHERE id = ?").get(evidence.evidenceId) as { run_id: string; trusted: number } | null;
+      if (!row || row.run_id !== runId) throw new EngineerNotFoundError("decision artifact evidence", evidence.evidenceId);
+      const expectedTrust = row.trusted === 1 ? "TRUSTED_SYSTEM" : "UNTRUSTED_REPOSITORY";
+      if (evidence.trust !== expectedTrust) throw new TypeError("decision artifact evidence trust mismatch");
+      return;
+    }
+    if (evidence.sourceType === "CONTEXT_SOURCE") {
+      const row = this.db.query("SELECT run_id FROM context_sources WHERE source_id = ?").get(evidence.evidenceId) as { run_id: string } | null;
+      if (!row || row.run_id !== runId || evidence.trust !== "UNTRUSTED_REPOSITORY") {
+        throw new EngineerNotFoundError("decision context evidence", evidence.evidenceId);
+      }
+      return;
+    }
+    if (evidence.sourceType === "POLICY") {
+      if (evidence.evidenceId !== DECISION_POLICY_VERSION || evidence.trust !== "TRUSTED_SYSTEM") {
+        throw new TypeError("decision policy evidence is not an authoritative installed policy");
+      }
+      return;
+    }
+    if (evidence.sourceType === "HUMAN_RESPONSE") {
+      if (evidence.trust !== "TRUSTED_HUMAN") throw new TypeError("human response evidence must be server-authenticated");
+      return;
+    }
+    if (evidence.trust !== "TRUSTED_SYSTEM") {
+      throw new TypeError("system decision evidence trust mismatch");
+    }
+  }
+
   private planProposalFromRow(row: Record<string, unknown>): PlanProposal {
-    return {
+    if (row.context_manifest_hash === null || row.context_manifest_hash === undefined) {
+      throw new Error("legacy ungrounded plan proposal is not eligible for Engineer execution");
+    }
+    return PlanProposalSchema.parse({
       planProposalId: String(row.id), runId: String(row.run_id),
       manifest: TaskManifestContentSchema.parse(JSON.parse(String(row.proposal_json))),
-      proposalHash: String(row.proposal_hash), artifactId: String(row.artifact_id), createdAt: String(row.created_at),
-    };
+      planningAnalysis: row.planning_analysis_json === null || row.planning_analysis_json === undefined
+        ? { architectureSummary: "", assumptions: [], unresolvedQuestions: [], touchedFileEstimates: [] }
+        : JSON.parse(String(row.planning_analysis_json)),
+      proposalHash: String(row.proposal_hash), contextManifestHash: String(row.context_manifest_hash), artifactId: String(row.artifact_id), createdAt: String(row.created_at),
+    });
   }
 
   private latestApprovalRequestById(approvalRequestId: string): ApprovalRequestRecord {

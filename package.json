@@ -23,6 +23,7 @@
     "dev:mobile": "bun run --filter @zintus/mobile dev",
     "dev:gateway": "bun run --filter @zintus/gateway dev",
     "doctor:mobile": "bun run --filter @zintus/mobile doctor",
+    "doctor:engineer": "bun run scripts/engineer-doctor.ts",
     "build": "bun run typecheck",
     "catalog:drift": "bun run scripts/sync-model-catalog.ts"
   },

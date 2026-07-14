@@ -13,6 +13,7 @@ describe("Phase 4 approval deadlines", () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-phase4-timeout-"));
     let state: EngineerRun["state"] = "HUMAN_APPROVAL_PENDING";
     let requestStatus: ApprovalRequestRecord["status"] = "PENDING";
+    const failures: unknown[] = [];
     const request: ApprovalRequestRecord = {
       approvalRequestId: "approval-1", runId: "run-1", riskTier: "HIGH", assignedReviewerId: "reviewer-1",
       requestedAt: "2026-07-14T10:00:00.000Z", deadlineAt: "2026-07-14T11:00:00.000Z",
@@ -31,6 +32,7 @@ describe("Phase 4 approval deadlines", () => {
       getRun: () => run(),
       latestApprovalRequest: () => ({ ...request, status: requestStatus }),
       decideApproval: (_decision: unknown, status: ApprovalRequestRecord["status"]) => { requestStatus = status; return _decision; },
+      recordFailure: (failure: unknown) => { failures.push(failure); return failure; },
       transition: (input: { nextState: EngineerRun["state"] }) => { state = input.nextState; return { run: run() }; },
     } as unknown as EngineerSupervisor;
     const manager = new EngineerPublicationManager({
@@ -45,6 +47,7 @@ describe("Phase 4 approval deadlines", () => {
     manager.expire("run-1");
     expect(String(requestStatus)).toBe("EXPIRED");
     expect(String(state)).toBe("HUMAN_REVIEW_REQUIRED");
+    expect(failures).toHaveLength(1);
     rmSync(root, { recursive: true, force: true });
   });
 });

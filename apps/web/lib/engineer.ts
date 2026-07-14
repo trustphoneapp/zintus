@@ -1,4 +1,5 @@
 import { GATEWAY_URL, gatewayAuthHeaders } from "./gateway";
+import type { EngineerDecisionItem } from "./engineer-decisions";
 
 export type EngineerState = string;
 export interface EngineerRun { runId: string; state: EngineerState; stateVersion: number; manifestHash: string | null; riskTier: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL"; humanGateRequired: boolean; requestOriginal: string; requestNormalized: string; repository: EngineerRepository; terminalAt: string | null; }
@@ -24,13 +25,25 @@ export async function freezeEngineerPlan(run: EngineerRun, manifest: EngineerMan
 export async function startEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST" })).run; }
 export async function getEngineerRunStatus(runId: string): Promise<EngineerRunStatus> { return request<EngineerRunStatus>(`/v1/engineer/runs/${runId}`); }
 export async function getEngineerRun(runId: string): Promise<EngineerRun> { return (await getEngineerRunStatus(runId)).run; }
-export async function getEngineerData(runId: string) { const [claims, evidence, tests, security, failures, diff, approval] = await Promise.all([
+export async function getEngineerData(runId: string) { const [claims, evidence, tests, security, failures, diff, approval, decisions] = await Promise.all([
   request<{ claims: unknown[] }>(`/v1/engineer/runs/${runId}/claims`), request<{ evidenceBundles: unknown[] }>(`/v1/engineer/runs/${runId}/evidence`),
   request<{ tests: unknown[] }>(`/v1/engineer/runs/${runId}/tests`), request<{ securityFindings: unknown[] }>(`/v1/engineer/runs/${runId}/security`),
   request<{ failures: unknown[] }>(`/v1/engineer/runs/${runId}/failures`), request<{ diff: string }>(`/v1/engineer/runs/${runId}/diff`).catch(() => ({ diff: "" })),
   request<{ approval: unknown | null }>(`/v1/engineer/runs/${runId}/approval`),
-]); return { ...claims, ...evidence, ...tests, ...security, ...failures, ...diff, ...approval }; }
+  request<{ decisions: EngineerDecisionItem[] }>(`/v1/engineer/runs/${runId}/decisions`).catch(() => ({ decisions: [] })),
+]); return { ...claims, ...evidence, ...tests, ...security, ...failures, ...diff, ...approval, ...decisions }; }
 export async function engineerDecision(runId: string, action: "approve" | "request-changes" | "reject" | "cancel", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/${action}`, { method: "POST", body: JSON.stringify({ actorId: "local-user", reason }) }); }
+export async function resolveEngineerDecision(run: EngineerRun, decisionId: string, selectedOptionId: string, rationale: string): Promise<void> {
+  await request(`/v1/engineer/runs/${run.runId}/decisions/${decisionId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify({
+      expectedStateVersion: run.stateVersion,
+      selectedOptionId,
+      rationale,
+      idempotencyKey: `ui:decision:${decisionId}:${run.stateVersion}`,
+    }),
+  });
+}
 
 export async function streamEngineerEvents(runId: string, onEvent: (event: RunEvent) => void, signal: AbortSignal): Promise<void> {
   const response = await fetch(`${GATEWAY_URL}/v1/engineer/runs/${runId}/events`, { headers: gatewayAuthHeaders(), signal });

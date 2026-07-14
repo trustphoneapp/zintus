@@ -6,6 +6,7 @@ import {
   FailureRecordSchema,
   GitOperationRecordSchema,
   SignedSupervisorPrCommandSchema,
+  type FailureRecord,
   type ApprovalRequestRecord,
   type GitOperationRecord,
 } from "./control-contracts.js";
@@ -13,6 +14,7 @@ import { SupervisorPrCommandSchema, type EngineerRun } from "./contracts.js";
 import type { GitService, PullRequestResult } from "./git-service.js";
 import { sha256 } from "./hash.js";
 import type { EngineerSupervisor } from "./supervisor.js";
+import { operationalFailurePolicy } from "./failure-policy.js";
 
 export interface EngineerPublicationManagerOptions {
   supervisor: EngineerSupervisor;
@@ -43,6 +45,8 @@ export class EngineerPublicationManager {
     const run = this.options.supervisor.getRun(runId);
     if (run.state !== "REVIEW_APPROVED") throw new Error(`publication requires REVIEW_APPROVED, not ${run.state}`);
     if (run.riskTier === "CRITICAL") {
+      const policy = operationalFailurePolicy("PUBLICATION");
+      this.recordFailure(runId, policy.failureClass, "CRITICAL_RISK_PUBLICATION_BLOCKED", new Error("critical-risk publication denied"), false);
       this.transition(runId, "SECURITY_ESCALATION", "CRITICAL_RISK_PUBLICATION_BLOCKED");
       throw new Error("critical-risk runs cannot be published");
     }
@@ -123,6 +127,8 @@ export class EngineerPublicationManager {
       approvalDecisionId: this.id(), approvalRequestId: request.approvalRequestId,
       actorId: "engineer-supervisor", decision: "REJECT", reason: "Approval deadline expired.", decidedAt: this.timestamp(),
     }), "EXPIRED");
+    const policy = operationalFailurePolicy("TIMEOUT");
+    this.recordFailure(runId, policy.failureClass, policy.reasonCode, new Error("human approval deadline expired"), policy.retryable, [request.approvalRequestId]);
     this.transition(runId, "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_TIMEOUT", [request.approvalRequestId]);
   }
 
@@ -343,7 +349,7 @@ export class EngineerPublicationManager {
     return expected.length === input.signature.length && timingSafeEqual(Buffer.from(expected), Buffer.from(input.signature));
   }
 
-  private recordFailure(runId: string, failureClass: "GIT_FAILURE" | "WORKFLOW_FAILURE", reasonCode: string, error: unknown, retryable: boolean, evidenceIds: string[] = []): void {
+  private recordFailure(runId: string, failureClass: FailureRecord["failureClass"], reasonCode: string, error: unknown, retryable: boolean, evidenceIds: string[] = []): void {
     const message = error instanceof Error ? error.message : String(error);
     this.options.supervisor.recordFailure(FailureRecordSchema.parse({
       failureId: this.id(), runId, failureClass, reasonCode,

@@ -2400,14 +2400,17 @@ export function createGatewayHandler(
     // gateway-smoke probe (curl -sf /health) still passes.
     if (url.pathname === "/health") {
       const draining = getDraining?.() ?? false;
+      const engineerReadiness = engineerRuns?.readiness() ?? { state: "DISABLED" as const, error: null };
+      const engineerUnavailable = engineerReadiness.state !== "READY" && engineerReadiness.state !== "DISABLED";
       return json(
         request,
         {
-          ok: !draining,
+          ok: !draining && !engineerUnavailable,
           auth: config.token ? "required" : "disabled",
+          engineer: engineerReadiness.state,
           ...(draining ? { status: "draining" } : {}),
         },
-        draining ? 503 : 200,
+        draining || engineerUnavailable ? 503 : 200,
       );
     }
 
@@ -2416,6 +2419,7 @@ export function createGatewayHandler(
       log("warn", "auth.rejected", { requestId, path: url.pathname });
       return json(request, { error: { message: "Unauthorized" } }, 401);
     }
+    const engineerPrincipal = engineerRuns?.principal();
 
     // Authenticated operational snapshot: provider inventory, key presence, live
     // quota, cooldown state, and provable savings. Moved here (behind auth) from
@@ -2748,6 +2752,26 @@ export function createGatewayHandler(
     }
 
     // ── P2: gateway-hosted agent runtime ─────────────────────────────────────
+    if (url.pathname === "/v1/engineer/readiness" && request.method === "GET") {
+      if (!engineerRuns) return json(request, { readiness: { state: "DISABLED", error: null } });
+      const readiness = engineerRuns.readiness();
+      return json(request, { readiness }, readiness.state === "READY" || readiness.state === "DISABLED" ? 200 : 503);
+    }
+
+    if (url.pathname === "/v1/engineer/readiness/retry" && request.method === "POST") {
+      if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
+      try {
+        await engineerRuns.ensureReady();
+        return json(request, { readiness: engineerRuns.readiness() });
+      } catch (error) {
+        return json(request, { readiness: engineerRuns.readiness(), error: { message: redactSecrets(error instanceof Error ? error.message : String(error)) } }, 503);
+      }
+    }
+
+    if (url.pathname.startsWith("/v1/engineer/") && engineerRuns?.readiness().state !== "READY") {
+      return json(request, { error: { message: "Engineer capability preflight is not ready" }, readiness: engineerRuns?.readiness() }, 503);
+    }
+
     if (url.pathname === "/v1/engineer/observability" && request.method === "GET") {
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
       return json(request, { snapshot: engineerRuns.observability() });
@@ -2759,19 +2783,18 @@ export function createGatewayHandler(
       if (limited) return limited;
       try {
         const body = await request.json() as {
-          runId?: string; userId?: string; userEmail?: string; repository?: unknown; request?: string;
+          runId?: string; userId?: string; actorId?: string; userEmail?: string; repository?: unknown; request?: string;
         };
-        if (!body.userId || !body.repository || !body.request) throw new Error("userId, repository, and request are required");
-        const run = engineerRuns.create({
+        if (!body.repository || !body.request) throw new Error("repository and request are required");
+        const run = await engineerRuns.create(engineerPrincipal!, {
           ...(body.runId ? { runId: body.runId } : {}),
-          userId: body.userId,
-          ...(body.userEmail ? { userEmail: body.userEmail } : {}),
           repository: body.repository as never,
           request: body.request,
         });
         return json(request, { run }, 201);
       } catch (error) {
-        return json(request, { error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+        const message = error instanceof Error ? error.message : String(error);
+        return json(request, { error: { message: redactSecrets(message) } }, /preflight/i.test(message) ? 503 : 400);
       }
     }
 
@@ -2779,6 +2802,8 @@ export function createGatewayHandler(
       const parts = url.pathname.split("/");
       const runId = parts[4] ?? "";
       const action = parts[5];
+      const decisionId = parts[6];
+      const decisionAction = parts[7];
       try {
         if (request.method === "POST") {
           const limited = enforceRateLimit(request, requestId, url.pathname);
@@ -2786,7 +2811,7 @@ export function createGatewayHandler(
         }
         if (!action && request.method === "GET") return json(request, engineerRuns.get(runId));
         if (action === "plan" && request.method === "POST") {
-          return json(request, { plan: await engineerRuns.plan(runId) });
+          return json(request, { plan: await engineerRuns.plan(engineerPrincipal!, runId) });
         }
         if (action === "plan" && request.method === "GET") {
           return json(request, { plan: engineerRuns.planProposal(runId) });
@@ -2795,39 +2820,38 @@ export function createGatewayHandler(
           const body = await request.json() as {
             expectedStateVersion?: number; manifest?: unknown; actorId?: string; idempotencyKey?: string;
           };
-          if (typeof body.expectedStateVersion !== "number" || !body.manifest || !body.actorId || !body.idempotencyKey) {
-            throw new Error("expectedStateVersion, manifest, actorId, and idempotencyKey are required");
+          if (typeof body.expectedStateVersion !== "number" || !body.manifest || !body.idempotencyKey) {
+            throw new Error("expectedStateVersion, manifest, and idempotencyKey are required");
           }
-          return json(request, { run: engineerRuns.freeze(runId, {
+          return json(request, { run: await engineerRuns.freeze(engineerPrincipal!, runId, {
             expectedStateVersion: body.expectedStateVersion,
             manifest: body.manifest as never,
-            actorId: body.actorId,
             idempotencyKey: body.idempotencyKey,
           }) });
         }
         if (action === "start" && request.method === "POST") {
-          return json(request, { run: engineerRuns.start(runId), accepted: true }, 202);
+          return json(request, { run: await engineerRuns.start(engineerPrincipal!, runId), accepted: true }, 202);
         }
         if (action === "approval" && request.method === "GET") {
           return json(request, { approval: engineerRuns.approval(runId) });
         }
         if (["approve", "request-changes", "reject", "extend-approval", "cancel"].includes(action ?? "") && request.method === "POST") {
           const body = await request.json() as { actorId?: string; reason?: string; extensionSeconds?: number };
-          if (!body.actorId || typeof body.reason !== "string") throw new Error("actorId and reason are required");
-          if (action === "approve") return json(request, { result: await engineerRuns.approve(runId, body.actorId, body.reason) });
+          if (typeof body.reason !== "string") throw new Error("reason is required");
+          if (action === "approve") return json(request, { result: await engineerRuns.approve(engineerPrincipal!, runId, body.reason) });
           if (action === "request-changes") {
-            engineerRuns.requestChanges(runId, body.actorId, body.reason);
+            await engineerRuns.requestChanges(engineerPrincipal!, runId, body.reason);
             return json(request, { run: engineerRuns.get(runId).run });
           }
           if (action === "reject") {
-            engineerRuns.reject(runId, body.actorId, body.reason);
+            await engineerRuns.reject(engineerPrincipal!, runId, body.reason);
             return json(request, { run: engineerRuns.get(runId).run });
           }
           if (action === "extend-approval") {
             if (typeof body.extensionSeconds !== "number") throw new Error("extensionSeconds is required");
-            return json(request, { approval: engineerRuns.extendApproval(runId, body.actorId, body.reason, body.extensionSeconds) });
+            return json(request, { approval: await engineerRuns.extendApproval(engineerPrincipal!, runId, body.reason, body.extensionSeconds) });
           }
-          await engineerRuns.cancel(runId, body.actorId, body.reason);
+          await engineerRuns.cancel(engineerPrincipal!, runId, body.reason);
           return json(request, { run: engineerRuns.get(runId).run });
         }
         if (action === "events" && request.method === "GET") {
@@ -2853,12 +2877,30 @@ export function createGatewayHandler(
         if (action === "failures" && request.method === "GET") {
           return json(request, { failures: engineerRuns.failures(runId) });
         }
+        if (action === "decisions" && !decisionId && request.method === "GET") {
+          return json(request, { decisions: engineerRuns.decisions(engineerPrincipal!, runId) });
+        }
+        if (action === "decisions" && decisionId && decisionAction === "resolve" && request.method === "POST") {
+          const body = await request.json() as {
+            expectedStateVersion?: number; selectedOptionId?: string; rationale?: string; idempotencyKey?: string;
+          };
+          if (typeof body.expectedStateVersion !== "number" || typeof body.selectedOptionId !== "string" ||
+              typeof body.rationale !== "string" || typeof body.idempotencyKey !== "string") {
+            throw new Error("expectedStateVersion, selectedOptionId, rationale, and idempotencyKey are required");
+          }
+          return json(request, { resolution: await engineerRuns.resolveDecision(engineerPrincipal!, runId, decisionId, {
+            expectedStateVersion: body.expectedStateVersion,
+            selectedOptionId: body.selectedOptionId,
+            rationale: body.rationale,
+            idempotencyKey: body.idempotencyKey,
+          }) });
+        }
         if (action === "diff" && request.method === "GET") {
           return json(request, { diff: engineerRuns.diff(runId) });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const status = /not found/i.test(message) ? 404 : /not configured|PLAN_FROZEN|planning requires/i.test(message) ? 409 : 400;
+        const status = /not found/i.test(message) ? 404 : /preflight/i.test(message) ? 503 : /not configured|PLAN_FROZEN|planning requires/i.test(message) ? 409 : 400;
         return json(request, { error: { message: redactSecrets(message) } }, status);
       }
     }

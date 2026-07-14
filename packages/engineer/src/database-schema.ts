@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 2;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 4;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -63,10 +63,100 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
     proposal_json TEXT NOT NULL,
+    planning_analysis_json TEXT,
     proposal_hash TEXT NOT NULL,
+    context_manifest_hash TEXT,
     artifact_id TEXT REFERENCES artifacts(id) ON DELETE RESTRICT,
     created_at TEXT NOT NULL,
-    UNIQUE(run_id, proposal_hash)
+    UNIQUE(run_id, proposal_hash),
+    FOREIGN KEY(context_manifest_hash) REFERENCES context_manifests(manifest_hash) ON DELETE RESTRICT
+  );
+
+  CREATE TABLE IF NOT EXISTS context_manifests (
+    manifest_hash TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    repository_id TEXT NOT NULL REFERENCES repository_connections(id) ON DELETE RESTRICT,
+    base_commit_sha TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    artifact_id TEXT REFERENCES artifacts(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, manifest_hash),
+    UNIQUE(run_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS context_sources (
+    source_id TEXT PRIMARY KEY,
+    manifest_hash TEXT NOT NULL REFERENCES context_manifests(manifest_hash) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    trust TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+    excerpt_truncated INTEGER NOT NULL CHECK(excerpt_truncated IN (0, 1)),
+    source_json TEXT NOT NULL,
+    UNIQUE(manifest_hash, path)
+  );
+
+  CREATE TABLE IF NOT EXISTS context_warnings (
+    warning_id TEXT PRIMARY KEY,
+    manifest_hash TEXT NOT NULL REFERENCES context_manifests(manifest_hash) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    code TEXT NOT NULL,
+    path TEXT,
+    source_id TEXT,
+    trust TEXT NOT NULL,
+    warning_json TEXT NOT NULL,
+    FOREIGN KEY(source_id) REFERENCES context_sources(source_id) ON DELETE RESTRICT
+  );
+
+  CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    decision_hash TEXT NOT NULL,
+    classification TEXT NOT NULL CHECK(classification IN ('ASK_NOW', 'DEFER', 'AUTO')),
+    policy_version TEXT NOT NULL,
+    requested_state TEXT NOT NULL,
+    resume_action TEXT NOT NULL CHECK(resume_action IN ('NONE', 'PLAN', 'REPLAN')),
+    decision_json TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(id, run_id),
+    UNIQUE(run_id, decision_hash),
+    UNIQUE(run_id, idempotency_key)
+  );
+
+  CREATE TABLE IF NOT EXISTS decision_evidence (
+    decision_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    evidence_id TEXT NOT NULL,
+    evidence_run_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    trust TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    PRIMARY KEY(decision_id, evidence_id),
+    FOREIGN KEY(decision_id, run_id) REFERENCES decisions(id, run_id) ON DELETE RESTRICT,
+    CHECK(run_id = evidence_run_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS decision_resolutions (
+    id TEXT PRIMARY KEY,
+    decision_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    resolution_hash TEXT NOT NULL,
+    selected_option_id TEXT NOT NULL,
+    actor_type TEXT NOT NULL CHECK(actor_type IN ('HUMAN', 'SUPERVISOR')),
+    actor_id TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    resolution_json TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    resolved_at TEXT NOT NULL,
+    FOREIGN KEY(decision_id, run_id) REFERENCES decisions(id, run_id) ON DELETE RESTRICT,
+    UNIQUE(decision_id),
+    UNIQUE(run_id, resolution_hash),
+    UNIQUE(run_id, idempotency_key)
   );
 
   CREATE TABLE IF NOT EXISTS run_state_events (
@@ -417,4 +507,5 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_retry_attempts_run_created ON retry_attempts(run_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_failures_run_fingerprint ON failure_records(run_id, fingerprint);
   CREATE INDEX IF NOT EXISTS idx_audit_run_created ON audit_events(run_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_decisions_run_created ON decisions(run_id, created_at);
 `;

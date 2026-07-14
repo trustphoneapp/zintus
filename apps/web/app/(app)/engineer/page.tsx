@@ -9,6 +9,7 @@ import {
   getEngineerPlan,
   getEngineerRunStatus,
   planEngineerRun,
+  resolveEngineerDecision,
   startEngineerRun,
   streamEngineerEvents,
   type EngineerRepository,
@@ -16,6 +17,8 @@ import {
   type PlanProposal,
   type RunEvent,
 } from "@/lib/engineer";
+import type { EngineerDecisionItem } from "@/lib/engineer-decisions";
+import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresentation";
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
@@ -92,6 +95,19 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
 
+  const resolveDecision = useCallback(async (decisionId: string, optionId: string) => {
+    if (!run) return;
+    setBusy(true); setError(null);
+    try {
+      await resolveEngineerDecision(run, decisionId, optionId, "Selected through the Zintus decision inbox.");
+      await refresh(run.runId);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to resolve decision");
+    } finally {
+      setBusy(false);
+    }
+  }, [refresh, run]);
+
   const freezeAndStart = async () => {
     if (!run || !plan) return;
     setBusy(true); setError(null);
@@ -125,6 +141,7 @@ export default function EngineerPage() {
   const tests = (data?.tests ?? []) as Array<{ testExecutionId?: string; type?: string; status?: string }>;
   const findings = (data?.securityFindings ?? []) as Array<{ securityFindingId?: string; severity?: string; category?: string; description?: string }>;
   const failures = (data?.failures ?? []) as Array<{ failureId?: string; reasonCode?: string; failureClass?: string }>;
+  const decisions = (data?.decisions ?? []) as EngineerDecisionItem[];
   const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; evidenceBundleHash?: string } | null | undefined;
   const progress = useMemo(() => TERMINAL.has(latestState) ? 100 : STATE_PROGRESS[latestState] ?? 35, [latestState]);
 
@@ -178,6 +195,7 @@ export default function EngineerPage() {
       <nav className="engineer-tabs" aria-label="Engineer run views">{(["timeline", "diff", "evidence"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
       {latestState === "REQUEST_RECEIVED" && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The durable run is intact. Planning can be retried without creating a duplicate run.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{busy ? "Planning…" : "Retry planning"}</button></section> : null}
       {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{busy ? "Starting…" : "Start frozen plan"}</button></section> : null}
+      <DecisionPresentation decisions={decisions} onResolve={busy ? undefined : resolveDecision} />
       {tab === "timeline" ? <section className="engineer-run-grid">
         <div className="engineer-card"><h2>Live timeline</h2><div className="engineer-timeline">{events.length ? events.map((event) => <div key={event.eventId} className="engineer-event"><span /><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div><strong>{event.nextState.replaceAll("_", " ")}</strong><small>{event.reasonCode.replaceAll("_", " ")}</small></div></div>) : <p className="engineer-muted">Waiting for the first durable event…</p>}</div></div>
         <aside className="engineer-card engineer-verification"><h2>Verification</h2><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /><Metric label="Failures" value={String(failures.length)} /></aside>
@@ -186,6 +204,7 @@ export default function EngineerPage() {
       {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><h2>Acceptance evidence</h2>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}</div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div></section> : null}
       {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>{approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>Approve and publish</button><button disabled={busy} onClick={() => void decide("request-changes")}>Request changes</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>Reject</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
+      {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
       {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
       {error ? <p className="engineer-error">{error}</p> : null}
       {managerError ? <p className="engineer-error">{managerError}</p> : null}

@@ -8,6 +8,9 @@ import type { EngineerSupervisor } from "./supervisor.js";
 import { TrustedCommandExecutor } from "./trusted-executor.js";
 import { resolveEngineerModel } from "./model-routing.js";
 import { sha256 } from "./hash.js";
+import { FailureRecordSchema } from "./control-contracts.js";
+import { executionFailureDomain, operationalFailurePolicy } from "./failure-policy.js";
+import type { EngineerWorkerLeaseManager, WorkerLeaseGrant } from "./worker-lease.js";
 
 export interface EngineerExecutionManagerOptions {
   supervisor: EngineerSupervisor;
@@ -18,12 +21,17 @@ export interface EngineerExecutionManagerOptions {
   now?: () => Date;
   idFactory?: () => string;
   builderOptions?: Pick<CodexBuilderOptions, "modelConfiguration" | "maxRounds">;
+  leaseManager?: EngineerWorkerLeaseManager;
+  workerOwnerId?: string;
+  leaseTtlMs?: number;
+  heartbeatIntervalMs?: number;
 }
 
 /** Phase-2 worker: one Builder per run, deterministic state promotions, durable evidence records. */
 export class EngineerExecutionManager {
   private readonly options: EngineerExecutionManagerOptions;
   private readonly active = new Map<string, Promise<BuilderResult>>();
+  private readonly abortControllers = new Map<string, AbortController>();
   private readonly sandboxes = new Map<string, ProvisionedSandbox>();
 
   constructor(options: EngineerExecutionManagerOptions) {
@@ -54,10 +62,24 @@ export class EngineerExecutionManager {
   runQueued(runId: string): Promise<BuilderResult> {
     const existing = this.active.get(runId);
     if (existing) return existing;
-    const promise = this.executeOnce(runId).finally(() => this.active.delete(runId));
+    const controller = new AbortController();
+    this.abortControllers.set(runId, controller);
+    const promise = this.executeOnce(runId, controller.signal).finally(() => {
+      this.active.delete(runId);
+      this.abortControllers.delete(runId);
+    });
     this.active.set(runId, promise);
     return promise;
   }
+
+  /** Abort detached model work and await cleanup before gateway-owned stores close. */
+  async drain(cleanupSandboxes = true): Promise<void> {
+    for (const controller of this.abortControllers.values()) controller.abort(new Error("Engineer gateway is draining"));
+    await Promise.allSettled([...this.active.values()]);
+    if (cleanupSandboxes) this.destroyAll();
+  }
+
+  destroyAll(): void { for (const runId of [...this.sandboxes.keys()]) this.destroy(runId); }
 
   recoverQueued(): Array<{ runId: string; promise: Promise<BuilderResult> }> {
     return this.options.supervisor.listRuns(["QUEUED"]).map((run) => ({
@@ -79,7 +101,7 @@ export class EngineerExecutionManager {
     return destroyed;
   }
 
-  private async executeOnce(runId: string): Promise<BuilderResult> {
+  private async executeOnce(runId: string, signal: AbortSignal): Promise<BuilderResult> {
     const supervisor = this.options.supervisor;
     const initial = supervisor.getRun(runId);
     if (initial.state !== "QUEUED" || !initial.manifestHash) {
@@ -90,6 +112,7 @@ export class EngineerExecutionManager {
       reasonCode: string,
       evidenceIds: string[] = [],
     ) => {
+      assertLease();
       const run = supervisor.getRun(runId);
       return supervisor.transition({
         runId,
@@ -105,7 +128,47 @@ export class EngineerExecutionManager {
     let provisioned: ProvisionedSandbox | null = null;
     let agentExecutionId: string | null = null;
     let agentStartedAt: string | null = null;
+    let lease: WorkerLeaseGrant | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let heartbeatSequence = 0;
+    const leaseOwnerId = this.options.workerOwnerId ?? "engineer-execution-worker";
+    const assertLease = () => {
+      if (!lease || !this.options.leaseManager) return;
+      this.options.leaseManager.assertActive({
+        leaseId: lease.lease.leaseId,
+        ownerId: leaseOwnerId,
+        fencingToken: lease.lease.fencingToken,
+        leaseToken: lease.leaseToken,
+      });
+    };
     try {
+      if (this.options.leaseManager) {
+        lease = this.options.leaseManager.acquire({
+          resourceKey: `run:${runId}`,
+          ownerId: leaseOwnerId,
+          ttlMs: this.options.leaseTtlMs ?? 30_000,
+          idempotencyKey: `execute:${runId}:${initial.stateVersion}`,
+        });
+        heartbeatTimer = setInterval(() => {
+          if (!lease) return;
+          heartbeatSequence += 1;
+          try {
+            const record = this.options.leaseManager!.heartbeat({
+              leaseId: lease.lease.leaseId,
+              ownerId: leaseOwnerId,
+              fencingToken: lease.lease.fencingToken,
+              leaseToken: lease.leaseToken,
+              idempotencyKey: `heartbeat:${heartbeatSequence}`,
+            });
+            lease = { ...lease, lease: record };
+          } catch {
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
+        }, this.options.heartbeatIntervalMs ?? 10_000);
+        heartbeatTimer.unref?.();
+      }
+      assertLease();
       if (this.options.sandboxManager.warmEnabled()) {
         transition("SANDBOX_WARM_CLAIMING", "WARM_SANDBOX_CLAIM_STARTED");
       } else {
@@ -190,6 +253,7 @@ export class EngineerExecutionManager {
         executor,
         ...this.options.builderOptions,
         now: this.options.now,
+        signal,
         onModelCall: (observation) => {
           supervisor.recordModelCall({
             modelCallId: (this.options.idFactory ?? randomUUID)(),
@@ -212,6 +276,7 @@ export class EngineerExecutionManager {
         },
       });
       const result = await builder.run();
+      assertLease();
       const artifact = supervisor.recordArtifact(this.options.artifactStore.put({
         runId,
         type: "BUILDER_RESULT",
@@ -235,6 +300,17 @@ export class EngineerExecutionManager {
       return result;
     } catch (error) {
       const run = supervisor.getRun(runId);
+      const domain = executionFailureDomain(run.state, error);
+      const policy = operationalFailurePolicy(domain);
+      const message = error instanceof Error ? error.message : String(error);
+      supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: (this.options.idFactory ?? randomUUID)(),
+        runId,
+        ...policy,
+        fingerprint: sha256({ policyVersion: "operational-failure-v1", domain, reasonCode: policy.reasonCode, message }),
+        evidenceIds: provisioned ? [provisioned.record.sandboxId] : [],
+        createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+      }));
       if (agentExecutionId && agentStartedAt) {
         supervisor.recordAgentExecution({
           agentExecutionId,
@@ -273,6 +349,19 @@ export class EngineerExecutionManager {
         } catch { /* preserve original failure */ }
       }
       throw error;
+    } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (lease && this.options.leaseManager) {
+        try {
+          this.options.leaseManager.release({
+            leaseId: lease.lease.leaseId,
+            ownerId: leaseOwnerId,
+            fencingToken: lease.lease.fencingToken,
+            leaseToken: lease.leaseToken,
+            idempotencyKey: "release",
+          });
+        } catch { /* Expired/fenced leases are recovered by the durable watchdog. */ }
+      }
     }
   }
 }

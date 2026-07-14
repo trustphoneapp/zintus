@@ -147,6 +147,34 @@ export const TestPlanItemSchema = z
   })
   .strict();
 
+export const PlannerAssumptionSchema = z.object({
+  assumptionId: IdentifierSchema,
+  statement: z.string().min(1).max(4_000),
+  sourceRefs: z.array(z.string().min(1).max(4_000)).max(20),
+  confidence: z.number().min(0).max(1),
+  reversible: z.boolean(),
+}).strict();
+
+export const PlannerQuestionSchema = z.object({
+  questionId: IdentifierSchema,
+  question: z.string().min(1).max(4_000),
+  impact: z.string().min(1).max(4_000),
+  sourceRefs: z.array(z.string().min(1).max(4_000)).max(20),
+}).strict();
+
+export const TouchedFileEstimateSchema = z.object({
+  path: z.string().min(1).max(2_000),
+  expectedChange: z.string().min(1).max(4_000),
+  confidence: z.number().min(0).max(1),
+}).strict();
+
+export const PlanningAnalysisSchema = z.object({
+  architectureSummary: z.string().max(12_000),
+  assumptions: z.array(PlannerAssumptionSchema).max(50),
+  unresolvedQuestions: z.array(PlannerQuestionSchema).max(30),
+  touchedFileEstimates: z.array(TouchedFileEstimateSchema).max(100),
+}).strict();
+
 export const RetryBudgetsSchema = z
   .object({
     sameFailureAttempts: z.number().int().min(0).max(10).default(2),

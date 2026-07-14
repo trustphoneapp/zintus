@@ -8,6 +8,7 @@ import {
 import { createEngineerSupervisor, type EngineerSupervisor } from "./supervisor.js";
 import type { RepositoryReference, TaskManifestContent } from "./contracts.js";
 import { RiskFeaturesSchema } from "./contracts.js";
+import { transitionReplanToPlanReadyForTest, transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 
 const repository: RepositoryReference = {
   repositoryId: "repo-zintus",
@@ -30,33 +31,19 @@ function createSupervisor(): EngineerSupervisor {
 }
 
 function receiveAndPlan(supervisor: EngineerSupervisor, runId = "run-1") {
-  let run = supervisor.receiveRequest({
+  const received = supervisor.receiveRequest({
     runId,
     userId: "user-1",
     repository,
     request: "Add evidence-bound Engineer workflow",
   });
-  run = supervisor.normalizeRequest({
-    runId,
-    expectedStateVersion: run.stateVersion,
+  return transitionToPlanReadyForTest({
+    supervisor,
+    received,
     normalizedRequest: "Add an evidence-bound Engineer workflow.",
-    idempotencyKey: `${runId}:normalize`,
-  }).run;
-  run = supervisor.transition({
-    runId,
-    expectedStateVersion: run.stateVersion,
-    nextState: "PLANNING",
-    reasonCode: "PLANNING_STARTED",
-    idempotencyKey: `${runId}:planning`,
-  }).run;
-  run = supervisor.transition({
-    runId,
-    expectedStateVersion: run.stateVersion,
-    nextState: "PLAN_READY",
-    reasonCode: "PLAN_GENERATED",
-    idempotencyKey: `${runId}:plan-ready`,
-  }).run;
-  return run;
+    manifest: manifestFor(runId),
+    key: runId,
+  });
 }
 
 function manifestFor(runId: string, version = 1, overrides: Partial<TaskManifestContent> = {}): TaskManifestContent {
@@ -153,9 +140,16 @@ describe("Engineer Supervisor foundation", () => {
       request: "Change authentication enforcement",
       initialRiskFeatures: { touchesAuthentication: true },
     });
-    run = supervisor.normalizeRequest({ runId: run.runId, expectedStateVersion: run.stateVersion, normalizedRequest: "Change authentication enforcement.", idempotencyKey: "risk:normalize" }).run;
-    run = supervisor.transition({ runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING", reasonCode: "PLANNING_STARTED", idempotencyKey: "risk:planning" }).run;
-    run = supervisor.transition({ runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLAN_READY", reasonCode: "PLAN_GENERATED", idempotencyKey: "risk:ready" }).run;
+    run = transitionToPlanReadyForTest({
+      supervisor,
+      received: run,
+      normalizedRequest: "Change authentication enforcement.",
+      manifest: manifestFor(run.runId, 1, {
+        request: { original: "Change authentication enforcement", normalized: "Change authentication enforcement." },
+        riskTier: "HIGH", humanGateRequired: true,
+      }),
+      key: "risk",
+    });
     expect(run.riskTier).toBe("HIGH");
     expect(() => supervisor.freezePlan({
       runId: run.runId, expectedStateVersion: run.stateVersion,
@@ -263,7 +257,6 @@ describe("Engineer Supervisor foundation", () => {
       ["SANDBOX_READY", "READY"],
       ["IMPLEMENTING", "BUILDING"],
       ["REPLANNING", "SCOPE_CHANGE"],
-      ["PLAN_READY", "REPLAN_READY"],
     ] as const) {
       run = supervisor.transition({
         runId: run.runId,
@@ -274,6 +267,19 @@ describe("Engineer Supervisor foundation", () => {
         idempotencyKey: `run-1:${reason}`,
       }).run;
     }
+    run = transitionReplanToPlanReadyForTest({
+      supervisor,
+      replanning: run,
+      manifest: manifestFor(run.runId, 2, {
+        acceptanceCriteria: [{
+          criterionId: "criterion-1",
+          statement: "Every revised state promotion is recorded.",
+          verificationMethod: "Inspect the versioned ledger test.",
+          priority: "MUST",
+        }],
+      }),
+      key: "run-1:replan",
+    });
     expect(() => supervisor.freezePlan({
       runId: run.runId,
       expectedStateVersion: run.stateVersion,

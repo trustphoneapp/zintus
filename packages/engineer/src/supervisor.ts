@@ -47,12 +47,28 @@ import type {
   TestExecutionView,
 } from "./control-contracts.js";
 import { IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
-import { sha256 } from "./hash.js";
+import { canonicalJson, sha256 } from "./hash.js";
 import { EngineerLedger, type LedgerTransitionResult } from "./ledger.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
 import { evaluateRetry, type RetryDecision } from "./retry.js";
 import { canTransition, isTerminalState } from "./state-machine.js";
 import type { PlanProposal } from "./planning.js";
+import { StoredContextSnapshotSchema, type StoredContextSnapshot } from "./context-contracts.js";
+import {
+  DecisionEvidenceReferenceSchema,
+  DecisionFactorsSchema,
+  DecisionOptionSchema,
+  DecisionRecordContentSchema,
+  DecisionRecordSchema,
+  DecisionResolutionContentSchema,
+  DecisionResolutionSchema,
+  type DecisionEvidenceReference,
+  type DecisionFactors,
+  type DecisionOption,
+  type DecisionRecord,
+  type DecisionResolution,
+} from "./decision-contracts.js";
+import { DECISION_POLICY_VERSION, classifyDecisionFactors } from "./decision-policy.js";
 
 export interface SupervisorOptions {
   dbPath?: string;
@@ -114,11 +130,38 @@ export interface AuthorizeRetryInput {
   progressMetric?: number | null;
 }
 
+export interface CreateDecisionInput {
+  runId: string;
+  expectedStateVersion: number;
+  question: string;
+  factors: DecisionFactors;
+  options: DecisionOption[];
+  recommendedOptionId: string;
+  sourceEvidence: DecisionEvidenceReference[];
+  idempotencyKey: string;
+}
+
+export interface ResolveDecisionInput {
+  runId: string;
+  decisionId: string;
+  expectedStateVersion: number;
+  selectedOptionId: string;
+  actorId: string;
+  rationale: string;
+  sourceEvidence: DecisionEvidenceReference[];
+  idempotencyKey: string;
+}
+
 function requireFacts(facts: TransitionFacts | undefined, names: Array<keyof TransitionFacts>, state: RunState): void {
   const missing = names.filter((name) => facts?.[name] !== true);
   if (missing.length > 0) {
     throw new InvalidTransitionError(`${state} requires supervisor facts: ${missing.join(", ")}`);
   }
+}
+
+function derivedDecisionKey(base: string, suffix: string): string {
+  const candidate = `${base}:${suffix}`;
+  return candidate.length <= 500 ? candidate : `decision:${sha256({ base, suffix })}`;
 }
 
 /**
@@ -333,6 +376,140 @@ export class EngineerSupervisor {
     return decision;
   }
 
+  createDecision(input: CreateDecisionInput): DecisionRecord {
+    const currentRun = this.ledger.getRun(input.runId);
+    const suppliedFactors = DecisionFactorsSchema.parse(input.factors);
+    const factors = DecisionFactorsSchema.parse({
+      ...suppliedFactors,
+      raisesRisk: suppliedFactors.raisesRisk || input.options.some((option) => {
+        const order = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 } as const;
+        return option.optionId === input.recommendedOptionId && order[option.riskTier] > order[currentRun.riskTier];
+      }),
+      riskFloorRequiresHuman: suppliedFactors.riskFloorRequiresHuman || currentRun.riskTier !== "LOW",
+    });
+    const options = input.options.map((option) => DecisionOptionSchema.parse(option));
+    const sourceEvidence = input.sourceEvidence.map((evidence) => DecisionEvidenceReferenceSchema.parse(evidence));
+    const question = input.question.trim();
+    if (!question) throw new InvalidTransitionError("decision question must not be empty");
+    const policy = classifyDecisionFactors(factors);
+    const existing = this.ledger.findDecisionByIdempotency(input.runId, input.idempotencyKey);
+    if (existing) {
+      const same = canonicalJson({
+        question: existing.question,
+        factors: existing.factors,
+        options: existing.options,
+        recommendedOptionId: existing.recommendedOptionId,
+        sourceEvidence: existing.sourceEvidence,
+        classification: existing.classification,
+        reasonCodes: existing.reasonCodes,
+      }) === canonicalJson({
+        question,
+        factors,
+        options,
+        recommendedOptionId: input.recommendedOptionId,
+        sourceEvidence,
+        classification: policy.classification,
+        reasonCodes: policy.reasonCodes,
+      });
+      if (!same) throw new IdempotencyConflictError(input.runId, input.idempotencyKey);
+      this.applyDecisionSideEffect(existing, input.expectedStateVersion);
+      return existing;
+    }
+
+    const run = currentRun;
+    if (run.stateVersion !== input.expectedStateVersion) {
+      throw new StateVersionConflictError(input.runId, input.expectedStateVersion, run.stateVersion);
+    }
+    if (isTerminalState(run.state)) throw new InvalidTransitionError(`terminal state ${run.state} cannot create a decision`);
+    if (policy.classification === "ASK_NOW" &&
+        !["REQUEST_NORMALIZED", "PLANNING", "PLAN_READY", "REPLANNING"].includes(run.state)) {
+      throw new InvalidTransitionError(`ASK_NOW cannot safely interrupt ${run.state}`);
+    }
+    if (policy.classification === "ASK_NOW" &&
+        this.ledger.listOpenDecisions(run.runId).some((decision) => decision.classification === "ASK_NOW")) {
+      throw new InvalidTransitionError("an unresolved ASK_NOW decision already blocks this run");
+    }
+    const createdAt = this.timestamp();
+    const content = DecisionRecordContentSchema.parse({
+      decisionId: this.idFactory(),
+      runId: run.runId,
+      question,
+      classification: policy.classification,
+      reasonCodes: policy.reasonCodes,
+      factors,
+      options,
+      recommendedOptionId: input.recommendedOptionId,
+      sourceEvidence,
+      policyVersion: DECISION_POLICY_VERSION,
+      requestedState: run.state,
+      resumeAction: policy.classification === "ASK_NOW"
+        ? (run.state === "REQUEST_NORMALIZED" ? "PLAN" : "REPLAN")
+        : "NONE",
+      status: "OPEN",
+      idempotencyKey: input.idempotencyKey,
+      createdAt,
+    });
+    const decision = DecisionRecordSchema.parse({ ...content, decisionHash: sha256(content) });
+    this.ledger.recordDecision(decision);
+    this.applyDecisionSideEffect(decision, input.expectedStateVersion);
+    return decision;
+  }
+
+  resolveDecision(input: ResolveDecisionInput): DecisionResolution {
+    const decision = this.ledger.getDecision(input.runId, input.decisionId);
+    if (decision.classification === "AUTO") throw new InvalidTransitionError("AUTO decisions are Supervisor-resolved");
+    const sourceEvidence = input.sourceEvidence.map((evidence) => DecisionEvidenceReferenceSchema.parse(evidence));
+    const rationale = input.rationale.trim();
+    if (!rationale) throw new InvalidTransitionError("decision resolution rationale must not be empty");
+    const existing = this.ledger.getDecisionResolution(input.runId, input.decisionId);
+    if (existing) {
+      const same = existing.idempotencyKey === input.idempotencyKey &&
+        existing.selectedOptionId === input.selectedOptionId && existing.actorId === input.actorId &&
+        existing.rationale === rationale && canonicalJson(existing.sourceEvidence) === canonicalJson(sourceEvidence);
+      if (!same) throw new IdempotencyConflictError(input.runId, input.idempotencyKey);
+      this.resumeResolvedDecision(decision, existing, input.expectedStateVersion);
+      return existing;
+    }
+    const run = this.ledger.getRun(input.runId);
+    if (run.stateVersion !== input.expectedStateVersion) {
+      throw new StateVersionConflictError(input.runId, input.expectedStateVersion, run.stateVersion);
+    }
+    if (decision.classification === "ASK_NOW" && run.state !== "CLARIFICATION_REQUIRED") {
+      throw new InvalidTransitionError("ASK_NOW may only resolve while CLARIFICATION_REQUIRED");
+    }
+    const resolvedAt = this.timestamp();
+    const content = DecisionResolutionContentSchema.parse({
+      resolutionId: this.idFactory(),
+      decisionId: decision.decisionId,
+      runId: decision.runId,
+      selectedOptionId: input.selectedOptionId,
+      actorType: "HUMAN",
+      actorId: input.actorId,
+      rationale,
+      sourceEvidence,
+      policyVersion: DECISION_POLICY_VERSION,
+      status: "RESOLVED",
+      idempotencyKey: input.idempotencyKey,
+      resolvedAt,
+    });
+    const resolution = DecisionResolutionSchema.parse({ ...content, resolutionHash: sha256(content) });
+    this.ledger.recordDecisionResolution(resolution);
+    this.resumeResolvedDecision(decision, resolution, input.expectedStateVersion);
+    return resolution;
+  }
+
+  listDecisions(runId: string): DecisionRecord[] {
+    return this.ledger.listDecisions(runId);
+  }
+
+  listOpenDecisions(runId: string): DecisionRecord[] {
+    return this.ledger.listOpenDecisions(runId);
+  }
+
+  getDecisionResolution(runId: string, decisionId: string): DecisionResolution | null {
+    return this.ledger.getDecisionResolution(runId, decisionId);
+  }
+
   getRun(runId: string): EngineerRun {
     return this.ledger.getRun(runId);
   }
@@ -351,12 +528,34 @@ export class EngineerSupervisor {
 
   recordPlanProposal(proposal: PlanProposal): PlanProposal {
     const run = this.ledger.getRun(proposal.runId);
-    if (run.state !== "PLANNING") throw new InvalidTransitionError("plan proposals may only be recorded while PLANNING");
+    if (run.state !== "PLANNING" && run.state !== "REPLANNING") {
+      throw new InvalidTransitionError("plan proposals may only be recorded while PLANNING or REPLANNING");
+    }
+    const context = this.ledger.latestContextSnapshot(proposal.runId);
+    if (!context || context.manifest.manifestHash !== proposal.contextManifestHash) {
+      throw new ManifestIntegrityError("plan proposal is not bound to the latest persisted context manifest");
+    }
     return this.ledger.recordPlanProposal(proposal);
   }
 
   latestPlanProposal(runId: string): PlanProposal | null {
     return this.ledger.latestPlanProposal(runId);
+  }
+
+  recordContextSnapshot(snapshot: StoredContextSnapshot): StoredContextSnapshot {
+    const parsed = StoredContextSnapshotSchema.parse(snapshot);
+    const run = this.ledger.getRun(parsed.manifest.runId);
+    if (run.state !== "REQUEST_RECEIVED") throw new InvalidTransitionError("context may only be recorded before planning");
+    if (parsed.manifest.repositoryId !== run.repository.repositoryId ||
+        parsed.manifest.baseCommitSha.toLowerCase() !== run.repository.baseCommitSha.toLowerCase() ||
+        parsed.manifest.requestHash !== sha256(run.requestOriginal)) {
+      throw new ManifestIntegrityError("context snapshot does not match the run repository, exact base, and request");
+    }
+    return this.ledger.recordContextSnapshot(parsed);
+  }
+
+  latestContextSnapshot(runId: string): StoredContextSnapshot | null {
+    return this.ledger.latestContextSnapshot(runId);
   }
 
   listEvents(runId: string): RunStateEvent[] {
@@ -495,6 +694,71 @@ export class EngineerSupervisor {
     this.ledger.close();
   }
 
+  private applyDecisionSideEffect(decision: DecisionRecord, expectedStateVersion: number): void {
+    const run = this.ledger.getRun(decision.runId);
+    if (decision.classification === "AUTO") {
+      if (this.ledger.getDecisionResolution(decision.runId, decision.decisionId)) return;
+      const resolvedAt = this.timestamp();
+      const content = DecisionResolutionContentSchema.parse({
+        resolutionId: this.idFactory(),
+        decisionId: decision.decisionId,
+        runId: decision.runId,
+        selectedOptionId: decision.recommendedOptionId,
+        actorType: "SUPERVISOR",
+        actorId: "engineer-supervisor",
+        rationale: "Applied the reversible, within-scope documented default under deterministic policy.",
+        sourceEvidence: decision.sourceEvidence,
+        policyVersion: DECISION_POLICY_VERSION,
+        status: "RESOLVED",
+        idempotencyKey: derivedDecisionKey(decision.idempotencyKey, "auto-resolution"),
+        resolvedAt,
+      });
+      this.ledger.recordDecisionResolution(DecisionResolutionSchema.parse({ ...content, resolutionHash: sha256(content) }));
+      return;
+    }
+    if (decision.classification !== "ASK_NOW") return;
+    if (run.state === "CLARIFICATION_REQUIRED") return;
+    if (run.stateVersion !== expectedStateVersion) {
+      throw new StateVersionConflictError(run.runId, expectedStateVersion, run.stateVersion);
+    }
+    this.transition({
+      runId: run.runId,
+      expectedStateVersion,
+      nextState: "CLARIFICATION_REQUIRED",
+      reasonCode: "DECISION_REQUIRES_CLARIFICATION",
+      actorType: "SUPERVISOR",
+      actorId: "engineer-supervisor",
+      evidenceIds: [decision.decisionId],
+      idempotencyKey: derivedDecisionKey(decision.idempotencyKey, "clarification"),
+    });
+  }
+
+  private resumeResolvedDecision(
+    decision: DecisionRecord,
+    resolution: DecisionResolution,
+    expectedStateVersion: number,
+  ): void {
+    if (decision.classification !== "ASK_NOW") return;
+    const run = this.ledger.getRun(decision.runId);
+    if (run.state === "PLANNING") return;
+    if (run.state !== "CLARIFICATION_REQUIRED") {
+      throw new InvalidTransitionError(`resolved ASK_NOW cannot resume from ${run.state}`);
+    }
+    if (run.stateVersion !== expectedStateVersion) {
+      throw new StateVersionConflictError(run.runId, expectedStateVersion, run.stateVersion);
+    }
+    this.transition({
+      runId: run.runId,
+      expectedStateVersion,
+      nextState: "PLANNING",
+      reasonCode: decision.resumeAction === "REPLAN" ? "DECISION_RESOLVED_REPLAN" : "DECISION_RESOLVED_PLAN",
+      actorType: "SUPERVISOR",
+      actorId: "engineer-supervisor",
+      evidenceIds: [decision.decisionId, resolution.resolutionId],
+      idempotencyKey: derivedDecisionKey(resolution.idempotencyKey, "resume"),
+    });
+  }
+
   private transitionInternal(
     run: EngineerRun,
     input: TransitionInput,
@@ -525,6 +789,22 @@ export class EngineerSupervisor {
     }
     if (!canTransition(run.state, input.nextState)) {
       throw new InvalidTransitionError(`transition ${run.state} -> ${input.nextState} is not permitted`);
+    }
+    if (input.nextState === "PLAN_READY") {
+      const context = this.ledger.latestContextSnapshot(run.runId);
+      const proposal = this.ledger.latestPlanProposal(run.runId);
+      if (!context || !proposal || proposal.contextManifestHash !== context.manifest.manifestHash ||
+          !input.evidenceIds?.includes(context.artifactId) || !input.evidenceIds.includes(proposal.artifactId)) {
+        throw new ManifestIntegrityError("PLAN_READY requires the matching persisted context and plan evidence");
+      }
+    }
+    const unresolved = this.ledger.listOpenDecisions(run.runId);
+    if (unresolved.some((decision) => decision.classification === "ASK_NOW" || decision.classification === "AUTO") &&
+        input.nextState !== "CLARIFICATION_REQUIRED" && input.nextState !== "CANCELLATION_PENDING") {
+      throw new InvalidTransitionError("open ASK_NOW or AUTO decisions block workflow progression");
+    }
+    if (input.nextState === "COMPLETED" && unresolved.some((decision) => decision.classification === "DEFER")) {
+      throw new InvalidTransitionError("deferred human tasks must be resolved before completion");
     }
     this.validateActor(input.nextState, actorType);
     this.validateManifestBinding(run, input.manifestHash);

@@ -191,6 +191,26 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/engineer/readiness:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerReadiness
+      summary: Get the fail-closed Engineer capability state
+      responses:
+        "200": { description: Engineer is ready or explicitly disabled. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: One or more mandatory capabilities are unavailable. }
+
+  /v1/engineer/readiness/retry:
+    post:
+      tags: [Engineer]
+      operationId: retryEngineerReadiness
+      summary: Explicitly rerun every mandatory Engineer capability probe
+      responses:
+        "200": { description: All capability probes passed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Capability proof remains incomplete. }
+
   /v1/engineer/observability:
     get:
       tags: [Engineer]
@@ -488,6 +508,46 @@ paths:
         "200": { description: Durable classified failures and retryability. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/decisions:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRunDecisions
+      summary: List owner-bound ASK_NOW, DEFER, and AUTO decisions
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Decision projections with options, recommendation, and resolution status. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/decisions/{decisionId}/resolve:
+    post:
+      tags: [Engineer]
+      operationId: resolveEngineerRunDecision
+      summary: Resolve an open decision as the authenticated Engineer reviewer
+      parameters:
+        - $ref: "#/components/parameters/EngineerRunId"
+        - name: decisionId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedStateVersion, selectedOptionId, rationale, idempotencyKey]
+              properties:
+                expectedStateVersion: { type: integer, minimum: 0 }
+                selectedOptionId: { type: string }
+                rationale: { type: string }
+                idempotencyKey: { type: string }
+      responses:
+        "200": { description: Hash-bound human resolution recorded. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run or decision not found. }
 
   /v1/engineer/runs/{runId}/diff:
     get:

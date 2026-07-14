@@ -13,6 +13,12 @@ describe("Engineer database schema", () => {
       "engineer_runs",
       "task_manifest_versions",
       "plan_proposals",
+      "context_manifests",
+      "context_sources",
+      "context_warnings",
+      "decisions",
+      "decision_evidence",
+      "decision_resolutions",
       "run_state_events",
       "risk_assessments",
       "retry_attempts",
@@ -26,7 +32,7 @@ describe("Engineer database schema", () => {
     ]) {
       expect(tables.has(table)).toBe(true);
     }
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(2);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(4);
     db.close();
   });
 });

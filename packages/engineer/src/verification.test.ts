@@ -29,6 +29,7 @@ import {
   type TaskManifest,
   type WorkspaceRecord,
 } from "./index.js";
+import { transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -89,12 +90,16 @@ function setupFastChecks(path: string, testType: "UNIT" | "SECURITY" = "UNIT") {
   const repo = repository(path);
   const supervisor = new EngineerSupervisor({ dbPath: join(path, "engineer.db") });
   const manifest = task("run-phase3", repo.sha, testType);
-  let run = supervisor.receiveRequest({ runId: manifest.runId, userId: "user-1", repository: manifest.repository, request: manifest.request.original });
-  run = supervisor.normalizeRequest({ runId: run.runId, expectedStateVersion: run.stateVersion, normalizedRequest: manifest.request.normalized, idempotencyKey: "normalize" }).run;
-  for (const [nextState, reasonCode] of [["PLANNING", "PLAN_STARTED"], ["PLAN_READY", "PLAN_READY"]] as const) {
-    run = supervisor.transition({ runId: run.runId, expectedStateVersion: run.stateVersion, nextState, reasonCode, idempotencyKey: reasonCode }).run;
-  }
   const { manifestHash: _hash, ...content } = manifest;
+  const received = supervisor.receiveRequest({ runId: manifest.runId, userId: "user-1", repository: manifest.repository, request: manifest.request.original });
+  let run = transitionToPlanReadyForTest({
+    supervisor,
+    received,
+    normalizedRequest: manifest.request.normalized,
+    manifest: content,
+    key: `${manifest.runId}:${testType}`,
+    artifactRoot: join(path, "planning-artifacts"),
+  });
   run = supervisor.freezePlan({ runId: run.runId, expectedStateVersion: run.stateVersion, manifest: content, actorId: "planner", idempotencyKey: "freeze" }).run;
   for (const [nextState, reasonCode] of [
     ["QUEUED", "QUEUED"], ["SANDBOX_COLD_PROVISIONING", "COLD"], ["SANDBOX_PREFLIGHT", "PREFLIGHT"],

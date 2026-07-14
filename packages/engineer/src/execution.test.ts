@@ -8,6 +8,7 @@ import {
   CodexBuilder,
   DockerSandboxManager,
   EngineerExecutionManager,
+  EngineerWorkerLeaseManager,
   EngineerSupervisor,
   GitWorkspaceManager,
   LocalArtifactStore,
@@ -25,6 +26,7 @@ import {
   type TaskManifest,
   type WorkspaceRecord,
 } from "./index.js";
+import { transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 
 const roots: string[] = [];
 
@@ -378,18 +380,16 @@ describe("Phase 2 authoritative execution worker", () => {
       },
       request: "Change value",
     });
-    let run = supervisor.normalizeRequest({
-      runId: received.runId, expectedStateVersion: received.stateVersion,
-      normalizedRequest: "Change src/value.ts to export value 2.", idempotencyKey: "normalize-worker",
-    }).run;
-    run = supervisor.transition({
-      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING",
-      reasonCode: "TEST_PLAN_STARTED", idempotencyKey: "planning-worker",
-    }).run;
-    run = supervisor.transition({
-      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLAN_READY",
-      reasonCode: "TEST_PLAN_READY", idempotencyKey: "ready-worker",
-    }).run;
+    const taskForRun = manifest(received.runId, repository.sha);
+    const { manifestHash: _proposalHash, ...proposalContent } = taskForRun;
+    let run = transitionToPlanReadyForTest({
+      supervisor,
+      received,
+      normalizedRequest: "Change src/value.ts to export value 2.",
+      manifest: proposalContent,
+      key: "worker",
+      artifactRoot: join(root, "planning-artifacts"),
+    });
     const frozen = supervisor.freezePlan({
       runId: run.runId,
       expectedStateVersion: run.stateVersion,
@@ -434,6 +434,12 @@ describe("Phase 2 authoritative execution worker", () => {
         return { id: "worker-response-3", output: [], output_text: "Implementation complete; executor evidence is separate." };
       },
     };
+    const leaseManager = new EngineerWorkerLeaseManager({
+      dbPath: join(root, "worker-leases.db"),
+      tokenSecret: "a".repeat(64),
+      maxConcurrentLeases: 1,
+      recoverExpiredLease: () => undefined,
+    });
     const manager = new EngineerExecutionManager({
       supervisor,
       sandboxManager,
@@ -443,10 +449,14 @@ describe("Phase 2 authoritative execution worker", () => {
         return repository.path;
       },
       transportForRun: () => transport,
+      leaseManager,
+      workerOwnerId: "test-worker",
+      leaseTtlMs: 30_000,
     });
     const result = await manager.execute(run.runId);
     expect(result.changedFiles).toEqual(["src/value.ts"]);
     expect(supervisor.getRun(run.runId).state).toBe("FAST_CHECKS");
+    expect(leaseManager.listActive()).toHaveLength(0);
     const artifacts = supervisor.listArtifacts(run.runId);
     expect(artifacts.map((artifact) => artifact.type)).toContain("COMMAND_STDOUT");
     expect(artifacts.map((artifact) => artifact.type)).toContain("COMMAND_STDERR");
@@ -457,6 +467,7 @@ describe("Phase 2 authoritative execution worker", () => {
     expect((auditDb.query("SELECT COUNT(*) AS count FROM model_calls").get() as { count: number }).count).toBe(3);
     auditDb.close();
     expect(manager.destroy(run.runId)?.status).toBe("DESTROYED");
+    leaseManager.close();
     supervisor.close();
   });
 });
