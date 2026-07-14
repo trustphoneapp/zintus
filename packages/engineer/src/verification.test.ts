@@ -68,15 +68,15 @@ function repository(path: string): { path: string; sha: string } {
   return { path: repo, sha: readFileSync(join(repo, ".git", head), "utf8").trim() };
 }
 
-function task(runId: string, sha: string): TaskManifest {
+function task(runId: string, sha: string, testType: "UNIT" | "SECURITY" = "UNIT"): TaskManifest {
   const content = {
     manifestVersion: 1, runId,
     repository: { repositoryId: "repo-1", provider: "local" as const, owner: "local", name: "repo", baseBranch: "main", baseCommitSha: sha },
     request: { original: "Verify value", normalized: "Verify src/value.ts exports value 2." },
     acceptanceCriteria: [{ criterionId: "criterion-1", statement: "Value is two", verificationMethod: "unit test", priority: "MUST" as const }],
-    testPlan: [{ testId: "test-1", criterionIds: ["criterion-1"], type: "UNIT" as const, description: "Run unit tests", command: "bun run test" }],
+    testPlan: [{ testId: "test-1", criterionIds: ["criterion-1"], type: testType, description: "Run trusted checks", command: "bun run test" }],
     allowedPaths: ["src/**"], deniedPaths: [], allowedCommands: ["bun run test"], prohibitedCommands: [],
-    riskTier: "LOW" as const, humanGateRequired: false,
+    riskTier: "MEDIUM" as const, humanGateRequired: true,
     retryBudgets: { sameFailureAttempts: 2, builderRepairAttempts: 4, reviewerFixAttempts: 2, plannerRestarts: 1, sandboxProvisioningAttempts: 3, transientModelAttempts: 3 },
     timeBudgetSeconds: 600, tokenBudget: 100_000, costBudgetUsd: 10,
     createdAt: "2026-07-14T12:00:00.000Z",
@@ -84,10 +84,10 @@ function task(runId: string, sha: string): TaskManifest {
   return TaskManifestSchema.parse({ ...content, manifestHash: sha256(content) });
 }
 
-function setupFastChecks(path: string) {
+function setupFastChecks(path: string, testType: "UNIT" | "SECURITY" = "UNIT") {
   const repo = repository(path);
   const supervisor = new EngineerSupervisor({ dbPath: join(path, "engineer.db") });
-  const manifest = task("run-phase3", repo.sha);
+  const manifest = task("run-phase3", repo.sha, testType);
   let run = supervisor.receiveRequest({ runId: manifest.runId, userId: "user-1", repository: manifest.repository, request: manifest.request.original });
   run = supervisor.normalizeRequest({ runId: run.runId, expectedStateVersion: run.stateVersion, normalizedRequest: manifest.request.normalized, idempotencyKey: "normalize" }).run;
   for (const [nextState, reasonCode] of [["PLANNING", "PLAN_STARTED"], ["PLAN_READY", "PLAN_READY"]] as const) {
@@ -139,6 +139,23 @@ describe("Phase 3 independent verification", () => {
     db.close();
     setup.supervisor.close();
   });
+
+  test("records executable SECURITY plan evidence while in SECURITY_REVIEW", () => {
+    const path = root();
+    const setup = setupFastChecks(path, "SECURITY");
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const executor = new TrustedCommandExecutor({
+      artifactStore, workspace: setup.workspace, sandbox: setup.sandbox, manifest: setup.manifest,
+      currentCommit: () => setup.manifest.repository.baseCommitSha,
+      runner: () => ({ status: 0, stdout: "security pass", stderr: "" }),
+      onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
+    });
+    const result = new IndependentVerifier({ supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor, diff: () => "" }).run();
+    expect(result.executions).toHaveLength(1);
+    expect(result.executions[0]).toMatchObject({ type: "SECURITY", status: "PASSED" });
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_REVIEW");
+    setup.supervisor.close();
+  });
 });
 
 describe("Phase 3 isolated Reviewer", () => {
@@ -186,6 +203,23 @@ describe("Phase 3 isolated Reviewer", () => {
       ...input,
       trustedEvidence: [{ ...evidence, payload: { passed: false } }],
     })).toThrow("evidence bundle hash mismatch");
+
+    const invalidApprovalTransport: ResponsesTransport = {
+      async create() {
+        return {
+          id: "review-response-invalid",
+          output: [{ type: "function_call", call_id: "review-call-invalid", name: "submit_review", arguments: JSON.stringify({
+            decision: "APPROVE",
+            requirementCoverage: [{ criterionId: "criterion-1", status: "UNVERIFIED", evidenceIds: [], explanation: "No evidence." }],
+            findings: [], unsupportedClaims: [], residualRisks: [],
+            reviewedDiffHash: input.diffHash, reviewedEvidenceBundleHash: input.evidenceBundleHash,
+            reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+          }) }],
+        };
+      },
+    };
+    await expect(new IsolatedReviewer({ transport: invalidApprovalTransport }).review(input, 2))
+      .rejects.toThrow("verified evidence for every MUST criterion");
   });
 });
 

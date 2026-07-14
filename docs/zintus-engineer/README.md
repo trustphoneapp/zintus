@@ -21,6 +21,13 @@ export GATEWAY_TOKEN="$(openssl rand -hex 24)"
 bun run dev:gateway
 ```
 
+`GATEWAY_TOKEN` mode is currently suitable for direct API clients only. The web
+Engineer client does not inject this operator secret, and disabling gateway
+authentication does not provide a human identity for approval or publication.
+Keep publication disabled until a session-bound UI authentication path and
+server-verified actor ownership are implemented. See the release audit for the
+remaining activation gates.
+
 The ledger and content-addressed artifacts stay machine-local under
 `~/.zintus/engineer`. Planning works with the OpenAI key; execution additionally
 requires the repository and pinned sandbox settings above. Publication stays off

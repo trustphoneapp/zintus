@@ -7,7 +7,7 @@ import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
-import { EngineerSupervisor } from "@zintus/engineer";
+import { EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
 
 function fakeEngine(overrides: Partial<Engine> = {}): Engine {
@@ -109,7 +109,7 @@ describe("gateway handler", () => {
   test("Engineer run intake and reads use the gateway bearer boundary", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-gateway-engineer-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
-    const engineerRuns = new EngineerRunManager({ supervisor, diffForRun: () => "diff --git a/a b/a" });
+    const engineerRuns = new EngineerRunManager({ supervisor, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => "diff --git a/a b/a" });
     const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
     const body = JSON.stringify({
       runId: "gateway-run-1",
@@ -166,6 +166,12 @@ describe("gateway handler", () => {
       totalRuns: 1,
       runsByState: { REQUEST_RECEIVED: 1 },
     });
+    const cancelled = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/cancel", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ actorId: "user-1", reason: "Stop the incomplete run." }),
+    }));
+    expect(cancelled.status).toBe(200);
+    expect(((await cancelled.json()) as { run: { state: string } }).run.state).toBe("CANCELLED");
     supervisor.close();
     rmSync(root, { recursive: true, force: true });
   });

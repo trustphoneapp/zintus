@@ -98,8 +98,8 @@ function manifest(runId: string, sha: string, overrides: Partial<TaskManifest> =
     deniedPaths: [],
     allowedCommands: ["bun run test"],
     prohibitedCommands: [],
-    riskTier: "LOW" as const,
-    humanGateRequired: false,
+    riskTier: "MEDIUM" as const,
+    humanGateRequired: true,
     retryBudgets: {
       sameFailureAttempts: 2, builderRepairAttempts: 4, reviewerFixAttempts: 2,
       plannerRestarts: 1, sandboxProvisioningAttempts: 3, transientModelAttempts: 3,
@@ -254,6 +254,8 @@ describe("Phase 2 Docker sandbox", () => {
     expect(run).toContain("--cap-drop=ALL");
     expect(run).toContain("no-new-privileges");
     expect(run).toContain("1000:1000");
+    expect(run).toContain("--env");
+    expect(run).toContain("PATH=/bin");
     manager.destroy(sandbox);
   });
 

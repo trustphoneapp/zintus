@@ -104,6 +104,33 @@ export interface IsolatedReviewResult {
   findings: ReviewFindingRecord[];
 }
 
+function validateApprovalSemantics(input: ReviewerInput, output: ReviewerOutput): void {
+  const criteria = new Map(input.manifest.acceptanceCriteria.map((criterion) => [criterion.criterionId, criterion]));
+  const trustedEvidence = new Set(input.trustedEvidence.map((evidence) => evidence.evidenceId));
+  const coverage = new Map<string, ReviewerOutput["requirementCoverage"][number]>();
+  for (const item of output.requirementCoverage) {
+    if (!criteria.has(item.criterionId)) throw new Error(`Reviewer referenced unknown criterion ${item.criterionId}`);
+    if (coverage.has(item.criterionId)) throw new Error(`Reviewer duplicated criterion coverage ${item.criterionId}`);
+    if (item.evidenceIds.some((evidenceId) => !trustedEvidence.has(evidenceId))) {
+      throw new Error(`Reviewer referenced evidence outside the trusted bundle for ${item.criterionId}`);
+    }
+    coverage.set(item.criterionId, item);
+  }
+  if (output.decision !== "APPROVE") return;
+  const invalidMust = input.manifest.acceptanceCriteria.filter((criterion) => {
+    if (criterion.priority !== "MUST") return false;
+    const item = coverage.get(criterion.criterionId);
+    return !item || item.status !== "SATISFIED" || item.evidenceIds.length === 0;
+  });
+  if (invalidMust.length > 0) {
+    throw new Error(`Reviewer approval requires verified evidence for every MUST criterion: ${invalidMust.map((item) => item.criterionId).join(", ")}`);
+  }
+  if (output.unsupportedClaims.length > 0) throw new Error("Reviewer approval cannot contain unsupported claims");
+  if (output.findings.some((finding) => finding.severity === "HIGH" || finding.severity === "CRITICAL")) {
+    throw new Error("Reviewer approval cannot contain open high-severity findings");
+  }
+}
+
 /** One call, one fresh transport, no previous_response_id, no Builder narrative, no repository tools. */
 export class IsolatedReviewer {
   private readonly options: IsolatedReviewerOptions;
@@ -151,6 +178,7 @@ export class IsolatedReviewer {
       .find((item): item is { success: true; data: z.infer<typeof FunctionCallSchema> } => item.success)?.data;
     if (!call) throw new Error("isolated Reviewer did not submit a structured review");
     const output = ReviewerOutputSchema.parse(JSON.parse(call.arguments)) as ReviewerOutput;
+    validateApprovalSemantics(input, output);
     if (output.reviewedDiffHash !== input.diffHash || output.reviewedEvidenceBundleHash !== input.evidenceBundleHash) {
       throw new Error("Reviewer approval is invalid because reviewed hashes do not match current evidence");
     }

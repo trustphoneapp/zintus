@@ -94,7 +94,7 @@ export class EngineerPlanningManager {
     for (const command of output.allowedCommands) parseTrustedCommand(command);
     let current = this.options.supervisor.normalizeRequest({ runId, expectedStateVersion: run.stateVersion, normalizedRequest: output.normalizedRequest, idempotencyKey: `plan:normalize:${inputHash}` }).run;
     current = this.options.supervisor.transition({ runId, expectedStateVersion: current.stateVersion, nextState: "PLANNING", reasonCode: "STRUCTURED_PLANNING_STARTED", idempotencyKey: `plan:start:${inputHash}` }).run;
-    const risk = this.options.supervisor.assessRunRisk(runId, current.stateVersion, output.riskFeatures);
+    const risk = this.options.supervisor.assessRunRisk(runId, current.stateVersion, output.riskFeatures, { autoApproveLowRisk: true });
     const manifest = TaskManifestContentSchema.parse({
       manifestVersion: this.options.supervisor.listManifestVersions(runId).length + 1,
       runId, repository: run.repository,

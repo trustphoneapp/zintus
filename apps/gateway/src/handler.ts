@@ -2755,6 +2755,8 @@ export function createGatewayHandler(
 
     if (url.pathname === "/v1/engineer/runs" && request.method === "POST") {
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
+      const limited = enforceRateLimit(request, requestId, url.pathname);
+      if (limited) return limited;
       try {
         const body = await request.json() as {
           runId?: string; userId?: string; userEmail?: string; repository?: unknown; request?: string;
@@ -2778,6 +2780,10 @@ export function createGatewayHandler(
       const runId = parts[4] ?? "";
       const action = parts[5];
       try {
+        if (request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+        }
         if (!action && request.method === "GET") return json(request, engineerRuns.get(runId));
         if (action === "plan" && request.method === "POST") {
           return json(request, { plan: await engineerRuns.plan(runId) });
@@ -2853,7 +2859,7 @@ export function createGatewayHandler(
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const status = /not found/i.test(message) ? 404 : /not configured|PLAN_FROZEN|planning requires/i.test(message) ? 409 : 400;
-        return json(request, { error: { message } }, status);
+        return json(request, { error: { message: redactSecrets(message) } }, status);
       }
     }
 

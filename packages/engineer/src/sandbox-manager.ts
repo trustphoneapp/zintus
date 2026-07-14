@@ -221,20 +221,28 @@ export class DockerSandboxManager {
       pids: this.options.limits?.pids ?? 256,
     };
     return (executable, args, commandOptions): CommandProcessResult => {
+      const containerEnvironment = Object.entries(commandOptions.env)
+        .filter((entry): entry is [string, string] => entry[1] !== undefined)
+        .flatMap(([name, value]) => ["--env", `${name}=${value}`]);
       const dockerArgs = [
         "run", "--rm", "--network=none", "--read-only", "--cap-drop=ALL",
         "--security-opt", "no-new-privileges", "--user", "1000:1000",
         "--cpus", String(limits.cpus), "--memory", limits.memory,
         "--pids-limit", String(limits.pids), "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
         "--mount", `type=bind,src=${workspace.workspaceRoot},dst=/workspace,rw`,
-        "--workdir", "/workspace", this.options.imageReference, executable, ...args,
+        "--workdir", "/workspace", ...containerEnvironment,
+        this.options.imageReference, executable, ...args,
       ];
+      const hostEnvironment: NodeJS.ProcessEnv = {};
+      for (const name of ["PATH", "HOME", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "XDG_RUNTIME_DIR"] as const) {
+        if (process.env[name]) hostEnvironment[name] = process.env[name];
+      }
       const result = dockerSpawn("docker", dockerArgs, {
         shell: false,
         encoding: "utf8",
         timeout: commandOptions.timeoutMs,
         maxBuffer: commandOptions.maxOutputBytes,
-        env: commandOptions.env,
+        env: hostEnvironment,
         stdio: ["ignore", "pipe", "pipe"],
       });
       return {

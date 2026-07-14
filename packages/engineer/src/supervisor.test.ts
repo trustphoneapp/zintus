@@ -7,6 +7,7 @@ import {
 } from "./errors.js";
 import { createEngineerSupervisor, type EngineerSupervisor } from "./supervisor.js";
 import type { RepositoryReference, TaskManifestContent } from "./contracts.js";
+import { RiskFeaturesSchema } from "./contracts.js";
 
 const repository: RepositoryReference = {
   repositoryId: "repo-zintus",
@@ -114,6 +115,16 @@ function freeze(supervisor: EngineerSupervisor, runId = "run-1") {
 }
 
 describe("Engineer Supervisor foundation", () => {
+  test("rejects invalid intake before it can poison the durable ledger", () => {
+    const supervisor = createSupervisor();
+    expect(() => supervisor.receiveRequest({
+      runId: "oversized-run", userId: "user-1", repository,
+      request: "x".repeat(100_001),
+    })).toThrow();
+    expect(supervisor.listRuns()).toEqual([]);
+    supervisor.close();
+  });
+
   test("rejects relationally invalid manifest contracts before persistence", () => {
     const supervisor = createSupervisor();
     const run = receiveAndPlan(supervisor);
@@ -132,6 +143,41 @@ describe("Engineer Supervisor foundation", () => {
       idempotencyKey: "invalid-manifest",
     })).toThrow("unknown criterion");
     expect(supervisor.listManifestVersions(run.runId)).toHaveLength(0);
+    supervisor.close();
+  });
+
+  test("cannot downgrade the Supervisor risk tier or remove its human gate at freeze", () => {
+    const supervisor = createSupervisor();
+    let run = supervisor.receiveRequest({
+      runId: "risk-floor-run", userId: "user-1", repository,
+      request: "Change authentication enforcement",
+      initialRiskFeatures: { touchesAuthentication: true },
+    });
+    run = supervisor.normalizeRequest({ runId: run.runId, expectedStateVersion: run.stateVersion, normalizedRequest: "Change authentication enforcement.", idempotencyKey: "risk:normalize" }).run;
+    run = supervisor.transition({ runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING", reasonCode: "PLANNING_STARTED", idempotencyKey: "risk:planning" }).run;
+    run = supervisor.transition({ runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLAN_READY", reasonCode: "PLAN_GENERATED", idempotencyKey: "risk:ready" }).run;
+    expect(run.riskTier).toBe("HIGH");
+    expect(() => supervisor.freezePlan({
+      runId: run.runId, expectedStateVersion: run.stateVersion,
+      manifest: manifestFor(run.runId, 1, {
+        request: { original: "Change authentication enforcement", normalized: "Change authentication enforcement." },
+        riskTier: "LOW", humanGateRequired: false,
+      }),
+      actorId: "malicious-client", idempotencyKey: "risk:downgrade",
+    })).toThrow("must match the Supervisor decision");
+    expect(supervisor.getRun(run.runId)).toMatchObject({ riskTier: "HIGH", humanGateRequired: true, state: "PLAN_READY" });
+    supervisor.close();
+  });
+
+  test("allows a provisional medium intake to become low-risk before freeze only after deterministic eligibility checks", () => {
+    const supervisor = createSupervisor();
+    let run = supervisor.receiveRequest({ runId: "low-risk-run", userId: "user-1", repository, request: "Correct a documentation typo" });
+    run = supervisor.normalizeRequest({ runId: run.runId, expectedStateVersion: run.stateVersion, normalizedRequest: "Correct a documentation typo.", idempotencyKey: "low:normalize" }).run;
+    run = supervisor.transition({ runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING", reasonCode: "PLANNING_STARTED", idempotencyKey: "low:planning" }).run;
+    const risk = supervisor.assessRunRisk(run.runId, run.stateVersion, RiskFeaturesSchema.parse({
+      documentationOnly: true, requiredChecksPassed: true, testCoveragePercent: 100,
+    }), { autoApproveLowRisk: true });
+    expect(risk).toMatchObject({ riskTier: "LOW", humanGateRequired: false });
     supervisor.close();
   });
 

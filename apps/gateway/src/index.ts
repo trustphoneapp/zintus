@@ -149,7 +149,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerVerification: EngineerVerificationManager | undefined;
   let engineerPublication: EngineerPublicationManager | undefined;
   let engineerWarmPool: WarmSandboxPool | undefined;
-  let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor, planning: engineerPlanning });
+  let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor, planning: engineerPlanning, artifactStore: engineerArtifactStore });
   if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest) {
     const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(engineerRoot, "workspaces") });
     const warmLockfileHash = process.env.ZINTUS_ENGINEER_LOCKFILE_HASH;
@@ -224,6 +224,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       execution: engineerExecution,
       verification: engineerVerification,
       planning: engineerPlanning,
+      artifactStore: engineerArtifactStore,
+      cleanupRun: (runId) => { engineerExecution?.destroy(runId); },
       ...(engineerPublication ? { publication: engineerPublication } : {}),
       diffForRun: (runId) => {
         const sandbox = engineerExecution?.getSandbox(runId);

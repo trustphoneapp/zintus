@@ -9,6 +9,7 @@ import {
   type EngineerSupervisor,
   type RepositoryReference,
   type TaskManifestContent,
+  type LocalArtifactStore,
   engineerObservabilitySnapshot,
 } from "@zintus/engineer";
 
@@ -19,6 +20,8 @@ export interface EngineerRunManagerOptions {
   publication?: EngineerPublicationManager;
   diffForRun?: (runId: string) => string;
   planning?: EngineerPlanningManager;
+  artifactStore?: LocalArtifactStore;
+  cleanupRun?: (runId: string) => void | Promise<void>;
 }
 
 /** Gateway facade. It exposes no generic state-transition endpoint. */
@@ -142,8 +145,41 @@ export class EngineerRunManager {
   }
 
   cancel(runId: string, actorId: string, reason: string): Promise<void> {
-    if (!this.options.publication) throw new Error("Engineer control is not configured on this gateway");
-    return this.options.publication.cancel(runId, actorId, reason);
+    if (this.options.publication) return this.options.publication.cancel(runId, actorId, reason);
+    return this.cancelWithoutPublication(runId, actorId, reason);
+  }
+
+  private async cancelWithoutPublication(runId: string, actorId: string, reason: string): Promise<void> {
+    const artifactStore = this.options.artifactStore;
+    if (!artifactStore) throw new Error("Engineer control is not configured on this gateway");
+    const run = this.options.supervisor.getRun(runId);
+    if (run.terminalAt) throw new Error(`terminal run ${run.state} cannot be cancelled`);
+    const artifact = this.options.supervisor.recordArtifact(artifactStore.put({
+      runId, type: "CANCELLATION_REQUEST",
+      bytes: JSON.stringify({ actorId, reason, requestedAt: new Date().toISOString() }),
+      producerType: "SYSTEM", producerId: "engineer-supervisor", trusted: true,
+    }));
+    let current = this.options.supervisor.transition({
+      runId, expectedStateVersion: run.stateVersion, nextState: "CANCELLATION_PENDING",
+      reasonCode: "USER_CANCELLATION_REQUESTED", actorType: "HUMAN", actorId,
+      evidenceIds: [artifact.artifactId], manifestHash: run.manifestHash,
+      idempotencyKey: `control:cancel:${run.stateVersion}`,
+    }).run;
+    try {
+      await this.options.cleanupRun?.(runId);
+      current = this.options.supervisor.transition({
+        runId, expectedStateVersion: current.stateVersion, nextState: "CANCELLED",
+        reasonCode: "RUN_CLEANUP_COMPLETE", manifestHash: current.manifestHash,
+        idempotencyKey: `control:cancelled:${current.stateVersion}`,
+      }).run;
+    } catch (error) {
+      this.options.supervisor.transition({
+        runId, expectedStateVersion: current.stateVersion, nextState: "FAILED",
+        reasonCode: "CANCELLATION_CLEANUP_FAILED", manifestHash: current.manifestHash,
+        idempotencyKey: `control:cancel-failed:${current.stateVersion}`,
+      });
+      throw error;
+    }
   }
 
   subscribe(runId: string): ReadableStream<Uint8Array> {

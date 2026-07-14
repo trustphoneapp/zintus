@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   RepositoryReferenceSchema,
+  EngineerRunSchema,
   RiskAssessmentSchema,
   RiskFeaturesSchema,
   RetryBudgetsSchema,
@@ -65,7 +66,7 @@ export interface ReceiveRequestInput {
   userEmail?: string;
   repository: RepositoryReference;
   request: string;
-  initialRiskFeatures?: RiskFeatures;
+  initialRiskFeatures?: Partial<RiskFeatures>;
 }
 
 export interface TransitionFacts {
@@ -145,15 +146,27 @@ export class EngineerSupervisor {
       { autoApproveLowRisk: false },
     );
     const now = this.timestamp();
-    return this.ledger.createRun({
-      runId: input.runId ?? this.idFactory(),
+    const runId = input.runId ?? this.idFactory();
+    EngineerRunSchema.parse({
+      runId,
       userId: input.userId,
-      ...(input.userEmail ? { userEmail: input.userEmail } : {}),
       repository,
       requestOriginal: request,
+      requestNormalized: "",
+      state: "REQUEST_RECEIVED",
+      stateVersion: 0,
+      manifestHash: null,
       riskTier: initialRisk.riskTier,
       humanGateRequired: initialRisk.humanGateRequired,
-      now,
+      createdAt: now,
+      updatedAt: now,
+      terminalAt: null,
+    });
+    return this.ledger.createRun({
+      runId, userId: input.userId,
+      ...(input.userEmail ? { userEmail: input.userEmail } : {}),
+      repository, requestOriginal: request,
+      riskTier: initialRisk.riskTier, humanGateRequired: initialRisk.humanGateRequired, now,
     });
   }
 
@@ -214,6 +227,13 @@ export class EngineerSupervisor {
         content.request.normalized !== run.requestNormalized) {
       throw new ManifestIntegrityError("manifest request does not match the normalized run request");
     }
+    if (content.riskTier !== run.riskTier || content.humanGateRequired !== run.humanGateRequired) {
+      throw new ManifestIntegrityError("manifest risk and human gate must match the Supervisor decision");
+    }
+    const proposal = this.ledger.latestPlanProposal(run.runId);
+    if (proposal && proposal.proposalHash !== sha256(content)) {
+      throw new ManifestIntegrityError("manifest does not match the persisted plan proposal");
+    }
     if (content.riskTier !== "LOW" && !content.humanGateRequired) {
       throw new ManifestIntegrityError("medium, high, and critical manifests require a human gate");
     }
@@ -272,13 +292,14 @@ export class EngineerSupervisor {
     }
     const decision = assessRisk(features, options);
     const rank: Record<RiskTier, number> = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
-    const riskTier = rank[decision.riskTier] < rank[run.riskTier] ? run.riskTier : decision.riskTier;
+    const retainPriorFloor = run.manifestHash !== null || rank[run.riskTier] >= rank.HIGH;
+    const riskTier = retainPriorFloor && rank[decision.riskTier] < rank[run.riskTier] ? run.riskTier : decision.riskTier;
     const retainedFloor = riskTier !== decision.riskTier;
     const assessment = RiskAssessmentSchema.parse({
       assessmentId: this.idFactory(),
       runId,
       riskTier,
-      humanGateRequired: run.humanGateRequired || decision.humanGateRequired || riskTier !== "LOW",
+      humanGateRequired: (retainPriorFloor && run.humanGateRequired) || decision.humanGateRequired || riskTier !== "LOW",
       ruleVersion: decision.ruleVersion,
       matchedRules: retainedFloor ? [...decision.matchedRules, "PRIOR_RISK_TIER_FLOOR"] : decision.matchedRules,
       features: decision.features,
@@ -379,7 +400,7 @@ export class EngineerSupervisor {
 
   recordVerificationExecution(record: VerificationExecutionRecord): VerificationExecutionRecord {
     const run = this.ledger.getRun(record.runId);
-    if (!["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "REVERIFYING"].includes(run.state)) {
+    if (!["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "SECURITY_REVIEW", "REVERIFYING"].includes(run.state)) {
       throw new InvalidTransitionError(`verification cannot be recorded while run is ${run.state}`);
     }
     return this.ledger.recordVerificationExecution(record);

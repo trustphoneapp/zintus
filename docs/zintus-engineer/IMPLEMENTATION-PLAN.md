@@ -100,7 +100,9 @@ changed; no model, sandbox, command, PR, or UI result is mocked as complete.
 
 ### Phase 2 — execution
 
-Status: complete for the local single-repository execution slice.
+Status: partial for the local single-repository execution slice. The implemented
+boundary is useful, but live Docker proof, offline dependency provisioning,
+non-blocking workers, complete recovery, and watchdogs remain release blockers.
 
 Delivered:
 
@@ -125,7 +127,9 @@ but they do not satisfy Phase-3 independent verification gates.
 
 ### Phase 3 — verification
 
-Status: complete for the local single-repository verification slice.
+Status: partial for the local single-repository verification slice. Independent
+evidence and Reviewer isolation exist; failed-test Builder repair, complete
+failure classification, and the mandatory evaluation matrix remain incomplete.
 
 Delivered:
 
@@ -154,7 +158,10 @@ and repair-loop tests pass; publication remains unavailable.
 
 ### Phase 4 — human control and publication
 
-Status: complete for the configured GitHub publication slice.
+Status: partial for the configured GitHub publication slice. Publication contracts
+and hash gates exist, but authenticated actor ownership, assigned-reviewer
+enforcement, token-backed Git transport, and a live private-repository proof are
+still required.
 
 Delivered:
 
@@ -182,7 +189,9 @@ credential and a stable publication-command signing secret.
 
 ### Phase 5 — Zintus experience
 
-Status: complete for the web and desktop clients.
+Status: partial for the web and desktop clients. The primary workflow exists;
+durable run resume, retry/recovery UX, secure gateway authentication, efficient SSE
+replay, and complete error visibility remain incomplete.
 
 Delivered:
 
@@ -207,7 +216,10 @@ The experience remains intentionally workflow-shaped rather than chat-shaped.
 
 ### Phase 6 — hardening and demo
 
-Status: complete for the local-first release candidate.
+Status: validation scaffolding implemented; **not a release candidate**. The audit
+fixtures cover several invariants, but end-to-end OpenAI/Docker/GitHub execution,
+restart recovery, budgets, LUNA runtime roles, and the full architecture evaluation
+suite have not passed.
 
 Delivered:
 

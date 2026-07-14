@@ -1,5 +1,10 @@
 # Zintus Engineer known limitations
 
+> Release status: **not production-ready**. See
+> [RELEASE-AUDIT-2026-07-14.md](./RELEASE-AUDIT-2026-07-14.md) for the verified
+> architecture comparison, fixed defects, activation evidence, and prioritized
+> TERRA/LUNA work lanes.
+
 - The current execution slice supports one explicitly configured local checkout.
   Supervisor-only GitHub publication is available, but multi-repository connection
   management is not yet implemented.
