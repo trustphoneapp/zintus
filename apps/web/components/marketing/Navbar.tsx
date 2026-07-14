@@ -12,7 +12,6 @@ function GithubMark() {
   );
 }
 import { ZintusLogo } from "@/components/ZintusLogo";
-import { ModeSwitcher } from "./ModeSwitcher";
 import { useMagnetic } from "./use-magnetic";
 
 // Section links are root-relative (`/#id`) so they resolve to the homepage
@@ -83,7 +82,6 @@ export function Navbar() {
               Open app
             </Link>
           </span>
-          <ModeSwitcher />
           <button
             type="button"
             className="m-nav-mobile-btn"
@@ -113,9 +111,6 @@ export function Navbar() {
             <GithubMark />
             Star on GitHub
           </a>
-          {/* ModeSwitcher lives here on mobile (hidden from the compact top row via
-              CSS below the ≤1023 nav floor). */}
-          <ModeSwitcher />
         </div>
       ) : null}
     </header>

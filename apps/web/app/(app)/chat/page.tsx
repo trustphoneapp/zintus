@@ -30,7 +30,7 @@ import {
   STRUCTURED_SCHEMA_KEY,
   type StructuredMode,
 } from "@/lib/structured-output";
-import { ModeSwitcher } from "@/components/marketing/ModeSwitcher";
+import { ThemeToggle } from "@/components/marketing/ThemeToggle";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { ConsentDialog } from "@/app/_components/ConsentDialog";
 import { useDismissableMenu } from "@/app/_components/useDismissableMenu";
@@ -1582,10 +1582,8 @@ export default function ChatPage() {
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" /><polyline points="16 6 12 2 8 6" /><line x1="12" y1="2" x2="12" y2="15" /></svg>
           </button>
 
-          {/* Colour mode — the SAME 4-mode switcher (Light + Obsidian/Indigo/
-              Graphite) as the app topbar, so the chat header never silently
-              collapses the mode family to a plain dark↔light toggle. */}
-          <ModeSwitcher withLight />
+          {/* Colour mode — Light ↔ Indigo toggle (the site's one dark mode). */}
+          <ThemeToggle />
 
           {/* Private / incognito — starts a fresh chat in the toggled privacy mode. */}
           <button
