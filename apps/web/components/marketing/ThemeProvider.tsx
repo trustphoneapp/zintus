@@ -15,6 +15,7 @@ export function ThemeProvider({
     <NextThemesProvider
       attribute="class"
       defaultTheme="dark"
+      themes={["light", "dark", "obsidian", "indigo", "graphite"]}
       enableSystem={false}
       disableTransitionOnChange
       nonce={nonce}

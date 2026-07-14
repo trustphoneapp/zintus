@@ -25,9 +25,6 @@ export const PUBLIC_ROUTES = [
   "/changelog",
   "/about",
   "/contact",
-  "/privacy",
-  "/terms",
-  "/security",
   // Public, login-free account-deletion page. Required by Google Play / the App
   // Store to be reachable without signing in (see docs/store/play-listing.md §5),
   // so it is intentionally crawlable rather than under DISALLOWED_ROUTES.
@@ -36,6 +33,11 @@ export const PUBLIC_ROUTES = [
 // Note: /blog is intentionally excluded. It is a "Coming soon" stub marked
 // noindex (see app/blog/page.tsx) — keeping it out of the sitemap avoids
 // advertising a thin placeholder until it has real content.
+//
+// /privacy, /terms, and /security are likewise excluded: all three carry
+// `robots: { index: false, follow: false }` (DRAFT pending legal review), so
+// listing them in the sitemap would contradict their own noindex metadata.
+// Re-add once each page's DRAFT banner + robots block are removed.
 
 /** Private/app route prefixes that must never be indexed. */
 export const DISALLOWED_ROUTES = [

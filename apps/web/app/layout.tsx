@@ -4,7 +4,6 @@ import { headers } from "next/headers";
 import "@zintus/ui/globals.css";
 import "./globals.css";
 import { ThemeProvider } from "@/components/marketing/ThemeProvider";
-import { GalaxyBackground } from "./components/GalaxyBackground";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -86,7 +85,6 @@ export default async function RootLayout({
       className={`${inter.variable} ${plusJakartaSans.variable} ${jetbrainsMono.variable} ${lora.variable} ${syne.variable}`}
     >
       <body className={plusJakartaSans.className}>
-        <GalaxyBackground />
         <ThemeProvider nonce={nonce}>{children}</ThemeProvider>
       </body>
     </html>

@@ -22,12 +22,12 @@ export function PlaceholderPage({
             fontSize: "2.25rem",
             fontWeight: 700,
             marginBottom: "1rem",
-            color: "#e9d5ff",
+            color: "var(--marketing-text)",
           }}
         >
           {title}
         </h1>
-        <div style={{ fontSize: 15, color: "#94a3b8", lineHeight: 1.8, maxWidth: 640 }}>
+        <div style={{ fontSize: 15, color: "var(--marketing-muted)", lineHeight: 1.8, maxWidth: 640 }}>
           {children ?? <p>Coming soon — check back shortly.</p>}
         </div>
         <Link
@@ -36,7 +36,7 @@ export function PlaceholderPage({
             display: "inline-block",
             marginTop: "2rem",
             fontSize: 14,
-            color: "#c4b5fd",
+            color: "var(--marketing-accent)",
             textDecoration: "none",
           }}
         >

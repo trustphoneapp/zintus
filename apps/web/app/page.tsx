@@ -10,6 +10,7 @@ import { Navbar } from "@/components/marketing/Navbar";
 import { PlatformSection } from "@/components/marketing/PlatformSection";
 import { ProviderGrid } from "@/components/marketing/ProviderGrid";
 import { Stats } from "@/components/marketing/Stats";
+import { TransparencyLedger } from "@/components/marketing/TransparencyLedger";
 import { TrustBar } from "@/components/marketing/TrustBar";
 
 export default function HomePage() {
@@ -22,6 +23,7 @@ export default function HomePage() {
       <Stats />
       <HowItWorks />
       <Features />
+      <TransparencyLedger />
       <PlatformSection />
       <ProviderGrid />
       <InstallSection />

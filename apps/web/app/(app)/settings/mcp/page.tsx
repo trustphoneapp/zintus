@@ -47,7 +47,8 @@ const sectionTitleStyle: CSSProperties = {
   color: "var(--color-text-muted)",
 };
 
-const VIOLET = "#7C3AED";
+// Inline styles resolve at runtime, so the token tracks the active mode.
+const ACCENT = "var(--color-purple)";
 
 function Section({
   title,
@@ -129,8 +130,15 @@ export default function McpSettingsPage() {
   const [testing, setTesting] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
-    setServers(loadMcpServers());
-    setHydrated(true);
+    let cancelled = false;
+    void loadMcpServers().then((loaded) => {
+      if (cancelled) return;
+      setServers(loaded);
+      setHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function refresh(next: StoredMcpServer[]) {
@@ -173,16 +181,16 @@ export default function McpSettingsPage() {
     name.trim().length > 0 &&
     (transport === "stdio" ? command.trim().length > 0 : url.trim().length > 0);
 
-  function handleAdd() {
+  async function handleAdd() {
     const config = buildConfig();
     if (!config || !name.trim()) return;
-    addMcpServer({
+    await addMcpServer({
       name: name.trim(),
       config,
       enabled: true,
       enabledTools: "all",
     });
-    refresh(loadMcpServers());
+    refresh(await loadMcpServers());
     resetForm();
   }
 
@@ -190,10 +198,10 @@ export default function McpSettingsPage() {
     setTesting((t) => ({ ...t, [server.id]: true }));
     const result = await discoverMcpServer(server.config);
     if ("error" in result) {
-      refresh(updateMcpServer(server.id, { lastError: result.error }));
+      refresh(await updateMcpServer(server.id, { lastError: result.error }));
     } else {
       refresh(
-        updateMcpServer(server.id, {
+        await updateMcpServer(server.id, {
           tools: result.tools,
           lastConnectedAt: result.connectedAt,
           lastError: undefined,
@@ -203,19 +211,19 @@ export default function McpSettingsPage() {
     setTesting((t) => ({ ...t, [server.id]: false }));
   }
 
-  function handleToggleServer(server: StoredMcpServer, enabled: boolean) {
-    refresh(updateMcpServer(server.id, { enabled }));
+  async function handleToggleServer(server: StoredMcpServer, enabled: boolean) {
+    refresh(await updateMcpServer(server.id, { enabled }));
   }
 
-  function handleToggleTool(server: StoredMcpServer, toolName: string) {
+  async function handleToggleTool(server: StoredMcpServer, toolName: string) {
     refresh(
-      updateMcpServer(server.id, {
+      await updateMcpServer(server.id, {
         enabledTools: toggleEnabledTool(server, toolName),
       }),
     );
   }
 
-  function handleRemove(server: StoredMcpServer) {
+  async function handleRemove(server: StoredMcpServer) {
     if (
       !window.confirm(`Remove "${server.name}"? Its config is deleted from this browser.`)
     ) {
@@ -223,7 +231,7 @@ export default function McpSettingsPage() {
     }
     // Best-effort: ask the gateway to drop any cached connection. Fire-and-forget.
     void disconnectMcpServer(server.config);
-    refresh(removeMcpServer(server.id));
+    refresh(await removeMcpServer(server.id));
   }
 
   if (!hydrated) {
@@ -300,7 +308,7 @@ export default function McpSettingsPage() {
                       href={ex.url}
                       target="_blank"
                       rel="noreferrer noopener"
-                      style={{ color: VIOLET, fontWeight: 600 }}
+                      style={{ color: ACCENT, fontWeight: 600 }}
                     >
                       {ex.name}
                     </a>
@@ -351,7 +359,7 @@ export default function McpSettingsPage() {
                 </p>
 
                 {server.lastConnectedAt ? (
-                  <p style={{ margin: 0, color: VIOLET }}>
+                  <p style={{ margin: 0, color: ACCENT }}>
                     Connected — {toolCount} {toolCount === 1 ? "tool" : "tools"}{" "}
                     available · {formatTime(server.lastConnectedAt)}
                   </p>
@@ -466,9 +474,9 @@ export default function McpSettingsPage() {
                       textAlign: "left",
                       borderRadius: 10,
                       cursor: "pointer",
-                      border: `0.5px solid ${active ? VIOLET : "var(--c-border)"}`,
+                      border: `0.5px solid ${active ? ACCENT : "var(--c-border)"}`,
                       background: active
-                        ? "color-mix(in oklch, #7C3AED 12%, transparent)"
+                        ? "var(--color-purple-faint)"
                         : "var(--color-surface)",
                       transition: "border-color .12s, background .12s",
                     }}

@@ -21,10 +21,20 @@ export interface CatalogStats {
   metaProviders: number;
   localProviders: number;
   cloudProviders: number;
+  /** Routable providers (tier "direct") that also expose a no-key free tier —
+   *  the number the marketing "free tier routes across N+ providers" copy
+   *  must match. */
+  freeTierRoutableProviders: number;
+  /** Model count OpenRouter itself claims reachable via a single BYOK key
+   *  (its own `models` field in PROVIDERS) — the "reach N+ models instantly"
+   *  aggregator claim. */
+  aggregatorModels: number;
   contextWindowMax: string;
   cheapestPaidModel: string;
   mostModelsProvider: string;
 }
+
+const openrouter = PROVIDERS.find((p) => p.id === "openrouter");
 
 export const CATALOG_STATS: CatalogStats = {
   totalProviders: PROVIDERS.length,
@@ -39,8 +49,18 @@ export const CATALOG_STATS: CatalogStats = {
   metaProviders: PROVIDERS.filter((p) => p.tier === "meta").length,
   localProviders: PROVIDERS.filter((p) => p.tier === "local").length,
   cloudProviders: PROVIDERS.filter((p) => p.tier === "cloud").length,
+  freeTierRoutableProviders: PROVIDERS.filter(
+    (p) => p.freetier && isRoutableProvider(p.id),
+  ).length,
+  aggregatorModels: openrouter?.models ?? 0,
   // Descriptive fields — kept verbatim.
   contextWindowMax: "10M",
   cheapestPaidModel: "$0.04/M (Ministral 3B)",
   mostModelsProvider: "OpenRouter (400+ via key)",
 };
+
+/** Round down to the nearest `step` for a conservative "N+" marketing claim
+ *  that stays true as the catalog grows (never overclaims). */
+export function floorTo(value: number, step: number): number {
+  return Math.floor(value / step) * step;
+}

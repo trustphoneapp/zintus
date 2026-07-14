@@ -27,7 +27,7 @@ export default function AppleIcon() {
           alignItems: "center",
           justifyContent: "center",
           // Full-bleed square; iOS rounds the corners itself.
-          background: "linear-gradient(135deg, #7C3AED 0%, #4C1D95 100%)",
+          background: "linear-gradient(135deg, #4D6BFE 0%, #3550C8 100%)",
         }}
       >
         <svg width="116" height="116" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -40,8 +40,8 @@ export default function AppleIcon() {
             strokeLinejoin="round"
           />
           {/* Dimmer midpoint nodes */}
-          <circle cx="312" cy="213" r="22" fill="#C4B5FD" />
-          <circle cx="200" cy="299" r="22" fill="#C4B5FD" />
+          <circle cx="312" cy="213" r="22" fill="#7C92FE" />
+          <circle cx="200" cy="299" r="22" fill="#7C92FE" />
           {/* Corner node endpoints */}
           <circle cx="112" cy="128" r="38" fill="#FFFFFF" />
           <circle cx="400" cy="128" r="38" fill="#FFFFFF" />

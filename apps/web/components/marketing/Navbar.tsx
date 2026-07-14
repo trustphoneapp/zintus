@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Menu, X, Star } from "lucide-react";
 
@@ -12,7 +12,8 @@ function GithubMark() {
   );
 }
 import { ZintusLogo } from "@/components/ZintusLogo";
-import { ThemeToggle } from "./ThemeToggle";
+import { ModeSwitcher } from "./ModeSwitcher";
+import { useMagnetic } from "./use-magnetic";
 
 // Section links are root-relative (`/#id`) so they resolve to the homepage
 // sections from ANY route. A bare `#id` is a same-document fragment: it works on
@@ -32,9 +33,28 @@ const navItems = [
 
 export function Navbar() {
   const [open, setOpen] = useState(false);
+  const [condensed, setCondensed] = useState(false);
+  const openAppMagnetic = useMagnetic<HTMLSpanElement>(4);
+
+  // Scroll-condense: shrink the bar (74→56px) + scale the logo once past 8px.
+  // Passive listener; rAF-throttled so scroll stays smooth.
+  useEffect(() => {
+    let ticking = false;
+    const onScroll = () => {
+      if (ticking) return;
+      ticking = true;
+      window.requestAnimationFrame(() => {
+        setCondensed(window.scrollY > 8);
+        ticking = false;
+      });
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   return (
-    <header className="m-nav-wrap">
+    <header className={`m-nav-wrap${condensed ? " condensed" : ""}`}>
       <div className="m-shell m-nav">
         <Link className="m-brand" href="/">
           <ZintusLogo size="sm" showWordmark />
@@ -51,17 +71,19 @@ export function Navbar() {
             href="https://github.com/trustphoneapp/zintus"
             target="_blank"
             rel="noreferrer noopener"
-            className="m-nav-github"
+            className="mk-btn mk-btn-secondary mk-btn-sm m-nav-github"
             aria-label="Star Zintus on GitHub"
           >
             <GithubMark />
             <span>Star</span>
             <Star size={12} fill="currentColor" />
           </a>
-          <Link href="/chat" style={{ background: "var(--marketing-accent)", color: "#fff", borderRadius: 8, padding: "7px 16px", fontSize: 13, fontWeight: 600, textDecoration: "none", display: "inline-flex", alignItems: "center" }}>
-            Open app
-          </Link>
-          <ThemeToggle />
+          <span ref={openAppMagnetic} className="mk-magnetic">
+            <Link href="/chat" className="mk-btn mk-btn-primary mk-btn-sm">
+              Open app
+            </Link>
+          </span>
+          <ModeSwitcher />
           <button
             type="button"
             className="m-nav-mobile-btn"
@@ -79,9 +101,21 @@ export function Navbar() {
               {item.label}
             </a>
           ))}
-          <Link href="/chat" onClick={() => setOpen(false)}>
+          <Link href="/chat" className="mk-btn mk-btn-primary" onClick={() => setOpen(false)}>
             Open app
           </Link>
+          <a
+            href="https://github.com/trustphoneapp/zintus"
+            target="_blank"
+            rel="noreferrer noopener"
+            className="mk-btn mk-btn-secondary"
+          >
+            <GithubMark />
+            Star on GitHub
+          </a>
+          {/* ModeSwitcher lives here on mobile (hidden from the compact top row via
+              CSS below the ≤1023 nav floor). */}
+          <ModeSwitcher />
         </div>
       ) : null}
     </header>

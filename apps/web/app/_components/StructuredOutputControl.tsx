@@ -118,7 +118,7 @@ export function StructuredOutputControl({
             padding: "0 4px 4px",
             fontSize: 11.5,
             lineHeight: 1.45,
-            color: "var(--color-text-sub, #94a3b8)",
+            color: "var(--color-text-sub)",
           }}
         >
           {STRUCTURED_GUARANTEE_CAVEAT}

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useTheme } from "next-themes";
 import { useShallow } from "zustand/react/shallow";
 import type { ResearchDepth } from "@/lib/gateway";
 import { MessageBubble } from "@/app/_components/MessageBubble";
@@ -31,8 +30,10 @@ import {
   STRUCTURED_SCHEMA_KEY,
   type StructuredMode,
 } from "@/lib/structured-output";
+import { ModeSwitcher } from "@/components/marketing/ModeSwitcher";
 import { LocalKeyManager } from "@/app/_components/LocalKeyManager";
 import { ConsentDialog } from "@/app/_components/ConsentDialog";
+import { useDismissableMenu } from "@/app/_components/useDismissableMenu";
 import { Icon } from "@/app/_components/Icons";
 import { Tooltip } from "@/components/ui/Tooltip";
 import {
@@ -143,11 +144,11 @@ function capitalize(s: string): string {
  * the header indicator. The gateway runs these tools SERVER-SIDE; the web only
  * displays the resulting activity. Returns `undefined` when nothing is enabled.
  */
-function activeMcpForChat(): {
+async function activeMcpForChat(): Promise<{
   mcp: ChatMcpConfig | undefined;
   toolCount: number;
-} {
-  const { servers } = activeMcpServersForChat(loadMcpServers());
+}> {
+  const { servers } = activeMcpServersForChat(await loadMcpServers());
   if (servers.length === 0) {
     return { mcp: undefined, toolCount: 0 };
   }
@@ -203,7 +204,6 @@ export default function ChatPage() {
   const { settings, hydrate, update: updateSettings } = useSettingsStore();
   const { unlock } = useProviderStatusStore();
   const router = useRouter();
-  const { theme, setTheme } = useTheme();
   const toggleSidebar = useSidebarStore((s) => s.toggle);
   // Atomic value selectors — re-render only when these specific fields change
   // (not on unrelated store writes like terminal-line spam or savings updates).
@@ -211,6 +211,8 @@ export default function ChatPage() {
   const activeThreadId = useAppStore((s) => s.activeThreadId);
   const selectedProvider = useAppStore((s) => s.selectedProvider);
   const gatewayConnected = useAppStore((s) => s.gatewayConnected);
+  const gatewayProviders = useAppStore((s) => s.gatewayProviders);
+  const vaultProviders = useProviderStatusStore((s) => s.providers);
   // Actions have stable identity — useShallow over the bag never re-renders.
   const {
     appendMessage,
@@ -294,6 +296,11 @@ export default function ChatPage() {
   const prevThreadIdRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Scroll anchoring (10.3b): track whether the user is pinned to the bottom so
+  // streaming auto-scroll never fights a user who scrolled up to read history.
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const atBottomRef = useRef(true);
+  const [showJump, setShowJump] = useState(false);
   // Image blocks of the most recent user turn — kept in memory (NOT persisted to
   // thread history, where only text + metadata live) so Regenerate can re-send
   // the same image instead of silently dropping it.
@@ -538,7 +545,8 @@ export default function ChatPage() {
   // settings (localStorage): recompute on mount + whenever the window regains
   // focus (the user may have just changed servers in /settings/mcp).
   useEffect(() => {
-    const refresh = () => setMcpToolCount(activeMcpForChat().toolCount);
+    const refresh = () =>
+      void activeMcpForChat().then(({ toolCount }) => setMcpToolCount(toolCount));
     refresh();
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
@@ -561,31 +569,64 @@ export default function ChatPage() {
     abortRef.current?.abort();
     setLoading(false);
     setInput("");
+    // Reset scroll-anchor state so a freshly-opened thread starts pinned to the
+    // bottom. A stale atBottomRef=false (from having scrolled up in the previous
+    // thread) would otherwise disable auto-scroll and mis-show the jump pill; the
+    // messages effect below re-anchors to the bottom once atBottomRef is true.
+    atBottomRef.current = true;
+    setShowJump(false);
   }, [activeThreadId]);
 
+  // Auto-scroll to the latest ONLY while anchored at the bottom (10.3b) — never
+  // yank a user who has scrolled up. Reduced-motion → no smooth scroll.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!atBottomRef.current) return;
+    const reduce =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    bottomRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
   }, [messages]);
 
-  // Dismiss the More / New-chat popovers on an outside click (mirrors ProviderPicker).
+  // Track distance from the bottom of the scroll region: re-anchor when near the
+  // bottom, and reveal the "Jump to latest" pill once ≥300px away.
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    atBottomRef.current = distance < 80;
+    setShowJump(distance > 300);
+  }, []);
+
+  const jumpToBottom = useCallback(() => {
+    const reduce =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    bottomRef.current?.scrollIntoView({ behavior: reduce ? "auto" : "smooth" });
+    atBottomRef.current = true;
+    setShowJump(false);
+  }, []);
+
+  // Auto-grow the composer textarea (1 → ~8 lines) as the user types, then let
+  // it scroll. Keyed to `input` so it also collapses back after send/clear.
   useEffect(() => {
-    if (!moreOpen && !newChatMenuOpen && !addMenuOpen) return;
-    function onClick(event: MouseEvent) {
-      const target = event.target as Node;
-      if (moreRef.current && !moreRef.current.contains(target)) {
-        setMoreOpen(false);
-      }
-      if (newChatRef.current && !newChatRef.current.contains(target)) {
-        setNewChatMenuOpen(false);
-      }
-      if (addMenuRef.current && !addMenuRef.current.contains(target)) {
-        setAddMenuOpen(false);
-        setAddProjectSubOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [moreOpen, newChatMenuOpen, addMenuOpen]);
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 184)}px`;
+  }, [input]);
+
+  // Dismiss each composer popover consistently: mousedown-outside (unchanged),
+  // Escape (restores focus to the trigger), and focus-out of the subtree.
+  useDismissableMenu(moreOpen, () => setMoreOpen(false), moreRef);
+  useDismissableMenu(newChatMenuOpen, () => setNewChatMenuOpen(false), newChatRef);
+  useDismissableMenu(
+    addMenuOpen,
+    () => {
+      setAddMenuOpen(false);
+      setAddProjectSubOpen(false);
+    },
+    addMenuRef,
+  );
 
   // Abort any in-flight stream when leaving the page (mirrors /compare, /research).
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -768,6 +809,10 @@ export default function ChatPage() {
       sendMessages: ChatMessage[],
       promptForLog: string,
       hadImages: boolean,
+      // Regenerate-with-model override (10.6): when present it forces the route
+      // for THIS turn only — `null` = Auto, a ProviderId = that provider — and
+      // bypasses the pinned catalog model. Absent → normal composer routing.
+      override?: { provider: ProviderId | null },
     ) => {
       setLoading(true);
       setActiveProvider(null);
@@ -791,25 +836,35 @@ export default function ChatPage() {
       // The user's enabled MCP servers for this turn (read fresh, like apiKeys).
       // When present the gateway runs the tools SERVER-SIDE and streams
       // `mcp_tool_call`/`mcp_tool_result` events; we only display them.
-      const { mcp } = activeMcpForChat();
+      const { mcp } = await activeMcpForChat();
+
+      // Route for this turn: an override (regenerate-with-model) forces the
+      // provider and ignores the pinned catalog model; otherwise use the
+      // composer's selected provider.
+      const overrideActive = override !== undefined;
+      const effectiveProvider = overrideActive
+        ? (override.provider ?? undefined)
+        : (selectedProvider ?? undefined);
 
       // Catalog "Use this model": route to the exact chosen model, but ONLY when it
       // belongs to the currently-selected provider (avoid a stale model after the
-      // user switches providers in the composer).
+      // user switches providers in the composer). Skipped under an override.
       let catalogModel: string | undefined;
-      try {
-        const raw =
-          typeof localStorage !== "undefined"
-            ? localStorage.getItem("zintus:selected-model")
-            : null;
-        if (raw) {
-          const sel = JSON.parse(raw) as { id?: string; provider?: string };
-          if (sel.id && sel.provider && sel.provider === selectedProvider) {
-            catalogModel = sel.id;
+      if (!overrideActive) {
+        try {
+          const raw =
+            typeof localStorage !== "undefined"
+              ? localStorage.getItem("zintus:selected-model")
+              : null;
+          if (raw) {
+            const sel = JSON.parse(raw) as { id?: string; provider?: string };
+            if (sel.id && sel.provider && sel.provider === selectedProvider) {
+              catalogModel = sel.id;
+            }
           }
+        } catch {
+          // ignore malformed storage
         }
-      } catch {
-        // ignore malformed storage
       }
 
       // The last assistant text streamed this turn — used after the loop to
@@ -824,7 +879,7 @@ export default function ChatPage() {
           const roundMcpEvents: McpToolEvent[] = [];
           const result = await streamChat({
             messages: convo,
-            providerId: selectedProvider ?? undefined,
+            providerId: effectiveProvider,
             model: catalogModel,
             mode: settings.contextMode,
             threadId: useThread ? threadId : undefined,
@@ -986,7 +1041,12 @@ export default function ChatPage() {
         }
         const message =
           error instanceof Error ? error.message : "Request failed";
-        updateMessage(currentAssistantId, `Error: ${message}`);
+        // Preserve whatever partially streamed — do NOT overwrite the body with
+        // "Error: …". The failure rides ONLY in the `error` field; MessageBubble
+        // renders the partial answer with a compact error card beneath it.
+        const rawPayload =
+          error instanceof Error ? (error.stack ?? error.message) : String(error);
+        patchMessage(currentAssistantId, { error: rawPayload });
         pushTerminalLine({ text: `✗ ${message}`, tone: "warning" });
       } finally {
         setLoading(false);
@@ -1186,7 +1246,7 @@ export default function ChatPage() {
     router,
   ]);
 
-  const regenerate = useCallback(async () => {
+  const regenerate = useCallback(async (override?: ProviderId | null) => {
     if (loading) {
       return;
     }
@@ -1249,6 +1309,7 @@ export default function ChatPage() {
       sendMessages,
       lastUser.content,
       reuseImages.length > 0,
+      override === undefined ? undefined : { provider: override },
     );
   }, [appendMessage, dropLastAssistant, loading, messages, streamAssistant, threadId]);
 
@@ -1256,6 +1317,17 @@ export default function ChatPage() {
     abortRef.current?.abort();
     setLoading(false);
   }, []);
+
+  // Esc stops an in-flight stream from anywhere on the page (10.7), not only
+  // when the composer textarea holds focus.
+  useEffect(() => {
+    if (!loading) return;
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") stop();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [loading, stop]);
 
   // Voice input (dictation): the BROWSER's Web Speech recognizer fills the
   // composer textarea — no audio touches the gateway/relay, and the user still
@@ -1287,6 +1359,22 @@ export default function ChatPage() {
     (sum, m) => sum + (m.meta?.savedUsd ?? 0),
     0,
   );
+
+  // Providers offered in the last answer's "Regenerate with" menu (10.6): the
+  // ones the user actually has a usable key/runtime for, plus the routed
+  // provider so its checkmark shows. Empty → the plain Regenerate button.
+  const regenerateProviders = useMemo<ProviderId[]>(() => {
+    const set = new Set<string>();
+    for (const p of gatewayProviders) {
+      if (p.hasKey) set.add(p.id);
+      if ((p.id === "ollama" || p.id === "lmstudio") && p.available) set.add(p.id);
+    }
+    for (const v of vaultProviders) {
+      if (v.hasKey) set.add(v.id);
+    }
+    if (routedVia) set.add(routedVia);
+    return [...set] as ProviderId[];
+  }, [gatewayProviders, vaultProviders, routedVia]);
 
   // The provider the next send will (likely) hit — used to surface an honest,
   // non-interactive "Vision" capability chip next to the attach control so it's
@@ -1355,10 +1443,11 @@ export default function ChatPage() {
             Private · this chat won&apos;t be saved
           </span>
         </div>
-      ) : localMode ? (
+      ) : localMode && gatewayConnected ? (
         <div className="chat-local-banner">
+          <span className="chat-local-banner-dot" aria-hidden />
           <span>Local mode — chats stay on this device.</span>
-          <a href="/login">Sign in to sync across devices →</a>
+          <a href="/login">Sign in for account &amp; billing →</a>
         </div>
       ) : null}
       <LocalKeyManager
@@ -1381,17 +1470,7 @@ export default function ChatPage() {
       {/* Thread header: title + context chips on the left; New-chat affordance
           (owns incognito) and Export pinned right. Export moved OUT of the
           composer per the chat-hierarchy cleanup. */}
-      <div
-        className="chat-header"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
-          padding: "10px 28px",
-          borderBottom: "0.5px solid var(--c-border)",
-        }}
-      >
+      <div className="chat-header">
         <div
           style={{
             display: "flex",
@@ -1413,8 +1492,6 @@ export default function ChatPage() {
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
           </button>
-          {/* Model/route pill lives in the header (design parity). */}
-          <ProviderPicker />
           {mounted && incognito ? (
             <span className="chat-privacy-chip" title="Incognito — nothing saved">
               🕶 Incognito
@@ -1454,7 +1531,7 @@ export default function ChatPage() {
               href="/settings/mcp"
               className="chat-tool-toggle"
               title="MCP tools available to the model this chat — manage in settings"
-              style={{ textDecoration: "none", color: "var(--color-purple-light, #7C3AED)" }}
+              style={{ textDecoration: "none", color: "var(--color-purple-light)" }}
             >
               🔧 {mcpToolCount} tool{mcpToolCount === 1 ? "" : "s"} active
             </a>
@@ -1505,20 +1582,10 @@ export default function ChatPage() {
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" /><polyline points="16 6 12 2 8 6" /><line x1="12" y1="2" x2="12" y2="15" /></svg>
           </button>
 
-          {/* Theme toggle (next-themes). */}
-          <button
-            type="button"
-            className="chat-header-icon"
-            onClick={() => setTheme(theme === "light" ? "dark" : "light")}
-            aria-label="Toggle theme"
-            title="Toggle light / dark"
-          >
-            {mounted && theme === "light" ? (
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4" /><line x1="12" y1="2" x2="12" y2="4" /><line x1="12" y1="20" x2="12" y2="22" /><line x1="4.2" y1="4.2" x2="5.6" y2="5.6" /><line x1="18.4" y1="18.4" x2="19.8" y2="19.8" /><line x1="2" y1="12" x2="4" y2="12" /><line x1="20" y1="12" x2="22" y2="12" /><line x1="4.2" y1="19.8" x2="5.6" y2="18.4" /><line x1="18.4" y1="5.6" x2="19.8" y2="4.2" /></svg>
-            ) : (
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>
-            )}
-          </button>
+          {/* Colour mode — the SAME 4-mode switcher (Light + Obsidian/Indigo/
+              Graphite) as the app topbar, so the chat header never silently
+              collapses the mode family to a plain dark↔light toggle. */}
+          <ModeSwitcher withLight />
 
           {/* Private / incognito — starts a fresh chat in the toggled privacy mode. */}
           <button
@@ -1538,7 +1605,7 @@ export default function ChatPage() {
         </div>
       </div>
 
-      <div className="chat-messages">
+      <div className="chat-messages" ref={messagesRef} onScroll={handleMessagesScroll}>
         <div className="chat-thread">
         {messages.length > 0 ? (
           <div className="chat-thread-head">
@@ -1569,19 +1636,19 @@ export default function ChatPage() {
             </div>
             <h2>Ask anything</h2>
             <p>Routed automatically across your free providers.</p>
-            <div className="chat-empty-cards">
-              {PROMPT_CARDS.map((card) => (
+            <div className="chat-empty-chips">
+              {PROMPT_CARDS.slice(0, 3).map((card) => (
                 <button
                   key={card.title}
                   type="button"
-                  className="chat-empty-card"
+                  className="chat-empty-chip"
+                  title={card.body}
                   onClick={() => {
                     setInput(card.title);
                     inputRef.current?.focus();
                   }}
                 >
-                  <span className="chat-empty-card-title">{card.title}</span>
-                  <span className="chat-empty-card-body">{card.body}</span>
+                  {card.title}
                 </button>
               ))}
             </div>
@@ -1624,6 +1691,7 @@ export default function ChatPage() {
                   ? regenerate
                   : undefined
               }
+              regenerateProviders={regenerateProviders}
             />
           ))
         )}
@@ -1631,276 +1699,34 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {/* Floating "Jump to latest" pill (10.3b) — appears when scrolled away. */}
+      {showJump ? (
+        <button
+          type="button"
+          className="chat-jump"
+          onClick={jumpToBottom}
+          aria-label="Jump to latest"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <line x1="12" y1="5" x2="12" y2="19" />
+            <polyline points="19 12 12 19 5 12" />
+          </svg>
+          Jump to latest
+        </button>
+      ) : null}
+
       <div className="chat-composer-wrap">
         <div
-          className={`chat-composer${input ? " focused" : ""}`}
+          className="chat-composer"
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {
             e.preventDefault();
             void handleFiles(e.dataTransfer.files);
           }}
         >
-          {/* Composer toolbar (calm): the model/route picker stays accessible;
-              every other secondary control collapses into a single "⚙ More"
-              popover. Incognito moved to the header New-chat menu; Export to the
-              header. */}
-          <div
-            className="chat-composer-top"
-            style={{ gap: 8 }}
-          >
-            <div className="composer-picker" ref={moreRef}>
-              <button
-                type="button"
-                className={`chat-tool-toggle${
-                  mounted &&
-                  (webSearchEnabled ||
-                    toolsEnabled ||
-                    researchMode ||
-                    jsonMode !== "off" ||
-                    activePreset ||
-                    activeProjectName ||
-                    settings.blockTrainingProviders)
-                    ? " active"
-                    : ""
-                }`}
-                aria-haspopup="menu"
-                aria-expanded={moreOpen}
-                aria-label="More chat options"
-                onClick={() => setMoreOpen((v) => !v)}
-                title="Search, tools, presets, project"
-              >
-                <Icon name="settings" size={13} />
-                More
-              </button>
-
-              {moreOpen ? (
-                <div
-                  className="composer-picker-menu"
-                  role="menu"
-                  style={{ minWidth: 252, padding: 8 }}
-                >
-                  <div className="composer-picker-section">Tools</div>
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 6,
-                      flexWrap: "wrap",
-                      padding: "0 4px 6px",
-                    }}
-                  >
-                    <button
-                      type="button"
-                      className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
-                      aria-pressed={webSearchEnabled}
-                      aria-label="Toggle web search"
-                      onClick={() => {
-                        setWebSearchEnabled((v) => {
-                          const next = !v;
-                          if (typeof localStorage !== "undefined") {
-                            localStorage.setItem("zintus:web-search", String(next));
-                          }
-                          return next;
-                        });
-                      }}
-                      title={searchTooltip(selectedProvider)}
-                    >
-                      <Icon name="globe" size={13} />
-                      Search
-                    </button>
-                    <button
-                      type="button"
-                      className={`chat-tool-toggle${toolsEnabled ? " active" : ""}`}
-                      aria-pressed={toolsEnabled}
-                      aria-label="Toggle tools"
-                      onClick={() => {
-                        setToolsEnabled((v) => {
-                          const next = !v;
-                          if (typeof localStorage !== "undefined") {
-                            localStorage.setItem("zintus:tools", String(next));
-                          }
-                          return next;
-                        });
-                      }}
-                      title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally in your browser; needs a tool-capable provider.`}
-                    >
-                      🔧 Tools
-                    </button>
-                    <button
-                      type="button"
-                      className={`chat-tool-toggle${artifactMode ? " active" : ""}`}
-                      aria-pressed={artifactMode}
-                      aria-label="Toggle canvas / artifact mode"
-                      onClick={() => {
-                        setArtifactMode((v) => {
-                          const next = !v;
-                          if (typeof localStorage !== "undefined") {
-                            localStorage.setItem("zintus:artifact-mode", String(next));
-                          }
-                          return next;
-                        });
-                      }}
-                      title="Canvas: the model marks substantial deliverables as editable artifacts, and your current version is fed back on the next turn so edits build on what you're looking at. Off by default."
-                    >
-                      <Icon name="layers" size={13} />
-                      Canvas
-                    </button>
-                    <button
-                      type="button"
-                      className={`chat-tool-toggle${researchMode ? " active" : ""}`}
-                      aria-pressed={researchMode}
-                      aria-label="Toggle research mode"
-                      onClick={() => {
-                        setResearchMode((v) => {
-                          const next = !v;
-                          if (typeof localStorage !== "undefined") {
-                            localStorage.setItem("zintus:research-mode", String(next));
-                          }
-                          return next;
-                        });
-                      }}
-                      title="Research: send this prompt to Deep Research — it searches multiple sources, synthesizes, and cites. Runs on the Research page at the depth below."
-                    >
-                      <Icon name="globe" size={13} />
-                      Research
-                    </button>
-                  </div>
-
-                  {/* Depth selector — only meaningful when research mode is on. */}
-                  {researchMode ? (
-                    <div style={{ padding: "0 4px 6px" }}>
-                      <div
-                        role="radiogroup"
-                        aria-label="Research depth"
-                        style={{ display: "flex", gap: 6 }}
-                      >
-                        {(
-                          [
-                            { value: "quick", label: "Quick", hint: "1 search · ~10s" },
-                            { value: "standard", label: "Standard", hint: "3 searches · ~30s" },
-                            { value: "deep", label: "Deep", hint: "5 searches · ~60s" },
-                          ] as Array<{ value: ResearchDepth; label: string; hint: string }>
-                        ).map((option) => (
-                          <button
-                            key={option.value}
-                            type="button"
-                            role="radio"
-                            aria-checked={researchDepth === option.value}
-                            className={`chat-tool-toggle${researchDepth === option.value ? " active" : ""}`}
-                            onClick={() => {
-                              setResearchDepth(option.value);
-                              if (typeof localStorage !== "undefined") {
-                                localStorage.setItem("zintus:research-depth", option.value);
-                              }
-                            }}
-                            title={option.hint}
-                          >
-                            {option.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <StructuredOutputControl
-                    mode={jsonMode}
-                    schemaText={jsonSchemaText}
-                    error={schemaError}
-                    onModeChange={setJsonMode}
-                    onSchemaTextChange={setJsonSchemaText}
-                  />
-
-                  {presets.length > 0 ? (
-                    <>
-                      <div className="composer-picker-section">Preset</div>
-                      <div style={{ padding: "0 4px 6px" }}>
-                        <select
-                          className="chat-preset-select"
-                          style={{ width: "100%" }}
-                          value={activePreset?.id ?? ""}
-                          onChange={(event) =>
-                            applyPreset(
-                              presets.find((p) => p.id === event.target.value) ??
-                                null,
-                            )
-                          }
-                          aria-label="Apply a saved preset"
-                          title="Apply a saved preset"
-                        >
-                          <option value="">No preset</option>
-                          {presets.map((preset) => (
-                            <option key={preset.id} value={preset.id}>
-                              {preset.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </>
-                  ) : null}
-
-                  {activeProjectName ? (
-                    <>
-                      <div className="composer-picker-section">Project</div>
-                      <div
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 6,
-                          padding: "0 4px 6px",
-                          fontSize: 12,
-                          color: "var(--color-text-sub)",
-                        }}
-                      >
-                        <span>📁 {activeProjectName}</span>
-                        <button
-                          type="button"
-                          className="chat-tool-toggle"
-                          style={{ marginLeft: "auto" }}
-                          onClick={() => {
-                            setActiveProjectId(null);
-                            setActiveProjectName(null);
-                          }}
-                          title="Leave this project"
-                        >
-                          Leave
-                        </button>
-                      </div>
-                    </>
-                  ) : null}
-
-                  {visionReady || settings.blockTrainingProviders ? (
-                    <>
-                      <div className="composer-picker-section">This route</div>
-                      <div
-                        style={{
-                          display: "flex",
-                          flexWrap: "wrap",
-                          gap: 6,
-                          padding: "0 4px 2px",
-                        }}
-                      >
-                        {visionReady ? (
-                          <span
-                            className="chat-privacy-chip"
-                            title={`${capitalize(effectiveComposerProvider ?? "")} can read attached images`}
-                          >
-                            <Icon name="image" size={12} /> Vision
-                          </span>
-                        ) : null}
-                        {settings.blockTrainingProviders ? (
-                          <span
-                            className="chat-privacy-chip"
-                            title="Privacy mode — only routing to providers that don't train on your data"
-                          >
-                            🛡 Privacy
-                          </span>
-                        ) : null}
-                      </div>
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-          </div>
+          {/* Composer: notice + attachments, then an auto-grow textarea, then a
+              single action row inside the card — left = attach (+) and the folded
+              "More" tools control; right = mic + send. */}
           {notice && (
             <div className={`chat-composer-notice is-${notice.tone}`} role="status">
               <span>{notice.text}</span>
@@ -1966,239 +1792,502 @@ export default function ChatPage() {
               ))}
             </div>
           )}
-          <div className="chat-composer-row">
-            <input
-              type="file"
-              ref={fileInputRef}
-              accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
-              multiple
-              style={{ display: "none" }}
-              onChange={(e) => {
-                if (e.target.files) void handleFiles(e.target.files);
-                // Reset so picking the same file again re-triggers onChange.
-                e.target.value = "";
-              }}
-            />
-            {/* Composer "+" (Add) menu — design parity. Files, screenshot, and
-                project are real; GitHub + Skills are honestly disabled until
-                those integrations exist (no dead buttons). */}
-            <div className="composer-picker" ref={addMenuRef}>
-              <Tooltip content="Add files, a screenshot, or attach to a project">
-                <button
-                  type="button"
-                  className={`chat-attach${addMenuOpen ? " active" : ""}`}
-                  aria-haspopup="menu"
-                  aria-expanded={addMenuOpen}
-                  aria-label="Add files, screenshot, or project"
-                  onClick={() => {
-                    setAddMenuOpen((v) => {
-                      const next = !v;
-                      if (next) setProjectList(listProjects());
-                      return next;
-                    });
-                    setAddProjectSubOpen(false);
-                  }}
-                >
-                  <Icon name="plus" size={18} />
-                </button>
-              </Tooltip>
-              {addMenuOpen ? (
-                <div
-                  className="composer-picker-menu"
-                  role="menu"
-                  style={{ minWidth: 230, left: 0, right: "auto" }}
-                >
+          <input
+            type="file"
+            ref={fileInputRef}
+            accept="image/jpeg,image/png,image/webp,application/pdf,.pdf,.txt,.md,.ts,.js,.tsx,.jsx,.py,.json,.sh,.yaml,.toml,.rs,.go,.css"
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => {
+              if (e.target.files) void handleFiles(e.target.files);
+              // Reset so picking the same file again re-triggers onChange.
+              e.target.value = "";
+            }}
+          />
+          <textarea
+            ref={inputRef}
+            rows={1}
+            value={input}
+            onChange={(event) => {
+              setInput(event.target.value);
+              // Drop the lingering post-send "Image analyzed by …" confirmation
+              // once the user starts a new message, so it never implies an image
+              // is still attached (it isn't — images clear on send; re-attach for
+              // a new one).
+              setNotice((n) => (n?.tone === "ok" ? null : n));
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void send();
+              } else if (event.key === "Escape" && loading) {
+                stop();
+              }
+            }}
+            onPaste={(e) => {
+              if (e.clipboardData.files.length > 0) {
+                void handleFiles(e.clipboardData.files);
+              }
+            }}
+            placeholder={
+              mounted && researchMode
+                ? `Research mode (${researchDepth}) — ⏎ runs Deep Research on this prompt`
+                : "Message Zintus…"
+            }
+          />
+          {/* Single action row inside the card. */}
+          <div className="chat-composer-actions">
+            <div className="chat-composer-actions-left">
+              {/* Composer "+" (Add) menu — design parity. Files, screenshot, and
+                  project are real; GitHub + Skills are honestly disabled until
+                  those integrations exist (no dead buttons). */}
+              <div className="composer-picker" ref={addMenuRef}>
+                <Tooltip content="Add files, a screenshot, or attach to a project">
                   <button
                     type="button"
-                    className="composer-picker-option"
+                    className={`chat-attach${addMenuOpen ? " active" : ""}`}
+                    aria-haspopup="menu"
+                    aria-expanded={addMenuOpen}
+                    aria-label="Add files, screenshot, or project"
                     onClick={() => {
-                      setAddMenuOpen(false);
-                      fileInputRef.current?.click();
+                      setAddMenuOpen((v) => {
+                        const next = !v;
+                        if (next) setProjectList(listProjects());
+                        return next;
+                      });
+                      setAddProjectSubOpen(false);
                     }}
                   >
-                    <Icon name="paperclip" size={14} />
-                    <span>Add files or photos</span>
+                    <Icon name="plus" size={18} />
                   </button>
-
-                  <button
-                    type="button"
-                    className="composer-picker-option"
-                    disabled={!canScreenshot}
-                    onClick={() => void handleScreenshot()}
-                    title={
-                      canScreenshot
-                        ? "Capture a screen, window, or tab and attach it (EXIF stripped)"
-                        : "Screen capture needs a Chromium or Firefox desktop browser"
-                    }
+                </Tooltip>
+                {addMenuOpen ? (
+                  <div
+                    className="composer-picker-menu"
+                    role="menu"
+                    style={{ minWidth: 230, left: 0, right: "auto" }}
                   >
-                    <Icon name="image" size={14} />
-                    <span>Take a screenshot</span>
-                    {!canScreenshot ? (
-                      <span className="composer-picker-hint">Unsupported</span>
+                    <button
+                      type="button"
+                      className="composer-picker-option"
+                      onClick={() => {
+                        setAddMenuOpen(false);
+                        fileInputRef.current?.click();
+                      }}
+                    >
+                      <Icon name="paperclip" size={14} />
+                      <span>Add files or photos</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="composer-picker-option"
+                      disabled={!canScreenshot}
+                      onClick={() => void handleScreenshot()}
+                      title={
+                        canScreenshot
+                          ? "Capture a screen, window, or tab and attach it (EXIF stripped)"
+                          : "Screen capture needs a Chromium or Firefox desktop browser"
+                      }
+                    >
+                      <Icon name="image" size={14} />
+                      <span>Take a screenshot</span>
+                      {!canScreenshot ? (
+                        <span className="composer-picker-hint">Unsupported</span>
+                      ) : null}
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`composer-picker-option${addProjectSubOpen ? " active" : ""}`}
+                      aria-expanded={addProjectSubOpen}
+                      onClick={() => setAddProjectSubOpen((v) => !v)}
+                    >
+                      <Icon name="layers" size={14} />
+                      <span>Add to project</span>
+                      <Icon name="chevron-down" size={11} />
+                    </button>
+                    {addProjectSubOpen ? (
+                      <div className="composer-project-sub">
+                        {projectList.length === 0 ? (
+                          <p className="composer-picker-empty">No projects yet.</p>
+                        ) : (
+                          projectList.map((project) => (
+                            <button
+                              key={project.id}
+                              type="button"
+                              className={`composer-picker-option${activeProjectName === project.name ? " active" : ""}`}
+                              onClick={() => attachToProject(project)}
+                            >
+                              <span aria-hidden>📁</span>
+                              <span>{project.name}</span>
+                            </button>
+                          ))
+                        )}
+                        <button
+                          type="button"
+                          className="composer-picker-option"
+                          onClick={() => {
+                            const name = window.prompt("New project name");
+                            if (!name?.trim()) return;
+                            const project = createProject({ name: name.trim() });
+                            setProjectList(listProjects());
+                            attachToProject(project);
+                          }}
+                        >
+                          <Icon name="plus" size={14} />
+                          <span>New project…</span>
+                        </button>
+                      </div>
                     ) : null}
-                  </button>
 
-                  <button
-                    type="button"
-                    className={`composer-picker-option${addProjectSubOpen ? " active" : ""}`}
-                    aria-expanded={addProjectSubOpen}
-                    onClick={() => setAddProjectSubOpen((v) => !v)}
+                    <button
+                      type="button"
+                      className="composer-picker-option"
+                      disabled
+                      title="GitHub import isn't connected yet — coming soon."
+                    >
+                      <Icon name="grid" size={14} />
+                      <span>Add from GitHub</span>
+                      <span className="composer-picker-hint">Soon</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="composer-picker-option"
+                      disabled
+                      title="Skills aren't available yet — coming soon."
+                    >
+                      <Icon name="zap" size={14} />
+                      <span>Skills</span>
+                      <span className="composer-picker-hint">Soon</span>
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Folded "More" tools control (search, tools, presets, project). */}
+              <div className="composer-picker" ref={moreRef}>
+                <button
+                  type="button"
+                  className={`chat-tool-toggle${
+                    mounted &&
+                    (webSearchEnabled ||
+                      toolsEnabled ||
+                      researchMode ||
+                      jsonMode !== "off" ||
+                      activePreset ||
+                      activeProjectName ||
+                      settings.blockTrainingProviders)
+                      ? " active"
+                      : ""
+                  }`}
+                  aria-haspopup="menu"
+                  aria-expanded={moreOpen}
+                  aria-label="More chat options"
+                  onClick={() => setMoreOpen((v) => !v)}
+                  title="Search, tools, presets, project"
+                >
+                  <Icon name="settings" size={13} />
+                  <span className="chat-more-label">More</span>
+                </button>
+
+                {moreOpen ? (
+                  <div
+                    className="composer-picker-menu"
+                    role="menu"
+                    style={{ minWidth: 252, padding: 8, left: 0, right: "auto" }}
                   >
-                    <Icon name="layers" size={14} />
-                    <span>Add to project</span>
-                    <Icon name="chevron-down" size={11} />
-                  </button>
-                  {addProjectSubOpen ? (
-                    <div className="composer-project-sub">
-                      {projectList.length === 0 ? (
-                        <p className="composer-picker-empty">No projects yet.</p>
-                      ) : (
-                        projectList.map((project) => (
-                          <button
-                            key={project.id}
-                            type="button"
-                            className={`composer-picker-option${activeProjectName === project.name ? " active" : ""}`}
-                            onClick={() => attachToProject(project)}
-                          >
-                            <span aria-hidden>📁</span>
-                            <span>{project.name}</span>
-                          </button>
-                        ))
-                      )}
+                    <div className="composer-picker-section">Tools</div>
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 6,
+                        flexWrap: "wrap",
+                        padding: "0 4px 6px",
+                      }}
+                    >
                       <button
                         type="button"
-                        className="composer-picker-option"
+                        className={`chat-tool-toggle${webSearchEnabled ? " active" : ""}`}
+                        aria-pressed={webSearchEnabled}
+                        aria-label="Toggle web search"
                         onClick={() => {
-                          const name = window.prompt("New project name");
-                          if (!name?.trim()) return;
-                          const project = createProject({ name: name.trim() });
-                          setProjectList(listProjects());
-                          attachToProject(project);
+                          setWebSearchEnabled((v) => {
+                            const next = !v;
+                            if (typeof localStorage !== "undefined") {
+                              localStorage.setItem("zintus:web-search", String(next));
+                            }
+                            return next;
+                          });
                         }}
+                        title={searchTooltip(selectedProvider)}
                       >
-                        <Icon name="plus" size={14} />
-                        <span>New project…</span>
+                        <Icon name="globe" size={13} />
+                        Search
+                      </button>
+                      <button
+                        type="button"
+                        className={`chat-tool-toggle${toolsEnabled ? " active" : ""}`}
+                        aria-pressed={toolsEnabled}
+                        aria-label="Toggle tools"
+                        onClick={() => {
+                          setToolsEnabled((v) => {
+                            const next = !v;
+                            if (typeof localStorage !== "undefined") {
+                              localStorage.setItem("zintus:tools", String(next));
+                            }
+                            return next;
+                          });
+                        }}
+                        title={`Let the model call built-in tools (${BUILTIN_WEB_TOOLS.map((t) => t.definition.name).join(", ")}). Runs locally in your browser; needs a tool-capable provider.`}
+                      >
+                        🔧 Tools
+                      </button>
+                      <button
+                        type="button"
+                        className={`chat-tool-toggle${artifactMode ? " active" : ""}`}
+                        aria-pressed={artifactMode}
+                        aria-label="Toggle canvas / artifact mode"
+                        onClick={() => {
+                          setArtifactMode((v) => {
+                            const next = !v;
+                            if (typeof localStorage !== "undefined") {
+                              localStorage.setItem("zintus:artifact-mode", String(next));
+                            }
+                            return next;
+                          });
+                        }}
+                        title="Canvas: the model marks substantial deliverables as editable artifacts, and your current version is fed back on the next turn so edits build on what you're looking at. Off by default."
+                      >
+                        <Icon name="layers" size={13} />
+                        Canvas
+                      </button>
+                      <button
+                        type="button"
+                        className={`chat-tool-toggle${researchMode ? " active" : ""}`}
+                        aria-pressed={researchMode}
+                        aria-label="Toggle research mode"
+                        onClick={() => {
+                          setResearchMode((v) => {
+                            const next = !v;
+                            if (typeof localStorage !== "undefined") {
+                              localStorage.setItem("zintus:research-mode", String(next));
+                            }
+                            return next;
+                          });
+                        }}
+                        title="Research: send this prompt to Deep Research — it searches multiple sources, synthesizes, and cites. Runs on the Research page at the depth below."
+                      >
+                        <Icon name="globe" size={13} />
+                        Research
                       </button>
                     </div>
-                  ) : null}
 
-                  <button
-                    type="button"
-                    className="composer-picker-option"
-                    disabled
-                    title="GitHub import isn't connected yet — coming soon."
-                  >
-                    <Icon name="grid" size={14} />
-                    <span>Add from GitHub</span>
-                    <span className="composer-picker-hint">Soon</span>
-                  </button>
+                    {/* Depth selector — only meaningful when research mode is on. */}
+                    {researchMode ? (
+                      <div style={{ padding: "0 4px 6px" }}>
+                        <div
+                          role="radiogroup"
+                          aria-label="Research depth"
+                          style={{ display: "flex", gap: 6 }}
+                        >
+                          {(
+                            [
+                              { value: "quick", label: "Quick", hint: "1 search · ~10s" },
+                              { value: "standard", label: "Standard", hint: "3 searches · ~30s" },
+                              { value: "deep", label: "Deep", hint: "5 searches · ~60s" },
+                            ] as Array<{ value: ResearchDepth; label: string; hint: string }>
+                          ).map((option) => (
+                            <button
+                              key={option.value}
+                              type="button"
+                              role="radio"
+                              aria-checked={researchDepth === option.value}
+                              className={`chat-tool-toggle${researchDepth === option.value ? " active" : ""}`}
+                              onClick={() => {
+                                setResearchDepth(option.value);
+                                if (typeof localStorage !== "undefined") {
+                                  localStorage.setItem("zintus:research-depth", option.value);
+                                }
+                              }}
+                              title={option.hint}
+                            >
+                              {option.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
 
-                  <button
-                    type="button"
-                    className="composer-picker-option"
-                    disabled
-                    title="Skills aren't available yet — coming soon."
-                  >
-                    <Icon name="zap" size={14} />
-                    <span>Skills</span>
-                    <span className="composer-picker-hint">Soon</span>
-                  </button>
-                </div>
-              ) : null}
+                    <StructuredOutputControl
+                      mode={jsonMode}
+                      schemaText={jsonSchemaText}
+                      error={schemaError}
+                      onModeChange={setJsonMode}
+                      onSchemaTextChange={setJsonSchemaText}
+                    />
+
+                    {presets.length > 0 ? (
+                      <>
+                        <div className="composer-picker-section">Preset</div>
+                        <div style={{ padding: "0 4px 6px" }}>
+                          <select
+                            className="chat-preset-select"
+                            style={{ width: "100%" }}
+                            value={activePreset?.id ?? ""}
+                            onChange={(event) =>
+                              applyPreset(
+                                presets.find((p) => p.id === event.target.value) ??
+                                  null,
+                              )
+                            }
+                            aria-label="Apply a saved preset"
+                            title="Apply a saved preset"
+                          >
+                            <option value="">No preset</option>
+                            {presets.map((preset) => (
+                              <option key={preset.id} value={preset.id}>
+                                {preset.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </>
+                    ) : null}
+
+                    {activeProjectName ? (
+                      <>
+                        <div className="composer-picker-section">Project</div>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            padding: "0 4px 6px",
+                            fontSize: 12,
+                            color: "var(--color-text-sub)",
+                          }}
+                        >
+                          <span>📁 {activeProjectName}</span>
+                          <button
+                            type="button"
+                            className="chat-tool-toggle"
+                            style={{ marginLeft: "auto" }}
+                            onClick={() => {
+                              setActiveProjectId(null);
+                              setActiveProjectName(null);
+                            }}
+                            title="Leave this project"
+                          >
+                            Leave
+                          </button>
+                        </div>
+                      </>
+                    ) : null}
+
+                    {visionReady || settings.blockTrainingProviders ? (
+                      <>
+                        <div className="composer-picker-section">This route</div>
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: 6,
+                            padding: "0 4px 2px",
+                          }}
+                        >
+                          {visionReady ? (
+                            <span
+                              className="chat-privacy-chip"
+                              title={`${capitalize(effectiveComposerProvider ?? "")} can read attached images`}
+                            >
+                              <Icon name="image" size={12} /> Vision
+                            </span>
+                          ) : null}
+                          {settings.blockTrainingProviders ? (
+                            <span
+                              className="chat-privacy-chip"
+                              title="Privacy mode — only routing to providers that don't train on your data"
+                            >
+                              🛡 Privacy
+                            </span>
+                          ) : null}
+                        </div>
+                      </>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Model picker moved into the composer action row (10.1). */}
+              <ProviderPicker />
             </div>
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={input}
-              onChange={(event) => {
-                setInput(event.target.value);
-                // Drop the lingering post-send "Image analyzed by …" confirmation
-                // once the user starts a new message, so it never implies an image
-                // is still attached (it isn't — images clear on send; re-attach for
-                // a new one).
-                setNotice((n) => (n?.tone === "ok" ? null : n));
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void send();
-                } else if (event.key === "Escape" && loading) {
-                  stop();
-                }
-              }}
-              onPaste={(e) => {
-                if (e.clipboardData.files.length > 0) {
-                  void handleFiles(e.clipboardData.files);
-                }
-              }}
-              placeholder={
-                mounted && researchMode
-                  ? `Research mode (${researchDepth}) — ⏎ runs Deep Research on this prompt`
-                  : "Message Zintus…"
-              }
-            />
-            {/* Voice input (dictation). Honest about support: the Web Speech
-                API is Chromium-only in practice, so when unsupported we show a
-                disabled mic with a plain-spoken tooltip rather than hide it. The
-                active tooltip is honest about where the audio goes. */}
-            {speech.supported ? (
-              <Tooltip
-                content={
-                  speech.listening
-                    ? "Stop dictation"
-                    : "Dictate — uses your browser's speech service (Chrome sends audio to Google); no audio reaches Zintus"
-                }
-              >
-                <button
-                  type="button"
-                  className={`chat-mic${speech.listening ? " is-listening" : ""}`}
-                  onClick={toggleDictation}
-                  aria-label={speech.listening ? "Stop dictation" : "Start dictation"}
-                  aria-pressed={speech.listening}
+
+            <div className="chat-composer-actions-right">
+              {/* Voice input (dictation). Honest about support: the Web Speech
+                  API is Chromium-only in practice, so when unsupported we show a
+                  disabled mic with a plain-spoken tooltip rather than hide it. The
+                  active tooltip is honest about where the audio goes. */}
+              {speech.supported ? (
+                <Tooltip
+                  content={
+                    speech.listening
+                      ? "Stop dictation"
+                      : "Dictate — uses your browser's speech service (Chrome sends audio to Google); no audio reaches Zintus"
+                  }
                 >
-                  <Icon name="mic" size={18} />
-                </button>
-              </Tooltip>
-            ) : (
-              <Tooltip content="Voice input needs a Chromium-based browser (Chrome or Edge)">
-                <button
-                  type="button"
-                  className="chat-mic"
-                  disabled
-                  aria-label="Voice input not available in this browser"
-                >
-                  <Icon name="mic" size={18} />
-                </button>
-              </Tooltip>
-            )}
-            {/* Send / stop pinned to the trailing (right) edge. */}
-            {loading ? (
-              <Tooltip content="Stop generating (Esc)">
-                <button
-                  type="button"
-                  className="chat-send chat-stop"
-                  onClick={stop}
-                  aria-label="Stop generating"
-                >
-                  <Icon name="stop" size={14} />
-                </button>
-              </Tooltip>
-            ) : (
-              <Tooltip content="Send message (Enter)">
-                <button
-                  type="button"
-                  className="chat-send"
-                  disabled={!input.trim() && attachments.length === 0}
-                  onClick={() => void send()}
-                  aria-label="Send message"
-                >
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                    <line x1="12" y1="19" x2="12" y2="5" />
-                    <polyline points="5 12 12 5 19 12" />
-                  </svg>
-                </button>
-              </Tooltip>
-            )}
+                  <button
+                    type="button"
+                    className={`chat-mic${speech.listening ? " is-listening" : ""}`}
+                    onClick={toggleDictation}
+                    aria-label={speech.listening ? "Stop dictation" : "Start dictation"}
+                    aria-pressed={speech.listening}
+                  >
+                    <Icon name="mic" size={18} />
+                  </button>
+                </Tooltip>
+              ) : (
+                <Tooltip content="Voice input needs a Chromium-based browser (Chrome or Edge)">
+                  <button
+                    type="button"
+                    className="chat-mic"
+                    disabled
+                    aria-label="Voice input not available in this browser"
+                  >
+                    <Icon name="mic" size={18} />
+                  </button>
+                </Tooltip>
+              )}
+              {/* Send / stop pinned to the trailing (right) edge. */}
+              {loading ? (
+                <Tooltip content="Stop generating (Esc)">
+                  <button
+                    type="button"
+                    className="chat-send chat-stop"
+                    onClick={stop}
+                    aria-label="Stop generating"
+                  >
+                    <Icon name="stop" size={14} />
+                  </button>
+                </Tooltip>
+              ) : (
+                <Tooltip content="Send message (Enter)">
+                  <button
+                    type="button"
+                    className="chat-send"
+                    disabled={!input.trim() && attachments.length === 0}
+                    onClick={() => void send()}
+                    aria-label="Send message"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                      <line x1="12" y1="19" x2="12" y2="5" />
+                      <polyline points="5 12 12 5 19 12" />
+                    </svg>
+                  </button>
+                </Tooltip>
+              )}
+            </div>
           </div>
           {speech.listening ? (
             <div className="chat-mic-status" role="status" aria-live="polite">

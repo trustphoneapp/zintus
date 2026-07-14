@@ -259,10 +259,12 @@ export default function SettingsPage() {
             </p>
             <ol className="priority-list">
               {settings.providerPriority.map((providerId) => (
-                <li
-                  key={providerId}
-                  style={{ color: PROVIDER_BY_ID[providerId].color }}
-                >
+                <li key={providerId} className="priority-list-item">
+                  <span
+                    className="priority-list-dot"
+                    style={{ background: PROVIDER_BY_ID[providerId].color }}
+                    aria-hidden="true"
+                  />
                   {PROVIDER_BY_ID[providerId].name}
                 </li>
               ))}

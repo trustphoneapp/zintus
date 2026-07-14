@@ -15,7 +15,8 @@ export function CommandBlock({ label, lines }: { label: string; lines: readonly 
   async function copy() {
     await navigator.clipboard.writeText(lines.join("\n"));
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
+    // Revert the check + accent tint ~1.5s after the copy.
+    window.setTimeout(() => setCopied(false), 1500);
   }
 
   return (
@@ -26,7 +27,7 @@ export function CommandBlock({ label, lines }: { label: string; lines: readonly 
         </span>
         <button
           type="button"
-          className="m-terminal-copy"
+          className={`m-terminal-copy${copied ? " copied" : ""}`}
           aria-label={`Copy ${label} commands`}
           onClick={() => void copy()}
         >
@@ -44,8 +45,8 @@ export function CommandBlock({ label, lines }: { label: string; lines: readonly 
         >
           {lines.map((line, i) => (
             <div key={i}>
-              <span style={{ color: "#7c3aed" }}>$ </span>
-              <span style={{ color: "#c4b5fd" }}>{line}</span>
+              <span style={{ color: "var(--marketing-accent)" }}>$ </span>
+              <span style={{ color: "var(--marketing-text)" }}>{line}</span>
             </div>
           ))}
         </code>

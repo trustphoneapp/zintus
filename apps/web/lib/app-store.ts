@@ -56,6 +56,9 @@ export interface UiMessage {
   toolCalls?: ToolCall[];
   /** Server-side MCP tool-loop activity for this turn (call/result lines). */
   mcpToolEvents?: McpToolEvent[];
+  /** Raw provider/network error payload for this turn — when set, the bubble
+   *  renders as an error card (⚠ Provider error + <details> raw payload). */
+  error?: string;
   time: string;
 }
 
@@ -92,6 +95,9 @@ export type ArtifactConsents = Record<string, Record<string, ArtifactConsent>>;
 interface AppState {
   threads: Thread[];
   activeThreadId: string;
+  /** Ids of pinned threads — persisted; the sidebar renders them first. */
+  pinnedThreadIds: string[];
+  togglePinThread: (id: string) => void;
   /** Per-thread, per-artifact user-edit history. */
   artifactEdits: ArtifactEdits;
   addArtifactEdit: (threadId: string, artifactId: string, version: ArtifactVersion) => void;
@@ -113,7 +119,7 @@ interface AppState {
   terminalLines: TerminalLine[];
   appendMessage: (message: UiMessage) => void;
   updateMessage: (id: string, content: string) => void;
-  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens" | "meta" | "compression" | "toolCalls" | "mcpToolEvents">>) => void;
+  patchMessage: (id: string, patch: Partial<Pick<UiMessage, "providerId" | "model" | "compileTokens" | "meta" | "compression" | "toolCalls" | "mcpToolEvents" | "error">>) => void;
   setThreadId: (threadId?: string) => void;
   setActiveProvider: (providerId: ProviderId | null) => void;
   setSelectedProvider: (providerId: ProviderId | null) => void;
@@ -182,6 +188,13 @@ export const useAppStore = create<AppState>()(
     (set) => ({
       threads: [initialThread],
       activeThreadId: initialThread.id,
+      pinnedThreadIds: [],
+      togglePinThread: (id) =>
+        set((state) => ({
+          pinnedThreadIds: state.pinnedThreadIds.includes(id)
+            ? state.pinnedThreadIds.filter((pid) => pid !== id)
+            : [...state.pinnedThreadIds, id],
+        })),
       artifactEdits: {},
       artifactBudgets: {},
       artifactConsents: {},
@@ -389,8 +402,9 @@ export const useAppStore = create<AppState>()(
       deleteThread: (id) =>
         set((state) => {
           const remaining = state.threads.filter((thread) => thread.id !== id);
+          const pinnedThreadIds = state.pinnedThreadIds.filter((pid) => pid !== id);
           if (state.activeThreadId !== id) {
-            return { threads: remaining };
+            return { threads: remaining, pinnedThreadIds };
           }
           // Deleted the active thread — fall back to the most recently
           // updated remaining thread, or create a fresh one if none are left.
@@ -398,6 +412,7 @@ export const useAppStore = create<AppState>()(
           if (next) {
             return {
               threads: remaining,
+              pinnedThreadIds,
               activeThreadId: next.id,
               threadId: next.gatewayThreadId,
               activeProvider: next.activeProvider,
@@ -406,6 +421,7 @@ export const useAppStore = create<AppState>()(
           const thread = createThread();
           return {
             threads: [thread],
+            pinnedThreadIds,
             activeThreadId: thread.id,
             threadId: undefined,
             activeProvider: null,
@@ -428,7 +444,8 @@ export const useAppStore = create<AppState>()(
         const activeThreadId = threads.some((t) => t.id === state.activeThreadId)
           ? state.activeThreadId
           : (threads[0]?.id ?? state.activeThreadId);
-        return { threads, activeThreadId, artifactEdits, artifactBudgets, artifactConsents };
+        const pinnedThreadIds = state.pinnedThreadIds.filter((id) => keep.has(id));
+        return { threads, activeThreadId, pinnedThreadIds, artifactEdits, artifactBudgets, artifactConsents };
       },
     },
   ),

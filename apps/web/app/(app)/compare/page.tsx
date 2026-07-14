@@ -420,7 +420,7 @@ export default function ComparePage() {
                       padding: "2px 9px",
                       borderRadius: 999,
                       background: "var(--c-accent)",
-                      color: "#fff",
+                      color: "var(--c-accent-contrast)",
                       fontSize: 10.5,
                       fontWeight: 700,
                       letterSpacing: "0.01em",

@@ -2,14 +2,14 @@
   <!--
     Zintus favicon — the networked "Z" brand mark (same geometry as
     components/ZintusLogo.tsx, scaled 16x from its 0 0 32 32 viewBox), white on
-    the brand-violet rounded square. The nodes evoke the routing/network theme,
+    the Indigo brand rounded square. The nodes evoke the routing/network theme,
     matching the in-app logo instead of a divergent placeholder. A final
     designer-delivered raster can still drop in over this later.
   -->
   <defs>
     <linearGradient id="zintus-mark" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#7C3AED" />
-      <stop offset="1" stop-color="#4C1D95" />
+      <stop offset="0" stop-color="#4D6BFE" />
+      <stop offset="1" stop-color="#3550C8" />
     </linearGradient>
   </defs>
   <rect width="512" height="512" rx="112" fill="url(#zintus-mark)" />
@@ -22,8 +22,8 @@
   </g>
 
   <!-- Dimmer midpoint nodes along the diagonal -->
-  <circle cx="312" cy="213" r="22" fill="#C4B5FD" />
-  <circle cx="200" cy="299" r="22" fill="#C4B5FD" />
+  <circle cx="312" cy="213" r="22" fill="#7C92FE" />
+  <circle cx="200" cy="299" r="22" fill="#7C92FE" />
 
   <!-- Filled node endpoints (the four corners of the Z) -->
   <circle cx="112" cy="128" r="38" fill="#FFFFFF" />

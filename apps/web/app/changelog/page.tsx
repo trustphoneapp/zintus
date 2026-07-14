@@ -113,7 +113,7 @@ const groupHeading: React.CSSProperties = {
   fontWeight: 700,
   textTransform: "uppercase",
   letterSpacing: "0.08em",
-  color: "#c4b5fd",
+  color: "var(--marketing-accent)",
   margin: "1.25rem 0 0.5rem",
 };
 
@@ -127,18 +127,18 @@ export default function ChangelogPage() {
             fontSize: "2.25rem",
             fontWeight: 700,
             marginBottom: "0.5rem",
-            color: "#e9d5ff",
+            color: "var(--marketing-text)",
           }}
         >
           Changelog
         </h1>
-        <p style={{ fontSize: 14, color: "#64748b", marginBottom: "2.5rem", maxWidth: 760 }}>
+        <p style={{ fontSize: 14, color: "var(--marketing-muted)", marginBottom: "2.5rem", maxWidth: 760 }}>
           Notable changes to Zintus. Format loosely follows{" "}
           <a
             href="https://keepachangelog.com/"
             target="_blank"
             rel="noopener noreferrer"
-            style={{ color: "#c4b5fd" }}
+            style={{ color: "var(--marketing-accent)" }}
           >
             Keep a Changelog
           </a>
@@ -152,15 +152,15 @@ export default function ChangelogPage() {
               style={{
                 marginBottom: "3rem",
                 paddingBottom: "2rem",
-                borderBottom: "1px solid rgba(148,163,184,0.15)",
+                borderBottom: "1px solid var(--marketing-border)",
               }}
             >
               <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem", flexWrap: "wrap" }}>
-                <h2 style={{ fontSize: "1.5rem", fontWeight: 700, color: "#e9d5ff" }}>
+                <h2 style={{ fontSize: "1.5rem", fontWeight: 700, color: "var(--marketing-text)" }}>
                   {release.version}
                 </h2>
                 {release.date ? (
-                  <span style={{ fontSize: 13, color: "#64748b" }}>{release.date}</span>
+                  <span style={{ fontSize: 13, color: "var(--marketing-muted)" }}>{release.date}</span>
                 ) : (
                   <span
                     style={{
@@ -177,7 +177,7 @@ export default function ChangelogPage() {
                   </span>
                 )}
               </div>
-              <p style={{ fontSize: 15, color: "#94a3b8", lineHeight: 1.7, marginTop: "0.5rem" }}>
+              <p style={{ fontSize: 15, color: "var(--marketing-muted)", lineHeight: 1.7, marginTop: "0.5rem" }}>
                 {release.summary}
               </p>
 
@@ -189,7 +189,7 @@ export default function ChangelogPage() {
                       margin: 0,
                       paddingLeft: "1.25rem",
                       fontSize: 14.5,
-                      color: "#94a3b8",
+                      color: "var(--marketing-muted)",
                       lineHeight: 1.7,
                     }}
                   >
@@ -211,7 +211,7 @@ export default function ChangelogPage() {
             display: "inline-block",
             marginTop: "1rem",
             fontSize: 14,
-            color: "#c4b5fd",
+            color: "var(--marketing-accent)",
             textDecoration: "none",
           }}
         >

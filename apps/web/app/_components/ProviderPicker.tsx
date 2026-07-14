@@ -7,6 +7,7 @@ import { PROVIDER_BY_ID } from "@/lib/providers";
 import { useAppStore } from "@/lib/app-store";
 import { useProviderStatusStore } from "@/lib/store";
 import { fetchCatalogModels, type CatalogModelDto } from "@/lib/gateway";
+import { useDismissableMenu } from "./useDismissableMenu";
 import { Icon } from "./Icons";
 
 const SELECTED_MODEL_KEY = "zintus:selected-model";
@@ -118,16 +119,8 @@ export function ProviderPicker() {
     };
   }, [gatewayConnected]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onClick(event: MouseEvent) {
-      if (ref.current && !ref.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [open]);
+  // Escape (restores focus to the pill) + click / focus-out dismissal.
+  useDismissableMenu(open, () => setOpen(false), ref);
 
   const { t0, t1, hiddenCount, connectedCount } = useMemo(() => {
     const all = models

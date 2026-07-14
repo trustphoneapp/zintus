@@ -53,10 +53,10 @@ afterEach(() => {
 });
 
 describe("CRUD round-trip", () => {
-  test("add → load → update → remove persists through localStorage", () => {
-    expect(loadMcpServers()).toEqual([]);
+  test("add → load → update → remove persists through localStorage", async () => {
+    expect(await loadMcpServers()).toEqual([]);
 
-    const a = addMcpServer({
+    const a = await addMcpServer({
       name: "Files",
       config: stdioConfig,
       enabled: true,
@@ -64,45 +64,45 @@ describe("CRUD round-trip", () => {
     });
     expect(a.id).toBeTruthy();
 
-    const b = addMcpServer({
+    const b = await addMcpServer({
       name: "Remote",
       config: httpConfig,
       enabled: false,
       enabledTools: "all",
     });
 
-    let loaded = loadMcpServers();
+    let loaded = await loadMcpServers();
     expect(loaded).toHaveLength(2);
     expect(loaded.map((s) => s.name)).toEqual(["Files", "Remote"]);
     expect(a.id).not.toBe(b.id);
 
-    updateMcpServer(a.id, { name: "Filesystem", lastConnectedAt: 123 });
-    loaded = loadMcpServers();
+    await updateMcpServer(a.id, { name: "Filesystem", lastConnectedAt: 123 });
+    loaded = await loadMcpServers();
     const updated = loaded.find((s) => s.id === a.id)!;
     expect(updated.name).toBe("Filesystem");
     expect(updated.lastConnectedAt).toBe(123);
     // The other server is untouched.
     expect(loaded.find((s) => s.id === b.id)!.name).toBe("Remote");
 
-    const after = removeMcpServer(a.id);
+    const after = await removeMcpServer(a.id);
     expect(after).toHaveLength(1);
     expect(after[0]!.id).toBe(b.id);
-    expect(loadMcpServers()).toHaveLength(1);
+    expect(await loadMcpServers()).toHaveLength(1);
   });
 });
 
 describe("bad-JSON safety", () => {
-  test("malformed JSON yields [] instead of throwing", () => {
+  test("malformed JSON yields [] instead of throwing", async () => {
     localStorage.setItem(KEY, "{not json");
-    expect(loadMcpServers()).toEqual([]);
+    expect(await loadMcpServers()).toEqual([]);
   });
 
-  test("non-array JSON yields []", () => {
+  test("non-array, non-envelope JSON yields []", async () => {
     localStorage.setItem(KEY, JSON.stringify({ foo: 1 }));
-    expect(loadMcpServers()).toEqual([]);
+    expect(await loadMcpServers()).toEqual([]);
   });
 
-  test("array with malformed entries keeps only well-formed servers", () => {
+  test("array with malformed entries keeps only well-formed servers", async () => {
     localStorage.setItem(
       KEY,
       JSON.stringify([
@@ -112,13 +112,77 @@ describe("bad-JSON safety", () => {
         42,
       ]),
     );
-    const loaded = loadMcpServers();
+    const loaded = await loadMcpServers();
     expect(loaded).toHaveLength(1);
     expect(loaded[0]!.id).toBe("ok");
   });
 
-  test("no localStorage value returns []", () => {
-    expect(loadMcpServers()).toEqual([]);
+  test("no localStorage value returns []", async () => {
+    expect(await loadMcpServers()).toEqual([]);
+  });
+});
+
+describe("encryption at rest", () => {
+  // A secret-bearing config: a bearer header (remote) + an env secret (stdio).
+  const secretHttp: MCPServerConfig = {
+    transport: "http",
+    url: "https://api.example.com/mcp",
+    headers: { Authorization: "Bearer sk-super-secret-token-123" },
+  };
+  const secretStdio: MCPServerConfig = {
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "server"],
+    env: { API_KEY: "env-secret-value-456" },
+  };
+
+  test("saveMcpServers never writes credentials as plaintext", async () => {
+    await saveMcpServers([
+      { id: "h", name: "H", config: secretHttp, enabled: true, enabledTools: "all" },
+      { id: "s", name: "S", config: secretStdio, enabled: true, enabledTools: "all" },
+    ]);
+    const raw = localStorage.getItem(KEY)!;
+    // Stored blob is an AES-GCM envelope, not a readable server array.
+    const envelope = JSON.parse(raw) as Record<string, unknown>;
+    expect(typeof envelope.iv).toBe("string");
+    expect(typeof envelope.data).toBe("string");
+    // The secrets must not appear anywhere in the ciphertext at rest.
+    expect(raw).not.toContain("sk-super-secret-token-123");
+    expect(raw).not.toContain("env-secret-value-456");
+    expect(raw).not.toContain("Authorization");
+  });
+
+  test("round-trips secret configs through encryption", async () => {
+    const servers: StoredMcpServer[] = [
+      { id: "h", name: "H", config: secretHttp, enabled: true, enabledTools: "all" },
+    ];
+    await saveMcpServers(servers);
+    expect(await loadMcpServers()).toEqual(servers);
+  });
+
+  test("legacy plaintext is transparently migrated to an encrypted envelope", async () => {
+    // Simulate a store written by an older build: a plaintext JSON array with a
+    // live bearer credential.
+    const legacy: StoredMcpServer[] = [
+      { id: "h", name: "H", config: secretHttp, enabled: true, enabledTools: "all" },
+    ];
+    localStorage.setItem(KEY, JSON.stringify(legacy));
+    // Sanity: the seeded value really is plaintext.
+    expect(localStorage.getItem(KEY)).toContain("sk-super-secret-token-123");
+
+    // First load returns the same data (no user-visible breakage / no loss)...
+    const loaded = await loadMcpServers();
+    expect(loaded).toEqual(legacy);
+
+    // ...and has re-saved it encrypted in place: plaintext credential is gone.
+    const raw = localStorage.getItem(KEY)!;
+    expect(raw).not.toContain("sk-super-secret-token-123");
+    const envelope = JSON.parse(raw) as Record<string, unknown>;
+    expect(typeof envelope.iv).toBe("string");
+    expect(typeof envelope.data).toBe("string");
+
+    // A subsequent load still decrypts to the same servers.
+    expect(await loadMcpServers()).toEqual(legacy);
   });
 });
 
@@ -233,12 +297,14 @@ describe("activeMcpServersForChat", () => {
 });
 
 describe("saveMcpServers", () => {
-  test("round-trips through the storage key", () => {
+  test("round-trips through the storage key", async () => {
     const servers: StoredMcpServer[] = [
       { id: "x", name: "X", config: httpConfig, enabled: true, enabledTools: "all" },
     ];
-    saveMcpServers(servers);
-    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual(servers);
-    expect(loadMcpServers()).toEqual(servers);
+    await saveMcpServers(servers);
+    // At rest the value is an encrypted envelope, not the raw array...
+    expect(Array.isArray(JSON.parse(localStorage.getItem(KEY)!))).toBe(false);
+    // ...but it decrypts back to exactly what we stored.
+    expect(await loadMcpServers()).toEqual(servers);
   });
 });

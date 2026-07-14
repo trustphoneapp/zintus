@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { fetchGatewayHealth, GATEWAY_URL } from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
-import { ThemeToggle } from "@/components/marketing/ThemeToggle";
+import { ModeSwitcher } from "@/components/marketing/ModeSwitcher";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { Sidebar } from "./Sidebar";
 import { GatewayOfflineBanner } from "./GatewayOfflineBanner";
@@ -29,12 +29,33 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // AND in the chat header, a different tree) and the <Sidebar> agree. `open`
   // defaults true on the server + first client render; the persisted choice is
   // applied after mount (no hydration mismatch).
-  const { open: sidebarOpen, toggle: toggleSidebar, hydrate: hydrateSidebar } =
-    useSidebarStore();
+  const {
+    open: sidebarOpen,
+    toggle: toggleSidebar,
+    hydrate: hydrateSidebar,
+  } = useSidebarStore();
   const collapsed = !sidebarOpen;
   useEffect(() => {
     hydrateSidebar();
+    // Responsive default (V7 11.2): on mobile (≤720) the sidebar is an off-canvas
+    // drawer; on tablet (721–1023) it defaults to the 60px icon rail (expanding
+    // overlays the content). Both start collapsed on mount so the chat column is
+    // full-width. We collapse WITHOUT persisting so a desktop user's saved
+    // expand/collapse preference is never overwritten by opening on a narrow
+    // window. On desktop (≥1024) the hydrated preference stands.
+    if (typeof window !== "undefined" && window.innerWidth <= 1023) {
+      useSidebarStore.setState({ open: false });
+    }
   }, [hydrateSidebar]);
+  // In overlay mode (≤1023 the sidebar is an off-canvas drawer / expanding rail),
+  // close it after an in-app navigation so it doesn't stay covering the new page.
+  // We set state directly (never the persisted toggle) so a desktop user's saved
+  // expand/collapse preference is untouched — and this no-ops at ≥1024.
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.innerWidth <= 1023) {
+      useSidebarStore.setState({ open: false });
+    }
+  }, [pathname]);
   const [checked, setChecked] = useState(false);
   const { gatewayConnected, setGatewayStatus } = useAppStore();
 
@@ -121,7 +142,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </kbd>
             </button>
           </Tooltip>
-          <ThemeToggle />
+          <ModeSwitcher withLight />
         </div>
       </header>
       ) : null}
@@ -131,6 +152,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       <div className="app-body">
+        {/* Mobile drawer scrim: only rendered when the sidebar is open; on ≤720px
+            it dims the chat behind the off-canvas drawer and closes it on tap. */}
+        {!collapsed ? (
+          <div
+            className="sidebar-scrim"
+            aria-hidden
+            onClick={toggleSidebar}
+          />
+        ) : null}
         <Sidebar
           collapsed={collapsed}
           onToggle={toggleSidebar}

@@ -35,7 +35,7 @@ export function Footer() {
   return (
     <footer
       style={{
-        borderTop: "1px solid rgba(124,58,237,0.12)",
+        borderTop: "1px solid var(--marketing-border)",
         paddingTop: "3rem",
         paddingBottom: "3rem",
       }}
@@ -48,7 +48,7 @@ export function Footer() {
               style={{
                 marginTop: "1rem",
                 fontSize: 13,
-                color: "#4a3070",
+                color: "var(--marketing-muted)",
                 maxWidth: 260,
                 lineHeight: 1.7,
               }}
@@ -65,7 +65,7 @@ export function Footer() {
                   fontWeight: 600,
                   letterSpacing: "0.08em",
                   textTransform: "uppercase",
-                  color: "#4a3070",
+                  color: "var(--marketing-muted)",
                   marginBottom: "1rem",
                 }}
               >
@@ -76,12 +76,12 @@ export function Footer() {
                   <a
                     key={link.label}
                     href={link.href}
-                    style={{ fontSize: 13, color: "#64748b", textDecoration: "none" }}
+                    style={{ fontSize: 13, color: "var(--marketing-muted)", textDecoration: "none" }}
                     onMouseOver={(e) => {
-                      (e.currentTarget as HTMLAnchorElement).style.color = "#c4b5fd";
+                      (e.currentTarget as HTMLAnchorElement).style.color = "var(--marketing-text)";
                     }}
                     onMouseOut={(e) => {
-                      (e.currentTarget as HTMLAnchorElement).style.color = "#64748b";
+                      (e.currentTarget as HTMLAnchorElement).style.color = "var(--marketing-muted)";
                     }}
                   >
                     {link.label}
@@ -93,7 +93,7 @@ export function Footer() {
         </div>
         <div
           style={{
-            borderTop: "1px solid rgba(124,58,237,0.08)",
+            borderTop: "1px solid var(--marketing-border)",
             paddingTop: "1.5rem",
             marginTop: "2.5rem",
             display: "flex",
@@ -103,10 +103,10 @@ export function Footer() {
             gap: "0.75rem",
           }}
         >
-          <span style={{ fontSize: 12, color: "#4a3070" }}>
+          <span style={{ fontSize: 12, color: "var(--marketing-muted)" }}>
             © 2026 Zintus · YS Ventures LLC · Business Source License 1.1
           </span>
-          <span style={{ fontSize: 12, color: "#4a3070" }}>
+          <span style={{ fontSize: 12, color: "var(--marketing-muted)" }}>
             Made with ❤️ in Pittsburgh, PA
           </span>
         </div>

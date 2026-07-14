@@ -13,11 +13,11 @@ export function InstallSection() {
   async function copySteps() {
     await navigator.clipboard.writeText(COPY_TEXT);
     setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
+    window.setTimeout(() => setCopied(false), 1500);
   }
 
   return (
-    <section className="m-section" id="install">
+    <section className="m-section m-cv" id="install">
       <div className="m-shell">
         <Reveal>
           <p className="m-eyebrow">For developers</p>
@@ -41,7 +41,7 @@ export function InstallSection() {
               </span>
               <button
                 type="button"
-                className="m-terminal-copy"
+                className={`m-terminal-copy${copied ? " copied" : ""}`}
                 aria-label="Copy all commands"
                 onClick={() => void copySteps()}
               >
@@ -59,8 +59,8 @@ export function InstallSection() {
               >
                 {INSTALL_STEPS.map((step, i) => (
                   <div key={i}>
-                    <span style={{ color: "#7c3aed" }}>$ </span>
-                    <span style={{ color: "#c4b5fd" }}>{step}</span>
+                    <span style={{ color: "var(--marketing-accent)" }}>$ </span>
+                    <span style={{ color: "var(--marketing-text)" }}>{step}</span>
                   </div>
                 ))}
               </code>

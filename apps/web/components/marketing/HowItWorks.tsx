@@ -1,5 +1,4 @@
-"use client";
-
+// Server Component: static three-step markup wrapped in <Reveal> client islands.
 import { Reveal } from "./Reveal";
 
 const STEPS = [
@@ -54,7 +53,8 @@ export function HowItWorks() {
                       style={{
                         fontSize: "3rem",
                         fontWeight: 800,
-                        color: "rgba(124,58,237,0.2)",
+                        color: "var(--marketing-muted)",
+                        opacity: 0.3,
                         lineHeight: 1,
                         display: "block",
                         marginBottom: "0.75rem",
@@ -66,7 +66,7 @@ export function HowItWorks() {
                       style={{
                         fontSize: "1.2rem",
                         fontWeight: 700,
-                        color: "#f1f5f9",
+                        color: "var(--marketing-text)",
                         marginBottom: "0.75rem",
                       }}
                     >
@@ -75,7 +75,7 @@ export function HowItWorks() {
                     <p
                       style={{
                         fontSize: "0.9rem",
-                        color: "#94a3b8",
+                        color: "var(--marketing-muted)",
                         lineHeight: 1.7,
                       }}
                     >
@@ -84,8 +84,8 @@ export function HowItWorks() {
                   </div>
                   <div
                     style={{
-                      background: "rgba(7,4,15,0.8)",
-                      border: "1px solid rgba(124,58,237,0.2)",
+                      background: "var(--marketing-bg)",
+                      border: "1px solid var(--marketing-border)",
                       borderRadius: 10,
                       padding: "1.1rem 1.3rem",
                       fontFamily: "'JetBrains Mono', monospace",
@@ -97,18 +97,18 @@ export function HowItWorks() {
                       <div key={j}>
                         {line.startsWith("$") ? (
                           <>
-                            <span style={{ color: "#7c3aed" }}>$ </span>
-                            <span style={{ color: "#c4b5fd" }}>
+                            <span style={{ color: "var(--marketing-accent)" }}>$ </span>
+                            <span style={{ color: "var(--marketing-text)" }}>
                               {line.replace(/^\$\s*/, "")}
                             </span>
                           </>
                         ) : (
-                          <span style={{ color: "#c4b5fd" }}>{line}</span>
+                          <span style={{ color: "var(--marketing-text)" }}>{line}</span>
                         )}
                       </div>
                     ))}
                     <div>
-                      <span style={{ color: "#4a3070" }}>{step.codeComment}</span>
+                      <span style={{ color: "var(--marketing-muted)" }}>{step.codeComment}</span>
                     </div>
                   </div>
                 </div>

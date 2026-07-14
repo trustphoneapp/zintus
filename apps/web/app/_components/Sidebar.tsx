@@ -5,10 +5,11 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import { getGatewayUrl } from "@/lib/gateway";
-import { useAppStore } from "@/lib/app-store";
+import { useAppStore, type Thread } from "@/lib/app-store";
 import { signOut } from "@/lib/cloud";
 import { ZintusLogo } from "@/components/ZintusLogo";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { useDismissableMenu } from "./useDismissableMenu";
 import { Icon } from "./Icons";
 
 type NavIcon =
@@ -46,15 +47,58 @@ const ACCOUNT_LINKS: Array<{ href: string; icon: NavIcon; label: string }> = [
   { href: "/help", icon: "globe", label: "Help & docs" },
 ];
 
+/** Group recents into PINNED / Today / Yesterday / Previous 7 days / Older
+ *  (10.5). Input is already sorted newest-first; ordering is preserved. */
+function groupThreadsByDate(
+  threads: Thread[],
+  pinned: Set<string>,
+): Array<{ label: string; threads: Thread[] }> {
+  const now = new Date();
+  const startToday = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate(),
+  ).getTime();
+  const startYesterday = startToday - 86_400_000;
+  const start7 = startToday - 7 * 86_400_000;
+  const pinnedThreads: Thread[] = [];
+  const buckets: Record<string, Thread[]> = {
+    Today: [],
+    Yesterday: [],
+    "Previous 7 days": [],
+    Older: [],
+  };
+  for (const t of threads) {
+    if (pinned.has(t.id)) {
+      pinnedThreads.push(t);
+      continue;
+    }
+    if (t.updatedAt >= startToday) buckets.Today!.push(t);
+    else if (t.updatedAt >= startYesterday) buckets.Yesterday!.push(t);
+    else if (t.updatedAt >= start7) buckets["Previous 7 days"]!.push(t);
+    else buckets.Older!.push(t);
+  }
+  const groups: Array<{ label: string; threads: Thread[] }> = [];
+  if (pinnedThreads.length) groups.push({ label: "Pinned", threads: pinnedThreads });
+  for (const label of ["Today", "Yesterday", "Previous 7 days", "Older"] as const) {
+    if (buckets[label]!.length) groups.push({ label, threads: buckets[label]! });
+  }
+  return groups;
+}
+
 function ThreadRow({
   id,
   title,
   active,
+  pinned,
+  onTogglePin,
   onSwitch,
 }: {
   id: string;
   title: string;
   active: boolean;
+  pinned: boolean;
+  onTogglePin: () => void;
   onSwitch: () => void;
 }) {
   const renameThread = useAppStore((state) => state.renameThread);
@@ -74,18 +118,8 @@ function ThreadRow({
     }
   }, [title, editing]);
 
-  useEffect(() => {
-    if (!menuOpen) {
-      return;
-    }
-    function onClick(event: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setMenuOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [menuOpen]);
+  // Escape (restores focus to the ⋯ trigger) + click / focus-out dismissal.
+  useDismissableMenu(menuOpen, () => setMenuOpen(false), menuRef);
 
   useEffect(() => {
     if (editing) {
@@ -151,6 +185,17 @@ function ThreadRow({
       <button type="button" className="sidebar-thread-button" onClick={onSwitch}>
         <span className="sidebar-thread-title">{title}</span>
       </button>
+      <Tooltip content={pinned ? "Unpin" : "Pin"}>
+        <button
+          type="button"
+          className={`sidebar-thread-pin${pinned ? " is-pinned" : ""}`}
+          aria-label={pinned ? "Unpin conversation" : "Pin conversation"}
+          aria-pressed={pinned}
+          onClick={onTogglePin}
+        >
+          <Icon name="pin" size={13} />
+        </button>
+      </Tooltip>
       <div className="sidebar-thread-menu" ref={menuRef}>
         <Tooltip content="Rename or delete">
           <button
@@ -220,19 +265,14 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
     setSignedIn(document.cookie.includes("zintus_session="));
   }, []);
 
-  useEffect(() => {
-    if (!open) return;
-    function onClick(event: MouseEvent) {
-      if (ref.current && !ref.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, [open]);
+  // Escape (restores focus to the account trigger) + click / focus-out dismissal.
+  useDismissableMenu(open, () => setOpen(false), ref);
 
-  const name = signedIn ? "Synced account" : "Local workspace";
-  const sub = signedIn ? "Chats sync across devices" : "Chats stay on this device";
+  // Sign-in gates account identity, billing/subscription, and gateway-session
+  // pairing (see lib/cloud.ts + lib/billing.ts) — there is no chat/thread sync
+  // backend, so this copy must never claim chats sync across devices.
+  const name = signedIn ? "Signed in" : "Local workspace";
+  const sub = signedIn ? "Account & billing synced" : "Chats stay on this device";
   const initial = signedIn ? "A" : "L";
   const savedUsd = gatewaySavings?.estimatedUsdSaved ?? 0;
   const isDark = !mounted || theme !== "light";
@@ -328,7 +368,7 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
               role="menuitem"
               onClick={() => setOpen(false)}
             >
-              Sign in to sync →
+              Sign in for account &amp; billing →
             </Link>
           )}
         </div>
@@ -370,6 +410,8 @@ export function Sidebar({
   const switchThread = useAppStore((state) => state.switchThread);
   const threads = useAppStore((state) => state.threads);
   const activeThreadId = useAppStore((state) => state.activeThreadId);
+  const pinnedThreadIds = useAppStore((state) => state.pinnedThreadIds);
+  const togglePinThread = useAppStore((state) => state.togglePinThread);
 
   const [search, setSearch] = useState("");
   const sortedThreads = [...threads]
@@ -393,6 +435,10 @@ export function Sidebar({
           t.messages.some((m) => m.content.toLowerCase().includes(query)),
       )
     : sortedThreads;
+
+  // PINNED-first, date-grouped recents (10.5). Search still filters everything.
+  const pinnedSet = new Set(pinnedThreadIds);
+  const recentGroups = groupThreadsByDate(visibleThreads, pinnedSet);
 
   // Collapsed → a thin icon RAIL (nav stays mounted + functional). The logo and
   // the bottom avatar both expand the sidebar; the workspace nav reuses the SAME
@@ -521,23 +567,30 @@ export function Sidebar({
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search conversations…"
             />
-            <div className="sidebar-threads">
-              {visibleThreads.length === 0 ? (
-                <p className="sidebar-search-empty">No matches</p>
-              ) : null}
-              {visibleThreads.map((thread) => (
-                <ThreadRow
-                  key={thread.id}
-                  id={thread.id}
-                  title={thread.title}
-                  active={thread.id === activeThreadId && pathname === "/chat"}
-                  onSwitch={() => {
-                    switchThread(thread.id);
-                    router.push("/chat");
-                  }}
-                />
-              ))}
-            </div>
+            {visibleThreads.length === 0 ? (
+              <p className="sidebar-search-empty">No matches</p>
+            ) : null}
+            {recentGroups.map((group) => (
+              <div key={group.label} className="sidebar-thread-group">
+                <span className="sidebar-thread-group-label">{group.label}</span>
+                <div className="sidebar-threads">
+                  {group.threads.map((thread) => (
+                    <ThreadRow
+                      key={thread.id}
+                      id={thread.id}
+                      title={thread.title}
+                      active={thread.id === activeThreadId && pathname === "/chat"}
+                      pinned={pinnedSet.has(thread.id)}
+                      onTogglePin={() => togglePinThread(thread.id)}
+                      onSwitch={() => {
+                        switchThread(thread.id);
+                        router.push("/chat");
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         ) : null}
       </nav>

@@ -1,4 +1,12 @@
 import type { NextConfig } from "next";
+import bundleAnalyzer from "@next/bundle-analyzer";
+
+// Build-tooling only: `ANALYZE=true bun run build` emits treemap reports under
+// .next/analyze/. A no-op wrapper in every other build, so it stays out of the
+// runtime path entirely.
+const withBundleAnalyzer = bundleAnalyzer({
+  enabled: process.env.ANALYZE === "true",
+});
 
 // Static security headers applied on EVERY host, not just Vercel — these used
 // to live ONLY in vercel.json, so a non-Vercel / self-hosted deploy shipped
@@ -35,6 +43,16 @@ const nextConfig: NextConfig = {
     "@zintus/types",
     "@zintus/ui",
   ],
+  experimental: {
+    // Barrel-import tree-shaking. lucide-react is on Next's default
+    // optimizePackageImports list, but that default only applies to the
+    // Turbopack builds — this app builds with `--webpack`, where the list is NOT
+    // applied automatically, so we set it explicitly. Each `import { Icon } from
+    // "lucide-react"` is rewritten to a direct per-icon module import, so only
+    // the handful of icons actually used ship, never the ~1k-icon barrel.
+    // @radix-ui/react-tooltip is a namespace re-export with the same shape.
+    optimizePackageImports: ["lucide-react", "@radix-ui/react-tooltip"],
+  },
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];
   },
@@ -56,4 +74,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default withBundleAnalyzer(nextConfig);

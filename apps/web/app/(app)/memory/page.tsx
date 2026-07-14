@@ -283,7 +283,7 @@ export default function MemoryPage() {
               borderRadius: 8,
               border: "none",
               background: "var(--c-accent, #6366f1)",
-              color: "#fff",
+              color: "var(--c-accent-contrast, #fff)",
               fontWeight: 600,
               fontSize: 13.5,
               cursor: importing ? "default" : "pointer",
@@ -314,7 +314,8 @@ export default function MemoryPage() {
                 fontSize: 13,
                 fontWeight: 600,
                 cursor: "pointer",
-                color: active ? "#fff" : "var(--color-text-sub)",
+                // V9 13.3: pair active ink with the accent fill.
+                color: active ? "var(--c-accent-contrast)" : "var(--color-text-sub)",
                 background: active
                   ? "var(--c-accent, #6366f1)"
                   : "transparent",
@@ -427,7 +428,7 @@ export default function MemoryPage() {
               borderRadius: 8,
               border: "none",
               background: "var(--c-accent, #6366f1)",
-              color: "#fff",
+              color: "var(--c-accent-contrast, #fff)",
               fontWeight: 600,
               fontSize: 13.5,
               cursor: saving ? "default" : "pointer",
