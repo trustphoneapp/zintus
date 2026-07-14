@@ -16,6 +16,7 @@
     { "path": "./packages/mcp" },
     { "path": "./packages/context-compiler" },
     { "path": "./packages/engine" },
+    { "path": "./packages/engineer" },
     { "path": "./packages/tokzen" },
     { "path": "./packages/agent" },
     { "path": "./packages/scaffold" },

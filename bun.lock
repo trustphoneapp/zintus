@@ -285,6 +285,17 @@
         "@types/bun": "latest",
       },
     },
+    "packages/engineer": {
+      "name": "@zintus/engineer",
+      "version": "0.0.1",
+      "dependencies": {
+        "zod": "^3.25.76",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "@types/node": "^22.0.0",
+      },
+    },
     "packages/keychain": {
       "name": "@zintus/keychain",
       "version": "0.0.1",
@@ -1295,6 +1306,8 @@
     "@zintus/desktop": ["@zintus/desktop@workspace:apps/desktop"],
 
     "@zintus/engine": ["@zintus/engine@workspace:packages/engine"],
+
+    "@zintus/engineer": ["@zintus/engineer@workspace:packages/engineer"],
 
     "@zintus/gateway": ["@zintus/gateway@workspace:apps/gateway"],
 

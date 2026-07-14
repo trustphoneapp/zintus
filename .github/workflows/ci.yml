@@ -16,6 +16,18 @@ jobs:
       - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
       - run: bun run typecheck
 
+  engineer-foundation:
+    runs-on: ubuntu-latest
+    needs: typecheck
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
+      - run: bun run --filter @zintus/engineer typecheck
+      - run: bun run --filter @zintus/engineer test
+
   security:
     runs-on: ubuntu-latest
     # gitleaks-action lists the PR's commits via the API, which needs
