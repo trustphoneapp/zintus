@@ -80,6 +80,7 @@ export default function EngineerPage() {
     const [canonical, history] = await Promise.allSettled([getEngineerRepository(), listEngineerRuns()]);
     if (canonical.status === "fulfilled") setRepository(canonical.value);
     if (history.status === "fulfilled") setRecentRuns(history.value);
+    if (canonical.status === "fulfilled" || history.status === "fulfilled") setError(null);
     if (canonical.status === "rejected" && history.status === "rejected") {
       setError(canonical.reason instanceof Error ? canonical.reason.message : "Engineer gateway is unavailable");
     }
@@ -92,7 +93,9 @@ export default function EngineerPage() {
     ]);
     setRun(status.run); setPlan(storedPlan); setData(storedData); setEvents([]); setManagerError(status.lastError);
     window.localStorage.setItem(RUN_STORAGE_KEY, runId);
-    if (!TERMINAL.has(status.run.state)) watch(runId);
+    // The stream replays durable history from sequence zero and closes after a
+    // terminal ledger is drained, so reopened completed runs get a full timeline.
+    watch(runId);
   }, [watch]);
 
   const returnToRuns = useCallback(() => {
