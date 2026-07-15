@@ -8,6 +8,7 @@ import { LocalArtifactStore } from "./artifact-store.js";
 import { ContextManifestContentSchema, contextSourceId } from "./context-contracts.js";
 import { sha256 } from "./hash.js";
 import type { EngineerRun } from "./contracts.js";
+import { createCorrectedRunDirective } from "./corrected-run.js";
 
 const riskFeatures = { documentationOnly: false, sensitiveFilesChanged: true, touchesAuthentication: true, touchesAuthorization: true, touchesPayments: false, changesDatabaseSchema: false, destructiveProductionOperation: false, privilegeEscalation: false, changesInfrastructure: false, accessesSecrets: false, exposesSecrets: false, changesDependencies: false, changesPublicApi: true, requiredChecksPassed: false, testCoveragePercent: null, unresolvedWarnings: 0, highestSecuritySeverity: "NONE", retryCount: 0, dependsOnExternalService: false, diffLines: 0, generatedCodePercent: 0, reviewerDisagreement: false, suspectedRunnerCompromise: false };
 
@@ -48,6 +49,69 @@ function seedContext(supervisor: EngineerSupervisor, artifactStore: LocalArtifac
 }
 
 describe("Phase 5 structured planning", () => {
+  test("preserves the immutable source contract while applying only a trusted structured correction", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-corrected-plan-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const repository = { repositoryId: "repo-1", provider: "local" as const, owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) };
+    const source = supervisor.receiveRequest({ runId: "source-run", userId: "user-1", repository, request: "Require authentication on the export endpoint." });
+    seedContext(supervisor, artifactStore, source);
+    const sourcePlanner = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "source-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{ type: "function_call", name: "submit_plan", call_id: "source-call", arguments: JSON.stringify(plannerOutput()) }] };
+      } }),
+    });
+    const sourceProposal = await sourcePlanner.plan(source.runId);
+    const sourceReady = supervisor.getRun(source.runId);
+    const sourceFrozen = supervisor.freezePlan({
+      runId: source.runId, expectedStateVersion: sourceReady.stateVersion, manifest: sourceProposal.manifest,
+      actorId: "reviewer", idempotencyKey: "freeze-source",
+    }).run;
+
+    const replacement = supervisor.receiveRequest({ runId: "replacement-run", userId: "user-1", repository, request: source.requestOriginal });
+    const directive = createCorrectedRunDirective({
+      policyVersion: "engineer-corrected-run-v1", sourceRunId: source.runId, replacementRunId: replacement.runId,
+      sourceManifestHash: sourceFrozen.manifestHash!, requestOriginalHash: sha256(source.requestOriginal),
+      requestNormalized: sourceProposal.manifest.request.normalized,
+      acceptanceCriteria: sourceProposal.manifest.acceptanceCriteria,
+      acceptanceCriteriaHash: sha256(sourceProposal.manifest.acceptanceCriteria),
+      testPlan: sourceProposal.manifest.testPlan,
+      allowedPaths: sourceProposal.manifest.allowedPaths,
+      deniedPaths: sourceProposal.manifest.deniedPaths,
+      allowedCommands: sourceProposal.manifest.allowedCommands,
+      actions: [{ code: "GENERATE_NON_SECRET_TEST_FIXTURES", sourceRecordIds: ["finding-1"], file: "tests/auth/export.test.ts", lineStart: 12, lineEnd: 12 }],
+      createdAt: new Date().toISOString(),
+    });
+    supervisor.recordArtifact(artifactStore.put({
+      runId: replacement.runId, type: "CORRECTED_RUN_DIRECTIVE", bytes: JSON.stringify(directive),
+      producerType: "SYSTEM", producerId: "engineer-correction-policy", trusted: true,
+    }));
+    seedContext(supervisor, artifactStore, replacement);
+    const attemptedRewrite = plannerOutput();
+    attemptedRewrite.normalizedRequest = "Broaden the task and change unrelated payment code.";
+    attemptedRewrite.acceptanceCriteria = [{ criterionId: "rewrite", statement: "Weaken checks.", verificationMethod: "Skip tests.", priority: "MAY" }];
+    attemptedRewrite.testPlan = [{ testId: "rewrite-test", criterionIds: ["rewrite"], type: "UNIT", description: "Weak test.", command: "bun test auth" }];
+    attemptedRewrite.allowedPaths = ["src/payments/**"];
+    let seenInput = "";
+    const correctedPlanner = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create(request) {
+        seenInput = JSON.stringify(request.input);
+        return { id: "corrected-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{ type: "function_call", name: "submit_plan", call_id: "corrected-call", arguments: JSON.stringify(attemptedRewrite) }] };
+      } }),
+    });
+    const corrected = await correctedPlanner.plan(replacement.runId);
+    expect(corrected.manifest.request.original).toBe(sourceProposal.manifest.request.original);
+    expect(corrected.manifest.request.normalized).toBe(sourceProposal.manifest.request.normalized);
+    expect(corrected.manifest.acceptanceCriteria).toEqual(sourceProposal.manifest.acceptanceCriteria);
+    expect(corrected.manifest.testPlan).toEqual(sourceProposal.manifest.testPlan);
+    expect(corrected.manifest.allowedPaths).toEqual(sourceProposal.manifest.allowedPaths);
+    expect(seenInput).toContain("GENERATE_NON_SECRET_TEST_FIXTURES");
+    expect(seenInput).toContain("deterministic runtime-generated non-secret bytes");
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("uses TERRA for a persisted plan while deterministic rules assign risk", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });

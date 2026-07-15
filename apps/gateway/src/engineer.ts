@@ -12,6 +12,9 @@ import {
   type TaskManifestContent,
   type LocalArtifactStore,
   engineerObservabilitySnapshot,
+  createCorrectedRunDirective,
+  manifestPatternMatchesPath,
+  type SafeCorrectionCode,
   sha256,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
@@ -197,6 +200,141 @@ export class EngineerRunManager {
         }).run
       : currentStale;
     return { supersededRun, replacementRun: replacement };
+  }
+
+  /**
+   * Creates a distinct run with the exact original request and acceptance
+   * criteria. Only bounded, policy-defined corrections derived from durable
+   * findings/failures cross into the replacement run.
+   */
+  async createCorrectedRun(principal: EngineerPrincipal, runId: string): Promise<{
+    sourceRun: EngineerRun;
+    replacementRun: EngineerRun;
+    plan: Awaited<ReturnType<EngineerPlanningManager["plan"]>>;
+  }> {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    if (!this.options.planning || !this.options.context || !this.options.artifactStore) {
+      throw new Error("corrected-run recovery is not configured on this gateway");
+    }
+    const sourceRun = this.options.supervisor.getRun(runId);
+    if (!["SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "REJECTED", "REVIEW_REJECTED", "FAILED"].includes(sourceRun.state)) {
+      throw new Error(`corrected-run recovery is not available from ${sourceRun.state}`);
+    }
+    const sourceManifest = this.options.supervisor.getManifest(runId);
+    if (!sourceManifest) throw new Error("corrected-run recovery requires the original frozen manifest");
+    await this.options.preflight.assertRunAdmission(sourceRun.repository);
+
+    const actions = this.deriveSafeCorrections(runId, sourceManifest.allowedPaths);
+    if (actions.length === 0) {
+      throw new Error("no structured safe correction is available for this run; inspect the evidence and create a bounded new request");
+    }
+    const replacementRunId = `corrected-${sha256({
+      sourceRunId: runId,
+      sourceManifestHash: sourceManifest.manifestHash,
+      actions,
+    }).slice("sha256:".length, "sha256:".length + 32)}`;
+    let replacement = this.options.supervisor.listRuns().find((candidate) => candidate.runId === replacementRunId);
+    if (!replacement) {
+      replacement = this.options.supervisor.receiveRequest({
+        runId: replacementRunId,
+        userId: principal.ownerId,
+        repository: sourceRun.repository,
+        request: sourceRun.requestOriginal,
+      });
+    }
+    if (replacement.requestOriginal !== sourceRun.requestOriginal || sha256(replacement.repository) !== sha256(sourceRun.repository)) {
+      throw new Error("existing corrected run does not match its immutable source identity");
+    }
+
+    const existingDirective = this.options.supervisor.listArtifacts(replacementRunId)
+      .find((artifact) => artifact.type === "CORRECTED_RUN_DIRECTIVE");
+    if (!existingDirective) {
+      const createdAt = new Date().toISOString();
+      const directive = createCorrectedRunDirective({
+        policyVersion: "engineer-corrected-run-v1",
+        sourceRunId: runId,
+        replacementRunId,
+        sourceManifestHash: sourceManifest.manifestHash,
+        requestOriginalHash: sha256(sourceRun.requestOriginal),
+        requestNormalized: sourceManifest.request.normalized,
+        acceptanceCriteria: sourceManifest.acceptanceCriteria,
+        acceptanceCriteriaHash: sha256(sourceManifest.acceptanceCriteria),
+        testPlan: sourceManifest.testPlan,
+        allowedPaths: sourceManifest.allowedPaths,
+        deniedPaths: sourceManifest.deniedPaths,
+        allowedCommands: sourceManifest.allowedCommands,
+        actions,
+        createdAt,
+      });
+      this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+        runId: replacementRunId,
+        type: "CORRECTED_RUN_DIRECTIVE",
+        bytes: JSON.stringify(directive),
+        producerType: "SYSTEM",
+        producerId: "engineer-correction-policy",
+        trusted: true,
+      }));
+    }
+
+    if (replacement.state === "REQUEST_RECEIVED") this.options.context.build(replacementRunId);
+    let plan = this.options.supervisor.latestPlanProposal(replacementRunId);
+    if (["REQUEST_RECEIVED", "PLANNING", "REPLANNING"].includes(replacement.state)) {
+      plan = await this.options.planning.plan(replacementRunId);
+    }
+    if (!plan) throw new Error(`corrected run ${replacement.state} has no durable plan proposal`);
+    replacement = this.options.supervisor.getRun(replacementRunId);
+    return { sourceRun, replacementRun: replacement, plan };
+  }
+
+  private deriveSafeCorrections(runId: string, allowedPaths: string[]): Array<{
+    code: SafeCorrectionCode;
+    sourceRecordIds: string[];
+    file: string | null;
+    lineStart: number | null;
+    lineEnd: number | null;
+  }> {
+    const actions: Array<{
+      code: SafeCorrectionCode;
+      sourceRecordIds: string[];
+      file: string | null;
+      lineStart: number | null;
+      lineEnd: number | null;
+    }> = [];
+    for (const finding of this.options.supervisor.listSecurityFindings(runId).filter((item) => item.status === "OPEN")) {
+      const signal = `${finding.category} ${finding.description}`.toLowerCase();
+      const boundedFile = finding.file && !finding.file.startsWith("/") && !finding.file.includes("\\") &&
+          !finding.file.split("/").some((segment) => !segment || segment === "." || segment === "..") &&
+          allowedPaths.some((pattern) => manifestPatternMatchesPath(pattern, finding.file!))
+        ? finding.file
+        : null;
+      const code: SafeCorrectionCode = /possible.secret|credential.like|hard.?coded (?:secret|credential)|test secret/.test(signal)
+        ? "GENERATE_NON_SECRET_TEST_FIXTURES"
+        : /unauthori[sz]ed|outside (?:the )?(?:allowlist|allowed paths)|scope violation/.test(signal)
+          ? "REMOVE_UNAUTHORIZED_PATH_CHANGES"
+          : /test (?:integrity|baseline)|baseline test/.test(signal)
+            ? "RESTORE_TEST_BASELINE_INTEGRITY"
+            : "ADDRESS_RECORDED_SECURITY_FINDING";
+      actions.push({
+        code,
+        sourceRecordIds: [finding.securityFindingId],
+        file: boundedFile,
+        lineStart: boundedFile ? finding.lineStart : null,
+        lineEnd: boundedFile ? finding.lineEnd : null,
+      });
+    }
+    for (const failure of this.options.supervisor.listFailures(runId)) {
+      if (failure.failureClass !== "TEST_FAILURE" && !/TEST|VERIFICATION/.test(failure.reasonCode)) continue;
+      actions.push({
+        code: "REPAIR_FAILED_VERIFICATION",
+        sourceRecordIds: [failure.failureId],
+        file: null,
+        lineStart: null,
+        lineEnd: null,
+      });
+    }
+    const unique = new Map(actions.map((action) => [sha256(action), action]));
+    return [...unique.values()];
   }
 
   /** Prevents new detached work, aborts execution, and waits for verification/publication cleanup. */

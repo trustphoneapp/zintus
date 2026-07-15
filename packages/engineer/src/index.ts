@@ -29,6 +29,7 @@ export * from "./phase3-evaluation-matrix.js";
 export * from "./phase4-evaluation-matrix.js";
 export * from "./phase56-evaluation-matrix.js";
 export * from "./control-contracts.js";
+export * from "./corrected-run.js";
 export * from "./git-service.js";
 export * from "./publication-manager.js";
 export * from "./planning.js";

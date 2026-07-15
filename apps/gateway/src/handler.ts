@@ -2846,6 +2846,9 @@ export function createGatewayHandler(
         if (action === "recover-stale-base" && request.method === "POST") {
           return json(request, await engineerRuns.recoverStaleBase(engineerPrincipal!, runId), 202);
         }
+        if (action === "corrected-run" && request.method === "POST") {
+          return json(request, await engineerRuns.createCorrectedRun(engineerPrincipal!, runId), 201);
+        }
         if (action === "approval" && request.method === "GET") {
           return json(request, { approval: engineerRuns.approval(runId) });
         }
