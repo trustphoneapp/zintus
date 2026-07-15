@@ -325,6 +325,7 @@ export class IndependentVerifier {
     const execution = this.options.supervisor.recordVerificationExecution(VerificationExecutionRecordSchema.parse({
       verificationExecutionId: (this.options.idFactory ?? randomUUID)(),
       runId: this.options.manifest.runId,
+      verificationPass: this.options.verificationPass ?? 1,
       testId: item.testId,
       commandExecutionId: command.commandExecutionId,
       criterionIds: item.criterionIds,

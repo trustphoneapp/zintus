@@ -93,6 +93,7 @@ export function trustedEvidenceSupportsCriterion(evidence: TrustedEvidence, crit
 export const VerificationExecutionRecordSchema = z.object({
   verificationExecutionId: IdentifierSchema,
   runId: IdentifierSchema,
+  verificationPass: z.number().int().positive().default(1),
   testId: IdentifierSchema,
   commandExecutionId: IdentifierSchema,
   criterionIds: z.array(IdentifierSchema).min(1),

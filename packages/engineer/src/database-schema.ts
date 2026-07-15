@@ -307,6 +307,7 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
     command_execution_id TEXT NOT NULL REFERENCES command_executions(id) ON DELETE RESTRICT,
     type TEXT NOT NULL,
+    verification_pass INTEGER NOT NULL DEFAULT 1,
     random_seed TEXT,
     status TEXT NOT NULL,
     started_at TEXT NOT NULL,

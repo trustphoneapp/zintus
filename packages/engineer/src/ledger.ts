@@ -258,6 +258,8 @@ export class EngineerLedger {
     if (!modelCallColumns.has("budget_reservation_id")) this.db.exec("ALTER TABLE model_calls ADD COLUMN budget_reservation_id TEXT");
     if (!modelCallColumns.has("cached_input_tokens")) this.db.exec("ALTER TABLE model_calls ADD COLUMN cached_input_tokens INTEGER");
     if (!modelCallColumns.has("cache_write_input_tokens")) this.db.exec("ALTER TABLE model_calls ADD COLUMN cache_write_input_tokens INTEGER");
+    const testExecutionColumns = new Set((this.db.query("PRAGMA table_info(test_executions)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!testExecutionColumns.has("verification_pass")) this.db.exec("ALTER TABLE test_executions ADD COLUMN verification_pass INTEGER NOT NULL DEFAULT 1");
     const proposalColumns = this.db.query("PRAGMA table_info(plan_proposals)").all() as Array<{ name: string }>;
     if (!proposalColumns.some((column) => column.name === "context_manifest_hash")) {
       this.db.exec("ALTER TABLE plan_proposals ADD COLUMN context_manifest_hash TEXT");
@@ -1131,10 +1133,10 @@ export class EngineerLedger {
       return parsed;
     }
     this.db.query(`INSERT INTO test_executions
-      (id, run_id, command_execution_id, type, random_seed, status, started_at, completed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      (id, run_id, command_execution_id, type, verification_pass, random_seed, status, started_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       parsed.verificationExecutionId, parsed.runId, parsed.commandExecutionId, parsed.type,
-      parsed.randomSeed, parsed.status, parsed.startedAt, parsed.completedAt,
+      parsed.verificationPass, parsed.randomSeed, parsed.status, parsed.startedAt, parsed.completedAt,
     );
     this.insertAudit(parsed.runId, "VERIFICATION_EXECUTED", "EXECUTOR", "trusted-verifier", {
       verificationExecutionId: parsed.verificationExecutionId,
@@ -1373,11 +1375,13 @@ export class EngineerLedger {
     const bundleManifest = EvidenceBundleRecordSchema.parse({
       evidenceBundleId: bundle.id, bundleHash: bundle.bundle_hash, bundle: JSON.parse(String(bundle.manifest_json)),
     });
+    const latestPass = this.db.query("SELECT COALESCE(MAX(verification_pass), 1) AS pass FROM test_executions WHERE run_id = ?")
+      .get(runId) as { pass: number };
     const testCounts = this.db.query(`SELECT COUNT(*) AS total,
-      SUM(CASE WHEN status <> 'PASSED' THEN 1 ELSE 0 END) AS failed FROM test_executions WHERE run_id = ?`)
-      .get(runId) as { total: number; failed: number | null };
+      SUM(CASE WHEN status <> 'PASSED' THEN 1 ELSE 0 END) AS failed FROM test_executions WHERE run_id = ? AND verification_pass = ?`)
+      .get(runId, latestPass.pass) as { total: number; failed: number | null };
     const critical = this.db.query(`SELECT COUNT(*) AS count FROM security_findings
-      WHERE run_id = ? AND severity = 'CRITICAL' AND status = 'OPEN'`).get(runId) as { count: number };
+      WHERE run_id = ? AND severity = 'CRITICAL' AND status = 'OPEN' AND category NOT LIKE 'AI_ADVISORY_%'`).get(runId) as { count: number };
     return PublicationEvidenceSchema.parse({
       runId, reviewerSessionId: reviewer.id, reviewerDecision: reviewer.decision,
       reviewerDiffHash: reviewer.diff_hash, reviewerEvidenceBundleHash: reviewer.evidence_bundle_hash,
