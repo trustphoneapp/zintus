@@ -63,6 +63,7 @@ export default function EngineerPage() {
   const [githubConfigured, setGithubConfigured] = useState(false);
   const [githubRepos, setGithubRepos] = useState<GithubConnectorRepository[]>([]);
   const [recentRuns, setRecentRuns] = useState<EngineerRun[]>([]);
+  const [showAllRuns, setShowAllRuns] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -289,10 +290,11 @@ export default function EngineerPage() {
       </section>
       {recentRuns.length ? <section className="engineer-card">
         <div className="engineer-section-title"><span>02</span><div><h2>Recent durable runs</h2><p>Reopen any run from the gateway ledger, including after a browser restart.</p></div></div>
-        <div className="engineer-list">{recentRuns.map((item) => <button key={item.runId} onClick={() => void openRun(item.runId)}>
+        <div className="engineer-list">{(showAllRuns ? recentRuns : recentRuns.slice(0, 2)).map((item) => <button key={item.runId} onClick={() => void openRun(item.runId)}>
           <span className={`engineer-status engineer-status--${item.state.toLowerCase()}`}>{item.state.replaceAll("_", " ")}</span>
           <div><strong>{item.requestNormalized || item.requestOriginal}</strong><code>{item.runId}</code></div>
         </button>)}</div>
+        {recentRuns.length > 2 ? <button className="engineer-secondary" onClick={() => setShowAllRuns((value) => !value)}>{showAllRuns ? "Show fewer runs" : `Show ${recentRuns.length - 2} more runs`}</button> : null}
       </section> : null}
       <section className="engineer-card engineer-new-run">
         <div className="engineer-section-title"><span>01</span><div><h2>New engineering run</h2><p>No chat transcript. One evidence-driven workflow.</p></div></div>
