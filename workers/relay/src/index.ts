@@ -790,6 +790,20 @@ app.get("/api/connectors/github/repos", async (c) => {
   return c.json({ repositories: repos.map((repo) => ({ id: String(repo.id), fullName: repo.full_name, defaultBranch: repo.default_branch, private: repo.private, cloneUrl: repo.clone_url })) });
 });
 
+app.get("/api/connectors/github/commit", async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  const owner = c.req.query("owner"); const repo = c.req.query("repo"); const branch = c.req.query("branch");
+  if (!owner || !repo || !branch) return c.json({ error: "owner, repo, and branch are required" }, 400);
+  const token = await githubToken(c.env, session.user_id);
+  if (!token) return c.json({ error: "GitHub is not connected" }, 409);
+  const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(branch)}`, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Zintus-Engineer" } });
+  if (response.status === 401) return c.json({ error: "GitHub authorization expired; reconnect GitHub" }, 401);
+  if (!response.ok) return c.json({ error: "Unable to inspect the selected branch" }, 502);
+  const commit = await response.json() as { sha?: string };
+  return commit.sha ? c.json({ sha: commit.sha }) : c.json({ error: "GitHub returned no commit" }, 502);
+});
+
 app.delete("/api/connectors/github", async (c) => {
   const session = await requireSession(c);
   if (!session) return c.json({ error: "Unauthorized" }, 401);

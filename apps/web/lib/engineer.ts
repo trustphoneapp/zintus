@@ -47,6 +47,7 @@ async function relayRequest<T>(path: string, init?: RequestInit): Promise<T> {
 export async function getGithubConnector(): Promise<{ configured: boolean; connected: boolean }> { return relayRequest("/api/connectors/github"); }
 export async function startGithubConnector(): Promise<string> { return (await relayRequest<{ authorizationUrl: string }>("/api/connectors/github/start", { method: "POST" })).authorizationUrl; }
 export async function listGithubConnectorRepositories(): Promise<GithubConnectorRepository[]> { return (await relayRequest<{ repositories: GithubConnectorRepository[] }>("/api/connectors/github/repos")).repositories; }
+export async function getGithubBranchCommit(owner: string, repo: string, branch: string): Promise<string> { return (await relayRequest<{ sha: string }>(`/api/connectors/github/commit?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`)).sha; }
 export async function disconnectGithubConnector(): Promise<void> { await relayRequest("/api/connectors/github", { method: "DELETE" }); }
 
 export async function createEngineerRun(input: { repository: EngineerRepository; request: string }): Promise<EngineerRun> {

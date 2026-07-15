@@ -12,6 +12,7 @@ import {
   getEngineerPlan,
   getEngineerRepository,
   getGithubConnector,
+  getGithubBranchCommit,
   listGithubConnectorRepositories,
   startGithubConnector,
   disconnectGithubConnector,
@@ -281,7 +282,7 @@ export default function EngineerPage() {
       <section className="engineer-card" id="repository-connector">
         <div className="engineer-section-title"><span>01</span><div><h2>Repository connector</h2><p>Local is the default. GitHub access is scoped to repositories you authorize.</p></div></div>
         <div className="engineer-actions"><span className="engineer-chip">{githubConnected ? "GitHub connected" : "Local repository"}</span>{githubConfigured && !githubConnected ? <button onClick={() => void connectGithub()} disabled={busy}>Connect GitHub</button> : null}{githubConnected ? <><button onClick={() => void loadGithubRepos()} disabled={busy}>Choose GitHub repository</button><button onClick={() => void disconnectGithub()} disabled={busy}>Disconnect</button></> : null}</div>
-        {githubRepos.length ? <div className="engineer-list">{githubRepos.map((repo) => <button key={repo.id} onClick={() => { const [owner, name] = repo.fullName.split("/"); setRepository({ repositoryId: repo.id, provider: "github", owner: owner ?? "", name: name ?? "", baseBranch: repo.defaultBranch, baseCommitSha: "" }); setGithubRepos([]); }}><strong>{repo.fullName}</strong><span>{repo.private ? "Private" : "Public"} · {repo.defaultBranch}</span></button>)}</div> : null}
+        {githubRepos.length ? <div className="engineer-list">{githubRepos.map((repo) => <button key={repo.id} onClick={() => void (async () => { const [owner, name] = repo.fullName.split("/"); try { setBusy(true); const sha = await getGithubBranchCommit(owner ?? "", name ?? "", repo.defaultBranch); setRepository({ repositoryId: repo.id, provider: "github", owner: owner ?? "", name: name ?? "", baseBranch: repo.defaultBranch, baseCommitSha: sha }); setGithubRepos([]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to inspect GitHub branch"); } finally { setBusy(false); } })()}><strong>{repo.fullName}</strong><span>{repo.private ? "Private" : "Public"} · {repo.defaultBranch}</span></button>)}</div> : null}
         {!githubConfigured ? <p className="engineer-muted">GitHub is not configured on this gateway. Local repositories remain available.</p> : null}
       </section>
       {recentRuns.length ? <section className="engineer-card">

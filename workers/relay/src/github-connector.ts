@@ -31,17 +31,17 @@ export function githubConfigured(env: GithubEnv): boolean {
 export async function startGithubAuthorization(env: GithubEnv, session: SessionPayload): Promise<string> {
   if (!githubConfigured(env)) throw new Error("GitHub connector is not configured");
   const state = crypto.randomUUID();
-  await env.KV.put(`github:oauth:${state}`, JSON.stringify({ userId: session.user_id }), { expirationTtl: 600 });
+  await env.KV.put(`github:oauth:${state}`, JSON.stringify({ userId: session.user_id, sessionId: session.session_id }), { expirationTtl: 600 });
   const params = new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID!, redirect_uri: env.GITHUB_CALLBACK_URL!, state });
   return `https://github.com/login/oauth/authorize?${params}`;
 }
 
-export async function completeGithubAuthorization(env: GithubEnv, state: string, code: string): Promise<string | null> {
+export async function completeGithubAuthorization(env: GithubEnv, state: string, code: string, sessionId: string): Promise<string | null> {
   const raw = await env.KV.get(`github:oauth:${state}`);
   if (!raw || !githubConfigured(env)) return null;
   await env.KV.delete(`github:oauth:${state}`);
-  const owner = JSON.parse(raw) as { userId?: string };
-  if (!owner.userId) return null;
+  const owner = JSON.parse(raw) as { userId?: string; sessionId?: string };
+  if (!owner.userId || !owner.sessionId || owner.sessionId !== sessionId) return null;
   const response = await fetch("https://github.com/login/oauth/access_token", { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code, redirect_uri: env.GITHUB_CALLBACK_URL }) });
   if (!response.ok) return null;
   const payload = await response.json() as { access_token?: string };
