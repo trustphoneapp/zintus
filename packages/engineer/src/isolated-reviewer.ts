@@ -11,6 +11,7 @@ import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-r
 import {
   ReviewFindingRecordSchema,
   ReviewerSessionRecordSchema,
+  trustedEvidenceSupportsCriterion,
   type ReviewFindingRecord,
   type ReviewerSessionRecord,
 } from "./verification-contracts.js";
@@ -119,15 +120,41 @@ export interface IsolatedReviewResult {
 
 function validateApprovalSemantics(input: ReviewerInput, output: ReviewerOutput): void {
   const criteria = new Map(input.manifest.acceptanceCriteria.map((criterion) => [criterion.criterionId, criterion]));
-  const trustedEvidence = new Set(input.trustedEvidence.map((evidence) => evidence.evidenceId));
+  const trustedEvidence = new Map(input.trustedEvidence.map((evidence) => [evidence.evidenceId, evidence]));
   const coverage = new Map<string, ReviewerOutput["requirementCoverage"][number]>();
+  const findingIds = new Set<string>();
   for (const item of output.requirementCoverage) {
     if (!criteria.has(item.criterionId)) throw new Error(`Reviewer referenced unknown criterion ${item.criterionId}`);
     if (coverage.has(item.criterionId)) throw new Error(`Reviewer duplicated criterion coverage ${item.criterionId}`);
     if (item.evidenceIds.some((evidenceId) => !trustedEvidence.has(evidenceId))) {
       throw new Error(`Reviewer referenced evidence outside the trusted bundle for ${item.criterionId}`);
     }
+    if (item.status === "SATISFIED" && !item.evidenceIds.some((evidenceId) =>
+      trustedEvidenceSupportsCriterion(trustedEvidence.get(evidenceId)!, item.criterionId))) {
+      throw new Error(`Reviewer marked ${item.criterionId} satisfied without successful criterion-bound executor evidence`);
+    }
     coverage.set(item.criterionId, item);
+  }
+  for (const finding of output.findings) {
+    if (findingIds.has(finding.findingId)) throw new Error(`Reviewer duplicated finding ${finding.findingId}`);
+    findingIds.add(finding.findingId);
+    if (finding.criterionIds.some((criterionId) => !criteria.has(criterionId))) {
+      throw new Error(`Reviewer finding ${finding.findingId} references an unknown criterion`);
+    }
+    if (finding.evidenceIds.some((evidenceId) => !trustedEvidence.has(evidenceId))) {
+      throw new Error(`Reviewer finding ${finding.findingId} references evidence outside the trusted bundle`);
+    }
+  }
+  if (output.decision === "REQUEST_CHANGES" && output.findings.length === 0) {
+    throw new Error("Reviewer REQUEST_CHANGES requires at least one structured finding");
+  }
+  if (
+    (output.decision === "REJECT" || output.decision === "HUMAN_REVIEW_REQUIRED")
+    && output.findings.length === 0
+    && output.unsupportedClaims.length === 0
+    && output.residualRisks.length === 0
+  ) {
+    throw new Error(`Reviewer ${output.decision} requires a structured rationale`);
   }
   if (output.decision !== "APPROVE") return;
   const invalidMust = input.manifest.acceptanceCriteria.filter((criterion) => {

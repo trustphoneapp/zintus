@@ -10,8 +10,10 @@
   management is not yet implemented.
 - `QUEUED` dispatch and every Phase 2 in-progress execution state survive restart
   through durable fenced leases, bounded heartbeats, watchdog recovery, clean
-  exact-base requeue, and orphaned Phase 2 worktree cleanup. Recovery for later
-  verification/publication states remains a separate Phase 3/4 concern.
+  exact-base requeue, and orphaned Phase 2 worktree cleanup. Every active Phase 3
+  verification/repair state also recovers from an immutable retained-sandbox
+  checkpoint and restarts independent verification from `FAST_CHECKS`.
+  Publication-state recovery remains a Phase 4 concern.
 - The warm pool provides atomic one-time claims, TTL rejection, validation,
   quarantine, cold fallback, one-time destruction after claim, and a periodic
   maximum/health sweep. It does not yet replenish to a configured minimum or
@@ -37,6 +39,8 @@
 - TERRA Tester and Security outputs are intentionally advisory. Deterministic
   checks and trusted command records remain authoritative, so the current security
   scan depth is limited to the frozen commands plus the built-in diff scanner.
+  LUNA failure triage is likewise advisory and is invoked only after a deterministic
+  failure classification. SOL remains reserved for Builder/Reviewer reasoning.
 - Web and desktop replay the durable SSE ledger with `Last-Event-ID`/sequence
   cursors, heartbeat comments, bounded pages, duplicate/gap checks, and bounded
   reconnect. Mobile-specific Engineer screens are not yet implemented.

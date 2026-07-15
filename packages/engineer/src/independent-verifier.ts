@@ -9,6 +9,7 @@ import { assessRepeatedTest } from "./hardening.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import type { TrustedCommandExecutor } from "./trusted-executor.js";
 import {
+  buildVerificationCoverageMatrix,
   SecurityFindingRecordSchema,
   VerificationExecutionRecordSchema,
   type SecurityFindingRecord,
@@ -75,6 +76,29 @@ export class StableRequiredTestFailure extends Error {
   }
 }
 
+/** A deterministic terminal classification that can be summarized, but never overridden, by LUNA. */
+export class IndependentVerificationFailure extends Error {
+  readonly failureClass: FailureRecord["failureClass"];
+  readonly reasonCode: string;
+  readonly evidenceIds: string[];
+  readonly details: Record<string, unknown>;
+
+  constructor(input: {
+    failureClass: FailureRecord["failureClass"];
+    reasonCode: string;
+    evidenceIds: string[];
+    details: Record<string, unknown>;
+    message: string;
+  }) {
+    super(input.message);
+    this.name = "IndependentVerificationFailure";
+    this.failureClass = input.failureClass;
+    this.reasonCode = input.reasonCode;
+    this.evidenceIds = [...input.evidenceIds];
+    this.details = { ...input.details };
+  }
+}
+
 const GROUPS: ReadonlyArray<{
   state: "FAST_CHECKS" | "UNIT_TESTING" | "INTEGRATION_TESTING" | "E2E_TESTING";
   types: ReadonlySet<TestPlanItem["type"]>;
@@ -103,6 +127,52 @@ export class IndependentVerifier {
   async run(): Promise<IndependentVerificationOutput> {
     const executions: VerificationExecutionRecord[] = [];
     const trustedEvidence: TrustedEvidence[] = [];
+    const coverageMatrix = buildVerificationCoverageMatrix(this.options.manifest);
+    const coverageArtifact = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+      runId: this.options.manifest.runId,
+      type: "VERIFICATION_COVERAGE_MATRIX",
+      bytes: JSON.stringify(coverageMatrix),
+      producerType: "SYSTEM",
+      producerId: "verification-coverage-policy",
+      trusted: true,
+    }));
+    const coverageEvidence = TrustedEvidenceSchema.parse({
+      evidenceId: coverageArtifact.artifactId,
+      runId: this.options.manifest.runId,
+      eventType: "VERIFICATION_COVERAGE_MATRIX",
+      producerType: "SYSTEM",
+      producerId: "verification-coverage-policy",
+      sha256: coverageArtifact.sha256,
+      payload: coverageMatrix,
+      createdAt: coverageArtifact.createdAt,
+    });
+    trustedEvidence.push(coverageEvidence);
+    if (!coverageMatrix.allPlanItemsExecutable || !coverageMatrix.securityGateCovered || !coverageMatrix.allMustCriteriaCovered) {
+      const uncoveredCriterionIds = coverageMatrix.criteria
+        .filter((criterion) => criterion.priority === "MUST" && criterion.status === "UNCOVERED")
+        .map((criterion) => criterion.criterionId);
+      const reasonCode = !coverageMatrix.allPlanItemsExecutable
+        ? "NON_EXECUTABLE_VERIFICATION_PLAN_ITEM"
+        : !coverageMatrix.securityGateCovered
+          ? "MANDATORY_SECURITY_GATE_MISSING"
+          : "MANDATORY_VERIFICATION_COVERAGE_GAP";
+      const failureClass = reasonCode === "MANDATORY_SECURITY_GATE_MISSING" ? "SECURITY_FAILURE" : "TEST_FAILURE";
+      this.recordFailure(failureClass, reasonCode, [coverageArtifact.artifactId], false, {
+        matrixHash: coverageMatrix.matrixHash,
+        uncoveredCriterionIds,
+        nonExecutableTestIds: coverageMatrix.nonExecutableTestIds,
+        executableSecurityTestIds: coverageMatrix.executableSecurityTestIds,
+      });
+      const nextState = reasonCode === "MANDATORY_SECURITY_GATE_MISSING" ? "SECURITY_ESCALATION" : "VERIFICATION_INCOMPLETE";
+      this.transition(nextState, reasonCode, [coverageArtifact.artifactId]);
+      throw new IndependentVerificationFailure({
+        failureClass,
+        reasonCode,
+        evidenceIds: [coverageArtifact.artifactId],
+        details: { uncoveredCriterionIds, nonExecutableTestIds: coverageMatrix.nonExecutableTestIds },
+        message: `verification plan rejected: ${reasonCode}`,
+      });
+    }
     for (let groupIndex = 0; groupIndex < GROUPS.length; groupIndex += 1) {
       const group = GROUPS[groupIndex]!;
       const items = this.options.manifest.testPlan.filter((item) => group.types.has(item.type));
@@ -157,7 +227,13 @@ export class IndependentVerifier {
             classification: flake.classification, quarantineRequired: flake.quarantineRequired,
           });
           this.transition("VERIFICATION_INCOMPLETE", reasonCode, evidenceIds);
-          throw new Error(`independent verification failed for ${item.testId}: ${result.execution.status}`);
+          throw new IndependentVerificationFailure({
+            failureClass,
+            reasonCode: failureReason,
+            evidenceIds,
+            details: { testId: item.testId, statuses, classification: flake.classification },
+            message: `independent verification failed for ${item.testId}: ${result.execution.status}`,
+          });
         }
       }
     }
@@ -167,11 +243,23 @@ export class IndependentVerifier {
       executions.push(result.execution);
       trustedEvidence.push(result.evidence);
       if (result.execution.status !== "PASSED") {
-        this.recordFailure("SECURITY_FAILURE", "INDEPENDENT_SECURITY_CHECK_FAILED", [result.evidence.evidenceId], false, {
+        const failureClass = result.execution.status === "BLOCKED" ? "SANDBOX_FAILURE" : "SECURITY_FAILURE";
+        const reasonCode = result.execution.status === "BLOCKED"
+          ? "INDEPENDENT_SECURITY_COMMAND_BLOCKED"
+          : result.execution.status === "TIMED_OUT"
+            ? "INDEPENDENT_SECURITY_CHECK_TIMED_OUT"
+            : "INDEPENDENT_SECURITY_CHECK_FAILED";
+        this.recordFailure(failureClass, reasonCode, [result.evidence.evidenceId], false, {
           testId: item.testId, status: result.execution.status,
         });
-        this.transition("SECURITY_ESCALATION", "INDEPENDENT_SECURITY_CHECK_FAILED", [result.evidence.evidenceId]);
-        throw new Error(`independent security check failed for ${item.testId}: ${result.execution.status}`);
+        this.transition("SECURITY_ESCALATION", reasonCode, [result.evidence.evidenceId]);
+        throw new IndependentVerificationFailure({
+          failureClass,
+          reasonCode,
+          evidenceIds: [result.evidence.evidenceId],
+          details: { testId: item.testId, status: result.execution.status },
+          message: `independent security check failed for ${item.testId}: ${result.execution.status}`,
+        });
       }
     }
     const securityFindings = this.scanDiff(this.options.diff());
@@ -200,16 +288,22 @@ export class IndependentVerifier {
       payload: report,
       createdAt: securityReportArtifact.createdAt,
     }));
-    if (securityFindings.some((finding) => finding.severity === "CRITICAL")) {
-      this.recordFailure("SECURITY_FAILURE", "CRITICAL_SECURITY_FINDING", [securityReportArtifact.artifactId], false, {
+    if (securityFindings.some((finding) => finding.severity === "HIGH" || finding.severity === "CRITICAL")) {
+      this.recordFailure("SECURITY_FAILURE", "HIGH_OR_CRITICAL_SECURITY_FINDING", [securityReportArtifact.artifactId], false, {
         reportSha256: securityReportArtifact.sha256,
-        criticalFindingIds: securityFindings
-          .filter((finding) => finding.severity === "CRITICAL")
+        blockingFindingIds: securityFindings
+          .filter((finding) => finding.severity === "HIGH" || finding.severity === "CRITICAL")
           .map((finding) => finding.securityFindingId)
           .sort(),
       });
-      this.transition("SECURITY_ESCALATION", "CRITICAL_SECURITY_FINDING", [securityReportArtifact.artifactId]);
-      throw new Error("critical deterministic security finding blocks review");
+      this.transition("SECURITY_ESCALATION", "HIGH_OR_CRITICAL_SECURITY_FINDING", [securityReportArtifact.artifactId]);
+      throw new IndependentVerificationFailure({
+        failureClass: "SECURITY_FAILURE",
+        reasonCode: "HIGH_OR_CRITICAL_SECURITY_FINDING",
+        evidenceIds: [securityReportArtifact.artifactId],
+        details: { reportSha256: securityReportArtifact.sha256 },
+        message: "high or critical deterministic security finding blocks review",
+      });
     }
     return { executions, securityFindings, trustedEvidence, securityReportArtifact };
   }

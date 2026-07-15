@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { BuilderResult, SandboxRecord } from "./execution-contracts.js";
+import {
+  SandboxWorkspaceCheckpointSchema,
+  type BuilderResult,
+  type SandboxRecord,
+} from "./execution-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import type { CodexBuilderOptions, ResponsesTransport } from "./codex-builder.js";
 import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder } from "./codex-builder.js";
@@ -160,6 +164,47 @@ export class EngineerExecutionManager {
     return this.sandboxes.get(runId) ?? null;
   }
 
+  /** Reconstruct a retained sandbox from an immutable local checkpoint after process restart. */
+  async recoverSandbox(runId: string, resetToHead: boolean): Promise<ProvisionedSandbox> {
+    const existing = this.sandboxes.get(runId);
+    if (existing) return existing;
+    const run = this.options.supervisor.getRun(runId);
+    if (!run.manifestHash) throw new Error("sandbox recovery requires a frozen manifest");
+    const checkpointArtifact = this.options.supervisor.listArtifacts(runId)
+      .filter((artifact) => artifact.type === "SANDBOX_WORKSPACE_CHECKPOINT" && artifact.trusted)
+      .at(-1);
+    if (!checkpointArtifact) throw new Error("retained sandbox checkpoint is unavailable");
+    const checkpoint = SandboxWorkspaceCheckpointSchema.parse(
+      JSON.parse(this.options.artifactStore.read(checkpointArtifact).toString("utf8")),
+    );
+    if (checkpoint.runId !== runId || checkpoint.manifestHash !== run.manifestHash) {
+      throw new Error("retained sandbox checkpoint does not match the active run manifest");
+    }
+    const recovered = await this.options.sandboxManager.recoverAsync({
+      workspace: checkpoint.workspace,
+      sandbox: checkpoint.sandbox,
+      resetToHead,
+    });
+    this.sandboxes.set(runId, recovered);
+    const recovery = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+      runId,
+      type: "SANDBOX_RECOVERY_ATTESTATION",
+      bytes: JSON.stringify({
+        checkpointHash: checkpoint.checkpointHash,
+        checkpointArtifactId: checkpointArtifact.artifactId,
+        sandboxId: recovered.record.sandboxId,
+        workspaceIdentity: recovered.workspace.workspaceIdentity,
+        recoveredCommitSha: await this.options.sandboxManager.currentCommitAsync(recovered.workspace),
+        resetToHead,
+      }),
+      producerType: "SYSTEM",
+      producerId: "engineer-execution-manager",
+      trusted: true,
+    }));
+    if (!recovery.trusted) throw new Error("sandbox recovery attestation must be trusted");
+    return recovered;
+  }
+
   destroy(runId: string): SandboxRecord | null {
     const sandbox = this.sandboxes.get(runId);
     if (!sandbox) return null;
@@ -295,6 +340,7 @@ export class EngineerExecutionManager {
         transition("SANDBOX_READY", "SANDBOX_PREFLIGHT_PASSED", [provisioned.record.sandboxId]);
       }
       this.sandboxes.set(runId, provisioned);
+      this.persistSandboxCheckpoint(initial.manifestHash, provisioned);
       transition("CONTEXT_BUILDING", "BUILDER_CONTEXT_BUILDING");
       const manifest = supervisor.getManifest(runId);
       if (!manifest) throw new Error("frozen manifest is unavailable");
@@ -490,5 +536,25 @@ export class EngineerExecutionManager {
         } catch { /* Expired/fenced leases are recovered by the durable watchdog. */ }
       }
     }
+  }
+
+  private persistSandboxCheckpoint(manifestHash: string, provisioned: ProvisionedSandbox): void {
+    const content = {
+      checkpointVersion: 1 as const,
+      runId: provisioned.record.runId,
+      manifestHash,
+      workspace: provisioned.workspace,
+      sandbox: provisioned.record,
+      createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+    };
+    const checkpoint = SandboxWorkspaceCheckpointSchema.parse({ ...content, checkpointHash: sha256(content) });
+    this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+      runId: checkpoint.runId,
+      type: "SANDBOX_WORKSPACE_CHECKPOINT",
+      bytes: JSON.stringify(checkpoint),
+      producerType: "SYSTEM",
+      producerId: "engineer-execution-manager",
+      trusted: true,
+    }));
   }
 }

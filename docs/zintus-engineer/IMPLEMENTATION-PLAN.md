@@ -146,9 +146,9 @@ but they do not satisfy Phase-3 independent verification gates.
 
 ### Phase 3 — verification
 
-Status: partial for the local single-repository verification slice. Independent
-evidence and Reviewer isolation exist; failed-test Builder repair, complete
-failure classification, and the mandatory evaluation matrix remain incomplete.
+Status: complete in code for the local single-repository verification slice.
+Live Docker/OpenAI activation evidence remains external to this phase and is
+tracked in `KNOWN-LIMITATIONS.md`.
 
 Delivered:
 
@@ -171,9 +171,25 @@ Delivered:
    untrusted, plus immutable hash-bound evidence bundles.
 9. Gateway orchestration through the `REVIEW_APPROVED` phase boundary and
    authenticated claims/evidence read endpoints.
+10. A hash-bound criterion/test coverage matrix that rejects uncovered MUST
+    criteria and non-executable plan items before any command runs.
+11. Mandatory executable security commands for HIGH/CRITICAL manifests and
+    fail-closed HIGH/CRITICAL deterministic diff findings.
+12. Complete deterministic verification failure reasons for failed, timed-out,
+    blocked, flaky, stable-required, plan-coverage, and security-gate failures.
+13. Low-cost LUNA failure triage that is stored as an untrusted advisory and
+    cannot override executor/system authority; normal success uses two TERRA
+    advisories and one isolated SOL review.
+14. Durable retained-sandbox/workspace checkpoints and restart recovery for all
+    active Phase-3 states, including interrupted repair, with Git/image/policy
+    revalidation and a full restart from `FAST_CHECKS`.
+15. A hash-bound mandatory adversarial evaluation matrix covering 16 executable
+    scenarios, including evidence substitution, concurrent workspace mutation,
+    retry exhaustion, recovery, routing, and budget stops.
 
-Exit criteria: package and gateway typechecks, isolation/tamper tests, approval,
-and repair-loop tests pass; publication remains unavailable.
+Exit criteria met in source: package and gateway typechecks, isolation/tamper,
+approval, repair-loop, recovery, routing, security-gate, and evaluation-matrix
+tests pass. Publication remains a Phase-4 concern.
 
 ### Phase 4 — human control and publication
 

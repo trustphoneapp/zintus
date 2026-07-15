@@ -184,6 +184,33 @@ export class GitWorkspaceManager {
     });
   }
 
+  /** Re-attaches to a retained managed worktree without trusting persisted paths blindly. */
+  async recoverExistingAsync(raw: WorkspaceRecord, resetToHead: boolean): Promise<WorkspaceRecord> {
+    const workspace = WorkspaceRecordSchema.parse(raw);
+    const repositoryRoot = realpathSync(workspace.repositoryRoot);
+    const workspaceRoot = realpathSync(workspace.workspaceRoot);
+    if (workspaceRoot !== workspace.workspaceRoot || repositoryRoot !== workspace.repositoryRoot) {
+      throw new Error("retained workspace paths changed after provisioning");
+    }
+    if (!workspaceRoot.startsWith(`${this.workspaceRoot}/`)) {
+      throw new Error("retained workspace is outside the managed root");
+    }
+    const branch = await this.gitAsync(workspaceRoot, ["branch", "--show-current"]);
+    if (branch !== workspace.branchName) throw new Error("retained workspace branch identity mismatch");
+    const base = await this.gitAsync(repositoryRoot, ["rev-parse", "--verify", `${workspace.baseCommitSha}^{commit}`]);
+    if (base.toLowerCase() !== workspace.baseCommitSha.toLowerCase()) throw new Error("retained workspace base commit mismatch");
+    const ancestor = await this.runGitAsync(workspaceRoot, ["merge-base", "--is-ancestor", workspace.baseCommitSha, "HEAD"]);
+    if (ancestor.status !== 0) throw new Error("retained workspace HEAD is not descended from the frozen base");
+    const origin = await this.runGitAsync(repositoryRoot, ["remote", "get-url", "origin"]);
+    const originUrl = origin.status === 0 ? origin.stdout.trim() : null;
+    if (originUrl !== workspace.originUrl) throw new Error("retained workspace origin changed after provisioning");
+    if (resetToHead) {
+      await this.gitAsync(workspaceRoot, ["reset", "--hard", "HEAD"]);
+      await this.gitAsync(workspaceRoot, ["clean", "-ffdx"]);
+    }
+    return WorkspaceRecordSchema.parse({ ...workspace, repositoryRoot, workspaceRoot });
+  }
+
   currentCommit(workspace: WorkspaceRecord): string {
     return this.git(workspace.workspaceRoot, ["rev-parse", "HEAD"]);
   }
@@ -194,7 +221,9 @@ export class GitWorkspaceManager {
 
   /** Creates a local evidence checkpoint only; this never pushes or contacts a remote. */
   checkpoint(workspace: WorkspaceRecord, message = "zintus engineer result checkpoint"): string {
-    if (!this.diff(workspace)) return this.currentCommit(workspace);
+    if (this.git(workspace.workspaceRoot, ["status", "--porcelain=v1", "--untracked-files=all"]) === "") {
+      return this.currentCommit(workspace);
+    }
     this.git(workspace.workspaceRoot, ["add", "-A", "--"]);
     this.git(workspace.workspaceRoot, [
       "-c", "user.name=Zintus Engineer",
@@ -205,7 +234,9 @@ export class GitWorkspaceManager {
   }
 
   async checkpointAsync(workspace: WorkspaceRecord, message = "zintus engineer result checkpoint"): Promise<string> {
-    if (!await this.diffAsync(workspace)) return this.currentCommitAsync(workspace);
+    if (await this.gitAsync(workspace.workspaceRoot, ["status", "--porcelain=v1", "--untracked-files=all"]) === "") {
+      return this.currentCommitAsync(workspace);
+    }
     await this.gitAsync(workspace.workspaceRoot, ["add", "-A", "--"]);
     await this.gitAsync(workspace.workspaceRoot, [
       "-c", "user.name=Zintus Engineer", "-c", "user.email=engineer@zintus.local",

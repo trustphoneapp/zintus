@@ -16,8 +16,9 @@ import type { AgentExecutionRecord, ArtifactRecord, SandboxRecord } from "./exec
 import type { EngineerExecutionManager } from "./execution-manager.js";
 import type { DockerSandboxManager, ProvisionedSandbox } from "./sandbox-manager.js";
 import { sha256 } from "./hash.js";
-import { IndependentVerifier, StableRequiredTestFailure } from "./independent-verifier.js";
+import { IndependentVerifier, IndependentVerificationFailure, StableRequiredTestFailure } from "./independent-verifier.js";
 import { IsolatedReviewer, REVIEWER_POLICY_VERSION } from "./isolated-reviewer.js";
+import { LUNA_FAILURE_ADVISOR_POLICY_VERSION, LunaFailureAdvisor } from "./luna-failure-advisor.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import { TERRA_ADVISOR_POLICY_VERSION, TerraAdvisors } from "./terra-advisors.js";
@@ -29,6 +30,7 @@ import {
   ClaimEvidenceRecordSchema,
   EvidenceBundleRecordSchema,
   SecurityFindingRecordSchema,
+  trustedEvidenceSupportsCriterion,
   VerificationResultSchema,
   type ClaimEvidenceRecord,
   type VerificationResult,
@@ -41,6 +43,7 @@ export interface EngineerVerificationManagerOptions {
   artifactStore: LocalArtifactStore;
   transportForRole: (runId: string, role: "BUILDER" | "TESTER" | "SECURITY" | "REVIEWER") =>
     ResponsesTransport | Promise<ResponsesTransport>;
+  transportForFailureClassifier?: (runId: string) => ResponsesTransport | Promise<ResponsesTransport>;
   modelConfiguration?: EngineerModelConfiguration;
   now?: () => Date;
   idFactory?: () => string;
@@ -78,10 +81,17 @@ export class EngineerVerificationManager {
   }
 
   recoverReady(): Array<{ runId: string; promise: Promise<VerificationResult> }> {
-    return this.options.supervisor.listRuns(["FAST_CHECKS"]).map((run) => ({
-      runId: run.runId,
-      promise: this.verify(run.runId),
-    }));
+    const states = [
+      "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE",
+      "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING",
+      "REVIEW_CHANGES_REQUESTED", "REVIEW_FIX_PREPARING", "VERIFICATION_RECOVERY", "IMPLEMENTING",
+    ] as const;
+    return this.options.supervisor.listRuns([...states])
+      .filter((run) => run.state !== "IMPLEMENTING" || this.isInterruptedPhase3Repair(run.runId))
+      .map((run) => ({
+        runId: run.runId,
+        promise: run.state === "FAST_CHECKS" ? this.verify(run.runId) : this.recoverInterruptedVerification(run.runId),
+      }));
   }
 
   private async verifyPass(runId: string): Promise<VerificationResult> {
@@ -93,8 +103,8 @@ export class EngineerVerificationManager {
     const manifest = supervisor.getManifest(runId);
     if (!manifest) throw new Error("frozen manifest is unavailable");
     const safetyIdentifier = this.options.safetyIdentifierForUser?.(initial.userId);
-    const sandbox = this.options.executionManager.getSandbox(runId);
-    if (!sandbox) throw new Error("Phase 3 requires the retained Phase 2 sandbox");
+    const sandbox = this.options.executionManager.getSandbox(runId)
+      ?? await this.options.executionManager.recoverSandbox(runId, false);
     const workspaceManager = this.options.sandboxManager.workspaceManager();
     const resultCommitSha = await workspaceManager.checkpointAsync(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
     const diff = await workspaceManager.diffAsync(sandbox.workspace);
@@ -118,6 +128,9 @@ export class EngineerVerificationManager {
     } catch (error) {
       if (error instanceof StableRequiredTestFailure) {
         return this.repairStableRequiredTest(manifest, sandbox, resultCommitSha, diff, error);
+      }
+      if (error instanceof IndependentVerificationFailure) {
+        await this.recordLunaFailureAdvisory(manifest, error).catch(() => undefined);
       }
       throw error;
     }
@@ -267,6 +280,13 @@ export class EngineerVerificationManager {
     let reviewArtifact;
     try {
       review = await reviewer.review(reviewerInput, pass);
+      const [reviewedCommitSha, reviewedDiff] = await Promise.all([
+        workspaceManager.currentCommitAsync(sandbox.workspace),
+        workspaceManager.diffAsync(sandbox.workspace),
+      ]);
+      if (reviewedCommitSha !== resultCommitSha || sha256(reviewedDiff) !== reviewerInput.diffHash) {
+        throw new Error("workspace changed during isolated review; Reviewer decision is stale");
+      }
       reviewArtifact = this.storeAgentOutput(runId, reviewerAgent, "REVIEWER_OUTPUT", review.session.output);
     } catch (error) {
       this.failAgent(runId, reviewerAgent);
@@ -489,6 +509,77 @@ export class EngineerVerificationManager {
     });
   }
 
+  private async recordLunaFailureAdvisory(
+    manifest: TaskManifest,
+    failure: IndependentVerificationFailure,
+  ): Promise<void> {
+    const transportFactory = this.options.transportForFailureClassifier;
+    if (!transportFactory) return;
+    const runId = manifest.runId;
+    const input = {
+      runId,
+      manifestHash: manifest.manifestHash,
+      failureClass: failure.failureClass,
+      reasonCode: failure.reasonCode,
+      evidenceIds: failure.evidenceIds,
+      details: failure.details,
+    };
+    const agent = this.startAgent(runId, "FAILURE_CLASSIFIER", sha256(input));
+    try {
+      const transport = await transportFactory(runId);
+      const advisor = new LunaFailureAdvisor({
+        transport,
+        modelConfiguration: this.options.modelConfiguration,
+        safetyIdentifier: this.options.safetyIdentifierForUser?.(this.options.supervisor.getRun(runId).userId),
+        reserveModelCall: ({ model, inputTokenUpperBound, maxOutputTokens }) => this.options.supervisor.reserveModelBudget({
+          runId,
+          reservationId: sha256({ runId, agentExecutionId: agent.id, reasonCode: failure.reasonCode, purpose: "luna-failure-advisory" }),
+          agentExecutionId: agent.id,
+          model,
+          inputTokenUpperBound,
+          maxOutputTokens,
+        }),
+        onModelCall: (observation) => this.options.supervisor.recordModelCall({
+          modelCallId: this.id(), runId, agentExecutionId: agent.id,
+          logicalTier: agent.route.logicalTier, resolvedModel: agent.route.model,
+          promptTemplateVersion: LUNA_FAILURE_ADVISOR_POLICY_VERSION,
+          inputContextRefs: [manifest.manifestHash, observation.inputHash], outputSchemaVersion: "luna-failure-advisory-v1",
+          cacheKey: observation.cacheKey, cacheHit: null, latencyMs: observation.latencyMs,
+          inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
+          retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp(),
+        }, observation.reservationId),
+      });
+      const advisory = await advisor.advise(input);
+      this.storeAgentOutput(runId, agent, "LUNA_FAILURE_ADVISORY", advisory);
+    } catch (error) {
+      this.failAgent(runId, agent);
+      throw error;
+    }
+  }
+
+  private async recoverInterruptedVerification(runId: string): Promise<VerificationResult> {
+    try {
+      const initial = this.options.supervisor.getRun(runId);
+      const sandbox = await this.options.executionManager.recoverSandbox(runId, true);
+      if (initial.state !== "VERIFICATION_RECOVERY") {
+        this.transition(runId, "VERIFICATION_RECOVERY", "PHASE3_PROCESS_INTERRUPTED", [sandbox.record.sandboxId]);
+      }
+      this.transition(runId, "FAST_CHECKS", "PHASE3_RECOVERY_RESTARTED", [sandbox.record.sandboxId]);
+      return this.verify(runId);
+    } catch (error) {
+      this.failClosed(runId, error);
+      throw error;
+    }
+  }
+
+  private isInterruptedPhase3Repair(runId: string): boolean {
+    const sequence = this.options.supervisor.latestEventSequence(runId);
+    if (sequence === 0) return false;
+    const latest = this.options.supervisor.listEvents(runId, sequence - 1, 1)[0];
+    return latest?.nextState === "IMPLEMENTING"
+      && ["REVIEW_REPAIR_STARTED", "STABLE_REQUIRED_TEST_REPAIR_STARTED"].includes(latest.reasonCode);
+  }
+
   private startAgent(runId: string, role: ModelRole, inputHash: string): AgentContext {
     const route = resolveEngineerModel(role, this.options.modelConfiguration);
     const context = { id: this.id(), role, startedAt: this.timestamp(), inputHash, route };
@@ -549,9 +640,13 @@ export class EngineerVerificationManager {
     const claims = manifest.acceptanceCriteria.map((criterion) => {
       const coverage = review.requirementCoverage.find((item) => item.criterionId === criterion.criterionId);
       const evidenceIds = coverage?.evidenceIds.filter((id) => knownEvidence.has(id)) ?? [];
-      const status = coverage?.status === "SATISFIED" && evidenceIds.length > 0
+      const criterionEvidenceIds = evidenceIds.filter((id) => {
+        const evidence = trustedEvidence.find((item) => item.evidenceId === id);
+        return evidence ? trustedEvidenceSupportsCriterion(evidence, criterion.criterionId) : false;
+      });
+      const status = coverage?.status === "SATISFIED" && criterionEvidenceIds.length > 0
         ? "VERIFIED"
-        : coverage?.status === "PARTIAL"
+        : coverage?.status === "PARTIAL" && criterionEvidenceIds.length > 0
           ? "PARTIALLY_VERIFIED"
           : coverage?.status === "FAILED"
             ? "FAILED"
@@ -562,7 +657,7 @@ export class EngineerVerificationManager {
         criterionId: criterion.criterionId,
         claim: criterion.statement,
         status,
-        evidenceIds,
+        evidenceIds: criterionEvidenceIds,
         notes: coverage?.explanation ?? "Reviewer supplied no coverage record.",
         createdAt: now,
       });
@@ -632,7 +727,7 @@ export class EngineerVerificationManager {
       }
       return;
     }
-    const preferred = ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "REVERIFYING"].includes(run.state)
+    const preferred = ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "VERIFICATION_RECOVERY", "REVERIFYING"].includes(run.state)
       ? "VERIFICATION_INCOMPLETE"
       : run.state === "SECURITY_REVIEW"
         ? "SECURITY_ESCALATION"

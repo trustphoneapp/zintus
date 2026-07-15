@@ -316,6 +316,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       sandboxManager,
       artifactStore: engineerArtifactStore,
       transportForRole: async () => transportForRole(),
+      transportForFailureClassifier: async () => transportForRole(),
       modelConfiguration: engineerModelConfiguration,
       safetyIdentifierForUser: (userId) => {
         if (userId !== engineerPrincipal.ownerId) throw new Error("unknown Engineer safety subject");

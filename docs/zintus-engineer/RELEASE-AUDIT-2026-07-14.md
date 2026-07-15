@@ -22,6 +22,16 @@ The release verdict remains fail-closed because this host has no Docker runtime;
 the strengthened `bun run doctor:engineer` requires a real hardened container and
 currently returns `ok: false` rather than accepting simulated activation evidence.
 
+## Post-audit Phase 3 closure
+
+The later Phase 3 closure batch added the missing hash-bound criterion/test and
+16-scenario adversarial matrices, complete verification failure reasons, mandatory
+HIGH/CRITICAL security gates, criterion-bound claim evidence, bounded LUNA failure
+triage, stale Reviewer-decision detection, and restart recovery for every active
+verification/repair state. The Engineer plus gateway source suite now passes in
+full. This closes the Phase 3 source blockers identified below; live Docker and
+OpenAI proof remains unavailable on this host and is not represented as passed.
+
 ## Fixed during this audit
 
 - A client can no longer downgrade Supervisor risk or remove a human gate while
@@ -65,8 +75,8 @@ currently returns `ok: false` rather than accepting simulated activation evidenc
 2. Move blocking Git, Docker, and test execution out of the gateway event loop into
    supervised workers with leases, heartbeats, cancellation, and bounded
    concurrency.
-3. Implement restart recovery for every active state, publication resume,
-   stale-base re-verification, `FIX_REQUESTED`, and `PR_CREATION_FAILED`.
+3. Phase 3 restart recovery is complete. Publication resume, stale-base worker
+   completion, `FIX_REQUESTED`, and `PR_CREATION_FAILED` remain Phase 4 work.
 4. Enforce manifest time, token, and cost budgets and every retry budget at the
    authoritative worker boundary.
 5. Recompute risk after the actual diff, tests, coverage, retries, changed paths,
@@ -80,8 +90,8 @@ currently returns `ok: false` rather than accepting simulated activation evidenc
 
 ### LUNA lane — classification, safety, and recovery
 
-1. Invoke LUNA for request, risk-feature, and failure classification. The LUNA role
-   mappings currently have no production call sites.
+1. LUNA now has a bounded production failure-triage call site. Request and
+   risk-feature classification remain deterministic/Phase-5 follow-up work.
 2. Add deterministic request/path/diff feature floors so a model cannot conceal
    authentication, authorization, payment, secret, migration, or infrastructure
    risk.
@@ -126,25 +136,24 @@ currently returns `ok: false` rather than accepting simulated activation evidenc
 
 ## Validation results
 
-- Engineer plus gateway focused suite: 129 passed, 0 failed.
+- Engineer plus gateway source suite: 406 passed, 0 failed.
 - Root typecheck: passed for core, gateway, web, desktop, and mobile.
-- Root test command: 1,229 passed and 5 failed. All five failures are the existing
-  gateway MCP stdio bridge integration file. The lower-level MCP stdio integration
-  tests pass, and the same gateway registry succeeds outside Bun's test runner.
-- Real Docker, live OpenAI SOL/TERRA/LUNA calls, restart recovery, authenticated
-  approval, and GitHub publication remain unverified.
+- Root test command: passed every command group with zero failures and now includes
+  the complete Engineer package and mandatory Phase 3 evaluation matrix.
+- Real Docker, live OpenAI SOL/TERRA/LUNA calls, live process-kill recovery,
+  authenticated approval, and GitHub publication remain unverified externally.
 
 ## Architecture conformance summary
 
 | Architecture area | Status |
 | --- | --- |
-| Durable Supervisor/state ledger | Partial: strong transition core; recovery/watchdogs incomplete |
+| Durable Supervisor/state ledger | Phase 3 implemented: execution and verification recovery exist; publication recovery remains |
 | Frozen manifest and evidence binding | Implemented, with audit hardening |
 | SOL Builder and isolated SOL Reviewer | Implemented in code, including bounded failed-test and review repair; live model proof missing |
 | TERRA planning/testing/security | Partial: runtime calls exist; planning lacks repository context |
-| LUNA classification roles | Partial: deterministic durable failure taxonomy exists; LUNA model roles have no production call sites |
+| LUNA classification roles | Partial: deterministic taxonomy plus advisory failure-triage call site; request/risk model calls remain optional |
 | Offline Docker sandbox | Partial: policy exists; dependencies and live Docker proof missing |
-| Independent verification and claim evidence | Partial: executable gates exist; full evaluation matrix missing |
+| Independent verification and claim evidence | Implemented in source with criterion binding and a 16-scenario mandatory matrix; live activation proof missing |
 | Human approval and Supervisor publication | Partial: hash binding exists; actor identity and live Git proof missing |
 | Risk, retries, and budgets | Partial: deterministic rules exist; final reassessment and enforcement missing |
 | Web/desktop workflow | Partial: main workflow, local recovery, resume, retry, and error paths exist; run list/cursor/operations views missing |

@@ -229,6 +229,35 @@ export class DockerSandboxManager {
     }
   }
 
+  /** Reconstructs command runners for a hash-bound retained Phase-2 sandbox. */
+  async recoverAsync(input: {
+    workspace: WorkspaceRecord;
+    sandbox: SandboxRecord;
+    resetToHead: boolean;
+  }): Promise<ProvisionedSandbox> {
+    const record = SandboxRecordSchema.parse(input.sandbox);
+    if (record.status !== "READY" || record.destroyedAt !== null) throw new Error("retained sandbox is not recoverable");
+    if (record.imageReference !== this.options.imageReference || record.imageDigest !== this.options.imageDigest) {
+      throw new Error("retained sandbox image does not match current immutable configuration");
+    }
+    if (record.networkPolicyVersion !== NETWORK_POLICY_VERSION || record.sandboxPolicyVersion !== SANDBOX_POLICY_VERSION) {
+      throw new Error("retained sandbox policy version is no longer accepted");
+    }
+    if (record.environmentDigest !== this.environmentDigest()) throw new Error("retained sandbox environment digest mismatch");
+    await this.verifyDockerAsync();
+    const workspace = await this.options.workspaceManager.recoverExistingAsync(input.workspace, input.resetToHead);
+    if (record.runId !== workspace.runId || record.workspaceIdentity !== workspace.workspaceIdentity) {
+      throw new Error("retained sandbox is bound to another workspace");
+    }
+    await this.verifyOfflineDependencies(workspace);
+    return {
+      record,
+      workspace,
+      commandRunner: this.dockerRunner(workspace),
+      commandRunnerAsync: this.dockerRunnerAsync(workspace),
+    };
+  }
+
   private async verifyOfflineDependencies(workspace: WorkspaceRecord): Promise<void> {
     const lockfileHash = workspaceLockfileHash(workspace.workspaceRoot);
     if (lockfileHash === NO_LOCKFILE_HASH) return;
@@ -268,17 +297,7 @@ export class DockerSandboxManager {
   private provisioned(runId: string, workspace: WorkspaceRecord, source: "COLD" | "WARM"): ProvisionedSandbox {
     const now = this.options.now ?? (() => new Date());
     const idFactory = this.options.idFactory ?? randomUUID;
-    const environmentDigest = sha256({
-      imageDigest: this.options.imageDigest,
-      offlineDependencyHash: this.options.offlineDependencies?.manifest.contentHash ?? null,
-      sandboxPolicyVersion: SANDBOX_POLICY_VERSION,
-      networkPolicyVersion: NETWORK_POLICY_VERSION,
-      limits: {
-        cpus: this.options.limits?.cpus ?? 2,
-        memory: this.options.limits?.memory ?? "2g",
-        pids: this.options.limits?.pids ?? 256,
-      },
-    });
+    const environmentDigest = this.environmentDigest();
     const record = SandboxRecordSchema.parse({
       sandboxId: idFactory(),
       runId,
@@ -294,6 +313,20 @@ export class DockerSandboxManager {
       destroyedAt: null,
     });
     return { record, workspace, commandRunner: this.dockerRunner(workspace), commandRunnerAsync: this.dockerRunnerAsync(workspace) };
+  }
+
+  private environmentDigest(): string {
+    return sha256({
+      imageDigest: this.options.imageDigest,
+      offlineDependencyHash: this.options.offlineDependencies?.manifest.contentHash ?? null,
+      sandboxPolicyVersion: SANDBOX_POLICY_VERSION,
+      networkPolicyVersion: NETWORK_POLICY_VERSION,
+      limits: {
+        cpus: this.options.limits?.cpus ?? 2,
+        memory: this.options.limits?.memory ?? "2g",
+        pids: this.options.limits?.pids ?? 256,
+      },
+    });
   }
 
   destroy(sandbox: ProvisionedSandbox): SandboxRecord {

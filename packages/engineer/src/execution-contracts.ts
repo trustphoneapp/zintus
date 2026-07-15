@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { LogicalModelTierSchema, ModelRoleSchema } from "./contracts.js";
 import { modelTierForRole } from "./model-routing.js";
+import { sha256 } from "./hash.js";
 
 const IdentifierSchema = z.string().min(1).max(200);
 const HashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -45,6 +46,27 @@ export const SandboxRecordSchema = z.object({
   createdAt: IsoTimestampSchema,
   destroyedAt: IsoTimestampSchema.nullable(),
 }).strict();
+
+export const SandboxWorkspaceCheckpointSchema = z.object({
+  checkpointVersion: z.literal(1),
+  runId: IdentifierSchema,
+  manifestHash: HashSchema,
+  workspace: WorkspaceRecordSchema,
+  sandbox: SandboxRecordSchema,
+  createdAt: IsoTimestampSchema,
+  checkpointHash: HashSchema,
+}).strict().superRefine((checkpoint, context) => {
+  if (checkpoint.workspace.runId !== checkpoint.runId || checkpoint.sandbox.runId !== checkpoint.runId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "sandbox checkpoint run binding mismatch", path: ["runId"] });
+  }
+  if (checkpoint.sandbox.workspaceIdentity !== checkpoint.workspace.workspaceIdentity) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "sandbox checkpoint workspace binding mismatch", path: ["sandbox", "workspaceIdentity"] });
+  }
+  const { checkpointHash, ...content } = checkpoint;
+  if (sha256(content) !== checkpointHash) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "sandbox checkpoint hash mismatch", path: ["checkpointHash"] });
+  }
+});
 
 export const CommandExecutionRecordSchema = z.object({
   commandExecutionId: IdentifierSchema,
@@ -117,6 +139,7 @@ export const ModelCallRecordSchema = z.object({
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
 export type WorkspaceRecord = z.infer<typeof WorkspaceRecordSchema>;
 export type SandboxRecord = z.infer<typeof SandboxRecordSchema>;
+export type SandboxWorkspaceCheckpoint = z.infer<typeof SandboxWorkspaceCheckpointSchema>;
 export type CommandExecutionRecord = z.infer<typeof CommandExecutionRecordSchema>;
 export type BuilderResult = z.infer<typeof BuilderResultSchema>;
 export type AgentExecutionRecord = z.infer<typeof AgentExecutionRecordSchema>;

@@ -1,9 +1,94 @@
 import { z } from "zod";
-import { EvidenceBundleSchema, ReviewerOutputSchema } from "./contracts.js";
+import { EvidenceBundleSchema, ReviewerOutputSchema, type TaskManifest, type TrustedEvidence } from "./contracts.js";
+import { sha256 } from "./hash.js";
 
 const IdentifierSchema = z.string().min(1).max(200);
 const HashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const IsoTimestampSchema = z.string().datetime({ offset: true });
+
+export const VERIFICATION_COVERAGE_POLICY_VERSION = "engineer-verification-coverage-v1";
+
+export const CriterionVerificationCoverageSchema = z.object({
+  criterionId: IdentifierSchema,
+  priority: z.enum(["MUST", "SHOULD", "MAY"]),
+  testIds: z.array(IdentifierSchema),
+  executableTestIds: z.array(IdentifierSchema),
+  status: z.enum(["COVERED", "UNCOVERED"]),
+}).strict();
+
+export const VerificationCoverageMatrixSchema = z.object({
+  policyVersion: z.literal(VERIFICATION_COVERAGE_POLICY_VERSION),
+  runId: IdentifierSchema,
+  manifestHash: HashSchema,
+  criteria: z.array(CriterionVerificationCoverageSchema).min(1),
+  nonExecutableTestIds: z.array(IdentifierSchema),
+  allPlanItemsExecutable: z.boolean(),
+  securityGateRequired: z.boolean(),
+  executableSecurityTestIds: z.array(IdentifierSchema),
+  securityGateCovered: z.boolean(),
+  allMustCriteriaCovered: z.boolean(),
+  matrixHash: HashSchema,
+}).strict().superRefine((matrix, context) => {
+  const { matrixHash, ...content } = matrix;
+  if (sha256(content) !== matrixHash) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "verification coverage matrix hash mismatch", path: ["matrixHash"] });
+  }
+  const expected = matrix.criteria
+    .filter((criterion) => criterion.priority === "MUST")
+    .every((criterion) => criterion.status === "COVERED" && criterion.executableTestIds.length > 0);
+  if (matrix.allMustCriteriaCovered !== expected) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "MUST coverage summary does not match matrix rows", path: ["allMustCriteriaCovered"] });
+  }
+  if (matrix.allPlanItemsExecutable !== (matrix.nonExecutableTestIds.length === 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "test-plan executability summary does not match matrix", path: ["allPlanItemsExecutable"] });
+  }
+  if (matrix.securityGateCovered !== (!matrix.securityGateRequired || matrix.executableSecurityTestIds.length > 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "security gate summary does not match matrix", path: ["securityGateCovered"] });
+  }
+});
+
+export function buildVerificationCoverageMatrix(manifest: TaskManifest) {
+  const criteria = manifest.acceptanceCriteria.map((criterion) => {
+    const tests = manifest.testPlan.filter((test) => test.criterionIds.includes(criterion.criterionId));
+    const executable = tests.filter((test) => Boolean(test.command));
+    return CriterionVerificationCoverageSchema.parse({
+      criterionId: criterion.criterionId,
+      priority: criterion.priority,
+      testIds: tests.map((test) => test.testId),
+      executableTestIds: executable.map((test) => test.testId),
+      status: executable.length > 0 ? "COVERED" : "UNCOVERED",
+    });
+  });
+  const content = {
+    policyVersion: VERIFICATION_COVERAGE_POLICY_VERSION,
+    runId: manifest.runId,
+    manifestHash: manifest.manifestHash,
+    criteria,
+    nonExecutableTestIds: manifest.testPlan.filter((test) => !test.command).map((test) => test.testId),
+    allPlanItemsExecutable: manifest.testPlan.every((test) => Boolean(test.command)),
+    securityGateRequired: manifest.riskTier === "HIGH" || manifest.riskTier === "CRITICAL",
+    executableSecurityTestIds: manifest.testPlan
+      .filter((test) => test.type === "SECURITY" && Boolean(test.command))
+      .map((test) => test.testId),
+    securityGateCovered: manifest.riskTier !== "HIGH" && manifest.riskTier !== "CRITICAL"
+      || manifest.testPlan.some((test) => test.type === "SECURITY" && Boolean(test.command)),
+    allMustCriteriaCovered: criteria
+      .filter((criterion) => criterion.priority === "MUST")
+      .every((criterion) => criterion.status === "COVERED"),
+  } as const;
+  return VerificationCoverageMatrixSchema.parse({ ...content, matrixHash: sha256(content) });
+}
+
+/** Only a successful independent executor record can substantiate a criterion. */
+export function trustedEvidenceSupportsCriterion(evidence: TrustedEvidence, criterionId: string): boolean {
+  const criterionIds = evidence.payload.criterionIds;
+  return evidence.eventType === "INDEPENDENT_VERIFICATION"
+    && evidence.producerType === "EXECUTOR"
+    && evidence.payload.status === "SUCCEEDED"
+    && Array.isArray(criterionIds)
+    && criterionIds.every((value) => typeof value === "string")
+    && criterionIds.includes(criterionId);
+}
 
 export const VerificationExecutionRecordSchema = z.object({
   verificationExecutionId: IdentifierSchema,
@@ -105,6 +190,8 @@ export const VerificationResultSchema = z.object({
 }).strict();
 
 export type VerificationExecutionRecord = z.infer<typeof VerificationExecutionRecordSchema>;
+export type CriterionVerificationCoverage = z.infer<typeof CriterionVerificationCoverageSchema>;
+export type VerificationCoverageMatrix = z.infer<typeof VerificationCoverageMatrixSchema>;
 export type SecurityFindingRecord = z.infer<typeof SecurityFindingRecordSchema>;
 export type ReviewerSessionRecord = z.infer<typeof ReviewerSessionRecordSchema>;
 export type ReviewFindingRecord = z.infer<typeof ReviewFindingRecordSchema>;

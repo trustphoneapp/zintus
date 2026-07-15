@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildVerificationCoverageMatrix,
   EngineerSupervisor,
   EngineerPublicationManager,
   EngineerVerificationManager,
@@ -16,6 +17,7 @@ import {
   LocalArtifactStore,
   REVIEWER_POLICY_VERSION,
   ReviewerInputSchema,
+  SandboxWorkspaceCheckpointSchema,
   TaskManifestSchema,
   TrustedCommandExecutor,
   TrustedEvidenceSchema,
@@ -66,6 +68,15 @@ const testGitSpawn = ((command: string, args: readonly string[]) => {
   };
 }) as typeof import("node:child_process").spawnSync;
 
+function dockerSpawnFor(digest: string): typeof import("node:child_process").spawnSync {
+  return ((_command: string, args: readonly string[]) => {
+    const stdout = args[0] === "image" ? JSON.stringify([`oven/bun@${digest}`]) : args[0] === "info" ? "27.0.0" : "1 pass";
+    return {
+      pid: 1, status: 0, signal: null, stdout, stderr: "", output: [null, stdout, ""], error: undefined,
+    };
+  }) as typeof import("node:child_process").spawnSync;
+}
+
 function repository(path: string): { path: string; sha: string } {
   const repo = join(path, "repo");
   mkdirSync(join(repo, "src"), { recursive: true });
@@ -104,6 +115,7 @@ function setupFastChecks(
   path: string,
   testType: "UNIT" | "SECURITY" = "UNIT",
   overrides: Partial<Pick<TaskManifest, "tokenBudget" | "costBudgetUsd" | "timeBudgetSeconds">> = {},
+  recordSandbox = true,
 ) {
   const repo = repository(path);
   const supervisor = new EngineerSupervisor({ dbPath: join(path, "engineer.db") });
@@ -135,11 +147,43 @@ function setupFastChecks(
     environmentDigest: `sha256:${"b".repeat(64)}`, networkPolicyVersion: "network-v1", sandboxPolicyVersion: "sandbox-v1",
     status: "READY", source: "COLD", createdAt: "2026-07-14T12:00:00.000Z", destroyedAt: null,
   };
-  supervisor.recordSandbox(sandbox);
+  if (recordSandbox) supervisor.recordSandbox(sandbox);
   return { supervisor, manifest, workspace, sandbox, dbPath: join(path, "engineer.db") };
 }
 
 describe("Phase 3 independent verification", () => {
+  test("fails closed before execution when a MUST criterion lacks an executable verification row", async () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const manifestContent = {
+      ...setup.manifest,
+      acceptanceCriteria: [
+        ...setup.manifest.acceptanceCriteria,
+        { criterionId: "criterion-uncovered", statement: "Uncovered invariant", verificationMethod: "Missing", priority: "MUST" as const },
+      ],
+    };
+    const { manifestHash: _oldHash, ...withoutHash } = manifestContent;
+    const manifest = TaskManifestSchema.parse({ ...withoutHash, manifestHash: sha256(withoutHash) });
+    const matrix = buildVerificationCoverageMatrix(manifest);
+    expect(matrix.allMustCriteriaCovered).toBe(false);
+    expect(matrix.criteria.find((criterion) => criterion.criterionId === "criterion-uncovered")?.status).toBe("UNCOVERED");
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const executor = new TrustedCommandExecutor({
+      artifactStore, workspace: setup.workspace, sandbox: setup.sandbox, manifest,
+      currentCommit: () => manifest.repository.baseCommitSha,
+      runner: () => { throw new Error("uncovered plans must fail before command execution"); },
+      onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
+    });
+    await expect(new IndependentVerifier({
+      supervisor: setup.supervisor, artifactStore, manifest, executor, diff: () => "",
+    }).run()).rejects.toThrow("MANDATORY_VERIFICATION_COVERAGE_GAP");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("VERIFICATION_INCOMPLETE");
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      failureClass: "TEST_FAILURE", reasonCode: "MANDATORY_VERIFICATION_COVERAGE_GAP", retryable: false,
+    }));
+    setup.supervisor.close();
+  });
+
   test("executes the frozen test plan independently and persists objective evidence", async () => {
     const path = root();
     const setup = setupFastChecks(path);
@@ -178,6 +222,28 @@ describe("Phase 3 independent verification", () => {
     expect(result.executions).toHaveLength(1);
     expect(result.executions[0]).toMatchObject({ type: "SECURITY", status: "PASSED" });
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_REVIEW");
+    setup.supervisor.close();
+  });
+
+  test("requires an executable security gate for HIGH and CRITICAL manifests", async () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const { manifestHash: _oldHash, ...content } = { ...setup.manifest, riskTier: "HIGH" as const };
+    const manifest = TaskManifestSchema.parse({ ...content, manifestHash: sha256(content) });
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const executor = new TrustedCommandExecutor({
+      artifactStore, workspace: setup.workspace, sandbox: setup.sandbox, manifest,
+      currentCommit: () => manifest.repository.baseCommitSha,
+      runner: () => { throw new Error("high-risk plan must fail before a non-security command runs"); },
+      onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
+    });
+    await expect(new IndependentVerifier({
+      supervisor: setup.supervisor, artifactStore, manifest, executor, diff: () => "",
+    }).run()).rejects.toThrow("MANDATORY_SECURITY_GATE_MISSING");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_ESCALATION");
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      failureClass: "SECURITY_FAILURE", reasonCode: "MANDATORY_SECURITY_GATE_MISSING", retryable: false,
+    }));
     setup.supervisor.close();
   });
 
@@ -251,15 +317,36 @@ describe("Phase 3 independent verification", () => {
     await expect(new IndependentVerifier({
       supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor,
       diff: () => 'diff --git a/src/value.ts b/src/value.ts\n+++ b/src/value.ts\n@@ -1 +1 @@\n+const api_key = "hard-coded-secret";\n',
-    }).run()).rejects.toThrow("critical deterministic security finding");
+    }).run()).rejects.toThrow("high or critical deterministic security finding");
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_ESCALATION");
     const failures = setup.supervisor.listFailures(setup.manifest.runId);
     expect(failures).toMatchObject([{
       failureClass: "SECURITY_FAILURE",
-      reasonCode: "CRITICAL_SECURITY_FINDING",
+      reasonCode: "HIGH_OR_CRITICAL_SECURITY_FINDING",
       retryable: false,
     }]);
     expect(failures[0]?.evidenceIds).toHaveLength(1);
+    setup.supervisor.close();
+  });
+
+  test("blocks HIGH deterministic findings before model review", async () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const executor = new TrustedCommandExecutor({
+      artifactStore, workspace: setup.workspace, sandbox: setup.sandbox, manifest: setup.manifest,
+      currentCommit: () => setup.manifest.repository.baseCommitSha,
+      runner: () => ({ status: 0, stdout: "test pass", stderr: "" }),
+      onRecord: (record) => { setup.supervisor.recordCommandExecution(record); },
+    });
+    await expect(new IndependentVerifier({
+      supervisor: setup.supervisor, artifactStore, manifest: setup.manifest, executor,
+      diff: () => "diff --git a/src/value.ts b/src/value.ts\n+++ b/src/value.ts\n@@ -1 +1 @@\n+eval(userInput);\n",
+    }).run()).rejects.toThrow("high or critical deterministic security finding");
+    expect(setup.supervisor.listSecurityFindings(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      severity: "HIGH", category: "UNSAFE_EVAL",
+    }));
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_ESCALATION");
     setup.supervisor.close();
   });
 });
@@ -271,7 +358,7 @@ describe("Phase 3 isolated Reviewer", () => {
     const evidence = TrustedEvidenceSchema.parse({
       evidenceId: "evidence-1", runId: manifest.runId, eventType: "INDEPENDENT_VERIFICATION",
       producerType: "EXECUTOR", producerId: "sandbox-1", sha256: sha256({ passed: true }),
-      payload: { passed: true }, createdAt: "2026-07-14T12:00:00.000Z",
+      payload: { status: "SUCCEEDED", criterionIds: ["criterion-1"] }, createdAt: "2026-07-14T12:00:00.000Z",
     });
     const diff = "diff --git a/src/value.ts b/src/value.ts\n+export const value = 2;\n";
     const base = {
@@ -326,10 +413,237 @@ describe("Phase 3 isolated Reviewer", () => {
     };
     await expect(new IsolatedReviewer({ transport: invalidApprovalTransport }).review(input, 2))
       .rejects.toThrow("verified evidence for every MUST criterion");
+
+    const unrelatedEvidence = TrustedEvidenceSchema.parse({
+      ...evidence,
+      evidenceId: "evidence-unrelated",
+      payload: { status: "SUCCEEDED", criterionIds: ["some-other-criterion"] },
+    });
+    const unrelatedBase = { ...base, trustedEvidence: [unrelatedEvidence] };
+    const unrelatedInput = ReviewerInputSchema.parse({
+      ...unrelatedBase,
+      evidenceBundleHash: reviewerEvidenceBundleHash(unrelatedBase),
+    });
+    const unrelatedTransport: ResponsesTransport = {
+      async create() {
+        return { id: "review-unrelated", output: [{
+          type: "function_call", call_id: "review-unrelated-call", name: "submit_review",
+          arguments: JSON.stringify({
+            decision: "APPROVE",
+            requirementCoverage: [{
+              criterionId: "criterion-1", status: "SATISFIED", evidenceIds: ["evidence-unrelated"], explanation: "Wrong evidence.",
+            }],
+            findings: [], unsupportedClaims: [], residualRisks: [],
+            reviewedDiffHash: unrelatedInput.diffHash,
+            reviewedEvidenceBundleHash: unrelatedInput.evidenceBundleHash,
+            reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+          }),
+        }] };
+      },
+    };
+    await expect(new IsolatedReviewer({ transport: unrelatedTransport }).review(unrelatedInput, 3))
+      .rejects.toThrow("without successful criterion-bound executor evidence");
+
+    const emptyChangeTransport: ResponsesTransport = {
+      async create() {
+        return { id: "review-empty-change", output: [{
+          type: "function_call", call_id: "review-empty-change-call", name: "submit_review",
+          arguments: JSON.stringify({
+            decision: "REQUEST_CHANGES",
+            requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: ["evidence-1"], explanation: "Execution passed." }],
+            findings: [], unsupportedClaims: [], residualRisks: [], reviewedDiffHash: input.diffHash,
+            reviewedEvidenceBundleHash: input.evidenceBundleHash, reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+          }),
+        }] };
+      },
+    };
+    await expect(new IsolatedReviewer({ transport: emptyChangeTransport }).review(input, 4))
+      .rejects.toThrow("REQUEST_CHANGES requires at least one structured finding");
   });
 });
 
 describe("Phase 3 authoritative verification manager", () => {
+  test("uses LUNA only for non-authoritative triage after deterministic failure classification", async () => {
+    const path = root();
+    const setup = setupFastChecks(path, "SECURITY");
+    const digest = `sha256:${"a".repeat(64)}`;
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
+    const sandboxManager = new DockerSandboxManager({ workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest });
+    const executionManager = { getSandbox: () => ({
+      record: setup.sandbox,
+      workspace: setup.workspace,
+      commandRunner: () => ({ status: 1, stdout: "", stderr: "security failure" }),
+    }) } as unknown as EngineerExecutionManager;
+    let lunaCalls = 0;
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor, executionManager, sandboxManager,
+      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
+      transportForRole: async (_runId, role) => { throw new Error(`${role} must not run after deterministic security failure`); },
+      transportForFailureClassifier: async () => metered({
+        async create(request) {
+          lunaCalls += 1;
+          expect(request.model).toBe("gpt-5.6-luna");
+          expect(request.store).toBe(false);
+          return { id: "luna-failure-triage", output: [{
+            type: "function_call", call_id: "luna-failure-triage-call", name: "submit_failure_advisory",
+            arguments: JSON.stringify({
+              humanSummary: "The frozen security command failed.",
+              suspectedCause: "The implementation violated a security check.",
+              recommendedAction: "Inspect the trusted stderr evidence and repair without weakening the check.",
+              confidence: 0.8,
+            }),
+          }] };
+        },
+      }),
+    });
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("independent security check failed");
+    expect(lunaCalls).toBe(1);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("SECURITY_ESCALATION");
+    const advisory = setup.supervisor.listArtifacts(setup.manifest.runId).find((artifact) => artifact.type === "LUNA_FAILURE_ADVISORY");
+    expect(advisory).toMatchObject({ trusted: false, producerType: "SYSTEM" });
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      reasonCode: "INDEPENDENT_SECURITY_CHECK_FAILED",
+    }));
+    setup.supervisor.close();
+  });
+
+  test("rejects a Reviewer decision when the workspace changes during review", async () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
+    const sandboxManager = new DockerSandboxManager({ workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest });
+    const provisioned: ProvisionedSandbox = {
+      record: setup.sandbox, workspace: setup.workspace,
+      commandRunner: () => ({ status: 0, stdout: "1 pass", stderr: "" }),
+    };
+    const executionManager = { getSandbox: () => provisioned } as unknown as EngineerExecutionManager;
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor, executionManager, sandboxManager,
+      artifactStore: new LocalArtifactStore({ root: join(path, "artifacts") }),
+      transportForRole: async (_runId, role) => metered({
+        async create(request) {
+          if (role === "TESTER") return { id: "mutation-tester", output: [{
+            type: "function_call", call_id: "mutation-tester-call", name: "submit_test_advisory",
+            arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+          }] };
+          if (role === "SECURITY") return { id: "mutation-security", output: [{
+            type: "function_call", call_id: "mutation-security-call", name: "submit_security_advisory",
+            arguments: JSON.stringify({ findings: [] }),
+          }] };
+          if (role === "BUILDER") throw new Error("Builder must not run");
+          const requestInput = request.input as Array<{ content: Array<{ text: string }> }>;
+          const input = JSON.parse(requestInput[0]!.content[0]!.text) as {
+            diffHash: string; evidenceBundleHash: string; trustedEvidence: Array<{ evidenceId: string; eventType: string }>;
+          };
+          const evidenceId = input.trustedEvidence.find((item) => item.eventType === "INDEPENDENT_VERIFICATION")!.evidenceId;
+          writeFileSync(join(setup.workspace.workspaceRoot, "src", "value.ts"), "// concurrent mutation\nexport const value = 999;\n");
+          return { id: "mutation-reviewer", output: [{
+            type: "function_call", call_id: "mutation-reviewer-call", name: "submit_review",
+            arguments: JSON.stringify({
+              decision: "APPROVE",
+              requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: [evidenceId], explanation: "Evidence passed before mutation." }],
+              findings: [], unsupportedClaims: [], residualRisks: [], reviewedDiffHash: input.diffHash,
+              reviewedEvidenceBundleHash: input.evidenceBundleHash, reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+            }),
+          }] };
+        },
+      }),
+    });
+
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("workspace changed during isolated review");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("HUMAN_REVIEW_REQUIRED");
+    expect(setup.supervisor.listEvidenceBundles(setup.manifest.runId)).toEqual([]);
+    expect(setup.supervisor.listArtifacts(setup.manifest.runId).some((artifact) => artifact.type === "REVIEWER_OUTPUT")).toBe(false);
+    setup.supervisor.close();
+  });
+
+  test("reconstructs a retained sandbox and restarts interrupted verification from FAST_CHECKS", async () => {
+    const path = root();
+    const setup = setupFastChecks(path, "UNIT", {}, false);
+    const digest = `sha256:${"a".repeat(64)}`;
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
+    const sandboxManager = new DockerSandboxManager({
+      workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest, dockerSpawn: dockerSpawnFor(digest),
+    });
+    const provisioned = sandboxManager.provisionCold({
+      runId: setup.manifest.runId,
+      repositoryRoot: setup.workspace.repositoryRoot,
+      baseCommitSha: setup.manifest.repository.baseCommitSha,
+    });
+    setup.supervisor.recordSandbox(provisioned.record);
+    writeFileSync(join(provisioned.workspace.workspaceRoot, "src", "value.ts"), "// retained-change\nexport const value = 2;\n");
+    await workspaceManager.checkpointAsync(provisioned.workspace, "retained phase3 result");
+    const transientPath = join(provisioned.workspace.workspaceRoot, "transient-test-output.tmp");
+    writeFileSync(transientPath, "must be removed during recovery");
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    const checkpointContent = {
+      checkpointVersion: 1 as const,
+      runId: setup.manifest.runId,
+      manifestHash: setup.manifest.manifestHash,
+      workspace: provisioned.workspace,
+      sandbox: provisioned.record,
+      createdAt: "2026-07-14T12:00:01.000Z",
+    };
+    const checkpoint = SandboxWorkspaceCheckpointSchema.parse({
+      ...checkpointContent, checkpointHash: sha256(checkpointContent),
+    });
+    setup.supervisor.recordArtifact(artifactStore.put({
+      runId: setup.manifest.runId, type: "SANDBOX_WORKSPACE_CHECKPOINT", bytes: JSON.stringify(checkpoint),
+      producerType: "SYSTEM", producerId: "engineer-execution-manager", trusted: true,
+    }));
+    const fast = setup.supervisor.getRun(setup.manifest.runId);
+    setup.supervisor.transition({
+      runId: fast.runId, expectedStateVersion: fast.stateVersion, nextState: "UNIT_TESTING",
+      reasonCode: "ENTER_UNIT_TESTING", manifestHash: fast.manifestHash, idempotencyKey: "interrupt:unit",
+    });
+    const executionManager = new (await import("./execution-manager.js")).EngineerExecutionManager({
+      supervisor: setup.supervisor, sandboxManager, artifactStore,
+      repositoryRootFor: () => setup.workspace.repositoryRoot,
+      transportForRun: async () => { throw new Error("Phase 2 must not restart"); },
+    });
+    const transportForRole = (_runId: string, role: "BUILDER" | "TESTER" | "SECURITY" | "REVIEWER"): ResponsesTransport => metered({
+      async create(request) {
+        if (role === "TESTER") return { id: "recovery-tester", output: [{
+          type: "function_call", call_id: "recovery-tester-call", name: "submit_test_advisory",
+          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+        }] };
+        if (role === "SECURITY") return { id: "recovery-security", output: [{
+          type: "function_call", call_id: "recovery-security-call", name: "submit_security_advisory",
+          arguments: JSON.stringify({ findings: [] }),
+        }] };
+        const requestInput = request.input as Array<{ content: Array<{ text: string }> }>;
+        const input = JSON.parse(requestInput[0]!.content[0]!.text) as {
+          diffHash: string; evidenceBundleHash: string; trustedEvidence: Array<{ evidenceId: string; eventType: string }>;
+        };
+        const evidenceId = input.trustedEvidence.find((item) => item.eventType === "INDEPENDENT_VERIFICATION")!.evidenceId;
+        return { id: "recovery-reviewer", output: [{
+          type: "function_call", call_id: "recovery-reviewer-call", name: "submit_review",
+          arguments: JSON.stringify({
+            decision: "APPROVE",
+            requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: [evidenceId], explanation: "Recovered independent execution passed." }],
+            findings: [], unsupportedClaims: [], residualRisks: [], reviewedDiffHash: input.diffHash,
+            reviewedEvidenceBundleHash: input.evidenceBundleHash, reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+          }),
+        }] };
+      },
+    });
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor, executionManager, sandboxManager, artifactStore, transportForRole,
+    });
+
+    const recoveries = manager.recoverReady();
+    expect(recoveries.map((item) => item.runId)).toEqual([setup.manifest.runId]);
+    await recoveries[0]!.promise;
+
+    expect(existsSync(transientPath)).toBe(false);
+    expect(readFileSync(join(provisioned.workspace.workspaceRoot, "src", "value.ts"), "utf8")).toContain("retained-change");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
+    expect(setup.supervisor.listEvents(setup.manifest.runId).map((event) => event.nextState)).toContain("VERIFICATION_RECOVERY");
+    expect(setup.supervisor.listArtifacts(setup.manifest.runId).map((artifact) => artifact.type)).toContain("SANDBOX_RECOVERY_ATTESTATION");
+    setup.supervisor.close();
+  });
+
   test("classifies model admission limits as a terminal runtime-budget stop", async () => {
     const path = root();
     const setup = setupFastChecks(path, "UNIT", { tokenBudget: 100 });
