@@ -88,7 +88,10 @@ const PROVIDER_BASE: Record<ManagedUpstream['provider'], string> = {
 /** Providers whose streaming responses honor `stream_options.include_usage`. */
 // Conservative for the compat endpoints: false only skips the REQUEST param;
 // the SSE scanner still captures a usage chunk whenever the provider sends
-// one unprompted (Gemini/xAI do), and the estimate fallback stays ~est-flagged.
+// one unprompted (xAI does), and the estimate fallback stays ~est-flagged.
+// gemini flipped true 2026-07-14: live turns metered ~est with a 0-token
+// client receipt (usage chunk never arrived unprompted), and the compat docs
+// show stream_options include_usage support (ai.google.dev/gemini-api/docs/openai).
 const STREAM_USAGE: Record<ManagedUpstream['provider'], boolean> = {
   groq: true,
   cerebras: true,
@@ -96,7 +99,7 @@ const STREAM_USAGE: Record<ManagedUpstream['provider'], boolean> = {
   deepseek: true,
   moonshot: false,
   anthropic: false,
-  gemini: false,
+  gemini: true,
   zai: false,
   mistral: false,
   xai: false,
@@ -223,26 +226,17 @@ export const MANAGED_MODELS: ManagedModel[] = [
     capabilities: { tools: true, json: true, vision: false },
     upstreams: [{ provider: 'xai', model: 'grok-4.3' }],
   },
-  // ── 2026-07-06 Together expansion: 3 models requested, 1 servable ──
-  // Llama-4 Scout + Maverick were requested but are NOT in Together's
-  // serverless catalog (dedicated endpoints only — official pricing page and
-  // docs.together.ai/docs/serverless/models verified 2026-07-06), so a
-  // /chat/completions call with the operator key would fail; listing them
-  // violates the never-vaporware rule. The plain Qwen/Qwen3-235B-A22B id is
-  // likewise not serverless — the servable variant is Instruct-2507-tput,
-  // 262K ctx at $0.20/$0.60 ⇒ $0.32/M blended (70/30) = mid band. COGS
-  // $0.16/1k cr vs the $0.48/1k cr mid worst case already priced into
-  // PRICING-FINAL §7 — margin-safe at every tier. Capabilities are honest:
-  // the -tput catalog row lists NO function-calling, vision, or structured
-  // outputs, so all three flags stay false.
-  {
-    id: 'zintus/qwen3-235b',
-    displayName: 'Qwen3 235B',
-    contextWindow: 262_144,
-    class: 'mid',
-    capabilities: { tools: false, json: false, vision: false },
-    upstreams: [{ provider: 'together', model: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput' }],
-  },
+  // ── 2026-07-06 Together expansion — DELISTED 2026-07-14 ──
+  // zintus/qwen3-235b (Together Qwen/Qwen3-235B-A22B-Instruct-2507-tput) was
+  // the one servable model from that request. Together retired the -tput
+  // variant from serverless: live 400 captured via wrangler tail 2026-07-14
+  // ("Unable to access non-serverless model … create and start a new dedicated
+  // endpoint"), and their serverless docs catalog no longer lists ANY
+  // Qwen3-235B. No other configured upstream serves it (Cerebras dropped Qwen
+  // from serverless too), so the entry is removed per the never-vaporware
+  // rule — a listed model that 400s every turn is vaporware with extra steps.
+  // Llama-4 Scout + Maverick from the same request were never listed for the
+  // same reason (dedicated-endpoint only).
   // Scout via GROQ (the Together route above was unservable). Verified on
   // console.groq.com/docs/models 2026-07-06: 131,072 ctx, $0.11/$0.34 ⇒
   // $0.179/M blended (70/30) = cheap band, exactly the survey's row 9; tool

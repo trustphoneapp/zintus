@@ -160,18 +160,12 @@ describe("availableManagedModels", () => {
     expect(ids).toEqual(["zintus/llama-3.3-70b"]);
   });
 
-  test("together key gates qwen3-235b and lists nothing else", () => {
+  test("together key alone lists nothing (qwen3-235b delisted 2026-07-14)", () => {
+    // Together retired the -tput serverless variant (live 400 captured via
+    // wrangler tail); the roster must not offer a model that fails every turn.
     const env = fakeEnv({ MANAGED_KEY_TOGETHER: "tk_x" });
-    const ids = availableManagedModels(env).map((m) => m.id);
-    expect(ids).toEqual(["zintus/qwen3-235b"]);
-    // Honest capabilities: Together's -tput catalog row lists no
-    // function-calling / vision / structured outputs (verified 2026-07-06).
-    const m = MANAGED_MODELS.find((x) => x.id === "zintus/qwen3-235b")!;
-    expect(m.capabilities).toEqual({ tools: false, json: false, vision: false });
-    expect(m.contextWindow).toBe(262_144);
-    expect(m.upstreams).toEqual([
-      { provider: "together", model: "Qwen/Qwen3-235B-A22B-Instruct-2507-tput" },
-    ]);
+    expect(availableManagedModels(env)).toEqual([]);
+    expect(MANAGED_MODELS.find((x) => x.id === "zintus/qwen3-235b")).toBeUndefined();
   });
 
   test("every model has a pricing class with a defined burn rate", () => {
@@ -198,8 +192,8 @@ describe("availableManagedModels", () => {
     expect(byId["zintus/grok-4.1-fast"]).toBeUndefined();
     expect(byId["zintus/grok-build"]).toBe("premium");
     expect(byId["zintus/grok-4.3"]).toBe("frontier");
-    // 2026-07-06 Together expansion: $0.32/M blended ⇒ mid band.
-    expect(byId["zintus/qwen3-235b"]).toBe("mid");
+    // 2026-07-14: qwen3-235b delisted (Together retired the serverless -tput).
+    expect(byId["zintus/qwen3-235b"]).toBeUndefined();
     // Scout on Groq: $0.179/M blended ⇒ cheap band (PRICING-FINAL §2 names it).
     expect(byId["zintus/llama-4-scout"]).toBe("cheap");
   });
