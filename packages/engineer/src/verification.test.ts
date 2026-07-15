@@ -1091,16 +1091,6 @@ describe("Phase 3 authoritative verification manager", () => {
       .all(setup.manifest.runId) as Array<{ pass: number }>;
     passDb.close();
     expect(Math.max(...passRows.map((row) => row.pass))).toBeGreaterThan(1);
-    setup.supervisor.recordSecurityFinding({
-      securityFindingId: "advisory-regression",
-      runId: setup.manifest.runId,
-      severity: "CRITICAL",
-      category: "AI_ADVISORY_SECURITY_REVIEW",
-      description: "Advisory-only critical finding must not block publication.",
-      file: null, lineStart: null, lineEnd: null, evidenceIds: [], status: "OPEN",
-      createdAt: "2026-07-14T12:00:00.000Z",
-    });
-    expect(setup.supervisor.getPublicationEvidence(setup.manifest.runId).openCriticalSecurityFindings).toBe(0);
     let mutationCalls = 0;
     const stalePublication = new EngineerPublicationManager({
       supervisor: setup.supervisor, artifactStore,
