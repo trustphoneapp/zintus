@@ -392,13 +392,13 @@ export class EngineerRunManager {
         evidenceIds, manifestHash: run.manifestHash, idempotencyKey: `human-review:reject:${run.stateVersion}:${sha256(reason)}`,
       }).run };
     }
-    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
     const approved = this.options.supervisor.transition({
       runId, expectedStateVersion: run.stateVersion, nextState: "REVIEW_APPROVED",
       reasonCode: "HUMAN_REVIEW_APPROVED", actorType: "HUMAN", actorId: principal.reviewerId,
       evidenceIds, manifestHash: run.manifestHash, idempotencyKey: `human-review:approve:${run.stateVersion}:${sha256(reason)}`,
       facts: { reviewerDecisionValid: true, freshReviewerSession: true },
     }).run;
+    if (!this.options.publication) return { run: approved, publication: null };
     const publication = await this.options.publication.start(runId, principal.reviewerId);
     return { run: approved, publication };
   }
