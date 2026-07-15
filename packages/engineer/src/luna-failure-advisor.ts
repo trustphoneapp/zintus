@@ -44,6 +44,8 @@ export interface LunaFailureAdvisorOptions {
     latencyMs: number;
     inputTokens: number | null;
     outputTokens: number | null;
+    cachedInputTokens: number;
+    cacheWriteInputTokens: number;
   }) => void;
 }
 
@@ -105,6 +107,8 @@ export class LunaFailureAdvisor {
       latencyMs: Math.max(0, Date.now() - started),
       inputTokens: response.usage?.input_tokens ?? null,
       outputTokens: response.usage?.output_tokens ?? null,
+      cachedInputTokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
+      cacheWriteInputTokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0,
     });
     const calls = response.output.filter((item) => typeof item === "object" && item !== null && (item as { type?: unknown }).type === "function_call");
     if (calls.length !== 1) throw new Error("LUNA failure advisor must submit exactly one structured advisory");

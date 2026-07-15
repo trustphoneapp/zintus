@@ -103,25 +103,30 @@ inspect/branch/push/PR operation under an idempotency key. PR text is synthesize
 from the normalized request, frozen criteria, exact diff, claims, risk, and
 evidence bundle. The base must enforce reviews, fresh approval, strict status
 checks, admin coverage, and immutable protected history. A stale base cannot
-publish and must enter `REVERIFYING`. Restart recovery replays durable publication
-states, re-inspects the base, and finds the deterministic head/base PR before
-attempting creation.
+publish. Controlled recovery synchronizes the credentialed current base and
+creates a replacement immutable run; the old hash-bound approval is superseded.
+Restart recovery replays durable publication states, re-inspects the base, and
+finds the deterministic head/base PR before attempting creation.
 
 Phase 5 adds a structured TERRA planner ahead of manifest freeze. The model proposes
 criteria, test commands, and scope through one strict forced function call; the
 Supervisor independently computes risk, adds non-negotiable denials, persists the
 proposal, and advances the durable state. Web and desktop consume the same
 authenticated workflow API for plan review, timeline replay, exact diff, evidence,
-security, human decisions, cancellation, and final outcomes. UI labels are derived
-from ledger truth and never manufacture progress or success.
+security, human decisions, cancellation, and final outcomes. All three clients
+discover the canonical repository and durable run history; mobile presents
+required choices and the final human gate. UI labels are derived from ledger truth
+and never manufacture progress or success.
 
 Phase 6 adds operational hardening around those boundaries. The planner now rejects
 commands that the trusted argv policy cannot execute. Failed correctness checks are
 confirmed three times at the same result commit and environment; mixed results are
 classified as flaky, quarantined, and remain non-authoritative. The filesystem warm
-pool performs periodic invalid/expired/capacity sweeps without ever returning a
-claimed workspace. An authenticated observability snapshot aggregates only durable
-run, approval, risk, and failure records.
+pool performs periodic invalid/expired/capacity sweeps and bounded minimum
+replenishment without ever returning a claimed workspace. Owner-only local
+storage rejects symlink substitution. Cached token classes are durable cost
+evidence. An authenticated observability snapshot and operations page aggregate
+only durable run, approval, retry, token, cost, risk, evidence, and failure records.
 
 ## Core invariants
 
@@ -166,5 +171,6 @@ are marked by producer and filtered before Reviewer input construction.
 
 ## Deferred integrations
 
-Mobile-specific Engineer screens and production-scale recovery remain deferred.
-The Builder and Reviewer have no credentials for publication operations.
+Organization-scale multi-repository RBAC, distributed workers, hosted artifact
+storage, and external activation remain deferred. The Builder and Reviewer have
+no credentials for publication operations.

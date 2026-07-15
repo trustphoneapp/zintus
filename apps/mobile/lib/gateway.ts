@@ -3,7 +3,7 @@ import { getGatewayUrl } from "@/lib/chat";
 
 const GATEWAY_TOKEN = process.env.EXPO_PUBLIC_GATEWAY_TOKEN?.trim() || "";
 
-function gatewayAuthHeaders(): Record<string, string> {
+export function gatewayAuthHeaders(): Record<string, string> {
   return GATEWAY_TOKEN ? { Authorization: `Bearer ${GATEWAY_TOKEN}` } : {};
 }
 

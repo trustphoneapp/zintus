@@ -47,6 +47,8 @@ export interface GitService {
   pushVerifiedCommit(input: PushVerifiedCommitInput): Promise<PushResult>;
   createPullRequest(input: CreatePullRequestInput): Promise<PullRequestResult>;
   inspectBaseBranch(input: InspectBaseBranchInput): Promise<BaseBranchStatus>;
+  /** Fetches the inspected base commit into the local object store without changing a working tree. */
+  synchronizeBaseBranch?(input: { repository: RepositoryReference; expectedCommitSha: string }): Promise<void>;
 }
 
 export interface GitHubGitServiceOptions {
@@ -107,6 +109,15 @@ export class GitHubGitService implements GitService {
       protection.requiresStatusChecks && protection.requiresStrictStatusChecks && protection.enforcesAdmins &&
       protection.blocksForcePushes && protection.blocksDeletions;
     return { currentCommitSha, matchesExpected: currentCommitSha.toLowerCase() === input.expectedBaseCommitSha.toLowerCase(), protectionEnforced, protection };
+  }
+
+  async synchronizeBaseBranch(input: { repository: RepositoryReference; expectedCommitSha: string }): Promise<void> {
+    const token = await this.requireToken();
+    this.authenticatedGit(input.repository, token, ["fetch", "--no-tags", "--force", this.remoteUrl(input.repository), `refs/heads/${input.repository.baseBranch}`]);
+    const fetched = this.git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"]).trim();
+    if (fetched.toLowerCase() !== input.expectedCommitSha.toLowerCase()) {
+      throw new Error("fetched base commit does not match the credentialed remote inspection");
+    }
   }
 
   async createPullRequest(input: CreatePullRequestInput): Promise<PullRequestResult> {

@@ -44,15 +44,31 @@ export class EngineerCapabilityPreflight {
   private startupPromise: Promise<void> | null = null;
   private readinessState: EngineerReadiness;
   private readonly options: EngineerCapabilityPreflightOptions;
+  private acceptedBaseCommitSha: string;
 
   constructor(options: EngineerCapabilityPreflightOptions) {
     this.options = options;
+    this.acceptedBaseCommitSha = options.repository.baseCommitSha;
     this.readinessState = options.unavailableReason
       ? { state: "DISABLED", error: null }
       : { state: "NOT_STARTED", error: null };
   }
 
   readiness(): EngineerReadiness { return { ...this.readinessState }; }
+
+  /** Returns the only repository identity accepted by this gateway. */
+  repository(): RepositoryReference {
+    const repository = this.options.repository;
+    return {
+      repositoryId: repository.repositoryId,
+      provider: repository.provider,
+      owner: repository.owner,
+      name: repository.name,
+      baseBranch: repository.baseBranch,
+      baseCommitSha: this.acceptedBaseCommitSha,
+      url: repository.originUrl,
+    };
+  }
 
   assertStartup(): Promise<void> {
     if (!this.startupPromise) {
@@ -74,9 +90,24 @@ export class EngineerCapabilityPreflight {
     if (repository.repositoryId !== expected.repositoryId || repository.provider !== expected.provider ||
         repository.owner !== expected.owner || repository.name !== expected.name ||
         repository.baseBranch !== expected.baseBranch ||
-        repository.baseCommitSha.toLowerCase() !== expected.baseCommitSha.toLowerCase()) {
+        repository.baseCommitSha.toLowerCase() !== this.acceptedBaseCommitSha.toLowerCase()) {
       throw new Error("Engineer preflight failed: repository does not match the frozen canonical fixture");
     }
+  }
+
+  /** Advances only the base SHA of the canonical repository after credentialed Git inspection. */
+  acceptAdvancedBase(previousBaseCommitSha: string, repository: RepositoryReference): void {
+    const expected = this.options.repository;
+    const identityMatches = repository.repositoryId === expected.repositoryId && repository.provider === expected.provider &&
+      repository.owner === expected.owner && repository.name === expected.name && repository.baseBranch === expected.baseBranch;
+    if (!identityMatches || !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(repository.baseCommitSha)) {
+      throw new Error("Engineer preflight failed: stale-base recovery attempted to change canonical repository identity");
+    }
+    if (this.acceptedBaseCommitSha.toLowerCase() === repository.baseCommitSha.toLowerCase()) return;
+    if (this.acceptedBaseCommitSha.toLowerCase() !== previousBaseCommitSha.toLowerCase()) {
+      throw new Error("Engineer preflight failed: canonical base advanced concurrently");
+    }
+    this.acceptedBaseCommitSha = repository.baseCommitSha;
   }
 
   private async runStartup(): Promise<void> {

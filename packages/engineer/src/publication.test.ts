@@ -9,6 +9,33 @@ import type { EngineerSupervisor } from "./supervisor.js";
 import type { ApprovalRequestRecord } from "./control-contracts.js";
 
 describe("Phase 4 approval deadlines", () => {
+  test("credentialed stale recovery synchronizes the inspected base without remote mutation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-phase4-stale-recovery-"));
+    let synchronized = "";
+    const run = {
+      runId: "run-stale", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "github" as const, owner: "o", name: "r", baseBranch: "main", baseCommitSha: "d".repeat(40) },
+      requestOriginal: "change", requestNormalized: "change", state: "BASE_BRANCH_STALE" as const, stateVersion: 10,
+      manifestHash: `sha256:${"a".repeat(64)}`, riskTier: "HIGH" as const, humanGateRequired: true,
+      createdAt: "2026-07-14T09:00:00.000Z", updatedAt: "2026-07-14T10:00:00.000Z", terminalAt: null,
+    };
+    const manager = new EngineerPublicationManager({
+      supervisor: { getRun: () => run } as unknown as EngineerSupervisor,
+      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => "",
+      commandSigningSecret: "phase4-stale-signing-secret-at-least-32-bytes",
+      gitService: {
+        async inspectBaseBranch() { return { currentCommitSha: "e".repeat(40), matchesExpected: false, protectionEnforced: true }; },
+        async synchronizeBaseBranch(input) { synchronized = input.expectedCommitSha; },
+        async createRunBranch() { throw new Error("must not mutate remote"); },
+        async pushVerifiedCommit() { throw new Error("must not mutate remote"); },
+        async createPullRequest() { throw new Error("must not mutate remote"); },
+      },
+    });
+    expect(await manager.replacementRepositoryForStale(run.runId)).toEqual({ ...run.repository, baseCommitSha: "e".repeat(40) });
+    expect(synchronized).toBe("e".repeat(40));
+    rmSync(root, { recursive: true, force: true });
+  });
+
   test("expires a pending approval fail-closed and records the terminal human-review state", () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-phase4-timeout-"));
     let state: EngineerRun["state"] = "HUMAN_APPROVAL_PENDING";

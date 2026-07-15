@@ -688,7 +688,10 @@ export class EngineerSupervisor {
           throw new Error("actual model output exceeded its admitted reservation");
         }
         if (record.inputTokens !== null && record.outputTokens !== null) {
-          const actualCostUsd = estimateGpt56CostUsd(record.resolvedModel, record.inputTokens, record.outputTokens);
+          const actualCostUsd = estimateGpt56CostUsd(record.resolvedModel, record.inputTokens, record.outputTokens, {
+            cachedInputTokens: record.cachedInputTokens ?? 0,
+            cacheWriteInputTokens: record.cacheWriteInputTokens ?? 0,
+          });
           if (actualCostUsd > reservation.estimatedCostUsd + Number.EPSILON) {
             throw new Error("actual model cost exceeded its admitted reservation");
           }
@@ -810,6 +813,10 @@ export class EngineerSupervisor {
 
   findGitOperation(runId: string, idempotencyKey: string): GitOperationRecord | null {
     return this.ledger.findGitOperation(runId, idempotencyKey);
+  }
+
+  listGitOperations(runId: string): GitOperationRecord[] {
+    return this.ledger.listGitOperations(runId);
   }
 
   recordFailure(record: FailureRecord): FailureRecord {

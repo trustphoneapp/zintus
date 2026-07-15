@@ -607,6 +607,8 @@ describe("Engineer Supervisor foundation", () => {
       latencyMs: 10,
       inputTokens: 100,
       outputTokens: 50,
+      cachedInputTokens: 40,
+      cacheWriteInputTokens: 10,
       retryCount: 0,
       status: "SUCCEEDED",
       createdAt: "2026-07-14T12:00:03.000Z",
@@ -616,6 +618,8 @@ describe("Engineer Supervisor foundation", () => {
       source_id: "planner-budget-call",
       input_tokens: 100,
       output_tokens: 50,
+      cached_input_tokens: 40,
+      cache_write_input_tokens: 10,
     }]);
     expect(supervisor.assertRuntimeBudget(run.runId)).toMatchObject({ status: "WITHIN_BUDGET", totalTokens: 150 });
 

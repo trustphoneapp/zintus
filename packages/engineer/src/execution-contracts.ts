@@ -131,10 +131,16 @@ export const ModelCallRecordSchema = z.object({
   latencyMs: z.number().int().nonnegative(),
   inputTokens: z.number().int().nonnegative().nullable(),
   outputTokens: z.number().int().nonnegative().nullable(),
+  cachedInputTokens: z.number().int().nonnegative().nullable().optional(),
+  cacheWriteInputTokens: z.number().int().nonnegative().nullable().optional(),
   retryCount: z.number().int().nonnegative(),
   status: z.enum(["SUCCEEDED", "FAILED"]),
   createdAt: IsoTimestampSchema,
-}).strict();
+}).strict().superRefine((record, context) => {
+  if (record.inputTokens !== null && (record.cachedInputTokens ?? 0) + (record.cacheWriteInputTokens ?? 0) > record.inputTokens) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "cached and cache-write input tokens cannot exceed total input tokens", path: ["cachedInputTokens"] });
+  }
+});
 
 export type ArtifactRecord = z.infer<typeof ArtifactRecordSchema>;
 export type WorkspaceRecord = z.infer<typeof WorkspaceRecordSchema>;

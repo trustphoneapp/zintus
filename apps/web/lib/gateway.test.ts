@@ -10,7 +10,22 @@ import {
   streamGatewayChat,
   summarizeToolArgs,
   summarizeToolResult,
+  clearEphemeralGatewayToken,
+  gatewayAuthHeaders,
+  setEphemeralGatewayToken,
 } from "./gateway.js";
+
+describe("ephemeral gateway authority", () => {
+  afterEach(() => clearEphemeralGatewayToken());
+
+  test("keeps an explicitly entered operator token in memory only", () => {
+    expect(gatewayAuthHeaders()).toEqual({});
+    setEphemeralGatewayToken("  local-operator-secret  ");
+    expect(gatewayAuthHeaders()).toEqual({ Authorization: "Bearer local-operator-secret" });
+    clearEphemeralGatewayToken();
+    expect(gatewayAuthHeaders()).toEqual({});
+  });
+});
 
 // The web client reassembles streamed tool calls the same fragile way the
 // provider side does: the gateway emits each call's `name` once and its

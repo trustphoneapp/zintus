@@ -101,6 +101,15 @@ export default function RootLayout() {
           }}
         />
         <Tabs.Screen
+          name="engineer"
+          options={{
+            title: "Engineer",
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="git-branch-outline" size={size} color={color} />
+            ),
+          }}
+        />
+        <Tabs.Screen
           name="providers"
           options={{
             title: "Providers",

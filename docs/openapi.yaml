@@ -230,6 +230,24 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { description: Engineer is not configured. }
 
+  /v1/engineer/repository:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerCanonicalRepository
+      summary: Get the only canonical repository snapshot admitted by this gateway
+      responses:
+        "200":
+          description: Authenticated canonical repository and exact accepted base.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [repository]
+                properties:
+                  repository: { $ref: "#/components/schemas/EngineerRepositoryReference" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Engineer preflight is not ready. }
+
   /v1/engineer/runs:
     get:
       tags: [Engineer]
@@ -406,6 +424,27 @@ paths:
         "404": { description: Run not found. }
         "409": { description: Execution is not configured or the run is not ready to start. }
 
+  /v1/engineer/runs/{runId}/recover-stale-base:
+    post:
+      tags: [Engineer]
+      operationId: recoverEngineerStaleBase
+      summary: Supersede stale approved work with a clean run on the credentialed current base
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "202":
+          description: Replacement run created and planning/execution accepted when no clarification is required.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [supersededRun, replacementRun]
+                properties:
+                  supersededRun: { $ref: "#/components/schemas/EngineerRun" }
+                  replacementRun: { $ref: "#/components/schemas/EngineerRun" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: Stale recovery or a required capability is not configured. }
+
   /v1/engineer/runs/{runId}/events:
     get:
       tags: [Engineer]
@@ -554,6 +593,27 @@ paths:
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       responses:
         "200": { description: Durable classified failures and retryability. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found. }
+
+  /v1/engineer/runs/{runId}/git-operations:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRunGitOperations
+      summary: List durable credentialed Git inspection and publication operations
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200":
+          description: Ordered Git operations and remote references.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [gitOperations]
+                properties:
+                  gitOperations:
+                    type: array
+                    items: { $ref: "#/components/schemas/EngineerGitOperation" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Run not found. }
 
@@ -1900,15 +1960,15 @@ components:
   schemas:
     EngineerHumanDecisionRequest:
       type: object
-      required: [actorId, reason]
+      required: [reason]
       additionalProperties: false
       properties:
-        actorId: { type: string, minLength: 1, maxLength: 200 }
+        actorId: { type: string, minLength: 1, maxLength: 200, deprecated: true, description: Ignored; authority comes from the authenticated gateway principal. }
         reason: { type: string, maxLength: 10000 }
 
     EngineerObservabilitySnapshot:
       type: object
-      required: [generatedAt, totalRuns, activeRuns, terminalRuns, pendingApprovals, runsByState, runsByRisk, failuresByClass]
+      required: [generatedAt, totalRuns, activeRuns, terminalRuns, pendingApprovals, completedRuns, failedRuns, successRate, stuckRuns, retryAttempts, totalInputTokens, totalOutputTokens, cachedInputTokens, cacheWriteInputTokens, estimatedCostUsd, averageApprovalLatencySeconds, evidenceCompleteRuns, runsByState, runsByRisk, failuresByClass, runHealth]
       additionalProperties: false
       properties:
         generatedAt: { type: string, format: date-time }
@@ -1916,9 +1976,35 @@ components:
         activeRuns: { type: integer, minimum: 0 }
         terminalRuns: { type: integer, minimum: 0 }
         pendingApprovals: { type: integer, minimum: 0 }
+        completedRuns: { type: integer, minimum: 0 }
+        failedRuns: { type: integer, minimum: 0 }
+        successRate: { type: [number, "null"], minimum: 0, maximum: 1 }
+        stuckRuns: { type: integer, minimum: 0 }
+        retryAttempts: { type: integer, minimum: 0 }
+        totalInputTokens: { type: integer, minimum: 0 }
+        totalOutputTokens: { type: integer, minimum: 0 }
+        cachedInputTokens: { type: integer, minimum: 0 }
+        cacheWriteInputTokens: { type: integer, minimum: 0 }
+        estimatedCostUsd: { type: number, minimum: 0 }
+        averageApprovalLatencySeconds: { type: [number, "null"], minimum: 0 }
+        evidenceCompleteRuns: { type: integer, minimum: 0 }
         runsByState: { type: object, additionalProperties: { type: integer, minimum: 0 } }
         runsByRisk: { type: object, additionalProperties: { type: integer, minimum: 0 } }
         failuresByClass: { type: object, additionalProperties: { type: integer, minimum: 0 } }
+        runHealth:
+          type: array
+          items:
+            type: object
+            required: [runId, state, riskTier, ageInStateSeconds, stuck, retryAttempts, failureCount]
+            additionalProperties: false
+            properties:
+              runId: { type: string }
+              state: { type: string }
+              riskTier: { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+              ageInStateSeconds: { type: integer, minimum: 0 }
+              stuck: { type: boolean }
+              retryAttempts: { type: integer, minimum: 0 }
+              failureCount: { type: integer, minimum: 0 }
 
     EngineerRepositoryReference:
       type: object
@@ -1937,14 +2023,34 @@ components:
 
     EngineerRunCreateRequest:
       type: object
-      required: [userId, repository, request]
+      required: [repository, request]
       additionalProperties: false
       properties:
         runId: { type: string, minLength: 1, maxLength: 200 }
-        userId: { type: string, minLength: 1, maxLength: 200 }
+        userId: { type: string, minLength: 1, maxLength: 200, deprecated: true, description: Ignored; ownership comes from the authenticated gateway principal. }
         userEmail: { type: string, format: email }
         repository: { $ref: "#/components/schemas/EngineerRepositoryReference" }
         request: { type: string, minLength: 1, maxLength: 100000 }
+
+    EngineerGitOperation:
+      type: object
+      required: [gitOperationId, runId, operationType, requestedBy, idempotencyKey, expectedBaseCommitSha, resultCommitSha, approvalId, evidenceBundleHash, status, remoteReference, startedAt, completedAt, errorCode]
+      additionalProperties: false
+      properties:
+        gitOperationId: { type: string }
+        runId: { type: string }
+        operationType: { type: string, enum: [CREATE_BRANCH, PUSH_COMMIT, CREATE_PR, INSPECT_BASE, REBASE_CANDIDATE] }
+        requestedBy: { type: string, const: SUPERVISOR }
+        idempotencyKey: { type: string }
+        expectedBaseCommitSha: { type: string }
+        resultCommitSha: { type: [string, "null"] }
+        approvalId: { type: [string, "null"] }
+        evidenceBundleHash: { type: [string, "null"] }
+        status: { type: string, enum: [STARTED, SUCCEEDED, FAILED, STALE] }
+        remoteReference: { type: [string, "null"] }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: [string, "null"], format: date-time }
+        errorCode: { type: [string, "null"] }
 
     EngineerRun:
       type: object

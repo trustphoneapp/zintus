@@ -169,8 +169,9 @@ export class EngineerVerificationManager {
           logicalTier: agent.route.logicalTier, resolvedModel: agent.route.model,
           promptTemplateVersion: TERRA_ADVISOR_POLICY_VERSION,
           inputContextRefs: [manifest.manifestHash, observation.inputHash], outputSchemaVersion: "phase3-advisory-v1",
-          cacheKey: observation.cacheKey, cacheHit: null, latencyMs: observation.latencyMs,
+          cacheKey: observation.cacheKey, cacheHit: observation.cachedInputTokens > 0, latencyMs: observation.latencyMs,
           inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
+          cachedInputTokens: observation.cachedInputTokens, cacheWriteInputTokens: observation.cacheWriteInputTokens,
           retryCount: observation.retryCount, status: "SUCCEEDED", createdAt: this.timestamp(),
         }, observation.reservationId);
       },
@@ -270,8 +271,9 @@ export class EngineerVerificationManager {
           logicalTier: reviewerAgent.route.logicalTier, resolvedModel: reviewerAgent.route.model,
           promptTemplateVersion: REVIEWER_POLICY_VERSION,
           inputContextRefs: [manifest.manifestHash, observation.dynamicInputHash], outputSchemaVersion: "reviewer-output-v1",
-          cacheKey: observation.cacheKey, cacheHit: null, latencyMs: observation.latencyMs,
+          cacheKey: observation.cacheKey, cacheHit: observation.cachedInputTokens > 0, latencyMs: observation.latencyMs,
           inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
+          cachedInputTokens: observation.cachedInputTokens, cacheWriteInputTokens: observation.cacheWriteInputTokens,
           retryCount: observation.retryCount, status: "SUCCEEDED", createdAt: this.timestamp(),
         }, observation.reservationId);
       },
@@ -477,8 +479,9 @@ export class EngineerVerificationManager {
           logicalTier: agent.route.logicalTier, resolvedModel: agent.route.model,
           promptTemplateVersion: CODEX_BUILDER_PROMPT_VERSION,
           inputContextRefs: [manifest.manifestHash, repairContext.reviewFindingsHash, observation.inputHash],
-          outputSchemaVersion: null, cacheKey: observation.cacheKey, cacheHit: null,
+          outputSchemaVersion: null, cacheKey: observation.cacheKey, cacheHit: observation.cachedInputTokens > 0,
           latencyMs: observation.latencyMs, inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
+          cachedInputTokens: observation.cachedInputTokens, cacheWriteInputTokens: observation.cacheWriteInputTokens,
           retryCount: observation.retryCount, status: "SUCCEEDED", createdAt: this.timestamp(),
         }, observation.reservationId);
       },
@@ -544,8 +547,9 @@ export class EngineerVerificationManager {
           logicalTier: agent.route.logicalTier, resolvedModel: agent.route.model,
           promptTemplateVersion: LUNA_FAILURE_ADVISOR_POLICY_VERSION,
           inputContextRefs: [manifest.manifestHash, observation.inputHash], outputSchemaVersion: "luna-failure-advisory-v1",
-          cacheKey: observation.cacheKey, cacheHit: null, latencyMs: observation.latencyMs,
+          cacheKey: observation.cacheKey, cacheHit: observation.cachedInputTokens > 0, latencyMs: observation.latencyMs,
           inputTokens: observation.inputTokens, outputTokens: observation.outputTokens,
+          cachedInputTokens: observation.cachedInputTokens, cacheWriteInputTokens: observation.cacheWriteInputTokens,
           retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp(),
         }, observation.reservationId),
       });

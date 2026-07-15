@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, openSync, closeSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, statSync, lstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { ArtifactRecordSchema, type ArtifactRecord } from "./execution-contracts.js";
 import { sha256 } from "./hash.js";
@@ -11,6 +11,15 @@ export const DEFAULT_MAX_RUN_ARTIFACT_BYTES = DEFAULT_RUN_ARTIFACT_BUDGET_BYTES;
 function safeIdentifier(value: string, label: string): string {
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(value)) throw new TypeError(`${label} contains unsafe characters`);
   return value;
+}
+
+function ensurePrivateDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) {
+    throw new Error("artifact storage must be an owner-controlled regular directory");
+  }
+  chmodSync(path, 0o700);
 }
 
 export interface ArtifactStoreOptions {
@@ -38,7 +47,7 @@ export class LocalArtifactStore {
     );
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
-    mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    ensurePrivateDirectory(this.root);
   }
 
   put(input: {
@@ -57,7 +66,7 @@ export class LocalArtifactStore {
     const digest = sha256(bytes);
     const hex = digest.slice("sha256:".length);
     const runRoot = join(this.root, runId);
-    mkdirSync(runRoot, { recursive: true, mode: 0o700 });
+    ensurePrivateDirectory(runRoot);
     const storageReference = join(runRoot, hex);
     const resolved = resolve(storageReference);
     if (!resolved.startsWith(`${runRoot}${sep}`)) throw new TypeError("artifact path escaped run root");
@@ -106,6 +115,10 @@ export class LocalArtifactStore {
     const expectedRoot = join(this.root, safeIdentifier(parsed.runId, "runId"));
     const path = resolve(parsed.storageReference);
     if (!path.startsWith(`${expectedRoot}${sep}`)) throw new Error("artifact reference escaped its run root");
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) {
+      throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
+    }
     const bytes = readFileSync(path);
     if (bytes.byteLength !== parsed.sizeBytes || sha256(bytes) !== parsed.sha256) {
       throw new Error(`artifact integrity check failed: ${parsed.artifactId}`);

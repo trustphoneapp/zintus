@@ -125,6 +125,14 @@ describe("gateway handler", () => {
     await preflight.assertStartup();
     const engineerRuns = new EngineerRunManager({ supervisor, principal, preflight, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => "diff --git a/a b/a" });
     const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const repository = await handler(new Request("http://x/v1/engineer/repository", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(repository.status).toBe(200);
+    expect((await repository.json()) as unknown).toEqual({ repository: {
+      repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture",
+      baseBranch: "main", baseCommitSha: "1".repeat(40), url: "file:///fixture",
+    } });
     const body = JSON.stringify({
       runId: "gateway-run-1",
       userId: "user-1",
@@ -171,6 +179,8 @@ describe("gateway handler", () => {
     expect((await security.json()) as unknown).toEqual({ securityFindings: [] });
     const failures = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/failures", { headers: { Authorization: "Bearer secret" } }));
     expect((await failures.json()) as unknown).toEqual({ failures: [] });
+    const gitOperations = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/git-operations", { headers: { Authorization: "Bearer secret" } }));
+    expect((await gitOperations.json()) as unknown).toEqual({ gitOperations: [] });
     const diff = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/diff", { headers: { Authorization: "Bearer secret" } }));
     expect((await diff.json()) as unknown).toEqual({ diff: "diff --git a/a b/a" });
     const approval = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/approval", { headers: { Authorization: "Bearer secret" } }));
@@ -179,7 +189,13 @@ describe("gateway handler", () => {
     expect(observability.status).toBe(200);
     expect(((await observability.json()) as { snapshot: { totalRuns: number; runsByState: Record<string, number> } }).snapshot).toMatchObject({
       totalRuns: 1,
+      activeRuns: 1,
+      stuckRuns: 0,
+      estimatedCostUsd: 0,
+      cachedInputTokens: 0,
+      retryAttempts: 0,
       runsByState: { REQUEST_RECEIVED: 1 },
+      runHealth: [{ runId: "gateway-run-1", state: "REQUEST_RECEIVED", stuck: false }],
     });
     const runList = await handler(new Request("http://x/v1/engineer/runs", { headers: { Authorization: "Bearer secret" } }));
     expect(((await runList.json()) as { runs: Array<{ runId: string }> }).runs.map((run) => run.runId)).toEqual(["gateway-run-1"]);

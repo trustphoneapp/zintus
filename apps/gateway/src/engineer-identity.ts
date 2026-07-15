@@ -10,6 +10,15 @@ export interface EngineerPrincipal {
   safetyIdentifier: string;
 }
 
+/** Publication needs both repository credentials and an authenticated gateway. */
+export function canEnableEngineerPublication(input: {
+  publicationSecret?: string;
+  githubToken?: string;
+  gatewayToken?: string;
+}): boolean {
+  return Boolean(input.publicationSecret?.trim() && input.githubToken?.trim() && input.gatewayToken?.trim());
+}
+
 function digest(secret: string, purpose: string): string {
   return createHmac("sha256", secret).update(`zintus-engineer:${purpose}`).digest("hex");
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import { sha256 } from "./hash.js";
@@ -64,6 +64,15 @@ export interface WarmSandboxPoolHealth {
   excessQuarantined: number;
 }
 
+function ensurePrivateDirectory(path: string): void {
+  mkdirSync(path, { recursive: true, mode: 0o700 });
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) {
+    throw new Error("warm pool storage must be an owner-controlled regular directory");
+  }
+  chmodSync(path, 0o700);
+}
+
 /** Filesystem-backed atomic warm claim registry. Claimed workspaces are never returned. */
 export class WarmSandboxPool {
   private readonly root: string;
@@ -74,8 +83,9 @@ export class WarmSandboxPool {
     this.root = resolve(options.root);
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
+    ensurePrivateDirectory(this.root);
     for (const name of ["available", "claimed", "quarantined"]) {
-      mkdirSync(join(this.root, name), { recursive: true, mode: 0o700 });
+      ensurePrivateDirectory(join(this.root, name));
     }
   }
 

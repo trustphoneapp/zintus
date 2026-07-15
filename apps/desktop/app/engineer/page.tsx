@@ -8,8 +8,11 @@ import {
   freezeEngineerPlan,
   getEngineerData,
   getEngineerPlan,
+  getEngineerRepository,
   getEngineerRunStatus,
+  listEngineerRuns,
   planEngineerRun,
+  recoverEngineerStaleBase,
   startEngineerRun,
   streamEngineerEvents,
   type EngineerRepository,
@@ -35,6 +38,7 @@ export default function EngineerPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [managerError, setManagerError] = useState<string | null>(null);
+  const [recentRuns, setRecentRuns] = useState<EngineerRun[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -60,17 +64,33 @@ export default function EngineerPage() {
     });
   }, [refresh]);
 
+  const loadDashboard = useCallback(async () => {
+    const [canonical, history] = await Promise.allSettled([getEngineerRepository(), listEngineerRuns()]);
+    if (canonical.status === "fulfilled") setRepository(canonical.value);
+    if (history.status === "fulfilled") setRecentRuns(history.value);
+    if (canonical.status === "rejected" && history.status === "rejected") setError(canonical.reason instanceof Error ? canonical.reason.message : "Engineer gateway is unavailable");
+  }, []);
+
+  const openRun = useCallback(async (runId: string) => {
+    const [status, storedPlan, storedData] = await Promise.all([getEngineerRunStatus(runId), getEngineerPlan(runId).catch(() => null), getEngineerData(runId)]);
+    setRun(status.run); setPlan(storedPlan); setData(storedData); setEvents([]); setManagerError(status.lastError);
+    window.localStorage.setItem(RUN_STORAGE_KEY, runId);
+    if (!TERMINAL.has(status.run.state)) watch(runId);
+  }, [watch]);
+
+  const returnToRuns = useCallback(() => {
+    abortRef.current?.abort(); window.localStorage.removeItem(RUN_STORAGE_KEY);
+    setRun(null); setPlan(null); setData(null); setEvents([]); setManagerError(null); setError(null);
+    void loadDashboard();
+  }, [loadDashboard]);
+
   useEffect(() => {
     const runId = window.localStorage.getItem(RUN_STORAGE_KEY);
-    if (!runId) return;
+    if (!runId) { void loadDashboard(); return; }
     let active = true;
-    void Promise.all([getEngineerRunStatus(runId), getEngineerPlan(runId).catch(() => null), getEngineerData(runId)]).then(([status, storedPlan, storedData]) => {
-      if (!active) return;
-      setRun(status.run); setPlan(storedPlan); setData(storedData); setManagerError(status.lastError);
-      if (!TERMINAL.has(status.run.state)) watch(runId);
-    }).catch(() => { window.localStorage.removeItem(RUN_STORAGE_KEY); });
+    void openRun(runId).catch(() => { if (active) { window.localStorage.removeItem(RUN_STORAGE_KEY); void loadDashboard(); } });
     return () => { active = false; };
-  }, [watch]);
+  }, [loadDashboard, openRun]);
 
   const submit = async () => {
     if (!request.trim() || !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(repository.baseCommitSha)) return;
@@ -113,6 +133,14 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
 
+  const recoverStaleBase = async () => {
+    if (!run) return;
+    setBusy(true); setError(null);
+    try { const replacement = await recoverEngineerStaleBase(run.runId); await openRun(replacement.runId); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to recover the stale base"); }
+    finally { setBusy(false); }
+  };
+
   const decide = async (action: "approve" | "request-changes" | "reject" | "cancel") => {
     if (!run) return;
     setBusy(true); setError(null);
@@ -134,6 +162,7 @@ export default function EngineerPage() {
   const tests = (data?.tests ?? []) as Array<{ testExecutionId?: string; type?: string; status?: string }>;
   const findings = (data?.securityFindings ?? []) as Array<{ securityFindingId?: string; severity?: string; category?: string; description?: string }>;
   const failures = (data?.failures ?? []) as Array<{ failureId?: string; reasonCode?: string; failureClass?: string }>;
+  const gitOperations = (data?.gitOperations ?? []) as Array<{ gitOperationId?: string; operationType?: string; status?: string; remoteReference?: string | null; errorCode?: string | null }>;
   const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; evidenceBundleHash?: string } | null | undefined;
   const progress = useMemo(() => TERMINAL.has(latestState) ? 100 : STATE_PROGRESS[latestState] ?? 35, [latestState]);
 
@@ -154,12 +183,13 @@ export default function EngineerPage() {
         {error ? <p className="engineer-error">{error}</p> : null}
         <button className="engineer-primary" onClick={() => void submit()} disabled={busy || !request.trim() || !repository.baseCommitSha}>{busy ? "Planning…" : "Create evidence plan"}</button>
       </section>
+      {recentRuns.length ? <section className="engineer-card"><div className="engineer-section-title"><span>02</span><div><h2>Recent durable runs</h2><p>Resume a run from the gateway ledger.</p></div></div><div className="engineer-list">{recentRuns.map((item) => <button key={item.runId} onClick={() => void openRun(item.runId)}><span className={`engineer-status engineer-status--${item.state.toLowerCase()}`}>{item.state.replaceAll("_", " ")}</span><div><strong>{item.requestNormalized || item.requestOriginal}</strong><code>{item.runId}</code></div></button>)}</div></section> : null}
     </main>
   );
 
   if (plan && run.state === "PLAN_READY") return (
     <main className="engineer-screen">
-      <RunHeader run={run} progress={10} />
+      <RunHeader run={run} progress={10} onBack={returnToRuns} />
       <section className="engineer-plan-grid">
         <div className="engineer-card">
           <div className="engineer-section-title"><span>02</span><div><h2>Review the frozen contract</h2><p>This scope controls every file, command, test, and retry.</p></div></div>
@@ -183,16 +213,17 @@ export default function EngineerPage() {
 
   return (
     <main className="engineer-screen">
-      <RunHeader run={run} progress={TERMINAL.has(latestState) ? 100 : progress} />
+      <RunHeader run={run} progress={TERMINAL.has(latestState) ? 100 : progress} onBack={returnToRuns} />
       <nav className="engineer-tabs" aria-label="Engineer run views">{(["timeline", "diff", "evidence"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
       {latestState === "REQUEST_RECEIVED" && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The durable run is intact. Planning can be retried without creating a duplicate run.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{busy ? "Planning…" : "Retry planning"}</button></section> : null}
       {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{busy ? "Starting…" : "Start frozen plan"}</button></section> : null}
+      {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recreate and verify on the current base</h2><p>The reviewed candidate stays blocked. A new immutable run will repeat planning, execution, verification, and review.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void recoverStaleBase()}>{busy ? "Recovering…" : "Start controlled recovery"}</button></section> : null}
       {tab === "timeline" ? <section className="engineer-run-grid">
         <div className="engineer-card"><h2>Live timeline</h2><div className="engineer-timeline">{events.length ? events.map((event) => <div key={event.eventId} className="engineer-event"><span /><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div><strong>{event.nextState.replaceAll("_", " ")}</strong><small>{event.reasonCode.replaceAll("_", " ")}</small></div></div>) : <p className="engineer-muted">Waiting for the first durable event…</p>}</div></div>
         <aside className="engineer-card engineer-verification"><h2>Verification</h2><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /><Metric label="Failures" value={String(failures.length)} /></aside>
       </section> : null}
       {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><h2>Reviewed diff</h2><span className="engineer-chip">hash-bound</span></div><pre className="engineer-diff">{data?.diff || "The exact diff appears after implementation begins."}</pre></section> : null}
-      {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><h2>Acceptance evidence</h2>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}</div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div></section> : null}
+      {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><h2>Acceptance evidence</h2>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}</div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div><PublicationOperations operations={gitOperations} /></section> : null}
       {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>{approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>Approve and publish</button><button disabled={busy} onClick={() => void decide("request-changes")}>Request changes</button><button disabled={busy} onClick={() => void extendApproval()}>Give me 24 hours</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>Reject</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
@@ -202,5 +233,6 @@ export default function EngineerPage() {
   );
 }
 
-function RunHeader({ run, progress }: { run: EngineerRun; progress: number }) { return <header className="engineer-run-header"><div><span className="engineer-kicker">Zintus Engineer · {run.repository.name}</span><h1>{run.requestNormalized || run.requestOriginal}</h1><div className="engineer-run-meta"><span className={`engineer-risk engineer-risk--${run.riskTier.toLowerCase()}`}>{run.riskTier}</span><code>{run.runId}</code></div></div><div className="engineer-progress"><div><span>{run.state.replaceAll("_", " ")}</span><strong>{progress}%</strong></div><progress max="100" value={progress} /></div></header>; }
+function RunHeader({ run, progress, onBack }: { run: EngineerRun; progress: number; onBack: () => void }) { return <header className="engineer-run-header"><div><button className="engineer-kicker" onClick={onBack}>← All runs</button><span className="engineer-kicker">Zintus Engineer · {run.repository.name}</span><h1>{run.requestNormalized || run.requestOriginal}</h1><div className="engineer-run-meta"><span className={`engineer-risk engineer-risk--${run.riskTier.toLowerCase()}`}>{run.riskTier}</span><code>{run.runId}</code></div></div><div className="engineer-progress"><div><span>{run.state.replaceAll("_", " ")}</span><strong>{progress}%</strong></div><progress max="100" value={progress} /></div></header>; }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="engineer-metric"><span>{label}</span><strong>{value}</strong></div>; }
+function PublicationOperations({ operations }: { operations: Array<{ gitOperationId?: string; operationType?: string; status?: string; remoteReference?: string | null; errorCode?: string | null }> }) { return <div className="engineer-card"><h2>Publication operations</h2>{operations.length ? operations.map((operation) => <article className="engineer-claim" key={operation.gitOperationId}><span className={`engineer-status engineer-status--${(operation.status ?? "").toLowerCase()}`}>{operation.status}</span><strong>{operation.operationType?.replaceAll("_", " ")}</strong>{operation.remoteReference?.startsWith("https://") ? <a href={operation.remoteReference} target="_blank" rel="noreferrer">Open published result</a> : <code>{operation.remoteReference ?? operation.errorCode ?? operation.gitOperationId}</code>}</article>) : <p className="engineer-muted">No credentialed Git operation has started.</p>}</div>; }

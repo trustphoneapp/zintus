@@ -32,6 +32,10 @@ const ResponsesResultSchema = z.object({
   usage: z.object({
     input_tokens: z.number().int().nonnegative().optional(),
     output_tokens: z.number().int().nonnegative().optional(),
+    input_tokens_details: z.object({
+      cached_tokens: z.number().int().nonnegative().optional(),
+      cache_write_tokens: z.number().int().nonnegative().optional(),
+    }).passthrough().optional(),
   }).passthrough().optional(),
 }).passthrough();
 
@@ -160,6 +164,8 @@ export interface CodexBuilderOptions {
     latencyMs: number;
     inputTokens: number | null;
     outputTokens: number | null;
+    cachedInputTokens: number;
+    cacheWriteInputTokens: number;
     reservationId?: string;
     retryCount: number;
   }) => void;
@@ -265,6 +271,8 @@ export class CodexBuilder {
         latencyMs: Math.max(0, Date.now() - callStarted),
         inputTokens: response.usage?.input_tokens ?? null,
         outputTokens: response.usage?.output_tokens ?? null,
+        cachedInputTokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
+        cacheWriteInputTokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0,
         reservationId,
         retryCount: attempt,
       });

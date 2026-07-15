@@ -112,6 +112,19 @@ describe("Engineer trusted identity and admission", () => {
       .rejects.toThrow("canonical fixture");
   });
 
+  test("advances only the canonical base after a credentialed stale-base recovery", async () => {
+    const gate = preflight();
+    await gate.assertRunAdmission(repository);
+    const advanced = { ...repository, baseCommitSha: "2".repeat(40) };
+    gate.acceptAdvancedBase(repository.baseCommitSha, advanced);
+    expect(gate.repository().baseCommitSha).toBe(advanced.baseCommitSha);
+    await expect(gate.assertRunAdmission(advanced)).resolves.toBeUndefined();
+    expect(() => gate.acceptAdvancedBase(advanced.baseCommitSha, { ...advanced, owner: "attacker" }))
+      .toThrow("canonical repository identity");
+    expect(() => gate.acceptAdvancedBase("3".repeat(40), { ...advanced, baseCommitSha: "4".repeat(40) }))
+      .toThrow("advanced concurrently");
+  });
+
   test("strict capability proof rejects extras, duplicates, wrong types, and model mismatch", async () => {
     const capability = (output: unknown[], responseModel = "exact-model") => createLocalEngineerCapabilityProbe({
       repositoryId: repository.repositoryId, repositoryRoot: tmpdir(), expectedOriginUrl: "file:///fixture",

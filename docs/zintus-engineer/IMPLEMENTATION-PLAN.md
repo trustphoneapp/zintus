@@ -231,9 +231,8 @@ credential and a stable publication-command signing secret.
 
 ### Phase 5 — Zintus experience
 
-Status: partial for the web and desktop clients. The primary workflow exists;
-durable run resume, retry/recovery UX, secure gateway authentication, efficient SSE
-replay, and complete error visibility remain incomplete.
+Status: source-complete for the local single-owner scope across web, desktop, and
+mobile. External model/Docker/GitHub activation remains a release gate.
 
 Delivered:
 
@@ -253,15 +252,19 @@ Delivered:
 7. Engineer navigation and command-palette entries in the existing responsive web
    and desktop Zintus shells, using their current design tokens and reduced-motion
    behavior.
+8. Authenticated canonical-repository discovery, server-side durable run history,
+   shareable run URLs, memory-only browser operator authority, and Git-operation
+   visibility.
+9. Mobile task intake, run history/monitoring, required decision choices, final
+   approval, and stale-base recovery.
 
 The experience remains intentionally workflow-shaped rather than chat-shaped.
 
 ### Phase 6 — hardening and demo
 
-Status: validation scaffolding implemented; **not a release candidate**. The audit
-fixtures cover several invariants, but end-to-end OpenAI/Docker/GitHub execution,
-restart recovery, budgets, LUNA runtime roles, and the full architecture evaluation
-suite have not passed.
+Status: source hardening complete for the local scope; **not externally activated**.
+End-to-end OpenAI/Docker/GitHub proof still requires credentials, a pinned image,
+and an authorized private test repository.
 
 Delivered:
 
@@ -279,6 +282,13 @@ Delivered:
    pending approvals, and failure classes.
 6. A deliberately failing password-reset demo repository, operator README,
    recording checklist, and safe-failure alternate.
+7. Bounded warm-pool minimum replenishment, owner-only local storage, controlled
+   stale-base replacement runs, and durable publication-operation inspection.
+8. Cached-read/cache-write token accounting with dated pricing plus a dedicated
+   operations page for success, stuck states, retries, approvals, evidence, and
+   cost.
+9. A hash-bound Phase 5/6 evaluation harness mapping 17 adversarial scenarios to
+   executable tests.
 
 Exit criteria: 51 Engineer package tests, 81 gateway/OpenAPI tests, package,
 gateway, web, and desktop typechecks pass. The demo fixture's one intentional

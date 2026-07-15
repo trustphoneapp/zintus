@@ -97,6 +97,8 @@ export interface IsolatedReviewerOptions {
     latencyMs: number;
     inputTokens: number | null;
     outputTokens: number | null;
+    cachedInputTokens: number;
+    cacheWriteInputTokens: number;
     reservationId?: string;
     retryCount: number;
   }) => void;
@@ -245,6 +247,8 @@ export class IsolatedReviewer {
       latencyMs: Math.max(0, Date.now() - callStarted),
       inputTokens: response.usage?.input_tokens ?? null,
       outputTokens: response.usage?.output_tokens ?? null,
+      cachedInputTokens: response.usage?.input_tokens_details?.cached_tokens ?? 0,
+      cacheWriteInputTokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0,
       reservationId,
       retryCount: transportAttempt,
     });

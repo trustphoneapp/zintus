@@ -33,8 +33,22 @@ export const GATEWAY_URL =
  * GUARD: do NOT reintroduce `process.env.NEXT_PUBLIC_GATEWAY_TOKEN` (or any other
  * static secret) here — it would leak to anyone viewing the page source.
  */
+let ephemeralGatewayToken = "";
+
+/**
+ * Sets a memory-only operator token for direct loopback access. It is never
+ * persisted, read from a public build variable, or written to browser storage.
+ */
+export function setEphemeralGatewayToken(token: string): void {
+  ephemeralGatewayToken = token.trim();
+}
+
+export function clearEphemeralGatewayToken(): void {
+  ephemeralGatewayToken = "";
+}
+
 export function gatewayAuthHeaders(): Record<string, string> {
-  return {};
+  return ephemeralGatewayToken ? { Authorization: `Bearer ${ephemeralGatewayToken}` } : {};
 }
 
 /** True when the gateway runs on this machine (safe to pass BYOK keys to). */

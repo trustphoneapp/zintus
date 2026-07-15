@@ -60,7 +60,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { EngineerRunManager } from "./engineer.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight } from "./engineer-preflight.js";
-import { loadOrCreateEngineerPrincipal, loadOrCreateEngineerWorkerLeaseSecret } from "./engineer-identity.js";
+import { canEnableEngineerPublication, loadOrCreateEngineerPrincipal, loadOrCreateEngineerWorkerLeaseSecret } from "./engineer-identity.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -166,6 +166,9 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   };
   const publicationSecret = process.env.ZINTUS_ENGINEER_PUBLICATION_SECRET;
   const githubToken = process.env.ZINTUS_ENGINEER_GITHUB_TOKEN;
+  // Publication is a privileged mutation boundary. Credentials alone are not
+  // sufficient: the gateway itself must require an authenticated bearer.
+  const publicationAuthorityReady = canEnableEngineerPublication({ publicationSecret, githubToken, gatewayToken: config.token });
   const engineerPlanning = new EngineerPlanningManager({
     supervisor: engineerSupervisor,
     artifactStore: engineerArtifactStore,
@@ -185,6 +188,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerVerification: EngineerVerificationManager | undefined;
   let engineerPublication: EngineerPublicationManager | undefined;
   let engineerWarmPool: WarmSandboxPool | undefined;
+  let engineerSandboxManager: DockerSandboxManager | undefined;
+  let engineerPrewarmConfig: { repositoryId: string; repositoryRoot: string; getBaseCommitSha: () => string } | undefined;
   const unavailablePreflight = new EngineerCapabilityPreflight({
     models: [], publicationEnabled: false,
     repository: { repositoryId: "unconfigured", provider: "local", owner: "unconfigured", name: "unconfigured", baseBranch: "unconfigured", baseCommitSha: "0".repeat(40), originUrl: "unconfigured" },
@@ -207,7 +212,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         resolveEngineerModel("REQUEST_CLASSIFIER", engineerModelConfiguration).model,
       ],
       execution: { imageReference: engineerImage, imageDigest: engineerImageDigest },
-      publicationEnabled: Boolean(publicationSecret && githubToken),
+      publicationEnabled: publicationAuthorityReady,
       repository: {
         repositoryId: engineerRepositoryId, provider: engineerRepositoryProvider,
         owner: engineerRepositoryOwner, name: engineerRepositoryName,
@@ -262,8 +267,14 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       ...(warmPool ? { warmPool } : {}),
       ...(offlineDependencies ? { offlineDependencies } : {}),
     });
+    engineerSandboxManager = sandboxManager;
     const prewarmBaseCommit = process.env.ZINTUS_ENGINEER_PREWARM_BASE_COMMIT_SHA;
     if (prewarmBaseCommit && warmPool) {
+      engineerPrewarmConfig = {
+        repositoryId: engineerRepositoryId,
+        repositoryRoot: engineerRepositoryRoot,
+        getBaseCommitSha: () => engineerPreflight.repository().baseCommitSha,
+      };
       sandboxManager.prewarm({
         repositoryId: engineerRepositoryId,
         repositoryRoot: engineerRepositoryRoot,
@@ -323,7 +334,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         return engineerPrincipal.safetyIdentifier;
       },
     });
-    engineerPublication = publicationSecret && githubToken
+    engineerPublication = publicationAuthorityReady && publicationSecret && githubToken
       ? new EngineerPublicationManager({
           supervisor: engineerSupervisor,
           gitService: new GitHubGitService({
@@ -469,21 +480,39 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerApprovalTimer: ReturnType<typeof setInterval> | null = null;
   let engineerWarmPoolTimer: ReturnType<typeof setInterval> | null = null;
   if (engineerWarmPool) {
+    const configuredMinimum = Number(process.env.ZINTUS_ENGINEER_WARM_POOL_MIN);
     const configuredMaximum = Number(process.env.ZINTUS_ENGINEER_WARM_POOL_MAX);
     const maximum = Number.isInteger(configuredMaximum) && configuredMaximum >= 0 ? configuredMaximum : 8;
-    const sweep = () => {
+    const minimum = Number.isInteger(configuredMinimum) && configuredMinimum >= 0
+      ? Math.min(configuredMinimum, maximum)
+      : Math.min(1, maximum);
+    let replenishing = false;
+    const sweep = async () => {
+      if (replenishing) return;
+      replenishing = true;
       try {
         const health = engineerWarmPool?.sweep(maximum);
         if (health && (health.expiredQuarantined + health.invalidQuarantined + health.excessQuarantined > 0)) {
           log("info", "engineer.warm_pool_quarantined", { ...health });
         }
+        if (health && health.available < minimum && engineerSandboxManager && engineerPrewarmConfig) {
+          const baseCommitSha = engineerPrewarmConfig.getBaseCommitSha();
+          engineerSandboxManager.prewarm({
+            repositoryId: engineerPrewarmConfig.repositoryId,
+            repositoryRoot: engineerPrewarmConfig.repositoryRoot,
+            baseCommitSha,
+          });
+          log("info", "engineer.warm_pool_replenished", { availableBefore: health.available, minimum, maximum, baseCommitSha });
+        }
       } catch (error) {
         log("error", "engineer.warm_pool_sweep_failed", { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        replenishing = false;
       }
     };
-    engineerWarmPoolTimer = setInterval(sweep, 60_000);
+    engineerWarmPoolTimer = setInterval(() => { void sweep(); }, 60_000);
     engineerWarmPoolTimer.unref?.();
-    sweep();
+    void sweep();
   }
   if (engineerPublication) {
     let recoveryComplete = false;

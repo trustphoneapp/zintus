@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalArtifactStore } from "./artifact-store.js";
@@ -79,6 +79,30 @@ describe("Phase 6 adversarial fixtures", () => {
     expect(() => store.read({ ...record, runId: "run-b" })).toThrow("escaped its run root");
     writeFileSync(record.storageReference, "tampered");
     expect(() => store.read(record)).toThrow("integrity check failed");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("local storage repairs private modes and rejects symlink substitution", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-hardening-storage-"));
+    const artifactRoot = join(root, "artifacts");
+    const store = new LocalArtifactStore({ root: artifactRoot });
+    expect(lstatSync(artifactRoot).mode & 0o077).toBe(0);
+    const record = store.put({ runId: "run-a", type: "FIXTURE", bytes: "trusted", producerType: "SYSTEM", producerId: "fixture", trusted: true });
+    const replacement = join(root, "replacement");
+    writeFileSync(replacement, "trusted");
+    unlinkSync(record.storageReference);
+    symlinkSync(replacement, record.storageReference);
+    expect(() => store.read(record)).toThrow("regular file");
+
+    const permissive = join(root, "permissive");
+    chmodSync(root, 0o777);
+    new WarmSandboxPool({ root: permissive });
+    expect(lstatSync(permissive).mode & 0o077).toBe(0);
+    const databaseTarget = join(root, "database-target");
+    writeFileSync(databaseTarget, "not-a-database");
+    const databaseLink = join(root, "engineer.db");
+    symlinkSync(databaseTarget, databaseLink);
+    expect(() => createEngineerSupervisor({ dbPath: databaseLink })).toThrow("regular file");
     rmSync(root, { recursive: true, force: true });
   });
 

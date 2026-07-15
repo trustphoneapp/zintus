@@ -67,7 +67,7 @@ describe("Phase 5 structured planning", () => {
         seenModel = String(request.model);
         seenSafetyIdentifier = String(request.safety_identifier);
         seenSessionIdentifier = String((request.metadata as { session_id?: unknown }).session_id);
-        return { id: "plan-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{ type: "function_call", name: "submit_plan", call_id: "plan-call", arguments: JSON.stringify(plannerOutput()) }] };
+        return { id: "plan-response", usage: { input_tokens: 100, output_tokens: 100, input_tokens_details: { cached_tokens: 40, cache_write_tokens: 10 } }, output: [{ type: "function_call", name: "submit_plan", call_id: "plan-call", arguments: JSON.stringify(plannerOutput()) }] };
       } }),
       safetyIdentifierForUser: () => "b".repeat(64),
       sessionIdentifierForUser: () => "engineer-session-stable",
@@ -80,6 +80,10 @@ describe("Phase 5 structured planning", () => {
     expect(proposal.contextManifestHash).toBe(context.manifest.manifestHash);
     expect(proposal.manifest.humanGateRequired).toBe(true);
     expect(proposal.manifest.prohibitedCommands).toContain("git push");
+    expect(supervisor.exportRunRecords(run.runId)).toMatchObject({
+      model_calls: [{ cached_input_tokens: 40, cache_write_input_tokens: 10, cache_hit: 1 }],
+      cost_records: [{ source_type: "MODEL_CALL", cached_input_tokens: 40, cache_write_input_tokens: 10 }],
+    });
     expect(() => PlanProposalSchema.parse({
       ...proposal,
       planningAnalysis: { ...proposal.planningAnalysis, architectureSummary: "tampered after hashing" },

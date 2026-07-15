@@ -17,8 +17,9 @@
   remote base/protection policy and discovering an already-created PR first.
 - The warm pool provides atomic one-time claims, TTL rejection, validation,
   quarantine, cold fallback, one-time destruction after claim, and a periodic
-  maximum/health sweep. It does not yet replenish to a configured minimum or
-  proactively rebuild quarantined capacity.
+  maximum/health sweep. The gateway replenishes one clean workspace per sweep
+  toward `ZINTUS_ENGINEER_WARM_POOL_MIN`, bounded by the configured maximum and
+  keyed to the current canonical base. It deliberately avoids burst rebuilding.
 - Docker storage quota enforcement relies on the host Docker/runtime configuration;
   the feature directly enforces CPU, memory, PIDs, time, output, privilege, and
   network limits.
@@ -34,10 +35,11 @@
   URL and an ephemeral askpass credential rather than ambient Git credentials.
   Tests exercise the service boundary but do not create a real external PR; that
   activation proof requires an authorized private test repository.
-- A stale remote base is detected before mutation and forced into `REVERIFYING`.
-  Automated conflict resolution is intentionally not attempted; the candidate
-  branch must be recreated/rebased by the controlled stale-base worker before the
-  complete Phase-3 verification pipeline runs again.
+- A stale remote base is detected before mutation. Controlled recovery fetches
+  the credentialed current base, advances only the canonical SHA, supersedes the
+  old approval, and creates a new immutable run that repeats context, planning,
+  execution, verification, fresh SOL review, and human approval. Automatic merge
+  conflict resolution is intentionally not attempted.
 - TERRA Tester and Security outputs are intentionally advisory. Deterministic
   checks and trusted command records remain authoritative, so the current security
   scan depth is limited to the frozen commands plus the built-in diff scanner.
@@ -45,7 +47,8 @@
   failure classification. SOL remains reserved for Builder/Reviewer reasoning.
 - Web and desktop replay the durable SSE ledger with `Last-Event-ID`/sequence
   cursors, heartbeat comments, bounded pages, duplicate/gap checks, and bounded
-  reconnect. Mobile-specific Engineer screens are not yet implemented.
+  reconnect. Web, desktop, and mobile reopen server-side durable history; mobile
+  polls run detail while focused instead of maintaining an SSE connection.
 - The gateway represents one authenticated local installation/owner. Client actor
   fields cannot alter authority; organization-scale multi-user RBAC and reviewer
   assignment remain outside this local Phase 4 slice.
@@ -53,12 +56,12 @@
   tokens, cost, command duration, diff size, artifact bytes, and concurrent agents.
   Every SOL/TERRA/LUNA call reserves its conservative worst case before transport
   and atomically reconciles the durable reservation to actual reported usage.
-  Cached-token usage details are not yet stored, so billing evidence deliberately
-  prices all reported input at the higher uncached rate.
-- New-run repository metadata and the exact base commit are entered directly in
-  this local-first slice. A connected repository picker and automatic branch-tip
-  resolution require the future repository-connection service; the server still
-  validates and records the exact submitted commit.
+  Responses cached-read/cache-write details are persisted separately and priced
+  through the dated model catalog. Providers that omit these fields remain an
+  honest zero rather than an inferred cache hit.
+- The gateway exposes and clients prefill the one authenticated canonical
+  repository and exact base commit. Multi-repository connection management and an
+  organization repository picker remain future product work.
 - Flake confirmation runs after an initial failed non-security check and blocks
   mixed outcomes. It is intentionally not a broad statistical flake service and
   does not make a failing security check retryable.

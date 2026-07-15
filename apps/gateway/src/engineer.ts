@@ -48,6 +48,11 @@ export class EngineerRunManager {
   readiness(): EngineerReadiness { return this.options.preflight.readiness(); }
   ensureReady(): Promise<void> { return this.options.preflight.assertStartup(); }
 
+  repository(principal: EngineerPrincipal): RepositoryReference {
+    this.assertPrincipal(principal);
+    return this.options.preflight.repository();
+  }
+
   async create(principal: EngineerPrincipal, input: {
     runId?: string;
     repository: RepositoryReference;
@@ -136,6 +141,64 @@ export class EngineerRunManager {
     return run;
   }
 
+  /** Recreates stale work as a new immutable run on the credentialed current base. */
+  async recoverStaleBase(principal: EngineerPrincipal, runId: string): Promise<{ supersededRun: EngineerRun; replacementRun: EngineerRun }> {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    if (!this.options.publication || !this.options.planning || !this.options.context || !this.options.execution || !this.options.artifactStore) {
+      throw new Error("stale-base recovery is not configured on this gateway");
+    }
+    const staleRun = this.options.supervisor.getRun(runId);
+    const repository = await this.options.publication.replacementRepositoryForStale(runId);
+    this.options.preflight.acceptAdvancedBase(staleRun.repository.baseCommitSha, repository);
+    const replacementRunId = `recovery-${sha256({ runId, baseCommitSha: repository.baseCommitSha }).slice(0, 32)}`;
+    let replacement = this.options.supervisor.listRuns().find((item) => item.runId === replacementRunId);
+    if (!replacement) {
+      replacement = this.options.supervisor.receiveRequest({
+        runId: replacementRunId,
+        userId: principal.ownerId,
+        repository,
+        request: staleRun.requestOriginal,
+      });
+    }
+    if (replacement.state === "REQUEST_RECEIVED" || replacement.state === "PLANNING" || replacement.state === "REPLANNING") {
+      const proposal = await this.plan(principal, replacement.runId);
+      replacement = this.options.supervisor.getRun(replacement.runId);
+      if (replacement.state === "PLAN_READY") {
+        replacement = this.options.supervisor.freezePlan({
+          runId: replacement.runId,
+          expectedStateVersion: replacement.stateVersion,
+          manifest: proposal.manifest,
+          actorId: "engineer-supervisor",
+          idempotencyKey: `stale-recovery:freeze:${replacement.runId}:${proposal.manifest.manifestVersion}`,
+        }).run;
+      }
+    }
+    if (replacement.state === "PLAN_FROZEN") replacement = await this.start(principal, replacement.runId);
+
+    const relation = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+      runId,
+      type: "STALE_BASE_REPLACEMENT",
+      bytes: JSON.stringify({ replacementRunId: replacement.runId, previousBaseCommitSha: staleRun.repository.baseCommitSha, currentBaseCommitSha: repository.baseCommitSha }),
+      producerType: "SYSTEM",
+      producerId: "engineer-supervisor",
+      trusted: true,
+    }));
+    const currentStale = this.options.supervisor.getRun(runId);
+    const supersededRun = currentStale.state === "BASE_BRANCH_STALE"
+      ? this.options.supervisor.transition({
+          runId,
+          expectedStateVersion: currentStale.stateVersion,
+          nextState: "HUMAN_REVIEW_REQUIRED",
+          reasonCode: "STALE_BASE_SUPERSEDED_BY_REPLACEMENT_RUN",
+          evidenceIds: [relation.artifactId],
+          manifestHash: currentStale.manifestHash,
+          idempotencyKey: `stale-recovery:supersede:${replacement.runId}`,
+        }).run
+      : currentStale;
+    return { supersededRun, replacementRun: replacement };
+  }
+
   /** Prevents new detached work, aborts execution, and waits for verification/publication cleanup. */
   async drain(): Promise<void> {
     this.draining = true;
@@ -211,6 +274,8 @@ export class EngineerRunManager {
   security(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listSecurityFindings(runId); }
 
   failures(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listFailures(runId); }
+
+  gitOperations(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listGitOperations(runId); }
 
   decisions(principal: EngineerPrincipal, runId: string) {
     this.assertPrincipal(principal);

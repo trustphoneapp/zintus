@@ -44,6 +44,20 @@ verification/repair state. The Engineer plus gateway source suite now passes in
 full. This closes the Phase 3 source blockers identified below; live Docker and
 OpenAI proof remains unavailable on this host and is not represented as passed.
 
+## Post-audit Phase 5/6 closure
+
+The local single-owner source scope now includes authenticated canonical
+repository discovery, server-side run reopening, controlled stale-base replacement
+runs, durable Git-operation visibility, bounded warm-pool replenishment,
+owner-only/symlink-resistant storage, cached-token cost evidence, an operations
+dashboard, and web/desktop/mobile workflows. A hash-bound 17-scenario Phase 5/6
+matrix maps these hardening claims to executable tests. Publication additionally
+requires gateway bearer authentication; browser operator authority is memory-only.
+
+This closes the source gaps previously listed under experience and operations.
+It does not manufacture external activation evidence: live Docker, OpenAI, and an
+authorized GitHub private repository are still required before production use.
+
 ## Fixed during this audit
 
 - A client can no longer downgrade Supervisor risk or remove a human gate while
@@ -121,17 +135,14 @@ OpenAI proof remains unavailable on this host and is not represented as passed.
    boundary; REST uses the GitHub token while `git push` currently depends on
    ambient Git credentials.
 
-## Experience and observability gaps
+## Remaining product-scale gaps
 
-- SSE has no resume cursor and still refreshes the evidence surface after a
-  coalesced event burst rather than consuming event deltas.
-- Reload restores the locally active run, but there is no server-side run list or
-  shareable run URL for reopening other durable runs.
-- There is no dedicated Engineer observability page.
-- Mobile has no Engineer workflow.
-- The secure `GATEWAY_TOKEN` operator mode is not usable by the browser UI because
-  it intentionally sends no bearer token. Authentication-disabled loopback mode is
-  not a sufficient identity boundary for approval or publication.
+- The gateway represents one authenticated local owner and one canonical
+  repository. Organization RBAC, reviewer assignment, and multi-repository
+  connection management remain outside the local scope.
+- Mobile uses bounded polling rather than the web/desktop durable SSE cursor.
+- Distributed workers, hosted artifact retention, and fleet-scale alert delivery
+  remain future operational work.
 
 ## Activation evidence on this machine
 
@@ -148,10 +159,10 @@ OpenAI proof remains unavailable on this host and is not represented as passed.
 
 ## Validation results
 
-- Engineer plus gateway source suite: 406 passed, 0 failed.
+- Engineer package suite: 123 passed, 0 failed across 23 files.
 - Root typecheck: passed for core, gateway, web, desktop, and mobile.
-- Root test command: passed every command group with zero failures and now includes
-  the complete Engineer package and mandatory Phase 3 evaluation matrix.
+- Root test command: passed every command group with zero failures and includes
+  the Phase 3, Phase 4, and Phase 5/6 mandatory evaluation matrices.
 - Real Docker, live OpenAI SOL/TERRA/LUNA calls, live process-kill recovery,
   authenticated approval, and GitHub publication remain unverified externally.
 
@@ -159,14 +170,14 @@ OpenAI proof remains unavailable on this host and is not represented as passed.
 
 | Architecture area | Status |
 | --- | --- |
-| Durable Supervisor/state ledger | Phase 3 implemented: execution and verification recovery exist; publication recovery remains |
+| Durable Supervisor/state ledger | Implemented for execution, verification, approval, publication, and stale-base replacement recovery |
 | Frozen manifest and evidence binding | Implemented, with audit hardening |
 | SOL Builder and isolated SOL Reviewer | Implemented in code, including bounded failed-test and review repair; live model proof missing |
-| TERRA planning/testing/security | Partial: runtime calls exist; planning lacks repository context |
+| TERRA planning/testing/security | Implemented with exact-base Context Engine input; outputs remain advisory outside structured planning |
 | LUNA classification roles | Partial: deterministic taxonomy plus advisory failure-triage call site; request/risk model calls remain optional |
-| Offline Docker sandbox | Partial: policy exists; dependencies and live Docker proof missing |
+| Offline Docker sandbox | Implemented in source with immutable dependency bundles and warm replenishment; live Docker proof missing |
 | Independent verification and claim evidence | Implemented in source with criterion binding and a 16-scenario mandatory matrix; live activation proof missing |
-| Human approval and Supervisor publication | Partial: hash binding exists; actor identity and live Git proof missing |
-| Risk, retries, and budgets | Partial: deterministic rules exist; final reassessment and enforcement missing |
-| Web/desktop workflow | Partial: main workflow, local recovery, resume, retry, and error paths exist; run list/cursor/operations views missing |
-| Mobile, observability, operations | Incomplete |
+| Human approval and Supervisor publication | Implemented for the authenticated local owner; live Git proof and organization RBAC remain |
+| Risk, retries, and budgets | Implemented with deterministic reassessment, bounded retries, reservations, and measured cache-aware cost |
+| Web/desktop workflow | Implemented with durable history, cursor replay, evidence export, publication operations, and recovery |
+| Mobile, observability, operations | Implemented for local scope; mobile uses bounded polling and fleet alerting remains deferred |

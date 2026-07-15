@@ -303,7 +303,7 @@ export class EngineerPlanningManager {
       maxOutputTokens: 8_000,
     });
     const response = await transport.create(request);
-    this.options.supervisor.recordModelCall({ modelCallId: this.id(), runId, agentExecutionId: agentId, logicalTier: route.logicalTier, resolvedModel: route.model, promptTemplateVersion: PLANNER_POLICY_VERSION, inputContextRefs: [inputHash, response.id], outputSchemaVersion: "plan-proposal-v2", cacheKey, cacheHit: null, latencyMs: Math.max(0, Date.now() - callStarted), inputTokens: response.usage?.input_tokens ?? null, outputTokens: response.usage?.output_tokens ?? null, retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp() }, reservationId);
+    this.options.supervisor.recordModelCall({ modelCallId: this.id(), runId, agentExecutionId: agentId, logicalTier: route.logicalTier, resolvedModel: route.model, promptTemplateVersion: PLANNER_POLICY_VERSION, inputContextRefs: [inputHash, response.id], outputSchemaVersion: "plan-proposal-v2", cacheKey, cacheHit: (response.usage?.input_tokens_details?.cached_tokens ?? 0) > 0, latencyMs: Math.max(0, Date.now() - callStarted), inputTokens: response.usage?.input_tokens ?? null, outputTokens: response.usage?.output_tokens ?? null, cachedInputTokens: response.usage?.input_tokens_details?.cached_tokens ?? 0, cacheWriteInputTokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0, retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp() }, reservationId);
     modelCallRecorded = true;
     failureStage = "STRUCTURED_OUTPUT";
     const rawCalls = response.output.filter((item) => typeof item === "object" && item !== null && (item as { type?: unknown }).type === "function_call");

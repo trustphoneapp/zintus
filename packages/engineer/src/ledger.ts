@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 import {
@@ -214,7 +214,19 @@ export class EngineerLedger {
 
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") {
-      mkdirSync(dirname(dbPath), { recursive: true });
+      const directory = dirname(dbPath);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const directoryStat = lstatSync(directory);
+      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || (process.getuid && directoryStat.uid !== process.getuid())) {
+        throw new Error("Engineer database directory must be owner-controlled and cannot be a symlink");
+      }
+      chmodSync(directory, 0o700);
+      if (existsSync(dbPath)) {
+        const databaseStat = lstatSync(dbPath);
+        if (!databaseStat.isFile() || databaseStat.isSymbolicLink() || (process.getuid && databaseStat.uid !== process.getuid())) {
+          throw new Error("Engineer database must be an owner-controlled regular file");
+        }
+      }
     }
     this.db = new Database(dbPath, { create: true });
     if (dbPath !== ":memory:") {
@@ -235,7 +247,8 @@ export class EngineerLedger {
     const costColumns = new Set((this.db.query("PRAGMA table_info(cost_records)").all() as Array<{ name: string }>).map((column) => column.name));
     for (const [name, type] of [
       ["agent_execution_id", "TEXT"], ["resolved_model", "TEXT"], ["routing_decision_id", "TEXT"],
-      ["pricing_version", "TEXT"], ["currency", "TEXT"],
+      ["pricing_version", "TEXT"], ["currency", "TEXT"], ["cached_input_tokens", "INTEGER NOT NULL DEFAULT 0"],
+      ["cache_write_input_tokens", "INTEGER NOT NULL DEFAULT 0"],
     ] as const) {
       if (!costColumns.has(name)) this.db.exec(`ALTER TABLE cost_records ADD COLUMN ${name} ${type}`);
     }
@@ -243,6 +256,8 @@ export class EngineerLedger {
     if (!routingColumns.has("agent_execution_id")) this.db.exec("ALTER TABLE model_routing_decisions ADD COLUMN agent_execution_id TEXT");
     const modelCallColumns = new Set((this.db.query("PRAGMA table_info(model_calls)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!modelCallColumns.has("budget_reservation_id")) this.db.exec("ALTER TABLE model_calls ADD COLUMN budget_reservation_id TEXT");
+    if (!modelCallColumns.has("cached_input_tokens")) this.db.exec("ALTER TABLE model_calls ADD COLUMN cached_input_tokens INTEGER");
+    if (!modelCallColumns.has("cache_write_input_tokens")) this.db.exec("ALTER TABLE model_calls ADD COLUMN cache_write_input_tokens INTEGER");
     const proposalColumns = this.db.query("PRAGMA table_info(plan_proposals)").all() as Array<{ name: string }>;
     if (!proposalColumns.some((column) => column.name === "context_manifest_hash")) {
       this.db.exec("ALTER TABLE plan_proposals ADD COLUMN context_manifest_hash TEXT");
@@ -982,23 +997,27 @@ export class EngineerLedger {
     this.db.query(`INSERT INTO model_calls
       (id, run_id, agent_execution_id, logical_tier, resolved_model, prompt_template_version,
        input_context_refs_json, output_schema_version, cache_key, cache_hit, latency_ms,
-       input_tokens, output_tokens, retry_count, budget_reservation_id, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+       input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens, retry_count, budget_reservation_id, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       parsed.modelCallId, parsed.runId, parsed.agentExecutionId, parsed.logicalTier, parsed.resolvedModel,
       parsed.promptTemplateVersion, canonicalJson(parsed.inputContextRefs), parsed.outputSchemaVersion,
       parsed.cacheKey, parsed.cacheHit === null ? null : parsed.cacheHit ? 1 : 0, parsed.latencyMs,
-      parsed.inputTokens, parsed.outputTokens, parsed.retryCount, budgetReservationId ?? null, parsed.status, parsed.createdAt,
+      parsed.inputTokens, parsed.outputTokens, parsed.cachedInputTokens ?? null, parsed.cacheWriteInputTokens ?? null,
+      parsed.retryCount, budgetReservationId ?? null, parsed.status, parsed.createdAt,
     );
     if (parsed.inputTokens !== null && parsed.outputTokens !== null) {
       try {
-        const estimatedCostUsd = estimateGpt56CostUsd(parsed.resolvedModel, parsed.inputTokens, parsed.outputTokens);
+        const estimatedCostUsd = estimateGpt56CostUsd(parsed.resolvedModel, parsed.inputTokens, parsed.outputTokens, {
+          cachedInputTokens: parsed.cachedInputTokens ?? 0,
+          cacheWriteInputTokens: parsed.cacheWriteInputTokens ?? 0,
+        });
         const routing = this.modelRouteForAgent(parsed.runId, parsed.agentExecutionId, parsed.resolvedModel);
         this.db.query(`INSERT OR IGNORE INTO cost_records
-          (id, run_id, source_type, source_id, input_tokens, output_tokens, estimated_cost_usd,
+          (id, run_id, source_type, source_id, input_tokens, output_tokens, cached_input_tokens, cache_write_input_tokens, estimated_cost_usd,
            agent_execution_id, resolved_model, routing_decision_id, pricing_version, currency, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           sha256({ sourceType: "MODEL_CALL", sourceId: parsed.modelCallId }), parsed.runId,
-          "MODEL_CALL", parsed.modelCallId, parsed.inputTokens, parsed.outputTokens,
+          "MODEL_CALL", parsed.modelCallId, parsed.inputTokens, parsed.outputTokens, parsed.cachedInputTokens ?? 0, parsed.cacheWriteInputTokens ?? 0,
           estimatedCostUsd, parsed.agentExecutionId, parsed.resolvedModel, routing.routingDecisionId,
           OPENAI_GPT56_PRICING_2026_07_14.version, OPENAI_GPT56_PRICING_2026_07_14.currency, parsed.createdAt,
         );
@@ -1400,6 +1419,13 @@ export class EngineerLedger {
     const row = this.db.query("SELECT * FROM git_operations WHERE run_id = ? AND idempotency_key = ?")
       .get(runId, idempotencyKey) as Record<string, unknown> | null;
     return row ? this.gitOperationFromRow(row) : null;
+  }
+
+  listGitOperations(runId: string): GitOperationRecord[] {
+    this.getRun(runId);
+    const rows = this.db.query("SELECT * FROM git_operations WHERE run_id = ? ORDER BY started_at, rowid")
+      .all(runId) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.gitOperationFromRow(row));
   }
 
   recordFailure(record: FailureRecord): FailureRecord {

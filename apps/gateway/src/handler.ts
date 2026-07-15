@@ -2773,6 +2773,11 @@ export function createGatewayHandler(
       return json(request, { error: { message: "Engineer capability preflight is not ready" }, readiness: engineerRuns?.readiness() }, 503);
     }
 
+    if (url.pathname === "/v1/engineer/repository" && request.method === "GET") {
+      if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
+      return json(request, { repository: engineerRuns.repository(engineerPrincipal!) });
+    }
+
     if (url.pathname === "/v1/engineer/observability" && request.method === "GET") {
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
       return json(request, { snapshot: engineerRuns.observability() });
@@ -2838,6 +2843,9 @@ export function createGatewayHandler(
         if (action === "start" && request.method === "POST") {
           return json(request, { run: await engineerRuns.start(engineerPrincipal!, runId), accepted: true }, 202);
         }
+        if (action === "recover-stale-base" && request.method === "POST") {
+          return json(request, await engineerRuns.recoverStaleBase(engineerPrincipal!, runId), 202);
+        }
         if (action === "approval" && request.method === "GET") {
           return json(request, { approval: engineerRuns.approval(runId) });
         }
@@ -2901,6 +2909,9 @@ export function createGatewayHandler(
         }
         if (action === "failures" && request.method === "GET") {
           return json(request, { failures: engineerRuns.failures(runId) });
+        }
+        if (action === "git-operations" && request.method === "GET") {
+          return json(request, { gitOperations: engineerRuns.gitOperations(runId) });
         }
         if (action === "decisions" && !decisionId && request.method === "GET") {
           return json(request, { decisions: engineerRuns.decisions(engineerPrincipal!, runId) });

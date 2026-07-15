@@ -15,10 +15,19 @@ export interface EngineerData {
   tests: unknown[];
   securityFindings: unknown[];
   failures: unknown[];
+  gitOperations: unknown[];
   diff: string;
   approval: unknown | null;
   decisions: EngineerDecisionItem[];
   errors: Array<{ section: string; message: string }>;
+}
+export interface EngineerObservability {
+  generatedAt: string; totalRuns: number; activeRuns: number; terminalRuns: number; pendingApprovals: number;
+  completedRuns: number; failedRuns: number; successRate: number | null; stuckRuns: number; retryAttempts: number;
+  totalInputTokens: number; totalOutputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number;
+  estimatedCostUsd: number; averageApprovalLatencySeconds: number | null; evidenceCompleteRuns: number;
+  runsByState: Record<string, number>; runsByRisk: Record<string, number>; failuresByClass: Record<string, number>;
+  runHealth: Array<{ runId: string; state: string; riskTier: string; ageInStateSeconds: number; stuck: boolean; retryAttempts: number; failureCount: number }>;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -31,10 +40,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export async function createEngineerRun(input: { repository: EngineerRepository; request: string }): Promise<EngineerRun> {
   return (await request<{ run: EngineerRun }>("/v1/engineer/runs", { method: "POST", body: JSON.stringify(input) })).run;
 }
+export async function getEngineerRepository(): Promise<EngineerRepository> { return (await request<{ repository: EngineerRepository }>("/v1/engineer/repository")).repository; }
+export async function getEngineerObservability(): Promise<EngineerObservability> { return (await request<{ snapshot: EngineerObservability }>("/v1/engineer/observability")).snapshot; }
 export async function planEngineerRun(runId: string): Promise<PlanProposal> { return (await request<{ plan: PlanProposal }>(`/v1/engineer/runs/${runId}/plan`, { method: "POST" })).plan; }
 export async function getEngineerPlan(runId: string): Promise<PlanProposal | null> { return (await request<{ plan: PlanProposal | null }>(`/v1/engineer/runs/${runId}/plan`)).plan; }
 export async function freezeEngineerPlan(run: EngineerRun, manifest: EngineerManifest): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${run.runId}/freeze-plan`, { method: "POST", body: JSON.stringify({ expectedStateVersion: run.stateVersion, manifest, idempotencyKey: `ui:freeze:${run.runId}:${manifest.manifestVersion}` }) })).run; }
 export async function startEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST" })).run; }
+export async function recoverEngineerStaleBase(runId: string): Promise<EngineerRun> { return (await request<{ replacementRun: EngineerRun }>(`/v1/engineer/runs/${runId}/recover-stale-base`, { method: "POST" })).replacementRun; }
 export async function getEngineerRunStatus(runId: string): Promise<EngineerRunStatus> { return request<EngineerRunStatus>(`/v1/engineer/runs/${runId}`); }
 export async function getEngineerRun(runId: string): Promise<EngineerRun> { return (await getEngineerRunStatus(runId)).run; }
 export async function listEngineerRuns(): Promise<EngineerRun[]> { return (await request<{ runs: EngineerRun[] }>("/v1/engineer/runs")).runs; }
@@ -50,13 +62,14 @@ export async function getEngineerData(runId: string): Promise<EngineerData> {
     load("tests", request<{ tests: unknown[] }>(`/v1/engineer/runs/${runId}/tests`), { tests: [] }),
     load("security", request<{ securityFindings: unknown[] }>(`/v1/engineer/runs/${runId}/security`), { securityFindings: [] }),
     load("failures", request<{ failures: unknown[] }>(`/v1/engineer/runs/${runId}/failures`), { failures: [] }),
+    load("publication", request<{ gitOperations: unknown[] }>(`/v1/engineer/runs/${runId}/git-operations`), { gitOperations: [] }),
     load("diff", request<{ diff: string }>(`/v1/engineer/runs/${runId}/diff`), { diff: "" }),
     load("approval", request<{ approval: unknown | null }>(`/v1/engineer/runs/${runId}/approval`), { approval: null }),
     load("decisions", request<{ decisions: EngineerDecisionItem[] }>(`/v1/engineer/runs/${runId}/decisions`), { decisions: [] }),
   ]);
   return {
     ...results[0].data, ...results[1].data, ...results[2].data, ...results[3].data,
-    ...results[4].data, ...results[5].data, ...results[6].data, ...results[7].data,
+    ...results[4].data, ...results[5].data, ...results[6].data, ...results[7].data, ...results[8].data,
     errors: results.flatMap((result) => result.error ? [result.error] : []),
   };
 }
