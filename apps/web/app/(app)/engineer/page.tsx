@@ -32,6 +32,7 @@ import {
 import type { EngineerDecisionItem } from "@/lib/engineer-decisions";
 import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresentation";
 import { clearEphemeralGatewayToken, fetchGatewayConnection, setEphemeralGatewayToken } from "@/lib/gateway";
+import { estimateEngineerCost, formatUsd } from "@/lib/engineer-cost";
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
@@ -64,6 +65,8 @@ export default function EngineerPage() {
   const [githubRepos, setGithubRepos] = useState<GithubConnectorRepository[]>([]);
   const [recentRuns, setRecentRuns] = useState<EngineerRun[]>([]);
   const [showAllRuns, setShowAllRuns] = useState(false);
+  const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number; readOnly: boolean } | null>(null);
+  const [folderBusy, setFolderBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -128,6 +131,44 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
   const disconnectGithub = async () => { setBusy(true); try { await disconnectGithubConnector(); setGithubConnected(false); setGithubRepos([]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to disconnect GitHub"); } finally { setBusy(false); } };
+
+  // Browser-only inspection is intentionally read-only. The selected directory
+  // never leaves this tab; the local gateway remains the execution/editing
+  // surface. Write access is requested only after an explicit user action.
+  const chooseLocalFolder = async () => {
+    const picker = (window as Window & { showDirectoryPicker?: (options?: { mode?: "read" | "readwrite" }) => Promise<unknown> }).showDirectoryPicker;
+    if (!picker) { setError("Folder access is unavailable in this browser. Use Chrome or the local gateway."); return; }
+    setFolderBusy(true); setError(null);
+    try {
+      const root = await picker({ mode: "read" }) as { name: string; values?: () => AsyncIterable<unknown> };
+      let files = 0; let bytes = 0;
+      const visit = async (directory: { values?: () => AsyncIterable<unknown> }) => {
+        if (!directory.values) return;
+        for await (const entry of directory.values()) {
+          const item = entry as { kind?: string; values?: () => AsyncIterable<unknown>; getFile?: () => Promise<{ size: number }> };
+          if (item.kind === "directory") await visit(item);
+          else if (item.kind === "file" && item.getFile) { const file = await item.getFile(); files += 1; bytes += file.size; }
+        }
+      };
+      await visit(root);
+      setFolderSnapshot({ name: root.name, files, bytes, readOnly: true });
+    } catch (cause) {
+      if ((cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to read the selected folder");
+    } finally { setFolderBusy(false); }
+  };
+  const requestFolderWriteAccess = async () => {
+    const picker = (window as Window & { showDirectoryPicker?: (options?: { mode?: "read" | "readwrite" }) => Promise<unknown> }).showDirectoryPicker;
+    if (!picker) return;
+    setFolderBusy(true); setError(null);
+    try {
+      const root = await picker({ mode: "readwrite" }) as { name: string; requestPermission?: (options: { mode: "readwrite" }) => Promise<string> };
+      const permission = root.requestPermission ? await root.requestPermission({ mode: "readwrite" }) : "granted";
+      if (permission !== "granted") throw new Error("Write access was not granted");
+      setFolderSnapshot((current) => current ? { ...current, name: root.name, readOnly: false } : current);
+    } catch (cause) {
+      if ((cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to grant folder write access");
+    } finally { setFolderBusy(false); }
+  };
 
   const openRun = useCallback(async (runId: string) => {
     setError(null);
@@ -273,6 +314,7 @@ export default function EngineerPage() {
   const decisions = (data?.decisions ?? []) as EngineerDecisionItem[];
   const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; manifestHash?: string; diffHash?: string; evidenceBundleHash?: string } | null | undefined;
   const progress = useMemo(() => TERMINAL.has(latestState) ? 100 : STATE_PROGRESS[latestState] ?? 35, [latestState]);
+  const costEstimate = useMemo(() => estimateEngineerCost(request, repository.name), [request, repository.name]);
 
   if (!run) return (
     <main className="engineer-screen">
@@ -287,6 +329,11 @@ export default function EngineerPage() {
         <div className="engineer-actions"><span className="engineer-chip">{githubConnected ? "GitHub connected" : "Local repository"}</span>{githubConfigured && !githubConnected ? <button onClick={() => void connectGithub()} disabled={busy}>Connect GitHub</button> : null}{githubConnected ? <><button onClick={() => void loadGithubRepos()} disabled={busy}>Choose GitHub repository</button><button onClick={() => void disconnectGithub()} disabled={busy}>Disconnect</button></> : null}</div>
         {githubRepos.length ? <div className="engineer-list">{githubRepos.map((repo) => <button key={repo.id} onClick={() => void (async () => { const [owner, name] = repo.fullName.split("/"); try { setBusy(true); const sha = await getGithubBranchCommit(owner ?? "", name ?? "", repo.defaultBranch); setRepository({ repositoryId: repo.id, provider: "github", owner: owner ?? "", name: name ?? "", baseBranch: repo.defaultBranch, baseCommitSha: sha }); setGithubRepos([]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to inspect GitHub branch"); } finally { setBusy(false); } })()}><strong>{repo.fullName}</strong><span>{repo.private ? "Private" : "Public"} · {repo.defaultBranch}</span></button>)}</div> : null}
         {!githubConfigured ? <p className="engineer-muted">GitHub is not configured on this gateway. Local repositories remain available.</p> : null}
+        <div className="engineer-folder-picker">
+          <div><strong>Inspect a local folder in this browser</strong><p className="engineer-muted">Read-only by default. The folder stays in this tab; no files are uploaded or changed.</p></div>
+          <div className="engineer-actions"><button onClick={() => void chooseLocalFolder()} disabled={folderBusy}>{folderBusy ? "Reading folder…" : "Add folder"}</button>{folderSnapshot ? <button onClick={() => void requestFolderWriteAccess()} disabled={folderBusy || !folderSnapshot.readOnly}>Allow changes to this folder</button> : null}</div>
+          {folderSnapshot ? <p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · {folderSnapshot.readOnly ? "read-only inspection" : "write access granted"}</p> : null}
+        </div>
       </section>
       {recentRuns.length ? <section className="engineer-card" id="recent-runs">
         <div className="engineer-section-title"><span>02</span><div><h2>Recent durable runs</h2><p>Reopen any run from the gateway ledger, including after a browser restart.</p></div></div>
@@ -307,6 +354,12 @@ export default function EngineerPage() {
           <label>Base branch<input value={repository.baseBranch} onChange={(event) => setRepository({ ...repository, baseBranch: event.target.value })} /></label>
           <label>Exact base commit SHA<input className="engineer-mono" value={repository.baseCommitSha} onChange={(event) => setRepository({ ...repository, baseCommitSha: event.target.value.trim() })} placeholder="40 or 64 hexadecimal characters" /></label>
         </div>
+        <aside className="engineer-cost-card" aria-live="polite">
+          <div><span className="engineer-kicker">Preflight cost estimate</span><strong>{formatUsd(costEstimate.lowerUsd)}–{formatUsd(costEstimate.upperUsd)}</strong></div>
+          <span className="engineer-chip">{costEstimate.complexity} scope</span>
+          <p>Estimate only; actual provider billing depends on context and retries. No model call is made until you create the evidence plan.</p>
+          <ul>{costEstimate.checks.map((check) => <li key={check}>{check}</li>)}</ul>
+        </aside>
         {error ? <p className="engineer-error">{error}</p> : null}
         <button className="engineer-primary" onClick={() => void submit()} disabled={busy || !request.trim() || !repository.baseCommitSha}>{busy ? "Planning…" : "Create evidence plan"}</button>
       </section>
