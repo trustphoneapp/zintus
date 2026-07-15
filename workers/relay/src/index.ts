@@ -767,7 +767,9 @@ app.get("/api/connectors/github/callback", async (c) => {
   const state = c.req.query("state");
   const code = c.req.query("code");
   if (!state || !code) return c.json({ error: "Missing authorization response" }, 400);
-  const userId = await completeGithubAuthorization(c.env, state, code);
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  const userId = await completeGithubAuthorization(c.env, state, code, session.session_id);
   if (!userId) return c.json({ error: "GitHub authorization failed or expired" }, 400);
   return Response.redirect(`${c.env.WEB_BASE_URL ?? "http://localhost:3000"}/engineer?github=connected`, 302);
 });
@@ -777,7 +779,12 @@ app.get("/api/connectors/github/repos", async (c) => {
   if (!session) return c.json({ error: "Unauthorized" }, 401);
   const token = await githubToken(c.env, session.user_id);
   if (!token) return c.json({ error: "GitHub is not connected" }, 409);
-  const response = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "Zintus-Engineer" } });
+  // Keep this pinned to a GitHub API version that is widely deployed.  A
+  // future/unsupported version header can make an otherwise valid connector
+  // fail with a 400/415 response, which is especially confusing during local
+  // development and after GitHub App setup.
+  const response = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Zintus-Engineer" } });
+  if (response.status === 401) return c.json({ error: "GitHub authorization expired; reconnect GitHub" }, 401);
   if (!response.ok) return c.json({ error: "Unable to read GitHub repositories" }, 502);
   const repos = await response.json() as Array<{ id: number; full_name: string; default_branch: string; private: boolean; clone_url: string }>;
   return c.json({ repositories: repos.map((repo) => ({ id: String(repo.id), fullName: repo.full_name, defaultBranch: repo.default_branch, private: repo.private, cloneUrl: repo.clone_url })) });
