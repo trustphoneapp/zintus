@@ -16,7 +16,7 @@ function plannerOutput(allowedCommands = ["bun test auth"], unresolvedQuestions:
     normalizedRequest: "Require authentication on the export endpoint.",
     acceptanceCriteria: [{ criterionId: "auth-1", statement: "Unauthenticated exports are rejected.", verificationMethod: "Run an authorization integration test.", priority: "MUST" }],
     testPlan: [{ testId: "auth-test", criterionIds: ["auth-1"], type: "SECURITY", description: "Verify authorization.", command: allowedCommands[0] }],
-    allowedPaths: ["src/auth/**", "tests/auth/**"], deniedPaths: [], allowedCommands, riskFeatures,
+    allowedPaths: ["src/auth/**", "tests/auth/**"], deniedPaths: [] as string[], allowedCommands, riskFeatures,
     architectureSummary: "The export boundary delegates authorization to the existing authentication layer.",
     assumptions: [{ assumptionId: "assumption-1", statement: "The existing session middleware is authoritative.", sourceRefs: ["src/auth/session.ts"], confidence: 0.8, reversible: true }],
     unresolvedQuestions,
@@ -101,6 +101,32 @@ describe("Phase 5 structured planning", () => {
     });
     expect(supervisor.getRun(run.runId).state).toBe("PLAN_READY");
     expect(manager.get(run.runId)?.proposalHash).toBe(proposal.proposalHash);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("removes planner scope-complement denials that shadow exact allowed files", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-scope-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const run = supervisor.receiveRequest({
+      runId: "scope-run", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Harden one bounded authentication file.",
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    seedContext(supervisor, artifactStore, run);
+    const output = plannerOutput();
+    output.allowedPaths = ["src/auth/export.ts", "tests/auth/export.test.ts"];
+    output.deniedPaths = ["src/**", "tests/**", "README.md"];
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "scope-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{ type: "function_call", name: "submit_plan", call_id: "scope-call", arguments: JSON.stringify(output) }] };
+      } }),
+    });
+    const proposal = await manager.plan(run.runId);
+    expect(proposal.manifest.deniedPaths).not.toContain("src/**");
+    expect(proposal.manifest.deniedPaths).not.toContain("tests/**");
+    expect(proposal.manifest.deniedPaths).toContain("README.md");
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

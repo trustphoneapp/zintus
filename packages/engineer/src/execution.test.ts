@@ -207,6 +207,15 @@ describe("Phase 2 manifest file boundary", () => {
     expect(() => isManifestPathAllowed(".git/config", task)).toThrow(".git");
   });
 
+  test("keeps explicit deny rules authoritative over broad allow rules", () => {
+    const task = manifest("run-1", "1".repeat(40), {
+      allowedPaths: ["src/**"],
+      deniedPaths: ["src/private/**"],
+    });
+    expect(isManifestPathAllowed("src/public/value.ts", task)).toBe(true);
+    expect(isManifestPathAllowed("src/private/key.ts", task)).toBe(false);
+  });
+
   test("rejects a symlink even when its apparent path is allowed", () => {
     const root = temporaryRoot();
     mkdirSync(join(root, "src"));

@@ -19,6 +19,11 @@ function globRegex(pattern: string): RegExp {
   return new RegExp(`^${source}$`);
 }
 
+/** Keeps planning-time scope reconciliation aligned with Builder enforcement. */
+export function manifestPatternMatchesPath(pattern: string, path: string): boolean {
+  return globRegex(pattern).test(normalizeRepositoryPath(path));
+}
+
 export function normalizeRepositoryPath(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/^\.\//, "");
   if (!normalized || normalized.includes("\0") || isAbsolute(path)) throw new Error("path must be repository-relative");
@@ -30,8 +35,8 @@ export function normalizeRepositoryPath(path: string): string {
 
 export function isManifestPathAllowed(path: string, manifest: TaskManifest): boolean {
   const normalized = normalizeRepositoryPath(path);
-  const allowed = manifest.allowedPaths.some((pattern) => globRegex(pattern).test(normalized));
-  const denied = manifest.deniedPaths.some((pattern) => globRegex(pattern).test(normalized));
+  const allowed = manifest.allowedPaths.some((pattern) => manifestPatternMatchesPath(pattern, normalized));
+  const denied = manifest.deniedPaths.some((pattern) => manifestPatternMatchesPath(pattern, normalized));
   return allowed && !denied;
 }
 
