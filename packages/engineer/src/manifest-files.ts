@@ -58,7 +58,9 @@ export function resolveManifestPath(
   } else if (forWrite) {
     let ancestor = dirname(target);
     while (!existsSync(ancestor) && ancestor !== root) ancestor = dirname(ancestor);
-    if (lstatSync(ancestor).isSymbolicLink() || !realpathSync(ancestor).startsWith(root)) {
+    const canonicalAncestor = realpathSync(ancestor);
+    const ancestorRelative = relative(root, canonicalAncestor);
+    if (lstatSync(ancestor).isSymbolicLink() || ancestorRelative.startsWith("..") || isAbsolute(ancestorRelative)) {
       throw new Error("write parent resolved outside workspace root");
     }
   }

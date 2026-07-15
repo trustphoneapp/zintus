@@ -398,7 +398,11 @@ export class IndependentVerifier {
       else if (line.startsWith("@@")) {
         const match = /\+(\d+)/.exec(line);
         newLine = match ? Number(match[1]) - 1 : 0;
-      } else if (!line.startsWith("-")) newLine += 1;
+      } else if (newLine > 0 && (line.startsWith("+") && !line.startsWith("+++") || line.startsWith(" "))) {
+        // Only hunk additions and context lines advance the new-file line.
+        // Diff metadata (diff/index/---) must not skew finding locations.
+        newLine += 1;
+      }
       if (file && ((line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")))) {
         const changes = changedLines.get(file) ?? { added: [], removed: [] };
         (line.startsWith("+") ? changes.added : changes.removed).push(line.slice(1));

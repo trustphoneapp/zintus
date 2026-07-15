@@ -222,6 +222,16 @@ describe("Phase 2 manifest file boundary", () => {
     symlinkSync("/tmp", join(root, "src", "escape"));
     expect(() => resolveManifestPath(root, "src/escape", manifest("run-1", "1".repeat(40)))).toThrow("symlinks");
   });
+
+  test("rejects a write parent whose canonical path only shares the root prefix", () => {
+    const root = mkdtempSync(join(tmpdir(), "engineer-root-"));
+    const sibling = `${root}-sibling`;
+    mkdirSync(sibling, { recursive: true });
+    mkdirSync(join(root, "src"));
+    symlinkSync(sibling, join(root, "src", "linked"));
+    const task = manifest("run-prefix", "1".repeat(40), { allowedPaths: ["src/**"] });
+    expect(() => resolveManifestPath(root, "src/linked/new.txt", task, true)).toThrow("write parent resolved outside workspace root");
+  });
 });
 
 describe("Phase 2 trusted executor", () => {
