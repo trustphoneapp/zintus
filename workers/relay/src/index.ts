@@ -63,6 +63,7 @@ import { enforceQuota, recordUsage, getQuotaUsed, resetQuota } from "./middlewar
 import { createErrorSink } from "./observability.js";
 import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 import { validateGoogleClaims, type GoogleClaims } from "./google-auth.js";
+import { completeGithubAuthorization, disconnectGithub, githubConfigured, githubToken, startGithubAuthorization } from "./github-connector.js";
 import {
   kvRateLimitOk,
   magicLinkEmailKey,
@@ -746,6 +747,47 @@ app.get("/api/auth/me", async (c) => {
   const session = await requireSession(c as Context<{ Bindings: Env }>);
   if (!session) return c.json({ authenticated: false }, 401);
   return c.json({ authenticated: true, email: session.email, user_id: session.user_id });
+});
+
+// ── CONNECTORS — GitHub App authorization ────────────────────────────────
+app.get("/api/connectors/github", async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  return c.json({ provider: "github", configured: githubConfigured(c.env), connected: Boolean(await githubToken(c.env, session.user_id)) });
+});
+
+app.post("/api/connectors/github/start", async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  if (!githubConfigured(c.env)) return c.json({ error: "GitHub connector is not configured" }, 503);
+  return c.json({ authorizationUrl: await startGithubAuthorization(c.env, session) });
+});
+
+app.get("/api/connectors/github/callback", async (c) => {
+  const state = c.req.query("state");
+  const code = c.req.query("code");
+  if (!state || !code) return c.json({ error: "Missing authorization response" }, 400);
+  const userId = await completeGithubAuthorization(c.env, state, code);
+  if (!userId) return c.json({ error: "GitHub authorization failed or expired" }, 400);
+  return Response.redirect(`${c.env.WEB_BASE_URL ?? "http://localhost:3000"}/engineer?github=connected`, 302);
+});
+
+app.get("/api/connectors/github/repos", async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  const token = await githubToken(c.env, session.user_id);
+  if (!token) return c.json({ error: "GitHub is not connected" }, 409);
+  const response = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "Zintus-Engineer" } });
+  if (!response.ok) return c.json({ error: "Unable to read GitHub repositories" }, 502);
+  const repos = await response.json() as Array<{ id: number; full_name: string; default_branch: string; private: boolean; clone_url: string }>;
+  return c.json({ repositories: repos.map((repo) => ({ id: String(repo.id), fullName: repo.full_name, defaultBranch: repo.default_branch, private: repo.private, cloneUrl: repo.clone_url })) });
+});
+
+app.delete("/api/connectors/github", async (c) => {
+  const session = await requireSession(c);
+  if (!session) return c.json({ error: "Unauthorized" }, 401);
+  await disconnectGithub(c.env, session.user_id);
+  return c.json({ ok: true, connected: false });
 });
 
 // ── ACCOUNT — self-service deletion (Google Play / store requirement) ────────

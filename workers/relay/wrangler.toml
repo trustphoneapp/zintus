@@ -77,7 +77,10 @@ id = "e37d30031cb2409daa2fd5d44003ec0c"
 # GOOGLE_CLIENT_ID    — from console.cloud.google.com
 # GOOGLE_CLIENT_SECRET
 # RESEND_API_KEY      — from resend.com
+# GITHUB_APP_ID, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_PRIVATE_KEY,
+# GITHUB_CALLBACK_URL, RELAY_ENCRYPTION_KEY — GitHub App connector secrets
 
 [vars]
 RELAY_BASE_URL = "https://relay.zintus.ai"
 COOKIE_DOMAIN = ".zintus.ai"
+WEB_BASE_URL = "https://www.zintus.ai"

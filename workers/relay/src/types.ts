@@ -32,6 +32,13 @@ export interface Env {
   MANAGED_KEY_XAI?: string;
   /** Tavily — external web-search fallback for managed chat (see managed.ts). */
   TAVILY_API_KEY?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  GITHUB_CALLBACK_URL?: string;
+  GITHUB_APP_ID?: string;
+  GITHUB_PRIVATE_KEY?: string;
+  RELAY_ENCRYPTION_KEY?: string;
+  WEB_BASE_URL?: string;
 }
 
 /** Attached to every accepted WebSocket (survives DO hibernation). */
