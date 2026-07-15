@@ -246,11 +246,25 @@ export class GitWorkspaceManager {
   }
 
   diff(workspace: WorkspaceRecord): string {
+    this.markUntrackedForDiff(workspace.workspaceRoot);
     return this.git(workspace.workspaceRoot, ["diff", "--binary", "--no-ext-diff", workspace.baseCommitSha, "--"]);
   }
 
   diffAsync(workspace: WorkspaceRecord): Promise<string> {
-    return this.gitAsync(workspace.workspaceRoot, ["diff", "--binary", "--no-ext-diff", workspace.baseCommitSha, "--"]);
+    return this.markUntrackedForDiffAsync(workspace.workspaceRoot).then(() =>
+      this.gitAsync(workspace.workspaceRoot, ["diff", "--binary", "--no-ext-diff", workspace.baseCommitSha, "--"]));
+  }
+
+  private markUntrackedForDiff(workspaceRoot: string): void {
+    const status = this.runGit(workspaceRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const paths = status.stdout.split("\0").filter((entry) => entry.startsWith("?? ")).map((entry) => entry.slice(3));
+    if (paths.length > 0) this.git(workspaceRoot, ["add", "-N", "--", ...paths]);
+  }
+
+  private async markUntrackedForDiffAsync(workspaceRoot: string): Promise<void> {
+    const status = await this.runGitAsync(workspaceRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    const paths = status.stdout.split("\0").filter((entry) => entry.startsWith("?? ")).map((entry) => entry.slice(3));
+    if (paths.length > 0) await this.gitAsync(workspaceRoot, ["add", "-N", "--", ...paths]);
   }
 
   changedFiles(workspace: WorkspaceRecord): string[] {

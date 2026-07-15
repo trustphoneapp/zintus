@@ -157,8 +157,11 @@ function validateGroundedPlan(output: z.infer<typeof PlannerOutputSchema>, conte
 
 function applyDeterministicRiskFloors(output: z.infer<typeof PlannerOutputSchema>): z.infer<typeof RiskFeaturesSchema> {
   const text = `${output.normalizedRequest}\n${output.allowedPaths.join("\n")}`.toLowerCase();
+  const documentationOnly = output.riskFeatures.documentationOnly && output.allowedPaths.every((path) =>
+    /\.(?:md|mdx|txt|adoc)$/i.test(path) || /^(?:docs?|documentation)(?:\/|$)/i.test(path));
   return RiskFeaturesSchema.parse({
     ...output.riskFeatures,
+    documentationOnly,
     sensitiveFilesChanged: output.riskFeatures.sensitiveFilesChanged || /(?:^|[/\s])(?:\.env|secrets?|credentials?)/.test(text),
     touchesAuthentication: output.riskFeatures.touchesAuthentication || /auth|login|session|token/.test(text),
     touchesAuthorization: output.riskFeatures.touchesAuthorization || /auth|permission|role|access.control/.test(text),

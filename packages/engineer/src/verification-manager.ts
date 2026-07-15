@@ -125,8 +125,11 @@ export class EngineerVerificationManager {
       now: this.options.now,
     });
     const preVerificationIntegrity = testIntegrity.attest("PRE_VERIFICATION");
-    const resultCommitSha = await workspaceManager.checkpointAsync(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
-    const diff = await workspaceManager.diffAsync(sandbox.workspace);
+      const resultCommitSha = await workspaceManager.checkpointAsync(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
+      const diff = await workspaceManager.diffAsync(sandbox.workspace);
+      supervisor.recordArtifact(this.options.artifactStore.put({
+        runId, type: "FINAL_DIFF", bytes: diff, producerType: "SYSTEM", producerId: "engineer-verification", trusted: true,
+      }));
     const pass = supervisor.nextReviewerAttempt(runId);
     const executor = this.executor(manifest, sandbox);
     let verified;

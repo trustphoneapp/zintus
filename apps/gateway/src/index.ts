@@ -349,7 +349,11 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
           artifactStore: engineerArtifactStore,
           diffForRun: (runId) => {
             const sandbox = engineerExecution?.getSandbox(runId);
-            if (!sandbox) throw new Error("Engineer sandbox is unavailable for publication");
+            if (!sandbox) {
+              const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF").at(-1);
+              if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
+              return engineerArtifactStore.read(artifact).toString("utf8");
+            }
             return workspaceManager.diff(sandbox.workspace);
           },
           commandSigningSecret: publicationSecret,
@@ -370,7 +374,11 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       ...(engineerPublication ? { publication: engineerPublication } : {}),
       diffForRun: (runId) => {
         const sandbox = engineerExecution?.getSandbox(runId);
-        if (!sandbox) throw new Error("Engineer sandbox is unavailable");
+        if (!sandbox) {
+          const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF").at(-1);
+          if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
+          return engineerArtifactStore.read(artifact).toString("utf8");
+        }
         return workspaceManager.diff(sandbox.workspace);
       },
     });
