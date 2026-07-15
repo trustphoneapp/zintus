@@ -9,6 +9,13 @@ export const DEFAULT_MODEL_BY_TIER: Readonly<Record<LogicalModelTier, string>> =
   "GPT-5.6_LUNA": "gpt-5.6-luna",
 };
 
+/** Versioned planning metadata used to explain routing and estimate spend. */
+export const MODEL_TIER_PROFILE: Readonly<Record<LogicalModelTier, { inputUsdPerMillion: number; outputUsdPerMillion: number; purpose: string }>> = {
+  "GPT-5.6_SOL": { inputUsdPerMillion: 5, outputUsdPerMillion: 30, purpose: "complex coding and final review" },
+  "GPT-5.6_TERRA": { inputUsdPerMillion: 2.5, outputUsdPerMillion: 15, purpose: "planning, architecture, and security analysis" },
+  "GPT-5.6_LUNA": { inputUsdPerMillion: 1, outputUsdPerMillion: 6, purpose: "high-volume classification and routine checks" },
+};
+
 export const MODEL_ROLE_TIERS: Readonly<Record<ModelRole, LogicalModelTier>> = {
   PLANNER: "GPT-5.6_TERRA",
   BUILDER: "GPT-5.6_SOL",
@@ -29,6 +36,10 @@ export function modelTierForRole(role: ModelRole): LogicalModelTier {
   const tier = MODEL_ROLE_TIERS[role];
   if (!tier) throw new TypeError(`unsupported Engineer model role: ${role}`);
   return tier;
+}
+
+export function routingPurposeForRole(role: ModelRole): string {
+  return MODEL_TIER_PROFILE[modelTierForRole(role)].purpose;
 }
 
 export interface EngineerModelConfiguration {

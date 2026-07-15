@@ -8,7 +8,7 @@ import {
   type TaskManifestContent,
 } from "./contracts.js";
 import { sha256 } from "./hash.js";
-import { MODEL_ROLE_TIERS, modelTierForRole } from "./model-routing.js";
+import { MODEL_ROLE_TIERS, MODEL_TIER_PROFILE, modelTierForRole, routingPurposeForRole } from "./model-routing.js";
 
 function manifest(): ReturnType<typeof TaskManifestSchema.parse> {
   const content: TaskManifestContent = {
@@ -114,6 +114,13 @@ describe("mandatory isolation contracts", () => {
     expect(modelTierForRole("TESTER")).toBe("GPT-5.6_LUNA");
     expect(modelTierForRole("SECURITY")).toBe("GPT-5.6_TERRA");
     expect(modelTierForRole("RISK_FEATURE_EXTRACTOR")).toBe("GPT-5.6_LUNA");
+  });
+
+  test("routing profiles expose auditable cost and purpose metadata", () => {
+    expect(MODEL_TIER_PROFILE["GPT-5.6_LUNA"].inputUsdPerMillion).toBeLessThan(MODEL_TIER_PROFILE["GPT-5.6_TERRA"].inputUsdPerMillion);
+    expect(MODEL_TIER_PROFILE["GPT-5.6_TERRA"].inputUsdPerMillion).toBeLessThan(MODEL_TIER_PROFILE["GPT-5.6_SOL"].inputUsdPerMillion);
+    expect(routingPurposeForRole("TESTER")).toContain("routine");
+    expect(routingPurposeForRole("REVIEWER")).toContain("final review");
   });
 
   test("planning analysis rejects duplicate question identifiers", () => {
