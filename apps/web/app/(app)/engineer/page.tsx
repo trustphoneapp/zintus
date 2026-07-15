@@ -11,6 +11,10 @@ import {
   getEngineerData,
   getEngineerPlan,
   getEngineerRepository,
+  getGithubConnector,
+  listGithubConnectorRepositories,
+  startGithubConnector,
+  disconnectGithubConnector,
   getEngineerRunStatus,
   listEngineerRuns,
   planEngineerRun,
@@ -22,6 +26,7 @@ import {
   type EngineerRun,
   type PlanProposal,
   type RunEvent,
+  type GithubConnectorRepository,
 } from "@/lib/engineer";
 import type { EngineerDecisionItem } from "@/lib/engineer-decisions";
 import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresentation";
@@ -51,6 +56,9 @@ export default function EngineerPage() {
   const [managerError, setManagerError] = useState<string | null>(null);
   const [gatewayToken, setGatewayToken] = useState("");
   const [gatewayAuthenticated, setGatewayAuthenticated] = useState(false);
+  const [githubConnected, setGithubConnected] = useState(false);
+  const [githubConfigured, setGithubConfigured] = useState(false);
+  const [githubRepos, setGithubRepos] = useState<GithubConnectorRepository[]>([]);
   const [recentRuns, setRecentRuns] = useState<EngineerRun[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -82,9 +90,10 @@ export default function EngineerPage() {
   }, [refresh]);
 
   const loadDashboard = useCallback(async (reportAuthorizationError = false) => {
-    const [canonical, history] = await Promise.allSettled([getEngineerRepository(), listEngineerRuns()]);
+    const [canonical, history, connector] = await Promise.allSettled([getEngineerRepository(), listEngineerRuns(), getGithubConnector()]);
     if (canonical.status === "fulfilled") setRepository(canonical.value);
     if (history.status === "fulfilled") setRecentRuns(history.value);
+    if (connector.status === "fulfilled") { setGithubConfigured(connector.value.configured); setGithubConnected(connector.value.connected); }
     if (canonical.status === "fulfilled" || history.status === "fulfilled") setError(null);
     if (canonical.status === "rejected" && history.status === "rejected") {
       if (isGatewayAuthorizationError(canonical.reason) || isGatewayAuthorizationError(history.reason)) {
@@ -99,6 +108,19 @@ export default function EngineerPage() {
       }
     }
   }, []);
+
+  const connectGithub = async () => {
+    setBusy(true); setError(null);
+    try { window.location.href = await startGithubConnector(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to connect GitHub"); setBusy(false); }
+  };
+  const loadGithubRepos = async () => {
+    setBusy(true); setError(null);
+    try { setGithubRepos(await listGithubConnectorRepositories()); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load GitHub repositories"); }
+    finally { setBusy(false); }
+  };
+  const disconnectGithub = async () => { setBusy(true); try { await disconnectGithubConnector(); setGithubConnected(false); setGithubRepos([]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to disconnect GitHub"); } finally { setBusy(false); } };
 
   const openRun = useCallback(async (runId: string) => {
     setError(null);
@@ -255,6 +277,12 @@ export default function EngineerPage() {
           <button disabled={!gatewayToken.trim()} onClick={() => { setEphemeralGatewayToken(gatewayToken); setGatewayToken(""); setGatewayAuthenticated(Boolean(gatewayToken.trim())); void loadDashboard(true); }}>{gatewayAuthenticated ? "Replace token" : "Use token for this tab"}</button>
           {gatewayAuthenticated ? <button onClick={() => { clearEphemeralGatewayToken(); setGatewayAuthenticated(false); }}>Clear token</button> : null}
         </div>
+      </section>
+      <section className="engineer-card" id="repository-connector">
+        <div className="engineer-section-title"><span>01</span><div><h2>Repository connector</h2><p>Local is the default. GitHub access is scoped to repositories you authorize.</p></div></div>
+        <div className="engineer-actions"><span className="engineer-chip">{githubConnected ? "GitHub connected" : "Local repository"}</span>{githubConfigured && !githubConnected ? <button onClick={() => void connectGithub()} disabled={busy}>Connect GitHub</button> : null}{githubConnected ? <><button onClick={() => void loadGithubRepos()} disabled={busy}>Choose GitHub repository</button><button onClick={() => void disconnectGithub()} disabled={busy}>Disconnect</button></> : null}</div>
+        {githubRepos.length ? <div className="engineer-list">{githubRepos.map((repo) => <button key={repo.id} onClick={() => { const [owner, name] = repo.fullName.split("/"); setRepository({ repositoryId: repo.id, provider: "github", owner: owner ?? "", name: name ?? "", baseBranch: repo.defaultBranch, baseCommitSha: "" }); setGithubRepos([]); }}><strong>{repo.fullName}</strong><span>{repo.private ? "Private" : "Public"} · {repo.defaultBranch}</span></button>)}</div> : null}
+        {!githubConfigured ? <p className="engineer-muted">GitHub is not configured on this gateway. Local repositories remain available.</p> : null}
       </section>
       {recentRuns.length ? <section className="engineer-card">
         <div className="engineer-section-title"><span>02</span><div><h2>Recent durable runs</h2><p>Reopen any run from the gateway ledger, including after a browser restart.</p></div></div>
