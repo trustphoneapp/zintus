@@ -970,6 +970,7 @@ export class EngineerSupervisor {
       throw new InvalidTransitionError(`${actorType} cannot directly mutate authoritative workflow state`);
     }
     if (actorType === "HUMAN" && ![
+      "REVIEW_APPROVED",
       "HUMAN_APPROVED",
       "FIX_REQUESTED",
       "REJECTED",

@@ -74,6 +74,7 @@ export async function getEngineerData(runId: string): Promise<EngineerData> {
   };
 }
 export async function engineerDecision(runId: string, action: "approve" | "request-changes" | "reject" | "cancel", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/${action}`, { method: "POST", body: JSON.stringify({ reason }) }); }
+export async function resolveHumanEngineerReview(runId: string, decision: "approve" | "reject", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/human-review`, { method: "POST", body: JSON.stringify({ decision, reason }) }); }
 export async function extendEngineerApproval(runId: string, reason: string, extensionSeconds = 86_400): Promise<void> { await request(`/v1/engineer/runs/${runId}/extend-approval`, { method: "POST", body: JSON.stringify({ reason, extensionSeconds }) }); }
 export async function resolveEngineerDecision(run: EngineerRun, decisionId: string, selectedOptionId: string, rationale: string): Promise<{ plan: PlanProposal | null; planningError: string | null }> {
   return request(`/v1/engineer/runs/${run.runId}/decisions/${decisionId}/resolve`, {
@@ -97,7 +98,7 @@ export async function streamEngineerEvents(
   let reconnects = 0;
   let retryMs = options.reconnectDelayMs ?? 1_000;
   const maximum = options.maxReconnects ?? 5;
-  const terminalStates = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
+  const terminalStates = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
   while (!signal.aborted) {
     let receivedEvent = false;
     try {

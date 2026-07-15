@@ -2849,6 +2849,12 @@ export function createGatewayHandler(
         if (action === "approval" && request.method === "GET") {
           return json(request, { approval: engineerRuns.approval(runId) });
         }
+        if (action === "human-review" && request.method === "POST") {
+          const body = await request.json() as { decision?: string; reason?: string };
+          if (body.decision !== "approve" && body.decision !== "reject") throw new Error("decision must be approve or reject");
+          if (typeof body.reason !== "string" || !body.reason.trim()) throw new Error("reason is required");
+          return json(request, await engineerRuns.resolveHumanReview(engineerPrincipal!, runId, body.decision, body.reason));
+        }
         if (["approve", "request-changes", "reject", "extend-approval", "cancel"].includes(action ?? "") && request.method === "POST") {
           const body = await request.json() as { actorId?: string; reason?: string; extensionSeconds?: number };
           if (typeof body.reason !== "string") throw new Error("reason is required");

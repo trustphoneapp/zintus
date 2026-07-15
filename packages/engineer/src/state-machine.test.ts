@@ -27,6 +27,8 @@ describe("Engineer state machine", () => {
     expect(canTransition("REVIEW_CHANGES_REQUESTED", "REVIEW_FIX_PREPARING")).toBe(true);
     expect(canTransition("REVIEW_FIX_PREPARING", "IMPLEMENTING")).toBe(true);
     expect(canTransition("REVIEW_APPROVED", "HUMAN_APPROVAL_PENDING")).toBe(true);
+    expect(canTransition("HUMAN_REVIEW_REQUIRED", "REVIEW_APPROVED")).toBe(true);
+    expect(canTransition("HUMAN_REVIEW_REQUIRED", "REJECTED")).toBe(true);
     expect(canTransition("HUMAN_APPROVED", "PR_PREFLIGHT")).toBe(true);
     expect(canTransition("PR_CREATED", "COMPLETED")).toBe(true);
     expect(canTransition("IMPLEMENTING", "PR_CREATING")).toBe(false);

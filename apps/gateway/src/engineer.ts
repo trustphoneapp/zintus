@@ -376,6 +376,33 @@ export class EngineerRunManager {
     this.options.publication.reject(runId, principal.reviewerId, reason);
   }
 
+  async resolveHumanReview(principal: EngineerPrincipal, runId: string, decision: "approve" | "reject", reason: string) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    const run = this.options.supervisor.getRun(runId);
+    if (run.state !== "HUMAN_REVIEW_REQUIRED") throw new Error(`human review requires HUMAN_REVIEW_REQUIRED, not ${run.state}`);
+    const bundle = this.options.supervisor.listEvidenceBundles(runId).at(-1);
+    if (!bundle) throw new Error("human review requires an immutable evidence bundle");
+    const evidenceIds = [bundle.evidenceBundleId];
+    if (decision === "reject") {
+      return { run: this.options.supervisor.transition({
+        runId, expectedStateVersion: run.stateVersion, nextState: "REJECTED",
+        reasonCode: "HUMAN_REVIEW_REJECTED", actorType: "HUMAN", actorId: principal.reviewerId,
+        evidenceIds, manifestHash: run.manifestHash, idempotencyKey: `human-review:reject:${run.stateVersion}:${sha256(reason)}`,
+      }).run };
+    }
+    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    const approved = this.options.supervisor.transition({
+      runId, expectedStateVersion: run.stateVersion, nextState: "REVIEW_APPROVED",
+      reasonCode: "HUMAN_REVIEW_APPROVED", actorType: "HUMAN", actorId: principal.reviewerId,
+      evidenceIds, manifestHash: run.manifestHash, idempotencyKey: `human-review:approve:${run.stateVersion}:${sha256(reason)}`,
+      facts: { reviewerDecisionValid: true, freshReviewerSession: true },
+    }).run;
+    const publication = await this.options.publication.start(runId, principal.reviewerId);
+    return { run: approved, publication };
+  }
+
   async extendApproval(principal: EngineerPrincipal, runId: string, reason: string, extensionSeconds: number) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
@@ -471,7 +498,7 @@ export class EngineerRunManager {
         ...(!this.options.publication ? ["REVIEW_APPROVED"] : []),
         "COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED",
         "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION",
-        "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED",
+        "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED",
       ].includes(state) && ledgerIsDrained) {
         if (timer) clearInterval(timer);
         if (heartbeatTimer) clearInterval(heartbeatTimer);

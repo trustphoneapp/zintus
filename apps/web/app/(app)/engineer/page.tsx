@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createEngineerRun,
   engineerDecision,
+  resolveHumanEngineerReview,
   extendEngineerApproval,
   freezeEngineerPlan,
   getEngineerEvidenceExport,
@@ -27,7 +28,7 @@ import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresen
 import { clearEphemeralGatewayToken, setEphemeralGatewayToken } from "@/lib/gateway";
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
-const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "HUMAN_REVIEW_REQUIRED", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
+const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
 const RUN_STORAGE_KEY = "zintus-engineer-active-run";
 const cursorKey = (runId: string) => `zintus-engineer-event-cursor:${runId}`;
 const STATE_PROGRESS: Record<string, number> = { REQUEST_RECEIVED: 2, REQUEST_NORMALIZED: 5, PLANNING: 7, PLAN_READY: 10, PLAN_FROZEN: 12, QUEUED: 15, SANDBOX_WARM_CLAIMING: 18, SANDBOX_COLD_PROVISIONING: 18, SANDBOX_PREFLIGHT: 22, SANDBOX_READY: 25, CONTEXT_BUILDING: 30, IMPLEMENTING: 42, FAST_CHECKS: 50, UNIT_TESTING: 58, INTEGRATION_TESTING: 66, E2E_TESTING: 72, SECURITY_REVIEW: 78, REVIEWING: 86, REVIEW_APPROVED: 90, HUMAN_APPROVAL_PENDING: 94, HUMAN_APPROVED: 96, PR_PREFLIGHT: 97, PR_CREATING: 98, PR_CREATED: 99 };
@@ -224,6 +225,16 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
 
+  const resolveHumanReview = async (decision: "approve" | "reject") => {
+    if (!run) return;
+    setBusy(true); setError(null);
+    try {
+      await resolveHumanEngineerReview(run.runId, decision, reason.trim() || `${decision} human review from Zintus Engineer`);
+      setReason(""); await refresh(run.runId);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Human review decision failed"); }
+    finally { setBusy(false); }
+  };
+
   const latestState = run?.state ?? "NEW";
   const claims = (data?.claims ?? []) as Array<{ claimId?: string; claim?: string; status?: string; notes?: string }>;
   const tests = (data?.tests ?? []) as Array<{ testExecutionId?: string; type?: string; status?: string }>;
@@ -313,6 +324,7 @@ export default function EngineerPage() {
       {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><h2>Reviewed diff</h2><span className="engineer-chip">hash-bound</span></div><pre className="engineer-diff">{data?.diff || "The exact diff appears after implementation begins."}</pre></section> : null}
       {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed JSON</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div><PublicationOperations operations={gitOperations} /></section> : null}
       {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>Approve and publish</button><button disabled={busy} onClick={() => void decide("request-changes")}>Request changes</button><button disabled={busy} onClick={() => void extendApproval()}>Give me 24 hours</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>Reject</button></div></section> : null}
+      {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Review the verified candidate</h2><p>The isolated Reviewer escalated this result for a human decision. Inspect the Diff and Evidence tabs, then either continue to the approval gate or reject the candidate.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("approve")}>Continue to approval</button><button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>Reject candidate</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
       {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
