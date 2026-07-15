@@ -6,7 +6,8 @@
    the set. The marketing surfaces are dark-only now — the light marketing theme
    is retired (`.light` keeps only the app-shell @zintus/ui tokens). */
 /* Zintus Engineer — evidence workflow, not a chat surface. */
-.engineer-screen { --engineer-ink: var(--color-text); --engineer-muted: var(--color-text-muted); --engineer-soft: color-mix(in srgb, var(--color-text) 6%, transparent); --engineer-soft-strong: color-mix(in srgb, var(--color-text) 11%, transparent); --engineer-border: var(--c-border); flex: 1; min-height: 0; width: min(1180px, 100%); margin: 0 auto; padding: 32px clamp(18px, 4vw, 48px) 72px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; color: var(--engineer-ink); }
+.engineer-screen { --engineer-ink: var(--color-text); --engineer-muted: var(--color-text-muted); --engineer-soft: color-mix(in srgb, var(--color-text) 6%, transparent); --engineer-soft-strong: color-mix(in srgb, var(--color-text) 11%, transparent); --engineer-border: var(--c-border); flex: 1; min-height: 0; width: 100%; margin: 0; padding: 32px clamp(18px, 4vw, 48px) 72px; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; color: var(--engineer-ink); box-sizing: border-box; }
+.engineer-screen > * { width: min(1180px, 100%); margin-left: auto; margin-right: auto; box-sizing: border-box; }
 .engineer-screen { --engineer-accent: #0f766e; --engineer-accent-soft: #e6f4f1; --engineer-card: #ffffff; --engineer-border: #e4e7eb; background: linear-gradient(180deg, #f8fafb 0%, #f4f7f8 100%); }
 .engineer-hero { max-width: 760px; margin: 28px 0 28px; }
 .engineer-kicker { display: block; color: var(--engineer-muted); font-size: 10px; font-weight: 700; letter-spacing: .13em; text-transform: uppercase; margin-bottom: 10px; }
