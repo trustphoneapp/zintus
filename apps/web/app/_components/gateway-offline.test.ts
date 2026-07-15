@@ -53,6 +53,13 @@ describe("gateway-offline UX honesty", () => {
     expect(shell).toContain("fetchGatewayConnection");
   });
 
+  it("gives Engineer users actionable feedback for a rejected token", () => {
+    const engineer = read("app/(app)/engineer/page.tsx");
+    expect(engineer).toContain("The operator token was rejected.");
+    expect(engineer).toContain("disabled={!gatewayToken.trim()}");
+    expect(engineer).toContain("loadDashboard(true)");
+  });
+
   it("chat empty-state offline panel renders the self-host CTA", () => {
     const src = read("app/(app)/chat/page.tsx");
     expect(src).toContain("zintus serve");

@@ -80,7 +80,7 @@ export default function EngineerPage() {
     });
   }, [refresh]);
 
-  const loadDashboard = useCallback(async () => {
+  const loadDashboard = useCallback(async (reportAuthorizationError = false) => {
     const [canonical, history] = await Promise.allSettled([getEngineerRepository(), listEngineerRuns()]);
     if (canonical.status === "fulfilled") setRepository(canonical.value);
     if (history.status === "fulfilled") setRecentRuns(history.value);
@@ -88,7 +88,11 @@ export default function EngineerPage() {
     if (canonical.status === "rejected" && history.status === "rejected") {
       if (isGatewayAuthorizationError(canonical.reason) || isGatewayAuthorizationError(history.reason)) {
         setGatewayAuthenticated(false);
-        setError(null);
+        setError(
+          reportAuthorizationError
+            ? "The operator token was rejected. Check the complete token and try again."
+            : null,
+        );
       } else {
         setError(canonical.reason instanceof Error ? canonical.reason.message : "Engineer gateway is unavailable");
       }
@@ -237,7 +241,7 @@ export default function EngineerPage() {
         <div className="engineer-section-title"><span>00</span><div><h2>Secure gateway access</h2><p>Required for authenticated publication. The token stays in memory and is cleared on reload.</p></div></div>
         <label>Gateway operator token<input type="password" value={gatewayToken} autoComplete="off" onChange={(event) => setGatewayToken(event.target.value)} placeholder="Paste GATEWAY_TOKEN" /></label>
         <div className="engineer-actions">
-          <button onClick={() => { setEphemeralGatewayToken(gatewayToken); setGatewayToken(""); setGatewayAuthenticated(Boolean(gatewayToken.trim())); void loadDashboard(); }}>{gatewayAuthenticated ? "Replace token" : "Use token for this tab"}</button>
+          <button disabled={!gatewayToken.trim()} onClick={() => { setEphemeralGatewayToken(gatewayToken); setGatewayToken(""); setGatewayAuthenticated(Boolean(gatewayToken.trim())); void loadDashboard(true); }}>{gatewayAuthenticated ? "Replace token" : "Use token for this tab"}</button>
           {gatewayAuthenticated ? <button onClick={() => { clearEphemeralGatewayToken(); setGatewayAuthenticated(false); }}>Clear token</button> : null}
         </div>
       </section>
