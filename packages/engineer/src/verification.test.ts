@@ -1082,6 +1082,25 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(builderRound).toBe(2);
     expect(result.reviewerSession.attempt).toBe(2);
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
+    // Publication evidence must be scoped to the latest complete verification pass;
+    // the failed first pass must not permanently poison the repaired run.
+    const publicationEvidence = setup.supervisor.getPublicationEvidence(setup.manifest.runId);
+    expect(publicationEvidence.allRequiredChecksPassed).toBe(true);
+    const passDb = new Database(setup.dbPath, { readonly: true });
+    const passRows = passDb.query("SELECT verification_pass AS pass FROM test_executions WHERE run_id = ?")
+      .all(setup.manifest.runId) as Array<{ pass: number }>;
+    passDb.close();
+    expect(Math.max(...passRows.map((row) => row.pass))).toBeGreaterThan(1);
+    setup.supervisor.recordSecurityFinding({
+      securityFindingId: "advisory-regression",
+      runId: setup.manifest.runId,
+      severity: "CRITICAL",
+      category: "AI_ADVISORY_SECURITY_REVIEW",
+      description: "Advisory-only critical finding must not block publication.",
+      file: null, lineStart: null, lineEnd: null, evidenceIds: [], status: "OPEN",
+      createdAt: "2026-07-14T12:00:00.000Z",
+    });
+    expect(setup.supervisor.getPublicationEvidence(setup.manifest.runId).openCriticalSecurityFindings).toBe(0);
     let mutationCalls = 0;
     const stalePublication = new EngineerPublicationManager({
       supervisor: setup.supervisor, artifactStore,
