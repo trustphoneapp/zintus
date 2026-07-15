@@ -111,7 +111,7 @@ describe("mandatory isolation contracts", () => {
     for (const [role, tier] of Object.entries(MODEL_ROLE_TIERS)) {
       if (role !== "BUILDER" && role !== "REVIEWER") expect(tier).not.toBe("GPT-5.6_SOL");
     }
-    expect(modelTierForRole("TESTER")).toBe("GPT-5.6_TERRA");
+    expect(modelTierForRole("TESTER")).toBe("GPT-5.6_LUNA");
     expect(modelTierForRole("SECURITY")).toBe("GPT-5.6_TERRA");
     expect(modelTierForRole("RISK_FEATURE_EXTRACTOR")).toBe("GPT-5.6_LUNA");
   });

@@ -12,7 +12,9 @@ export const DEFAULT_MODEL_BY_TIER: Readonly<Record<LogicalModelTier, string>> =
 export const MODEL_ROLE_TIERS: Readonly<Record<ModelRole, LogicalModelTier>> = {
   PLANNER: "GPT-5.6_TERRA",
   BUILDER: "GPT-5.6_SOL",
-  TESTER: "GPT-5.6_TERRA",
+  // Test execution is deterministic and the model only summarizes structured
+  // results; keep this high-volume role on the cost-sensitive tier.
+  TESTER: "GPT-5.6_LUNA",
   SECURITY: "GPT-5.6_TERRA",
   REVIEWER: "GPT-5.6_SOL",
   ARCHITECTURE_ANALYSIS: "GPT-5.6_TERRA",

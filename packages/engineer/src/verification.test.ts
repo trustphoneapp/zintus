@@ -819,7 +819,7 @@ describe("Phase 3 authoritative verification manager", () => {
       transportForRole: (runId, role) => metered(transportForRole(runId, role)),
     });
     const result = await manager.verify(setup.manifest.runId);
-    expect(seenModels).toEqual(["gpt-5.6-terra", "gpt-5.6-terra", "gpt-5.6-sol"]);
+    expect(seenModels).toEqual(["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]);
     expect(result.claims[0]?.status).toBe("VERIFIED");
     expect(result.evidenceBundle.bundleHash).toBe(sha256(result.evidenceBundle.bundle));
     expect(result.evidenceBundle.bundle.artifacts.some((artifact) => artifact.type.endsWith("ADVISORY"))).toBe(false);
