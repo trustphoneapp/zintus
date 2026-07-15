@@ -68,7 +68,7 @@ describe("Phase 4 credentialed Git publication", () => {
       repositoryRoot: "/trusted/repository", token: () => "token",
       fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
         methods.push(init?.method ?? "GET");
-        return new Response(JSON.stringify([{ id: 91, number: 12, html_url: "https://github.test/pull/12" }]), { status: 200 });
+        return new Response(JSON.stringify([{ id: 91, number: 12, html_url: "https://github.test/pull/12", draft: true }]), { status: 200 });
       }) as unknown as typeof fetch,
     });
     const pullRequest = await service.createPullRequest({
@@ -77,5 +77,42 @@ describe("Phase 4 credentialed Git publication", () => {
     });
     expect(pullRequest).toEqual({ id: "91", number: 12, url: "https://github.test/pull/12" });
     expect(methods).toEqual(["GET"]);
+  });
+
+  test("fails closed when idempotent recovery finds a publication PR already marked ready", async () => {
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async () => new Response(JSON.stringify([{
+        id: 91, number: 12, html_url: "https://github.test/pull/12", draft: false,
+      }]), { status: 200 })) as unknown as typeof fetch,
+    });
+    await expect(service.createPullRequest({
+      runId: "run-1", repository, branchName: "zintus/engineer/run-1", baseBranch: "main",
+      title: "Verified change", body: "trusted body", idempotencyKey: "pr:create:run-1",
+    })).rejects.toThrow("existing publication pull request is not a draft");
+  });
+
+  test("creates publication pull requests as drafts so approval remains a separate human action", async () => {
+    const requests: Array<{ method: string; body: Record<string, unknown> | null }> = [];
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
+        requests.push({
+          method: init?.method ?? "GET",
+          body: typeof init?.body === "string" ? JSON.parse(init.body) as Record<string, unknown> : null,
+        });
+        if ((init?.method ?? "GET") === "GET") return new Response("[]", { status: 200 });
+        return new Response(JSON.stringify({ id: 92, number: 13, html_url: "https://github.test/pull/13" }), { status: 201 });
+      }) as unknown as typeof fetch,
+    });
+    const pullRequest = await service.createPullRequest({
+      runId: "run-1", repository, branchName: "zintus/engineer/run-1", baseBranch: "main",
+      title: "Verified change", body: "trusted body", idempotencyKey: "pr:create:run-1",
+    });
+    expect(pullRequest.number).toBe(13);
+    expect(requests).toEqual([
+      { method: "GET", body: null },
+      { method: "POST", body: { title: "Verified change", body: "trusted body", head: "zintus/engineer/run-1", base: "main", draft: true } },
+    ]);
   });
 });

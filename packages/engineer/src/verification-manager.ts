@@ -3,6 +3,7 @@ import {
   EvidenceBundleSchema,
   RepairContextSchema,
   ReviewerInputSchema,
+  TrustedEvidenceSchema,
   reviewerEvidenceBundleHash,
   type ModelRole,
   type ReviewerOutput,
@@ -26,6 +27,7 @@ import { TrustedCommandExecutor } from "./trusted-executor.js";
 import { canTransition, isTerminalState } from "./state-machine.js";
 import { derivePostVerificationRiskFeatures } from "./post-verification-risk.js";
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
+import { TestIntegrityGuard, TestIntegrityViolationError, type TestIntegrityComparison } from "./test-integrity.js";
 import {
   ClaimEvidenceRecordSchema,
   EvidenceBundleRecordSchema,
@@ -106,6 +108,14 @@ export class EngineerVerificationManager {
     const sandbox = this.options.executionManager.getSandbox(runId)
       ?? await this.options.executionManager.recoverSandbox(runId, false);
     const workspaceManager = this.options.sandboxManager.workspaceManager();
+    const testIntegrity = TestIntegrityGuard.load({
+      supervisor,
+      artifactStore: this.options.artifactStore,
+      manifest,
+      workspace: sandbox.workspace,
+      now: this.options.now,
+    });
+    const preVerificationIntegrity = testIntegrity.attest("PRE_VERIFICATION");
     const resultCommitSha = await workspaceManager.checkpointAsync(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
     const diff = await workspaceManager.diffAsync(sandbox.workspace);
     const pass = supervisor.nextReviewerAttempt(runId);
@@ -121,10 +131,15 @@ export class EngineerVerificationManager {
         // Every return to FAST_CHECKS has a new durable state version, including
         // Builder repair loops that occur before any Reviewer session exists.
         verificationPass: initial.stateVersion,
+        beforeCommand: () => testIntegrity.captureCommandSnapshot(),
+        afterCommand: (command, beforeSnapshot) => testIntegrity.assertCommandDidNotMutate(beforeSnapshot, command),
         now: this.options.now,
         idFactory: this.options.idFactory,
       }).run();
       verified = await verified;
+      verified.trustedEvidence.unshift(this.testIntegrityEvidence(preVerificationIntegrity.artifact, preVerificationIntegrity.comparison));
+      const postVerificationIntegrity = testIntegrity.attest("POST_INDEPENDENT_VERIFICATION");
+      verified.trustedEvidence.push(this.testIntegrityEvidence(postVerificationIntegrity.artifact, postVerificationIntegrity.comparison));
     } catch (error) {
       if (error instanceof StableRequiredTestFailure) {
         return this.repairStableRequiredTest(manifest, sandbox, resultCommitSha, diff, error);
@@ -209,6 +224,8 @@ export class EngineerVerificationManager {
     // Model advisories remain auditable artifacts/findings, but never cross the
     // trust boundary into Reviewer evidence or acceptance-claim certification.
     const trustedEvidence = verified.trustedEvidence;
+    const preReviewIntegrity = testIntegrity.attest("PRE_REVIEW");
+    trustedEvidence.push(this.testIntegrityEvidence(preReviewIntegrity.artifact, preReviewIntegrity.comparison));
     const finalRiskFeatures = derivePostVerificationRiskFeatures({
       diff,
       requiredChecksPassed: verified.executions.every((execution) => execution.status === "PASSED"),
@@ -430,6 +447,13 @@ export class EngineerVerificationManager {
   ): Promise<void> {
     const runId = manifest.runId;
     const executor = this.executor(manifest, sandbox);
+    const testIntegrity = TestIntegrityGuard.load({
+      supervisor: this.options.supervisor,
+      artifactStore: this.options.artifactStore,
+      manifest,
+      workspace: sandbox.workspace,
+      now: this.options.now,
+    });
     const agent = this.startAgent(runId, "BUILDER", sha256(repairContext));
     let transport;
     try {
@@ -489,7 +513,8 @@ export class EngineerVerificationManager {
     try {
       const builderResult = await builder.run();
       const artifact = this.storeAgentOutput(runId, agent, "BUILDER_REPAIR_RESULT", builderResult);
-      this.transition(runId, "FAST_CHECKS", completionReason, [artifact.artifactId]);
+      const integrity = testIntegrity.attest("POST_REPAIR");
+      this.transition(runId, "FAST_CHECKS", completionReason, [artifact.artifactId, integrity.artifact.artifactId]);
     } catch (error) {
       this.failAgent(runId, agent);
       throw error;
@@ -612,6 +637,19 @@ export class EngineerVerificationManager {
     return artifact;
   }
 
+  private testIntegrityEvidence(artifact: ArtifactRecord, comparison: TestIntegrityComparison): TrustedEvidence {
+    return TrustedEvidenceSchema.parse({
+      evidenceId: artifact.artifactId,
+      runId: comparison.runId,
+      eventType: "TEST_INTEGRITY_ATTESTATION",
+      producerType: "SYSTEM",
+      producerId: artifact.producerId,
+      sha256: artifact.sha256,
+      payload: comparison,
+      createdAt: artifact.createdAt,
+    });
+  }
+
   private failAgent(runId: string, agent: AgentContext): void {
     this.options.supervisor.recordAgentExecution({
       agentExecutionId: agent.id, runId, role: agent.role, modelTier: agent.route.logicalTier,
@@ -728,6 +766,23 @@ export class EngineerVerificationManager {
       }));
       if (canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")) {
         this.transition(runId, "RETRY_BUDGET_EXHAUSTED", "RUNTIME_BUDGET_EXHAUSTED");
+      }
+      return;
+    }
+    if (error instanceof TestIntegrityViolationError) {
+      const nextState = canTransition(run.state, "SECURITY_ESCALATION") ? "SECURITY_ESCALATION" : "VERIFICATION_INCOMPLETE";
+      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: this.id(),
+        runId,
+        failureClass: "SECURITY_FAILURE",
+        reasonCode: error.reasonCode,
+        fingerprint: sha256({ reasonCode: error.reasonCode, state: run.state, message: error.message }),
+        evidenceIds: error.evidenceId ? [error.evidenceId] : [],
+        retryable: false,
+        createdAt: this.timestamp(),
+      }));
+      if (canTransition(run.state, nextState)) {
+        this.transition(runId, nextState, error.reasonCode, error.evidenceId ? [error.evidenceId] : []);
       }
       return;
     }

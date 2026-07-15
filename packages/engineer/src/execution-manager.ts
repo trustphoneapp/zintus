@@ -17,6 +17,7 @@ import { executionFailureDomain, operationalFailurePolicy } from "./failure-poli
 import type { EngineerWorkerLeaseManager, WorkerLeaseGrant } from "./worker-lease.js";
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import { canTransition } from "./state-machine.js";
+import { TestIntegrityGuard, TestIntegrityViolationError } from "./test-integrity.js";
 
 const PHASE2_RECOVERABLE_STATES = new Set([
   "SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED",
@@ -251,6 +252,7 @@ export class EngineerExecutionManager {
     let agentExecutionId: string | null = null;
     let agentStartedAt: string | null = null;
     let lease: WorkerLeaseGrant | null = null;
+    let testIntegrity: TestIntegrityGuard | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let heartbeatSequence = 0;
     const leaseOwnerId = this.options.workerOwnerId ?? "engineer-execution-worker";
@@ -344,6 +346,13 @@ export class EngineerExecutionManager {
       transition("CONTEXT_BUILDING", "BUILDER_CONTEXT_BUILDING");
       const manifest = supervisor.getManifest(runId);
       if (!manifest) throw new Error("frozen manifest is unavailable");
+      testIntegrity = TestIntegrityGuard.createAndRecord({
+        supervisor,
+        artifactStore: this.options.artifactStore,
+        manifest,
+        workspace: provisioned.workspace,
+        now: this.options.now,
+      });
       const route = resolveEngineerModel("BUILDER", this.options.builderOptions?.modelConfiguration);
       agentExecutionId = (this.options.idFactory ?? randomUUID)();
       agentStartedAt = (this.options.now ?? (() => new Date()))().toISOString();
@@ -445,6 +454,7 @@ export class EngineerExecutionManager {
       supervisor.assertRuntimeBudget(runId);
       const result = await builder.run();
       assertLease();
+      const integrity = testIntegrity.attest("POST_BUILDER");
       const artifact = supervisor.recordArtifact(this.options.artifactStore.put({
         runId,
         type: "BUILDER_RESULT",
@@ -464,13 +474,16 @@ export class EngineerExecutionManager {
         startedAt: agentStartedAt,
         completedAt: (this.options.now ?? (() => new Date()))().toISOString(),
       });
-      transition("FAST_CHECKS", "BUILDER_IMPLEMENTATION_FINISHED", [artifact.artifactId]);
+      transition("FAST_CHECKS", "BUILDER_IMPLEMENTATION_FINISHED", [artifact.artifactId, integrity.artifact.artifactId]);
       return result;
     } catch (error) {
       const run = supervisor.getRun(runId);
       const budgetExhausted = error instanceof RuntimeBudgetExhaustedError;
+      const testIntegrityFailure = error instanceof TestIntegrityViolationError;
       const domain = executionFailureDomain(run.state, error);
-      const policy = budgetExhausted
+      const policy = testIntegrityFailure
+        ? { failureClass: "SECURITY_FAILURE" as const, reasonCode: error.reasonCode, retryable: false }
+        : budgetExhausted
         ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }
         : operationalFailurePolicy(domain);
       const message = error instanceof Error ? error.message : String(error);
@@ -479,7 +492,10 @@ export class EngineerExecutionManager {
         runId,
         ...policy,
         fingerprint: sha256({ policyVersion: "operational-failure-v1", domain, reasonCode: policy.reasonCode, message }),
-        evidenceIds: provisioned ? [provisioned.record.sandboxId] : [],
+        evidenceIds: [
+          ...(provisioned ? [provisioned.record.sandboxId] : []),
+          ...(testIntegrityFailure && error.evidenceId ? [error.evidenceId] : []),
+        ],
         createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
       }));
       if (agentExecutionId && agentStartedAt) {
@@ -499,7 +515,9 @@ export class EngineerExecutionManager {
         "SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED",
         "SANDBOX_COLD_PROVISIONING", "SANDBOX_PROVISIONING", "SANDBOX_PREFLIGHT", "SANDBOX_PREWARM_INVALID",
       ]);
-      const next = budgetExhausted && canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")
+      const next = testIntegrityFailure && canTransition(run.state, "SECURITY_ESCALATION")
+        ? "SECURITY_ESCALATION"
+        : budgetExhausted && canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")
         ? "RETRY_BUDGET_EXHAUSTED"
         : sandboxStates.has(run.state) || run.state === "CONTEXT_BUILDING"
         ? "BLOCKED_BY_ENVIRONMENT"
@@ -511,7 +529,9 @@ export class EngineerExecutionManager {
           runId,
           expectedStateVersion: run.stateVersion,
           nextState: next,
-          reasonCode: next === "RETRY_BUDGET_EXHAUSTED"
+          reasonCode: testIntegrityFailure
+            ? error.reasonCode
+            : next === "RETRY_BUDGET_EXHAUSTED"
             ? "RUNTIME_BUDGET_EXHAUSTED"
             : next === "FAILED" ? "CODEX_BUILDER_FAILED" : "SANDBOX_OR_CONTEXT_FAILED",
           manifestHash: run.manifestHash,

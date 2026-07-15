@@ -592,6 +592,8 @@ describe("Phase 2 authoritative execution worker", () => {
     expect(artifacts.map((artifact) => artifact.type)).toContain("COMMAND_STDOUT");
     expect(artifacts.map((artifact) => artifact.type)).toContain("COMMAND_STDERR");
     expect(artifacts.map((artifact) => artifact.type)).toContain("BUILDER_RESULT");
+    expect(artifacts.map((artifact) => artifact.type)).toContain("TEST_BASELINE_MANIFEST");
+    expect(artifacts.map((artifact) => artifact.type)).toContain("TEST_INTEGRITY_COMPARISON");
     const auditDb = new Database(join(root, "engineer.db"), { readonly: true });
     expect((auditDb.query("SELECT COUNT(*) AS count FROM command_executions").get() as { count: number }).count).toBe(1);
     expect((auditDb.query("SELECT COUNT(*) AS count FROM agent_executions").get() as { count: number }).count).toBe(1);

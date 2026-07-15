@@ -122,14 +122,15 @@ export class GitHubGitService implements GitService {
 
   async createPullRequest(input: CreatePullRequestInput): Promise<PullRequestResult> {
     const query = new URLSearchParams({ state: "open", head: `${input.repository.owner}:${input.branchName}`, base: input.baseBranch });
-    const existing = await this.github(input.repository, `/pulls?${query.toString()}`, { method: "GET" }) as Array<{ id?: number; number?: number; html_url?: string }>;
+    const existing = await this.github(input.repository, `/pulls?${query.toString()}`, { method: "GET" }) as Array<{ id?: number; number?: number; html_url?: string; draft?: boolean }>;
     const match = existing[0];
     if (match?.id && match.number && match.html_url) {
+      if (match.draft !== true) throw new Error("existing publication pull request is not a draft");
       return { id: String(match.id), number: match.number, url: match.html_url };
     }
     const response = await this.github(input.repository, "/pulls", {
       method: "POST",
-      body: JSON.stringify({ title: input.title, body: input.body, head: input.branchName, base: input.baseBranch }),
+      body: JSON.stringify({ title: input.title, body: input.body, head: input.branchName, base: input.baseBranch, draft: true }),
     }) as { id?: number; number?: number; html_url?: string };
     if (!response.id || !response.number || !response.html_url) throw new Error("GitHub returned an invalid pull request result");
     return { id: String(response.id), number: response.number, url: response.html_url };

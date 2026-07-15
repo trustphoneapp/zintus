@@ -30,6 +30,8 @@ export interface IndependentVerifierOptions {
   now?: () => Date;
   idFactory?: () => string;
   verificationPass?: number;
+  beforeCommand?: (command: string) => string | Promise<string>;
+  afterCommand?: (command: string, beforeSnapshot: string) => void | Promise<void>;
 }
 
 export interface IndependentVerificationOutput {
@@ -310,10 +312,16 @@ export class IndependentVerifier {
 
   private async runItem(item: TestPlanItem, repeatAttempt: number): Promise<{ execution: VerificationExecutionRecord; evidence: TrustedEvidence; command: CommandExecutionRecord }> {
     if (!item.command) throw new Error(`test plan item ${item.testId} has no executable command`);
-    const command = await this.options.executor.executeAsync(
-      item.command,
-      `verify:${this.options.verificationPass ?? 1}:${item.testId}:${repeatAttempt}:${sha256(item).slice(7, 23)}`,
-    );
+    const beforeSnapshot = await this.options.beforeCommand?.(item.command);
+    let command: CommandExecutionRecord;
+    try {
+      command = await this.options.executor.executeAsync(
+        item.command,
+        `verify:${this.options.verificationPass ?? 1}:${item.testId}:${repeatAttempt}:${sha256(item).slice(7, 23)}`,
+      );
+    } finally {
+      if (beforeSnapshot !== undefined) await this.options.afterCommand?.(item.command, beforeSnapshot);
+    }
     const execution = this.options.supervisor.recordVerificationExecution(VerificationExecutionRecordSchema.parse({
       verificationExecutionId: (this.options.idFactory ?? randomUUID)(),
       runId: this.options.manifest.runId,
@@ -365,8 +373,23 @@ export class IndependentVerifier {
         description: "A newly added line invokes eval()." },
       { category: "SHELL_EXECUTION", severity: "MEDIUM" as const, pattern: /^\+.*\b(?:exec|spawn)\s*\([^\n]*shell\s*:\s*true/,
         description: "A newly added process invocation enables a shell." },
+      { category: "TLS_VERIFICATION_DISABLED", severity: "CRITICAL" as const, pattern: /^\+.*(?:rejectUnauthorized|verify)\s*[:=]\s*false\b/i,
+        description: "A newly added line disables transport certificate verification." },
+      { category: "COOKIE_SECURITY_DISABLED", severity: "HIGH" as const, pattern: /^\+.*(?:httpOnly|secure)\s*:\s*false\b/i,
+        description: "A newly added line disables a cookie security control." },
+    ];
+    const negativeConstraints = [
+      { category: "AUTHENTICATION_CONTROL_REMOVED", pattern: /\b(?:authenticate|requireAuth|verifyToken|verifySession|currentUser)\b/i,
+        description: "The diff removes an authentication control without a replacement in the same file." },
+      { category: "AUTHORIZATION_CONTROL_REMOVED", pattern: /\b(?:authorize|requirePermission|hasPermission|canAccess|enforceRbac)\b/i,
+        description: "The diff removes an authorization control without a replacement in the same file." },
+      { category: "INPUT_VALIDATION_REMOVED", pattern: /\b(?:safeParse|validate|sanitize|escapeHtml)\s*\(/i,
+        description: "The diff removes input validation or sanitization without a replacement in the same file." },
+      { category: "CSRF_CONTROL_REMOVED", pattern: /\b(?:csrf|sameSite|originCheck)\b/i,
+        description: "The diff removes a request-forgery control without a replacement in the same file." },
     ];
     const findings: SecurityFindingRecord[] = [];
+    const changedLines = new Map<string, { added: string[]; removed: string[] }>();
     let file: string | null = null;
     let newLine = 0;
     for (const line of diff.split("\n")) {
@@ -375,6 +398,11 @@ export class IndependentVerifier {
         const match = /\+(\d+)/.exec(line);
         newLine = match ? Number(match[1]) - 1 : 0;
       } else if (!line.startsWith("-")) newLine += 1;
+      if (file && ((line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")))) {
+        const changes = changedLines.get(file) ?? { added: [], removed: [] };
+        (line.startsWith("+") ? changes.added : changes.removed).push(line.slice(1));
+        changedLines.set(file, changes);
+      }
       for (const rule of rules) {
         if (!rule.pattern.test(line)) continue;
         findings.push(SecurityFindingRecordSchema.parse({
@@ -386,6 +414,25 @@ export class IndependentVerifier {
           file,
           lineStart: newLine || null,
           lineEnd: newLine || null,
+          evidenceIds: [],
+          status: "OPEN",
+          createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+        }));
+      }
+    }
+    for (const [changedFile, changes] of changedLines) {
+      for (const constraint of negativeConstraints) {
+        if (!changes.removed.some((line) => constraint.pattern.test(line))) continue;
+        if (changes.added.some((line) => constraint.pattern.test(line))) continue;
+        findings.push(SecurityFindingRecordSchema.parse({
+          securityFindingId: (this.options.idFactory ?? randomUUID)(),
+          runId: this.options.manifest.runId,
+          severity: "HIGH",
+          category: constraint.category,
+          description: constraint.description,
+          file: changedFile,
+          lineStart: null,
+          lineEnd: null,
           evidenceIds: [],
           status: "OPEN",
           createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
