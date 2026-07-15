@@ -656,11 +656,11 @@ describe("Phase 2 authoritative execution worker", () => {
       idempotencyKey: "freeze-worker-budget-stop",
     }).run;
     expect(budgetFrozen.state).toBe("PLAN_FROZEN");
-    await expect(manager.execute(budgetFrozen.runId)).rejects.toThrow("runtime budget exhausted");
-    expect(supervisor.getRun(budgetFrozen.runId).state).toBe("RETRY_BUDGET_EXHAUSTED");
-    expect(supervisor.listFailures(budgetFrozen.runId)).toMatchObject([{
-      failureClass: "WORKFLOW_FAILURE", reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false,
-    }]);
+    await expect(manager.execute(budgetFrozen.runId)).rejects.toThrow("paused safely");
+    expect(supervisor.getRun(budgetFrozen.runId).state).toBe("PAUSED_BUDGET");
+    expect(supervisor.listEvents(budgetFrozen.runId)).toContainEqual(expect.objectContaining({
+      nextState: "PAUSED_BUDGET", reasonCode: "TOKEN_LIMIT_REACHED",
+    }));
 
     expect(manager.destroy(run.runId)?.status).toBe("DESTROYED");
     leaseManager.close();

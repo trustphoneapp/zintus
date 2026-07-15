@@ -32,3 +32,10 @@ export class ManifestIntegrityError extends Error {
     this.name = "ManifestIntegrityError";
   }
 }
+
+export class BudgetPausedError extends Error {
+  constructor(runId: string, reason: string) {
+    super(`run ${runId} paused safely: ${reason}`);
+    this.name = "BudgetPausedError";
+  }
+}

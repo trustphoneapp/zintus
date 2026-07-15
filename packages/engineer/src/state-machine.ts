@@ -53,6 +53,7 @@ export const STATE_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> 
   ROLLBACK_IN_PROGRESS: ["ROLLED_BACK", "FAILED"],
   CANCELLATION_PENDING: ["CANCELLED", "ROLLBACK_IN_PROGRESS", "FAILED"],
   EVIDENCE_PACKAGING: ["COMPLETED", "VERIFICATION_INCOMPLETE", "FAILED", "CANCELLATION_PENDING"],
+  PAUSED_BUDGET: ["CANCELLATION_PENDING"],
   COMPLETED: [],
   REJECTED: [],
   CANCELLED: [],
@@ -107,5 +108,6 @@ export function isTerminalState(state: RunState): boolean {
 }
 
 export function canTransition(previousState: RunState, nextState: RunState): boolean {
+  if (nextState === "PAUSED_BUDGET") return previousState !== "PAUSED_BUDGET" && !terminalSet.has(previousState);
   return STATE_TRANSITIONS[previousState]?.includes(nextState) ?? false;
 }

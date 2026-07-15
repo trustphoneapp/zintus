@@ -220,11 +220,7 @@ export class EngineerPlanningManager {
         fingerprint: sha256({ reasonCode: "RUNTIME_BUDGET_EXHAUSTED", message }),
         evidenceIds: [], retryable: false, createdAt: this.timestamp(),
       }));
-      const current = this.options.supervisor.getRun(runId);
-      this.options.supervisor.transition({
-        runId, expectedStateVersion: current.stateVersion, nextState: "RETRY_BUDGET_EXHAUSTED",
-        reasonCode: "RUNTIME_BUDGET_EXHAUSTED", idempotencyKey: `planner:runtime-budget:${failureId}`,
-      });
+      this.options.supervisor.reconcileBudget(runId);
       throw error;
     }
     const latestProposalBeforeAttempt = this.options.supervisor.latestPlanProposal(runId);
@@ -398,7 +394,9 @@ export class EngineerPlanningManager {
       prohibitedCommands: ["git push", "gh pr create", "git merge", "git reset --hard", "rm -rf", "curl", "wget"],
       riskTier: risk.riskTier, humanGateRequired: risk.humanGateRequired,
       retryBudgets: { sameFailureAttempts: 2, builderRepairAttempts: 4, reviewerFixAttempts: 2, plannerRestarts: 1, sandboxProvisioningAttempts: 3, transientModelAttempts: 3 },
-      timeBudgetSeconds: 3_600, tokenBudget: 200_000, costBudgetUsd: 20,
+      timeBudgetSeconds: this.options.supervisor.getBudget(runId).limits.timeSeconds,
+      tokenBudget: this.options.supervisor.getBudget(runId).limits.tokens,
+      costBudgetUsd: this.options.supervisor.getBudget(runId).limits.costUsd,
       createdAt: this.timestamp(),
     });
     const questionsByKey = new Map<string, PlannerQuestion>();
@@ -491,6 +489,7 @@ export class EngineerPlanningManager {
       }
       this.options.supervisor.recordAgentExecution({ agentExecutionId: agentId, runId, role: "PLANNER", modelTier: route.logicalTier, status: "FAILED", inputHash, outputArtifactId: null, startedAt, completedAt: this.timestamp() });
       if (error instanceof RuntimeBudgetExhaustedError) {
+        this.options.supervisor.reconcileBudget(runId);
         const current = this.options.supervisor.getRun(runId);
         if (canTransition(current.state, "RETRY_BUDGET_EXHAUSTED")) {
           this.options.supervisor.transition({

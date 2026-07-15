@@ -575,7 +575,19 @@ describe("Engineer Supervisor foundation", () => {
       model: "gpt-5.6-terra",
       inputTokenUpperBound: 200_000,
       maxOutputTokens: 1,
-    })).toThrow("MODEL_TOKENS_BUDGET_EXHAUSTED");
+    })).toThrow("paused safely");
+    const paused = supervisor.getRun(run.runId);
+    const pausedBudget = supervisor.getBudget(run.runId);
+    expect(paused.state).toBe("PAUSED_BUDGET");
+    const topped = supervisor.topUpBudget({
+      runId: run.runId, expectedRevision: pausedBudget.revision,
+      topUp: { addCostBudgetUsd: 0, addTokenBudget: 1_000, addTimeBudgetSeconds: 0 },
+      actorId: "user-1", idempotencyKey: "supervisor-budget-top-up",
+    });
+    supervisor.resumeBudget({
+      runId: run.runId, expectedStateVersion: paused.stateVersion, expectedBudgetRevision: topped.revision,
+      actorId: "user-1", idempotencyKey: "supervisor-budget-resume",
+    });
     expect(supervisor.exportRunRecords(run.runId).cost_records).toEqual([]);
 
     const reservationId = supervisor.reserveModelBudget({

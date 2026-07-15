@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 8;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 9;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -455,6 +455,32 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     created_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS run_budgets (
+    run_id TEXT PRIMARY KEY REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    cost_limit_usd REAL NOT NULL CHECK(cost_limit_usd >= 0), token_limit INTEGER NOT NULL CHECK(token_limit >= 0),
+    time_limit_seconds INTEGER NOT NULL CHECK(time_limit_seconds > 0),
+    lifetime_cost_limit_usd REAL NOT NULL CHECK(lifetime_cost_limit_usd >= cost_limit_usd),
+    lifetime_token_limit INTEGER NOT NULL CHECK(lifetime_token_limit >= token_limit),
+    lifetime_time_limit_seconds INTEGER NOT NULL CHECK(lifetime_time_limit_seconds >= time_limit_seconds),
+    used_cost_usd REAL NOT NULL DEFAULT 0 CHECK(used_cost_usd >= 0), used_tokens INTEGER NOT NULL DEFAULT 0 CHECK(used_tokens >= 0),
+    used_time_seconds INTEGER NOT NULL DEFAULT 0 CHECK(used_time_seconds >= 0), reserved_cost_usd REAL NOT NULL DEFAULT 0 CHECK(reserved_cost_usd >= 0),
+    reserved_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reserved_tokens >= 0), status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'WARNING', 'PAUSED')),
+    pause_reason TEXT, resume_state TEXT, warning_threshold REAL NOT NULL DEFAULT 0.8 CHECK(warning_threshold >= 0.5 AND warning_threshold <= 0.99),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0), active_since TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  );
+
+  INSERT OR IGNORE INTO run_budgets
+    (run_id, cost_limit_usd, token_limit, time_limit_seconds, lifetime_cost_limit_usd, lifetime_token_limit,
+     lifetime_time_limit_seconds, status, active_since, created_at, updated_at)
+  SELECT id, 20, 200000, 3600, 100, 1000000, 86400, 'ACTIVE', updated_at, created_at, updated_at FROM engineer_runs;
+
+  CREATE TABLE IF NOT EXISTS budget_events (
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    event_type TEXT NOT NULL, actor_id TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+    budget_revision INTEGER NOT NULL CHECK(budget_revision > 0), details_json TEXT NOT NULL, created_at TEXT NOT NULL,
+    UNIQUE(run_id, idempotency_key)
+  );
+
   CREATE TABLE IF NOT EXISTS audit_events (
     id TEXT PRIMARY KEY,
     run_id TEXT REFERENCES engineer_runs(id) ON DELETE RESTRICT,
@@ -521,4 +547,5 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_failures_run_fingerprint ON failure_records(run_id, fingerprint);
   CREATE INDEX IF NOT EXISTS idx_audit_run_created ON audit_events(run_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_decisions_run_created ON decisions(run_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_budget_events_run_created ON budget_events(run_id, created_at);
 `;

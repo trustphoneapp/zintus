@@ -2789,13 +2789,14 @@ export function createGatewayHandler(
       if (limited) return limited;
       try {
         const body = await request.json() as {
-          runId?: string; userId?: string; actorId?: string; userEmail?: string; repository?: unknown; request?: string;
+          runId?: string; userId?: string; actorId?: string; userEmail?: string; repository?: unknown; request?: string; budget?: unknown;
         };
         if (!body.repository || !body.request) throw new Error("repository and request are required");
         const run = await engineerRuns.create(engineerPrincipal!, {
           ...(body.runId ? { runId: body.runId } : {}),
           repository: body.repository as never,
           request: body.request,
+          ...(body.budget ? { budget: body.budget as never } : {}),
         });
         return json(request, { run }, 201);
       } catch (error) {
@@ -2821,6 +2822,28 @@ export function createGatewayHandler(
           if (limited) return limited;
         }
         if (!action && request.method === "GET") return json(request, engineerRuns.get(runId));
+        if (action === "budget" && request.method === "GET") {
+          return json(request, { budget: engineerRuns.budget(engineerPrincipal!, runId) });
+        }
+        if (action === "budget" && parts[6] === "top-up" && request.method === "POST") {
+          const body = await request.json() as {
+            expectedRevision?: number; idempotencyKey?: string;
+            addCostBudgetUsd?: number; addTokenBudget?: number; addTimeBudgetSeconds?: number;
+          };
+          if (typeof body.expectedRevision !== "number" || !body.idempotencyKey) throw new Error("expectedRevision and idempotencyKey are required");
+          return json(request, { budget: engineerRuns.topUpBudget(engineerPrincipal!, runId, {
+            expectedRevision: body.expectedRevision, idempotencyKey: body.idempotencyKey,
+            topUp: { addCostBudgetUsd: body.addCostBudgetUsd ?? 0, addTokenBudget: body.addTokenBudget ?? 0, addTimeBudgetSeconds: body.addTimeBudgetSeconds ?? 0 },
+          }) });
+        }
+        if (action === "resume-budget" && request.method === "POST") {
+          const body = await request.json() as { expectedStateVersion?: number; expectedBudgetRevision?: number; idempotencyKey?: string };
+          if (typeof body.expectedStateVersion !== "number" || typeof body.expectedBudgetRevision !== "number" || !body.idempotencyKey) {
+            throw new Error("expectedStateVersion, expectedBudgetRevision, and idempotencyKey are required");
+          }
+          const run = engineerRuns.resumeBudget(engineerPrincipal!, runId, body as Required<typeof body>);
+          return json(request, { run, budget: engineerRuns.budget(engineerPrincipal!, runId) });
+        }
         if (action === "plan" && request.method === "POST") {
           return json(request, { plan: await engineerRuns.plan(engineerPrincipal!, runId) });
         }

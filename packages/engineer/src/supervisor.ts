@@ -46,7 +46,7 @@ import type {
   PublicationEvidence,
   TestExecutionView,
 } from "./control-contracts.js";
-import { IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
+import { BudgetPausedError, IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
 import { canonicalJson, sha256 } from "./hash.js";
 import { EngineerLedger, type LedgerTransitionResult } from "./ledger.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
@@ -69,7 +69,15 @@ import {
   type DecisionResolution,
 } from "./decision-contracts.js";
 import { DECISION_POLICY_VERSION, classifyDecisionFactors } from "./decision-policy.js";
-import { assertRunBudget as assertBudgetPolicy, estimateGpt56CostUsd, RunBudgetUsageSchema, type RunBudgetDecision, type RunBudgetUsage } from "./runtime-budget.js";
+import { assertRunBudget as assertBudgetPolicy, estimateGpt56CostUsd, RunBudgetUsageSchema, RuntimeBudgetExhaustedError, type RunBudgetDecision, type RunBudgetUsage } from "./runtime-budget.js";
+import {
+  BudgetTopUpSchema,
+  EngineerBudgetSelectionSchema,
+  type BudgetPauseReason,
+  type BudgetTopUp,
+  type EngineerBudgetSelection,
+  type EngineerBudgetSnapshot,
+} from "./budget-contracts.js";
 
 export interface SupervisorOptions {
   dbPath?: string;
@@ -84,6 +92,7 @@ export interface ReceiveRequestInput {
   repository: RepositoryReference;
   request: string;
   initialRiskFeatures?: Partial<RiskFeatures>;
+  budget?: Partial<EngineerBudgetSelection>;
 }
 
 export interface TransitionFacts {
@@ -211,6 +220,7 @@ export class EngineerSupervisor {
       ...(input.userEmail ? { userEmail: input.userEmail } : {}),
       repository, requestOriginal: request,
       riskTier: initialRisk.riskTier, humanGateRequired: initialRisk.humanGateRequired, now,
+      budget: EngineerBudgetSelectionSchema.parse(input.budget ?? {}),
     });
   }
 
@@ -274,6 +284,12 @@ export class EngineerSupervisor {
     if (content.riskTier !== run.riskTier || content.humanGateRequired !== run.humanGateRequired) {
       throw new ManifestIntegrityError("manifest risk and human gate must match the Supervisor decision");
     }
+    // A manifest may tighten the selected ceiling, but can never raise it.
+    // This preserves legacy/manual plans without allowing prompt output to
+    // silently increase the user's authoritative budget.
+    this.ledger.constrainBudget(run.runId, {
+      costUsd: content.costBudgetUsd, tokens: content.tokenBudget, timeSeconds: content.timeBudgetSeconds,
+    }, this.timestamp());
     const proposal = this.ledger.latestPlanProposal(run.runId);
     if (proposal && sha256(proposal.manifest) !== sha256(content)) {
       throw new ManifestIntegrityError("manifest does not match the persisted plan proposal");
@@ -707,27 +723,76 @@ export class EngineerSupervisor {
 
   reserveModelBudget(input: { runId: string; reservationId: string; agentExecutionId: string; model: string; inputTokenUpperBound: number; maxOutputTokens: number }): string {
     const estimatedCostUsd = estimateGpt56CostUsd(input.model, input.inputTokenUpperBound, input.maxOutputTokens);
-    this.ledger.atomic(() => {
-      const route = this.ledger.modelRouteForAgent(input.runId, input.agentExecutionId, input.model);
-      this.ledger.reserveModelBudget({
-        runId: input.runId, reservationId: input.reservationId,
-        inputTokens: input.inputTokenUpperBound, outputTokens: input.maxOutputTokens,
-        estimatedCostUsd, agentExecutionId: input.agentExecutionId, model: input.model,
-        routingDecisionId: route.routingDecisionId, createdAt: this.timestamp(),
+    try {
+      this.ledger.atomic(() => {
+        const route = this.ledger.modelRouteForAgent(input.runId, input.agentExecutionId, input.model);
+        this.ledger.reserveModelBudget({
+          runId: input.runId, reservationId: input.reservationId,
+          inputTokens: input.inputTokenUpperBound, outputTokens: input.maxOutputTokens,
+          estimatedCostUsd, agentExecutionId: input.agentExecutionId, model: input.model,
+          routingDecisionId: route.routingDecisionId, createdAt: this.timestamp(),
+        });
+        this.assertRuntimeBudget(input.runId);
       });
-      this.assertRuntimeBudget(input.runId);
-    });
+    } catch (error) {
+      if (!(error instanceof RuntimeBudgetExhaustedError)) throw error;
+      const joined = error.decision.hardLimitReasons.join(" ");
+      const reason: BudgetPauseReason = joined.includes("TOKEN") ? "TOKEN_LIMIT_REACHED"
+        : joined.includes("COST") || joined.includes("ACCOUNTING") ? "COST_LIMIT_REACHED"
+          : "TIME_LIMIT_REACHED";
+      this.pauseForBudget(input.runId, reason);
+      throw new BudgetPausedError(input.runId, reason);
+    }
     return input.reservationId;
   }
 
   assertRuntimeBudget(runId: string, overrides: Partial<RunBudgetUsage> = {}): RunBudgetDecision | null {
     const frozenManifest = this.ledger.getManifest(runId);
     const proposalManifest = frozenManifest ? null : this.ledger.latestPlanProposal(runId)?.manifest;
-    const manifest = frozenManifest ?? (proposalManifest
+    const baseManifest = frozenManifest ?? (proposalManifest
       ? TaskManifestSchema.parse({ ...proposalManifest, manifestHash: sha256(proposalManifest) })
-      : { timeBudgetSeconds: 3_600, tokenBudget: 200_000, costBudgetUsd: 20 });
+      : (() => {
+          const selected = this.ledger.getBudget(runId, this.timestamp()).limits;
+          return { timeBudgetSeconds: selected.timeSeconds, tokenBudget: selected.tokens, costBudgetUsd: selected.costUsd };
+        })());
+    const selected = this.ledger.getBudget(runId, this.timestamp()).limits;
+    const manifest = { ...baseManifest, timeBudgetSeconds: selected.timeSeconds, tokenBudget: selected.tokens, costBudgetUsd: selected.costUsd };
     const usage = { ...this.ledger.runtimeBudgetUsage(runId, new Date(this.timestamp())), ...overrides };
     return assertBudgetPolicy(manifest, RunBudgetUsageSchema.parse(usage));
+  }
+
+  getBudget(runId: string): EngineerBudgetSnapshot { return this.ledger.getBudget(runId, this.timestamp()); }
+
+  reconcileBudget(runId: string): EngineerBudgetSnapshot {
+    const snapshot = this.getBudget(runId);
+    if (snapshot.status !== "PAUSED") {
+      const reason: BudgetPauseReason | null = snapshot.remaining.tokens === 0 ? "TOKEN_LIMIT_REACHED"
+        : snapshot.remaining.costUsd === 0 ? "COST_LIMIT_REACHED"
+          : snapshot.remaining.timeSeconds === 0 ? "TIME_LIMIT_REACHED" : null;
+      if (reason) this.pauseForBudget(runId, reason);
+    }
+    return this.getBudget(runId);
+  }
+
+  topUpBudget(input: { runId: string; expectedRevision: number; topUp: BudgetTopUp; actorId: string; idempotencyKey: string }): EngineerBudgetSnapshot {
+    const run = this.getRun(input.runId);
+    if (run.userId !== input.actorId) throw new InvalidTransitionError("budget actor does not own this run");
+    return this.ledger.topUpBudget({ ...input, topUp: BudgetTopUpSchema.parse(input.topUp), createdAt: this.timestamp() });
+  }
+
+  resumeBudget(input: { runId: string; expectedStateVersion: number; expectedBudgetRevision: number; actorId: string; idempotencyKey: string }): LedgerTransitionResult {
+    const run = this.getRun(input.runId);
+    const budget = this.getBudget(input.runId);
+    if (run.userId !== input.actorId) throw new InvalidTransitionError("budget actor does not own this run");
+    if (run.state !== "PAUSED_BUDGET" || budget.status !== "PAUSED" || !budget.resumeState) throw new InvalidTransitionError("run is not paused for budget");
+    if (run.stateVersion !== input.expectedStateVersion) throw new StateVersionConflictError(run.runId, input.expectedStateVersion, run.stateVersion);
+    if (budget.revision !== input.expectedBudgetRevision) throw new StateVersionConflictError(run.runId, input.expectedBudgetRevision, budget.revision);
+    const timestamp = this.timestamp();
+    return this.ledger.resumeFromBudget({
+      runId: run.runId, expectedStateVersion: run.stateVersion, previousState: "PAUSED_BUDGET", nextState: budget.resumeState,
+      reasonCode: "BUDGET_RESUMED", actorType: "HUMAN", actorId: input.actorId, evidenceIds: [], manifestHash: run.manifestHash,
+      idempotencyKey: input.idempotencyKey, eventId: this.idFactory(), timestamp, terminalAt: null,
+    });
   }
 
   recordVerificationExecution(record: VerificationExecutionRecord): VerificationExecutionRecord {
@@ -924,6 +989,9 @@ export class EngineerSupervisor {
     if (input.nextState === "PLAN_FROZEN") {
       throw new InvalidTransitionError("PLAN_FROZEN requires freezePlan so the manifest and event commit atomically");
     }
+    if (input.nextState === "PAUSED_BUDGET" || run.state === "PAUSED_BUDGET") {
+      throw new InvalidTransitionError("budget pause and resume require the dedicated Supervisor controls");
+    }
     if (!canTransition(run.state, input.nextState)) {
       throw new InvalidTransitionError(`transition ${run.state} -> ${input.nextState} is not permitted`);
     }
@@ -1063,6 +1131,17 @@ export class EngineerSupervisor {
 
   private timestamp(): string {
     return this.now().toISOString();
+  }
+
+  private pauseForBudget(runId: string, reason: BudgetPauseReason): void {
+    const run = this.ledger.getRun(runId);
+    if (run.state === "PAUSED_BUDGET" || isTerminalState(run.state)) return;
+    const timestamp = this.timestamp();
+    this.ledger.pauseForBudget({
+      runId, expectedStateVersion: run.stateVersion, previousState: run.state, nextState: "PAUSED_BUDGET",
+      reasonCode: reason, actorType: "SUPERVISOR", actorId: "budget-supervisor", evidenceIds: [], manifestHash: run.manifestHash,
+      idempotencyKey: `budget:pause:${run.stateVersion}:${reason}`, eventId: this.idFactory(), timestamp, terminalAt: null,
+    }, reason);
   }
 }
 

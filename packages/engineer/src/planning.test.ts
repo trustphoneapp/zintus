@@ -376,7 +376,7 @@ describe("Phase 5 structured planning", () => {
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
-  test("records and terminally stops a run whose runtime budget is exhausted before planning", async () => {
+  test("records and safely pauses a run whose runtime budget is exhausted before planning", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-budget-"));
     let clock = new Date("2026-07-14T12:00:00.000Z");
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db"), now: () => clock });
@@ -395,7 +395,7 @@ describe("Phase 5 structured planning", () => {
     });
     await expect(manager.plan(run.runId)).rejects.toThrow("RUN_TIME_BUDGET_EXHAUSTED");
     expect(transportCalled).toBe(false);
-    expect(supervisor.getRun(run.runId).state).toBe("RETRY_BUDGET_EXHAUSTED");
+    expect(supervisor.getRun(run.runId).state).toBe("PAUSED_BUDGET");
     expect(supervisor.listFailures(run.runId)).toMatchObject([{ reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }]);
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });

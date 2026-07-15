@@ -141,6 +141,7 @@ describe("gateway handler", () => {
         baseBranch: "main", baseCommitSha: "1".repeat(40),
       },
       request: "Add a bounded feature",
+      budget: { tokenBudget: 0, lifetimeTokenBudget: 1_000 },
     });
     expect((await handler(new Request("http://x/v1/engineer/runs", { method: "POST", body }))).status).toBe(401);
     const created = await handler(new Request("http://x/v1/engineer/runs", {
@@ -152,7 +153,23 @@ describe("gateway handler", () => {
       headers: { Authorization: "Bearer secret" },
     }));
     expect(read.status).toBe(200);
-    expect(((await read.json()) as { run: { state: string } }).run.state).toBe("REQUEST_RECEIVED");
+    const readBody = (await read.json()) as { run: { state: string }; budget: { limits: { tokens: number } } };
+    expect(readBody.run.state).toBe("REQUEST_RECEIVED");
+    expect(readBody.budget.limits.tokens).toBe(0);
+    const paused = engineerRuns.get("gateway-run-1");
+    const topUp = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/budget/top-up", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedRevision: paused.budget.revision, idempotencyKey: "gateway-top-up", addTokenBudget: 200 }),
+    }));
+    expect(topUp.status).toBe(200);
+    const topped = (await topUp.json()) as { budget: { revision: number; limits: { tokens: number } } };
+    expect(topped.budget.limits.tokens).toBe(200);
+    const resume = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/resume-budget", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedStateVersion: paused.run.stateVersion, expectedBudgetRevision: topped.budget.revision, idempotencyKey: "gateway-resume" }),
+    }));
+    expect(resume.status).toBe(200);
+    expect(((await resume.json()) as { run: { state: string } }).run.state).toBe("REQUEST_RECEIVED");
     const plan = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/plan", {
       headers: { Authorization: "Bearer secret" },
     }));

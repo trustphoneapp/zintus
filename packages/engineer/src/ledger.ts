@@ -77,6 +77,14 @@ import {
   type DecisionResolution,
 } from "./decision-contracts.js";
 import { DECISION_POLICY_VERSION } from "./decision-policy.js";
+import {
+  EngineerBudgetSelectionSchema,
+  EngineerBudgetSnapshotSchema,
+  type BudgetPauseReason,
+  type BudgetTopUp,
+  type EngineerBudgetSelection,
+  type EngineerBudgetSnapshot,
+} from "./budget-contracts.js";
 
 interface RunRow {
   id: string;
@@ -125,6 +133,16 @@ export interface LedgerCreateRunInput {
   riskTier: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   humanGateRequired: boolean;
   now: string;
+  budget: EngineerBudgetSelection;
+}
+
+interface BudgetRow {
+  run_id: string; cost_limit_usd: number; token_limit: number; time_limit_seconds: number;
+  lifetime_cost_limit_usd: number; lifetime_token_limit: number; lifetime_time_limit_seconds: number;
+  used_cost_usd: number; used_tokens: number; used_time_seconds: number;
+  reserved_cost_usd: number; reserved_tokens: number; status: "ACTIVE" | "WARNING" | "PAUSED";
+  pause_reason: BudgetPauseReason | null; resume_state: RunState | null; warning_threshold: number;
+  revision: number; active_since: string | null; updated_at: string;
 }
 
 export interface LedgerTransitionCommand {
@@ -320,9 +338,18 @@ export class EngineerLedger {
           input.now,
           input.now,
         );
+      const budget = EngineerBudgetSelectionSchema.parse(input.budget);
+      this.db.query(`INSERT INTO run_budgets
+        (run_id, cost_limit_usd, token_limit, time_limit_seconds, lifetime_cost_limit_usd,
+         lifetime_token_limit, lifetime_time_limit_seconds, status, active_since, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`)
+        .run(input.runId, budget.costBudgetUsd, budget.tokenBudget, budget.timeBudgetSeconds,
+          budget.lifetimeCostBudgetUsd, budget.lifetimeTokenBudget, budget.lifetimeTimeBudgetSeconds,
+          input.now, input.now, input.now);
       this.insertAudit(input.runId, "RUN_CREATED", "USER", input.userId, {
         repositoryId: input.repository.repositoryId,
         baseCommitSha: input.repository.baseCommitSha,
+        budget,
       }, input.now);
     });
     transact();
@@ -333,6 +360,78 @@ export class EngineerLedger {
     const row = this.db.query(`${RUN_SELECT} WHERE r.id = ?`).get(runId) as RunRow | null;
     if (!row) throw new EngineerNotFoundError("run", runId);
     return rowToRun(row);
+  }
+
+  getBudget(runId: string, now: string): EngineerBudgetSnapshot {
+    const usage = this.runtimeBudgetUsage(runId, new Date(now));
+    this.db.query(`UPDATE run_budgets SET used_cost_usd = ?, used_tokens = ?, used_time_seconds = ?, updated_at = ? WHERE run_id = ?`)
+      .run(usage.estimatedCostUsd, usage.inputTokens + usage.outputTokens, Math.floor(usage.elapsedSeconds), now, runId);
+    const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(runId) as BudgetRow | null;
+    if (!row) throw new EngineerNotFoundError("run budget", runId);
+    return this.budgetSnapshot(row);
+  }
+
+  constrainBudget(runId: string, limits: { costUsd: number; tokens: number; timeSeconds: number }, now: string): EngineerBudgetSnapshot {
+    this.db.query(`UPDATE run_budgets SET cost_limit_usd = MIN(cost_limit_usd, ?), token_limit = MIN(token_limit, ?),
+      time_limit_seconds = MIN(time_limit_seconds, ?), revision = revision + 1, updated_at = ? WHERE run_id = ?`)
+      .run(limits.costUsd, limits.tokens, limits.timeSeconds, now, runId);
+    return this.getBudget(runId, now);
+  }
+
+  topUpBudget(input: { runId: string; expectedRevision: number; topUp: BudgetTopUp; actorId: string; idempotencyKey: string; createdAt: string }): EngineerBudgetSnapshot {
+    return this.atomic(() => {
+      const replay = this.db.query("SELECT id FROM budget_events WHERE run_id = ? AND idempotency_key = ?")
+        .get(input.runId, input.idempotencyKey);
+      if (replay) return this.getBudget(input.runId, input.createdAt);
+      const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(input.runId) as BudgetRow | null;
+      if (!row) throw new EngineerNotFoundError("run budget", input.runId);
+      if (row.revision !== input.expectedRevision) throw new StateVersionConflictError(input.runId, input.expectedRevision, row.revision);
+      const nextCost = row.cost_limit_usd + input.topUp.addCostBudgetUsd;
+      const nextTokens = row.token_limit + input.topUp.addTokenBudget;
+      const nextTime = row.time_limit_seconds + input.topUp.addTimeBudgetSeconds;
+      if (nextCost > row.lifetime_cost_limit_usd + Number.EPSILON || nextTokens > row.lifetime_token_limit || nextTime > row.lifetime_time_limit_seconds) {
+        throw new Error("top-up exceeds the run lifetime budget cap");
+      }
+      this.db.query(`UPDATE run_budgets SET cost_limit_usd = ?, token_limit = ?, time_limit_seconds = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND revision = ?`)
+        .run(nextCost, nextTokens, nextTime, input.createdAt, input.runId, input.expectedRevision);
+      this.insertBudgetEvent(input.runId, "BUDGET_TOPPED_UP", input.actorId, input.idempotencyKey, input.topUp, input.createdAt);
+      this.insertAudit(input.runId, "BUDGET_TOPPED_UP", "HUMAN", input.actorId, { topUp: input.topUp }, input.createdAt);
+      return this.getBudget(input.runId, input.createdAt);
+    });
+  }
+
+  pauseForBudget(command: LedgerTransitionCommand, reason: BudgetPauseReason): LedgerTransitionResult {
+    return this.atomic(() => {
+      const current = this.getRun(command.runId);
+      if (current.state === "PAUSED_BUDGET") {
+        const event = this.listEvents(command.runId).at(-1);
+        if (!event) throw new EngineerNotFoundError("budget pause event", command.runId);
+        return { applied: false, event, run: current };
+      }
+      const result = this.appendTransition(command);
+      this.db.query(`UPDATE run_budgets SET status = 'PAUSED', pause_reason = ?, resume_state = ?, active_since = NULL,
+        revision = revision + 1, updated_at = ? WHERE run_id = ?`).run(reason, command.previousState, command.timestamp, command.runId);
+      this.insertBudgetEvent(command.runId, "BUDGET_PAUSED", command.actorId, `budget:${command.idempotencyKey}`,
+        { reason, resumeState: command.previousState }, command.timestamp);
+      return result;
+    });
+  }
+
+  resumeFromBudget(command: LedgerTransitionCommand): LedgerTransitionResult {
+    return this.atomic(() => {
+      const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(command.runId) as BudgetRow | null;
+      if (!row || row.status !== "PAUSED" || row.resume_state !== command.nextState) throw new IdempotencyConflictError(command.runId, command.idempotencyKey);
+      const snapshot = this.budgetSnapshot(row);
+      if (snapshot.remaining.costUsd === 0 || snapshot.remaining.tokens === 0 || snapshot.remaining.timeSeconds === 0) {
+        throw new Error("budget is still exhausted; top up before resuming");
+      }
+      const result = this.appendTransition(command);
+      this.db.query(`UPDATE run_budgets SET status = 'ACTIVE', pause_reason = NULL, resume_state = NULL,
+        active_since = ?, revision = revision + 1, updated_at = ? WHERE run_id = ?`).run(command.timestamp, command.timestamp, command.runId);
+      this.insertBudgetEvent(command.runId, "BUDGET_RESUMED", command.actorId, `budget:${command.idempotencyKey}`,
+        { resumedState: command.nextState }, command.timestamp);
+      return result;
+    });
   }
 
   listRuns(states?: RunState[]): EngineerRun[] {
@@ -1626,5 +1725,32 @@ export class EngineerLedger {
       (id, run_id, action, actor_type, actor_id, details_json, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(randomUUID(), runId, action, actorType, actorId, canonicalJson(details), createdAt);
+  }
+
+  private budgetSnapshot(row: BudgetRow): EngineerBudgetSnapshot {
+    const remainingCost = Number(Math.max(0, row.cost_limit_usd - row.used_cost_usd - row.reserved_cost_usd).toFixed(8));
+    const remainingTokens = Math.max(0, row.token_limit - row.used_tokens - row.reserved_tokens);
+    const remainingTime = Math.max(0, row.time_limit_seconds - row.used_time_seconds);
+    const ratios = [row.cost_limit_usd === 0 ? 1 : row.used_cost_usd / row.cost_limit_usd,
+      row.token_limit === 0 ? 1 : row.used_tokens / row.token_limit, row.used_time_seconds / row.time_limit_seconds];
+    const status = row.status === "PAUSED" ? "PAUSED" : Math.max(...ratios) >= row.warning_threshold ? "WARNING" : "ACTIVE";
+    return EngineerBudgetSnapshotSchema.parse({
+      runId: row.run_id, status,
+      limits: { costUsd: row.cost_limit_usd, tokens: row.token_limit, timeSeconds: row.time_limit_seconds },
+      lifetimeLimits: { costUsd: row.lifetime_cost_limit_usd, tokens: row.lifetime_token_limit, timeSeconds: row.lifetime_time_limit_seconds },
+      used: { costUsd: row.used_cost_usd, tokens: row.used_tokens, timeSeconds: row.used_time_seconds },
+      reserved: { costUsd: row.reserved_cost_usd, tokens: row.reserved_tokens },
+      remaining: { costUsd: remainingCost, tokens: remainingTokens, timeSeconds: remainingTime },
+      warningThreshold: row.warning_threshold, pauseReason: row.pause_reason, resumeState: row.resume_state,
+      revision: row.revision, updatedAt: row.updated_at,
+    });
+  }
+
+  private insertBudgetEvent(runId: string, eventType: string, actorId: string, idempotencyKey: string, details: unknown, createdAt: string): void {
+    const row = this.db.query("SELECT revision FROM run_budgets WHERE run_id = ?").get(runId) as { revision: number } | null;
+    if (!row) throw new EngineerNotFoundError("run budget", runId);
+    this.db.query(`INSERT INTO budget_events
+      (id, run_id, event_type, actor_id, idempotency_key, budget_revision, details_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), runId, eventType, actorId, idempotencyKey, row.revision, canonicalJson(details), createdAt);
   }
 }

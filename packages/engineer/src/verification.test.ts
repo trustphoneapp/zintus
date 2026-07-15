@@ -721,7 +721,7 @@ describe("Phase 3 authoritative verification manager", () => {
     setup.supervisor.close();
   });
 
-  test("classifies model admission limits as a terminal runtime-budget stop", async () => {
+  test("pauses safely before dispatch when model admission exceeds the runtime budget", async () => {
     const path = root();
     const setup = setupFastChecks(path, "UNIT", { tokenBudget: 100 });
     const digest = `sha256:${"a".repeat(64)}`;
@@ -744,11 +744,11 @@ describe("Phase 3 authoritative verification manager", () => {
       artifactStore,
       transportForRole: () => ({ async create() { providerCalls += 1; return { id: "must-not-dispatch", output: [] }; } }),
     });
-    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("runtime budget exhausted");
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("paused safely");
     expect(providerCalls).toBe(0);
-    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("RETRY_BUDGET_EXHAUSTED");
-    expect(setup.supervisor.listFailures(setup.manifest.runId)).toContainEqual(expect.objectContaining({
-      failureClass: "WORKFLOW_FAILURE", reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false,
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("PAUSED_BUDGET");
+    expect(setup.supervisor.listEvents(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      nextState: "PAUSED_BUDGET", reasonCode: "TOKEN_LIMIT_REACHED",
     }));
     setup.supervisor.close();
   });

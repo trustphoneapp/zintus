@@ -11,6 +11,9 @@ import {
   type RepositoryReference,
   type TaskManifestContent,
   type LocalArtifactStore,
+  type BudgetTopUp,
+  type EngineerBudgetSelection,
+  type EngineerBudgetSnapshot,
   engineerObservabilitySnapshot,
   createCorrectedRunDirective,
   manifestPatternMatchesPath,
@@ -60,6 +63,7 @@ export class EngineerRunManager {
     runId?: string;
     repository: RepositoryReference;
     request: string;
+    budget?: Partial<EngineerBudgetSelection>;
   }): Promise<EngineerRun> {
     this.assertPrincipal(principal);
     const repository = RepositoryReferenceSchema.parse(input.repository);
@@ -71,9 +75,30 @@ export class EngineerRunManager {
     });
   }
 
-  get(runId: string): { run: EngineerRun; lastError: string | null } {
+  get(runId: string): { run: EngineerRun; budget: EngineerBudgetSnapshot; lastError: string | null } {
     this.assertOwner(runId, this.options.principal);
-    return { run: this.options.supervisor.getRun(runId), lastError: this.errors.get(runId) ?? null };
+    return { run: this.options.supervisor.getRun(runId), budget: this.options.supervisor.reconcileBudget(runId), lastError: this.errors.get(runId) ?? null };
+  }
+
+  budget(principal: EngineerPrincipal, runId: string): EngineerBudgetSnapshot {
+    this.assertOwner(runId, principal);
+    return this.options.supervisor.reconcileBudget(runId);
+  }
+
+  topUpBudget(principal: EngineerPrincipal, runId: string, input: {
+    expectedRevision: number; topUp: BudgetTopUp; idempotencyKey: string;
+  }): EngineerBudgetSnapshot {
+    this.assertOwner(runId, principal);
+    return this.options.supervisor.topUpBudget({ runId, ...input, actorId: principal.ownerId });
+  }
+
+  resumeBudget(principal: EngineerPrincipal, runId: string, input: {
+    expectedStateVersion: number; expectedBudgetRevision: number; idempotencyKey: string;
+  }): EngineerRun {
+    this.assertOwner(runId, principal);
+    const result = this.options.supervisor.resumeBudget({ runId, ...input, actorId: principal.ownerId });
+    this.errors.delete(runId);
+    return result.run;
   }
 
   list(principal: EngineerPrincipal): EngineerRun[] {

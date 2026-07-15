@@ -39,6 +39,8 @@ export * from "./database-schema.js";
 export * from "./errors.js";
 export * from "./hash.js";
 export * from "./model-routing.js";
+export * from "./budget-contracts.js";
+export * from "./budget.js";
 export * from "./retry.js";
 export * from "./risk.js";
 export * from "./runtime-budget.js";

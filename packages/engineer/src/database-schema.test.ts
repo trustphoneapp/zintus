@@ -29,10 +29,12 @@ describe("Engineer database schema", () => {
       "model_routing_decisions",
       "warm_sandboxes",
       "audit_events",
+      "run_budgets",
+      "budget_events",
     ]) {
       expect(tables.has(table)).toBe(true);
     }
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(8);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(9);
     db.close();
   });
 });
