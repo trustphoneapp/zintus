@@ -82,10 +82,12 @@ export async function createCorrectedEngineerRun(runId: string): Promise<{ repla
 export async function getEngineerRunStatus(runId: string): Promise<EngineerRunStatus> { return request<EngineerRunStatus>(`/v1/engineer/runs/${runId}`); }
 export async function getEngineerBudget(runId: string): Promise<EngineerBudgetSnapshot> { return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget`)).budget; }
 export async function topUpEngineerBudget(runId: string, input: { expectedRevision: number; addCostBudgetUsd: number; addTokenBudget: number; addTimeBudgetSeconds: number }): Promise<EngineerBudgetSnapshot> {
-  return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget/top-up`, { method: "POST", body: JSON.stringify(input) })).budget;
+  const idempotencyKey = `ui:budget-top-up:${runId}:${input.expectedRevision}:${input.addCostBudgetUsd}:${input.addTokenBudget}:${input.addTimeBudgetSeconds}`;
+  return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget/top-up`, { method: "POST", body: JSON.stringify({ ...input, idempotencyKey }) })).budget;
 }
 export async function resumeEngineerBudget(runId: string, input: { expectedStateVersion: number; expectedBudgetRevision: number }): Promise<EngineerRun> {
-  return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/resume-budget`, { method: "POST", body: JSON.stringify(input) })).run;
+  const idempotencyKey = `ui:budget-resume:${runId}:${input.expectedStateVersion}:${input.expectedBudgetRevision}`;
+  return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/resume-budget`, { method: "POST", body: JSON.stringify({ ...input, idempotencyKey }) })).run;
 }
 export async function getEngineerRun(runId: string): Promise<EngineerRun> { return (await getEngineerRunStatus(runId)).run; }
 export async function listEngineerRuns(): Promise<EngineerRun[]> { return (await request<{ runs: EngineerRun[] }>("/v1/engineer/runs")).runs; }
@@ -137,7 +139,7 @@ export async function streamEngineerEvents(
   let reconnects = 0;
   let retryMs = options.reconnectDelayMs ?? 1_000;
   const maximum = options.maxReconnects ?? 5;
-  const terminalStates = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
+  const terminalStates = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "PAUSED_BUDGET", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
   while (!signal.aborted) {
     let receivedEvent = false;
     try {

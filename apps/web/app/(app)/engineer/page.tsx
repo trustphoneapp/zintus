@@ -75,7 +75,7 @@ function BudgetHud({ budget, manifest }: { budget: EngineerBudgetSnapshot | null
 function BudgetTopUp({ value, onChange, disabled }: { value: typeof TOP_UP_DEFAULTS; onChange: (value: typeof TOP_UP_DEFAULTS) => void; disabled: boolean }) {
   return <div className="engineer-budget-topup">
     <label>Add cost allowance (USD)<input disabled={disabled} type="number" min="0" max="100" step="0.5" value={value.addCostBudgetUsd} onChange={(event) => onChange({ ...value, addCostBudgetUsd: Math.max(0, Number(event.target.value) || 0) })} /></label>
-    <label>Add token allowance<input disabled={disabled} type="number" min="0" max="1000000" step="10000" value={value.addTokenBudget} onChange={(event) => onChange({ ...value, addTokenBudget: Math.max(0, Number(event.target.value) || 0) })} /></label>
+    <label>Add token allowance<input disabled={disabled} type="number" min="0" max="1000000" step="10000" value={value.addTokenBudget} onChange={(event) => onChange({ ...value, addTokenBudget: Math.min(1_000_000, Math.max(0, Number(event.target.value) || 0)) })} /></label>
     <label>Add time (minutes)<input disabled={disabled} type="number" min="0" max="480" step="5" value={Math.round(value.addTimeBudgetSeconds / 60)} onChange={(event) => onChange({ ...value, addTimeBudgetSeconds: Math.max(0, (Number(event.target.value) || 0) * 60) })} /></label>
   </div>;
 }

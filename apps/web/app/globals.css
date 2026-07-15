@@ -124,8 +124,38 @@
 .engineer-deferred-clear { align-self: center; justify-self: end; padding: 5px 10px; border-radius: 999px; background: color-mix(in srgb, var(--color-green) 14%, transparent); color: var(--color-green); font-size: 11px; font-weight: 750; }
 .engineer-cancel { margin-top: 16px; color: var(--color-text-muted); background: transparent; }
 .engineer-muted { color: var(--color-text-muted); font-size: 13px; }
-@media (max-width: 820px) { .engineer-form-grid, .engineer-plan-grid, .engineer-run-grid, .engineer-evidence-grid, .engineer-gate, .engineer-deferred-summary { grid-template-columns: 1fr; } .engineer-run-header { align-items: stretch; flex-direction: column; } .engineer-progress { width: 100%; } .engineer-decision-options { grid-template-columns: 1fr; } .engineer-decision-option p { min-height: 0; } .engineer-deferred-clear { justify-self: start; } }
-@media (max-width: 520px) { .engineer-screen { padding-inline: 14px; } .engineer-form-grid { grid-template-columns: 1fr; } .engineer-event { grid-template-columns: 12px 58px 1fr; } }
+.engineer-budget-picker { margin: 18px 0 24px; padding: 20px; border: 1px solid var(--engineer-border); border-radius: 15px; background: #f8fafc; }
+.engineer-budget-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+.engineer-budget-options button { display: flex; justify-content: space-between; gap: 16px; min-height: 92px; padding: 15px; text-align: left; color: var(--color-text); border: 1px solid var(--engineer-border); border-radius: 12px; background: var(--engineer-card); cursor: pointer; }
+.engineer-budget-options button:hover { border-color: color-mix(in srgb, var(--engineer-accent) 45%, var(--engineer-border)); }
+.engineer-budget-options button.selected { border-color: var(--engineer-accent); box-shadow: 0 0 0 2px var(--engineer-accent-soft); }
+.engineer-budget-options span { display: grid; gap: 5px; }
+.engineer-budget-options small, .engineer-budget-note, .engineer-budget-hud small, .engineer-budget-paused p { color: var(--color-text-muted); line-height: 1.5; }
+.engineer-budget-options b { white-space: nowrap; color: var(--engineer-accent); font-size: 12px; }
+.engineer-budget-custom, .engineer-budget-topup { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.engineer-budget-note { margin: 14px 0 0; font-size: 12px; }
+.engineer-budget-hud { margin: -10px 0 22px; padding: 16px 18px; border: 1px solid var(--engineer-border); border-radius: 14px; background: var(--engineer-card); box-shadow: 0 8px 24px rgb(15 23 42 / 4%); }
+.engineer-budget-hud--pending { display: flex; justify-content: space-between; gap: 20px; align-items: end; }
+.engineer-budget-hud--warning { border-color: color-mix(in srgb, var(--c-warn) 65%, var(--engineer-border)); }
+.engineer-budget-hud--paused { border-color: color-mix(in srgb, var(--color-red) 55%, var(--engineer-border)); }
+.engineer-budget-hud-title { display: flex; justify-content: space-between; gap: 20px; align-items: end; }
+.engineer-budget-bars { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 14px; }
+.engineer-budget-row > div { display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; align-items: baseline; }
+.engineer-budget-row span { color: var(--color-text-muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.engineer-budget-row strong { justify-self: end; font-size: 11px; }
+.engineer-budget-row small { grid-column: 1 / -1; text-align: right; font-size: 10px; }
+.engineer-budget-row progress { width: 100%; height: 6px; margin-top: 7px; accent-color: var(--engineer-accent); }
+.engineer-budget-hud--warning progress { accent-color: var(--c-warn); }
+.engineer-budget-hud--paused progress { accent-color: var(--color-red); }
+.engineer-budget-warning { display: flex; justify-content: space-between; gap: 20px; align-items: center; margin: -10px 0 18px; padding: 13px 15px; border: 1px solid color-mix(in srgb, var(--c-warn) 55%, var(--engineer-border)); border-radius: 12px; background: color-mix(in srgb, var(--c-warn) 10%, var(--engineer-card)); }
+.engineer-budget-warning p { margin: 3px 0 0; color: var(--color-text-muted); font-size: 12px; }
+.engineer-budget-warning button { flex: none; border: 0; border-radius: 9px; padding: 9px 12px; background: var(--engineer-ink); color: var(--engineer-card); font-weight: 700; cursor: pointer; }
+.engineer-budget-paused { margin-bottom: 18px; border-color: color-mix(in srgb, var(--c-warn) 45%, var(--engineer-border)); }
+.engineer-budget-paused-header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; }
+.engineer-budget-paused h2 { margin-top: 0; }
+.engineer-unverified { display: inline-flex; flex: none; width: fit-content; padding: 5px 9px; border-radius: 999px; background: color-mix(in srgb, var(--c-warn) 16%, transparent); color: var(--c-warn); font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+@media (max-width: 820px) { .engineer-form-grid, .engineer-plan-grid, .engineer-run-grid, .engineer-evidence-grid, .engineer-gate, .engineer-deferred-summary, .engineer-budget-bars { grid-template-columns: 1fr; } .engineer-run-header { align-items: stretch; flex-direction: column; } .engineer-progress { width: 100%; } .engineer-decision-options { grid-template-columns: 1fr; } .engineer-decision-option p { min-height: 0; } .engineer-deferred-clear { justify-self: start; } .engineer-budget-hud-title, .engineer-budget-hud--pending, .engineer-budget-paused-header { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 520px) { .engineer-screen { padding-inline: 14px; } .engineer-form-grid, .engineer-budget-options, .engineer-budget-custom, .engineer-budget-topup { grid-template-columns: 1fr; } .engineer-event { grid-template-columns: 12px 58px 1fr; } .engineer-budget-options button, .engineer-budget-warning { align-items: flex-start; flex-direction: column; } }
  @media (prefers-reduced-motion: reduce) { .engineer-screen * { scroll-behavior: auto !important; } }
 :root {
   color-scheme: dark;
