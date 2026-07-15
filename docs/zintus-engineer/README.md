@@ -36,12 +36,12 @@ The dependency bundle contains `zintus-engineer-dependencies.json` and its
 exact repository lockfile and toolchain hashes. The doctor must return `ok: true`
 before execution is considered activated.
 
-`GATEWAY_TOKEN` mode is currently suitable for direct API clients only. The web
-Engineer client does not inject this operator secret, and disabling gateway
-authentication does not provide a human identity for approval or publication.
-Keep publication disabled until a session-bound UI authentication path and
-server-verified actor ownership are implemented. See the release audit for the
-remaining activation gates.
+`GATEWAY_TOKEN` mode is suitable for direct API clients and the packaged desktop
+configuration. The browser client deliberately never embeds an operator secret;
+its direct loopback mode relies on the local machine boundary and one durable,
+server-owned installation identity. Client-supplied actor IDs are ignored. Do not
+expose a tokenless gateway beyond loopback. Shared/network deployment still needs
+session authentication and organization RBAC in front of the gateway.
 
 The ledger and content-addressed artifacts stay machine-local under
 `~/.zintus/engineer`. Planning works with the OpenAI key; execution additionally

@@ -486,17 +486,30 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     sweep();
   }
   if (engineerPublication) {
-    const sweep = () => {
+    let recoveryComplete = false;
+    let sweepRunning = false;
+    const sweep = async () => {
+      if (sweepRunning) return;
+      sweepRunning = true;
       try {
+        if (!recoveryComplete) {
+          const recovered = await engineerPublication?.recoverPending();
+          recoveryComplete = true;
+          if (recovered && (recovered.resumedRunIds.length > 0 || recovered.failedRunIds.length > 0)) {
+            log("info", "engineer.publication_recovery", recovered);
+          }
+        }
         const expired = engineerPublication?.sweepExpired() ?? [];
         if (expired.length > 0) log("info", "engineer.approvals_expired", { runIds: expired.join(",") });
       } catch (error) {
         log("error", "engineer.approval_sweep_failed", { error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        sweepRunning = false;
       }
     };
-    engineerApprovalTimer = setInterval(sweep, 30_000);
+    engineerApprovalTimer = setInterval(() => { void sweep(); }, 30_000);
     engineerApprovalTimer.unref?.();
-    sweep();
+    void sweep();
   }
   const probeIntervalMs = Number(process.env.PROVIDER_PROBE_INTERVAL_MS);
   if (Number.isFinite(probeIntervalMs) && probeIntervalMs >= 1000) {

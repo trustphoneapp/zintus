@@ -101,7 +101,11 @@ The Supervisor signs the exact PR command with an internal HMAC key, persists it
 as trusted evidence, checks the remote base before mutation, and records every
 inspect/branch/push/PR operation under an idempotency key. PR text is synthesized
 from the normalized request, frozen criteria, exact diff, claims, risk, and
-evidence bundle. A stale base cannot publish and must enter `REVERIFYING`.
+evidence bundle. The base must enforce reviews, fresh approval, strict status
+checks, admin coverage, and immutable protected history. A stale base cannot
+publish and must enter `REVERIFYING`. Restart recovery replays durable publication
+states, re-inspects the base, and finds the deterministic head/base PR before
+attempting creation.
 
 Phase 5 adds a structured TERRA planner ahead of manifest freeze. The model proposes
 criteria, test commands, and scope through one strict forced function call; the

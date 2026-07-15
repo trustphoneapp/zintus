@@ -76,5 +76,8 @@ The publication manager recalculates the current diff hash, checks trusted test
 and security records, validates the exact approval binding and deadline, and
 inspects the remote base before any mutation. It persists a signed Supervisor
 command and idempotent Git operations. A stale base blocks all branch, push, and
-PR methods. The Git service can create a branch, push the verified commit, and
-open a PR, but exposes no merge, force-push, branch-protection, or deployment API.
+PR methods. Required reviews, fresh approval, strict named status checks, admin
+coverage, and blocked force-push/deletion are enforced before publication. Remote
+Git uses an ephemeral askpass helper and canonical HTTPS URL, keeping the token
+out of argv and ambient Git configuration. The service exposes no merge,
+force-push, branch-protection mutation, or deployment API.

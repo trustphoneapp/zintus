@@ -193,10 +193,8 @@ tests pass. Publication remains a Phase-4 concern.
 
 ### Phase 4 — human control and publication
 
-Status: partial for the configured GitHub publication slice. Publication contracts
-and hash gates exist, but authenticated actor ownership, assigned-reviewer
-enforcement, token-backed Git transport, and a live private-repository proof are
-still required.
+Status: implementation complete for the configured single-owner GitHub publication
+slice. A live private-repository activation proof remains an external release gate.
 
 Delivered:
 
@@ -218,6 +216,15 @@ Delivered:
 9. Stale-base blocking before remote mutation, with an explicit transition into
    mandatory re-verification.
 10. Authenticated approval, diff, tests, security, failures, and control routes.
+11. Server-derived owner/reviewer authority; request-body actor IDs cannot choose
+    ownership, review authority, or cancellation authority.
+12. Ephemeral `GIT_ASKPASS` HTTPS authentication for remote reads and pushes.
+13. Enforced reviews, fresh approval, strict status checks, admin coverage, and
+    blocked force-push/deletion before any publication mutation.
+14. Crash-safe resume for every active publication state and deterministic
+    head/base PR discovery before creation.
+15. A hash-bound 12-scenario Phase 4 adversarial matrix.
+16. Web and desktop exact-hash approval details and bounded deadline extension.
 
 Live publication is enabled only when the gateway receives an explicit GitHub
 credential and a stable publication-command signing secret.

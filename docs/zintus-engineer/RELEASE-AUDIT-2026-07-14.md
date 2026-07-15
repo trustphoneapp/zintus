@@ -12,6 +12,18 @@ identity, budget, context, and operational paths remain incomplete.
 Do not enable real repository mutation or GitHub publication until every release
 blocker below is closed and the end-to-end Docker/OpenAI/GitHub evaluation passes.
 
+## Phase 4 completion update
+
+The local single-owner Phase 4 implementation is complete. Server-owned install
+identity controls ownership and assigned review; client actor fields have no
+authority. GitHub transport now uses an ephemeral askpass credential, the current
+versioned REST API, enforced branch-protection evidence, deterministic PR
+discovery, and durable restart recovery. A hash-bound 12-scenario adversarial
+matrix covers authority, approval, cancellation, publication, security, and
+recovery. The remaining Phase 4 release gate is external activation against an
+authorized private repository; organization-scale multi-user RBAC is a later
+product capability.
+
 ## Post-audit Phase 2 closure
 
 The later Phase 2 closure batch removed blocking Git/Docker/test processes from

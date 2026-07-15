@@ -747,6 +747,7 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(setup.supervisor.listEvidenceBundles(setup.manifest.runId)).toEqual([result.evidenceBundle]);
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
     let pullRequestCalls = 0;
+    let failPublicationOnce = true;
     let cleanupCalls = 0;
     const gitService: GitService = {
       async inspectBaseBranch(input) {
@@ -756,7 +757,11 @@ describe("Phase 3 authoritative verification manager", () => {
         return { branchName: `zintus/engineer/${input.runId}`, remoteReference: `refs/heads/zintus/engineer/${input.runId}` };
       },
       async pushVerifiedCommit(input) { return { remoteReference: `refs/heads/${input.branchName}` }; },
-      async createPullRequest() { pullRequestCalls += 1; return { id: "pr-1", number: 17, url: "https://github.test/pull/17" }; },
+      async createPullRequest() {
+        pullRequestCalls += 1;
+        if (failPublicationOnce) { failPublicationOnce = false; throw new Error("simulated transport interruption"); }
+        return { id: "pr-1", number: 17, url: "https://github.test/pull/17" };
+      },
     };
     const publication = new EngineerPublicationManager({
       supervisor: setup.supervisor, gitService, artifactStore,
@@ -769,12 +774,15 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(pullRequestCalls).toBe(0);
     await expect(publication.approve(setup.manifest.runId, "unassigned-reviewer", "Attempt to impersonate the reviewer."))
       .rejects.toThrow("not the assigned reviewer");
-    const published = await publication.approve(setup.manifest.runId, "reviewer@example.test", "Evidence is sufficient.");
+    await expect(publication.approve(setup.manifest.runId, "reviewer@example.test", "Evidence is sufficient."))
+      .rejects.toThrow("simulated transport interruption");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("PR_CREATION_FAILED");
+    const published = await publication.resume(setup.manifest.runId);
     expect(published.status).toBe("PUBLISHED");
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("COMPLETED");
     const replay = await publication.resume(setup.manifest.runId);
     expect(replay.status).toBe("PUBLISHED");
-    expect(pullRequestCalls).toBe(1);
+    expect(pullRequestCalls).toBe(2);
     expect(cleanupCalls).toBe(1);
     const db = new Database(setup.dbPath, { readonly: true });
     expect((db.query("SELECT COUNT(*) AS count FROM reviewer_sessions").get() as { count: number }).count).toBe(1);

@@ -13,7 +13,8 @@
   exact-base requeue, and orphaned Phase 2 worktree cleanup. Every active Phase 3
   verification/repair state also recovers from an immutable retained-sandbox
   checkpoint and restarts independent verification from `FAST_CHECKS`.
-  Publication-state recovery remains a Phase 4 concern.
+  Phase 4 publication states also recover on gateway restart by rechecking the
+  remote base/protection policy and discovering an already-created PR first.
 - The warm pool provides atomic one-time claims, TTL rejection, validation,
   quarantine, cold fallback, one-time destruction after claim, and a periodic
   maximum/health sweep. It does not yet replenish to a configured minimum or
@@ -29,9 +30,10 @@
   `ZINTUS_ENGINEER_*` execution configuration. `bun run doctor:engineer` fails
   closed until those external prerequisites are supplied.
 - GitHub publication requires `ZINTUS_ENGINEER_PUBLICATION_SECRET` and
-  `ZINTUS_ENGINEER_GITHUB_TOKEN`, plus a configured Git remote that accepts the
-  verified commit. Tests use an in-memory Git-service boundary and do not create a
-  real external pull request.
+  `ZINTUS_ENGINEER_GITHUB_TOKEN`. Remote operations use the canonical GitHub HTTPS
+  URL and an ephemeral askpass credential rather than ambient Git credentials.
+  Tests exercise the service boundary but do not create a real external PR; that
+  activation proof requires an authorized private test repository.
 - A stale remote base is detected before mutation and forced into `REVERIFYING`.
   Automated conflict resolution is intentionally not attempted; the candidate
   branch must be recreated/rebased by the controlled stale-base worker before the
@@ -44,6 +46,9 @@
 - Web and desktop replay the durable SSE ledger with `Last-Event-ID`/sequence
   cursors, heartbeat comments, bounded pages, duplicate/gap checks, and bounded
   reconnect. Mobile-specific Engineer screens are not yet implemented.
+- The gateway represents one authenticated local installation/owner. Client actor
+  fields cannot alter authority; organization-scale multi-user RBAC and reviewer
+  assignment remain outside this local Phase 4 slice.
 - Runtime budget contracts now fail closed for unknown pricing and bound time,
   tokens, cost, command duration, diff size, artifact bytes, and concurrent agents.
   Every SOL/TERRA/LUNA call reserves its conservative worst case before transport

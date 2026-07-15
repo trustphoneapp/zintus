@@ -226,7 +226,7 @@ export function createLocalEngineerCapabilityProbe(options: {
           headers: {
             Authorization: `Bearer ${options.githubToken}`,
             Accept: "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
+            "X-GitHub-Api-Version": "2026-03-10",
           },
           signal: AbortSignal.timeout(15_000),
         });
@@ -239,7 +239,7 @@ export function createLocalEngineerCapabilityProbe(options: {
             Authorization: `Bearer ${options.githubToken}`,
             Accept: "application/vnd.github+json",
             "Content-Type": "application/json",
-            "X-GitHub-Api-Version": "2022-11-28",
+            "X-GitHub-Api-Version": "2026-03-10",
           },
           body: JSON.stringify({
             title: "Zintus Engineer permission probe",

@@ -25,6 +25,7 @@ export * from "./luna-failure-advisor.js";
 export * from "./isolated-reviewer.js";
 export * from "./verification-manager.js";
 export * from "./phase3-evaluation-matrix.js";
+export * from "./phase4-evaluation-matrix.js";
 export * from "./control-contracts.js";
 export * from "./git-service.js";
 export * from "./publication-manager.js";

@@ -41,7 +41,8 @@ export class EngineerPublicationManager {
     this.options = options;
   }
 
-  async start(runId: string, assignedReviewerId: string | null = null): Promise<PublicationStartResult> {
+  async start(runId: string, assignedReviewerId: string): Promise<PublicationStartResult> {
+    if (!assignedReviewerId.trim()) throw new Error("an authenticated assigned reviewer is required for publication");
     const run = this.options.supervisor.getRun(runId);
     if (run.state !== "REVIEW_APPROVED") throw new Error(`publication requires REVIEW_APPROVED, not ${run.state}`);
     if (run.riskTier === "CRITICAL") {
@@ -58,7 +59,7 @@ export class EngineerPublicationManager {
     const deadlineMs = run.riskTier === "HIGH" ? 24 * 60 * 60_000 : 72 * 60 * 60_000;
     const deadlineAt = new Date(new Date(requestedAt).getTime() + deadlineMs).toISOString();
     const approval = this.options.supervisor.recordApprovalRequest(ApprovalRequestRecordSchema.parse({
-      approvalRequestId: this.id(), runId, riskTier: run.riskTier, assignedReviewerId: assignedReviewerId ?? run.userId,
+      approvalRequestId: this.id(), runId, riskTier: run.riskTier, assignedReviewerId,
       requestedAt, deadlineAt,
       reminderSchedule: [0.5, 0.8].map((ratio) => new Date(new Date(requestedAt).getTime() + deadlineMs * ratio).toISOString()),
       timeoutAction: run.riskTier === "HIGH" ? "HUMAN_REVIEW_REQUIRED" : "HUMAN_REVIEW_REQUIRED",
@@ -85,6 +86,22 @@ export class EngineerPublicationManager {
   /** Replays an interrupted publication idempotently; successful PR creation is never duplicated. */
   resume(runId: string): Promise<PublicationStartResult> {
     return this.publish(runId);
+  }
+
+  /** Recovers only durable publication states; failures remain visible and retryable. */
+  async recoverPending(): Promise<{ resumedRunIds: string[]; failedRunIds: string[] }> {
+    const states: EngineerRun["state"][] = ["HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "PR_CREATION_FAILED"];
+    const resumedRunIds: string[] = [];
+    const failedRunIds: string[] = [];
+    for (const run of this.options.supervisor.listRuns(states)) {
+      try {
+        await this.resume(run.runId);
+        resumedRunIds.push(run.runId);
+      } catch {
+        failedRunIds.push(run.runId);
+      }
+    }
+    return { resumedRunIds, failedRunIds };
   }
 
   requestChanges(runId: string, actorId: string, reason: string): void {
@@ -171,31 +188,47 @@ export class EngineerPublicationManager {
 
   private async publish(runId: string): Promise<PublicationStartResult> {
     const supervisor = this.options.supervisor;
-    const run = supervisor.getRun(runId);
+    let run = supervisor.getRun(runId);
     const evidence = this.currentEvidence(runId);
-    const approval = run.state === "HUMAN_APPROVED" ? this.requireApprovedBinding(runId, evidence.evidenceBundleHash) : null;
+    const approval = run.humanGateRequired ? this.requireApprovedBinding(runId, evidence.evidenceBundleHash) : null;
     const prIdempotencyKey = `pr:create:${runId}:${evidence.resultCommitSha}`;
     const replay = supervisor.findGitOperation(runId, prIdempotencyKey);
-    if (replay?.status === "SUCCEEDED" && replay.remoteReference) {
+    if (run.state === "COMPLETED" && replay?.status === "SUCCEEDED" && replay.remoteReference) {
       return { status: "PUBLISHED", pullRequest: { id: replay.gitOperationId, number: 0, url: replay.remoteReference } };
+    }
+    if (run.state === "PR_CREATED" && replay?.status === "SUCCEEDED" && replay.remoteReference) {
+      this.transition(runId, "COMPLETED", "ENGINEER_RUN_COMPLETED", [replay.gitOperationId, evidence.evidenceBundleId]);
+      await this.options.cleanupRun?.(runId);
+      return { status: "PUBLISHED", pullRequest: { id: replay.gitOperationId, number: 0, url: replay.remoteReference } };
+    }
+    if (!["REVIEW_APPROVED", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATION_FAILED"].includes(run.state)) {
+      throw new Error(`publication resume is not valid from ${run.state}`);
     }
     const inspect = await this.operation(run, "INSPECT_BASE", `git:inspect:${runId}:${run.repository.baseCommitSha}`, evidence, approval?.approvalRequestId ?? null,
       async () => {
         const status = await this.options.gitService.inspectBaseBranch({ repository: run.repository, expectedBaseCommitSha: run.repository.baseCommitSha });
         return { reference: status.currentCommitSha, value: status };
       });
-    const base = inspect.value as { currentCommitSha: string; matchesExpected: boolean };
+    const base = inspect.value as { currentCommitSha: string; matchesExpected: boolean; protectionEnforced: boolean };
     if (!base.matchesExpected) {
       this.transition(runId, "BASE_BRANCH_STALE", "BASE_BRANCH_CHANGED", [inspect.record.gitOperationId]);
       this.recordFailure(runId, "GIT_FAILURE", "BASE_BRANCH_CHANGED", new Error(base.currentCommitSha), true, [inspect.record.gitOperationId]);
       return { status: "BASE_STALE", currentBaseCommitSha: base.currentCommitSha };
     }
-    this.transition(runId, "PR_PREFLIGHT", "PUBLICATION_PREFLIGHT_PASSED", [evidence.evidenceBundleId, inspect.record.gitOperationId], "SUPERVISOR", "engineer-supervisor", {
-      reviewerDecisionValid: true, allRequiredChecksPassed: evidence.allRequiredChecksPassed,
-      noCriticalSecurityFindings: evidence.openCriticalSecurityFindings === 0,
-      evidenceBundleComplete: true, baseBranchCurrent: true,
-      ...(approval ? { humanApprovalValid: true } : {}),
-    });
+    if (run.state === "REVIEW_APPROVED" || run.state === "HUMAN_APPROVED" || run.state === "PR_CREATION_FAILED") {
+      this.transition(runId, "PR_PREFLIGHT", run.state === "PR_CREATION_FAILED" ? "PUBLICATION_RECOVERY_RETRY" : "PUBLICATION_PREFLIGHT_PASSED", [evidence.evidenceBundleId, inspect.record.gitOperationId], "SUPERVISOR", "engineer-supervisor", {
+        reviewerDecisionValid: true, allRequiredChecksPassed: evidence.allRequiredChecksPassed,
+        noCriticalSecurityFindings: evidence.openCriticalSecurityFindings === 0,
+        evidenceBundleComplete: true, baseBranchCurrent: true,
+        ...(approval ? { humanApprovalValid: true } : {}),
+      });
+      run = supervisor.getRun(runId);
+    }
+    if (!base.protectionEnforced) {
+      this.recordFailure(runId, "SECURITY_FAILURE", "BRANCH_PROTECTION_INSUFFICIENT", new Error("base branch does not enforce required reviews and strict status checks"), false, [inspect.record.gitOperationId]);
+      this.transition(runId, "SECURITY_ESCALATION", "BRANCH_PROTECTION_INSUFFICIENT", [inspect.record.gitOperationId]);
+      throw new Error("publication blocked: base branch protection is insufficient");
+    }
     const command = SupervisorPrCommandSchema.parse({
       runId, repositoryId: run.repository.repositoryId, baseBranch: run.repository.baseBranch,
       expectedBaseCommitSha: run.repository.baseCommitSha, resultCommitSha: evidence.resultCommitSha,
@@ -209,7 +242,10 @@ export class EngineerPublicationManager {
       runId, type: "SUPERVISOR_PR_COMMAND", bytes: JSON.stringify(signed), producerType: "SYSTEM",
       producerId: "engineer-supervisor", trusted: true,
     }));
-    this.transition(runId, "PR_CREATING", "SUPERVISOR_PR_COMMAND_AUTHORIZED", [commandArtifact.artifactId]);
+    if (run.state !== "PR_CREATING") {
+      this.transition(runId, "PR_CREATING", "SUPERVISOR_PR_COMMAND_AUTHORIZED", [commandArtifact.artifactId]);
+      run = supervisor.getRun(runId);
+    }
     try {
       const branch = await this.operation(run, "CREATE_BRANCH", `git:branch:${runId}:${evidence.resultCommitSha}`, evidence, approval?.approvalRequestId ?? null,
         async () => {
@@ -222,6 +258,12 @@ export class EngineerPublicationManager {
           const value = await this.options.gitService.pushVerifiedCommit({ runId, repository: run.repository, resultCommitSha: evidence.resultCommitSha, branchName: branchValue.branchName });
           return { reference: value.remoteReference, value };
         });
+      if (replay?.status === "SUCCEEDED" && replay.remoteReference) {
+        this.transition(runId, "PR_CREATED", "PULL_REQUEST_RECOVERED", [replay.gitOperationId]);
+        this.transition(runId, "COMPLETED", "ENGINEER_RUN_COMPLETED", [replay.gitOperationId, evidence.evidenceBundleId]);
+        await this.options.cleanupRun?.(runId);
+        return { status: "PUBLISHED", pullRequest: { id: replay.gitOperationId, number: 0, url: replay.remoteReference } };
+      }
       const body = this.prBody(run, evidence.evidenceBundleHash);
       const created = await this.operation(run, "CREATE_PR", prIdempotencyKey, evidence, approval?.approvalRequestId ?? null,
         async () => {
@@ -289,12 +331,10 @@ export class EngineerPublicationManager {
     execute: () => Promise<{ reference: string; value: unknown }>,
   ): Promise<{ record: GitOperationRecord; value: unknown }> {
     const existing = this.options.supervisor.findGitOperation(run.runId, idempotencyKey);
-    if (existing?.status === "SUCCEEDED" && existing.remoteReference) {
+    if (operationType !== "INSPECT_BASE" && operationType !== "PUSH_COMMIT" && existing?.status === "SUCCEEDED" && existing.remoteReference) {
       const value = operationType === "CREATE_BRANCH"
         ? { branchName: existing.remoteReference.replace(/^refs\/heads\//, ""), remoteReference: existing.remoteReference }
-        : operationType === "INSPECT_BASE"
-          ? { currentCommitSha: existing.remoteReference, matchesExpected: existing.remoteReference.toLowerCase() === run.repository.baseCommitSha.toLowerCase() }
-          : { url: existing.remoteReference, remoteReference: existing.remoteReference };
+        : { url: existing.remoteReference, remoteReference: existing.remoteReference };
       return { record: existing, value };
     }
     const id = existing?.gitOperationId ?? this.id();
