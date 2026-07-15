@@ -31,7 +31,7 @@ import {
 } from "@/lib/engineer";
 import type { EngineerDecisionItem } from "@/lib/engineer-decisions";
 import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresentation";
-import { clearEphemeralGatewayToken, setEphemeralGatewayToken } from "@/lib/gateway";
+import { clearEphemeralGatewayToken, fetchGatewayConnection, setEphemeralGatewayToken } from "@/lib/gateway";
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
@@ -57,6 +57,8 @@ export default function EngineerPage() {
   const [managerError, setManagerError] = useState<string | null>(null);
   const [gatewayToken, setGatewayToken] = useState("");
   const [gatewayAuthenticated, setGatewayAuthenticated] = useState(false);
+  const [gatewayState, setGatewayState] = useState<"connected" | "authentication-required" | "offline">("offline");
+  const [showAdvancedGateway, setShowAdvancedGateway] = useState(false);
   const [githubConnected, setGithubConnected] = useState(false);
   const [githubConfigured, setGithubConfigured] = useState(false);
   const [githubRepos, setGithubRepos] = useState<GithubConnectorRepository[]>([]);
@@ -91,6 +93,9 @@ export default function EngineerPage() {
   }, [refresh]);
 
   const loadDashboard = useCallback(async (reportAuthorizationError = false) => {
+    const connection = await fetchGatewayConnection();
+    setGatewayState(connection.state);
+    if (connection.state === "connected") setGatewayAuthenticated(true);
     const [canonical, history, connector] = await Promise.allSettled([getEngineerRepository(), listEngineerRuns(), getGithubConnector()]);
     if (canonical.status === "fulfilled") setRepository(canonical.value);
     if (history.status === "fulfilled") setRecentRuns(history.value);
@@ -272,12 +277,9 @@ export default function EngineerPage() {
     <main className="engineer-screen">
       <header className="engineer-hero"><span className="engineer-kicker">Zintus Engineer</span><h1>AI writes the code. Zintus proves whether it works.</h1><p>Define the exact repository snapshot and the outcome. Zintus plans, isolates, verifies, reviews, and waits for you before risky publication.</p><a href="/engineer/operations">Open operations and cost health →</a></header>
       <section className="engineer-card" id="gateway-access">
-        <div className="engineer-section-title"><span>00</span><div><h2>Secure gateway access</h2><p>Required for authenticated publication. The token stays in memory and is cleared on reload.</p></div></div>
-        <label>Gateway operator token<input type="password" value={gatewayToken} autoComplete="off" onChange={(event) => setGatewayToken(event.target.value)} placeholder="Paste GATEWAY_TOKEN" /></label>
-        <div className="engineer-actions">
-          <button disabled={!gatewayToken.trim()} onClick={() => { setEphemeralGatewayToken(gatewayToken); setGatewayToken(""); setGatewayAuthenticated(Boolean(gatewayToken.trim())); void loadDashboard(true); }}>{gatewayAuthenticated ? "Replace token" : "Use token for this tab"}</button>
-          {gatewayAuthenticated ? <button onClick={() => { clearEphemeralGatewayToken(); setGatewayAuthenticated(false); }}>Clear token</button> : null}
-        </div>
+        <div className="engineer-section-title"><span>00</span><div><h2>Gateway</h2><p>{gatewayState === "connected" ? "Connected locally. No token is required on a loopback gateway." : gatewayState === "authentication-required" ? "This gateway requires an operator token." : "Start the local gateway to connect automatically."}</p></div></div>
+        <div className="engineer-actions"><span className={`engineer-status engineer-status--${gatewayState}`}>{gatewayState.replaceAll("-", " ")}</span><button onClick={() => setShowAdvancedGateway((value) => !value)}>{showAdvancedGateway ? "Hide advanced security" : "Advanced security"}</button></div>
+        {showAdvancedGateway ? <div className="engineer-actions"><label>Operator token<input type="password" value={gatewayToken} autoComplete="off" onChange={(event) => setGatewayToken(event.target.value)} placeholder="Paste GATEWAY_TOKEN" /></label><button disabled={!gatewayToken.trim()} onClick={() => { setEphemeralGatewayToken(gatewayToken); setGatewayToken(""); setGatewayAuthenticated(true); void loadDashboard(true); }}>Use token for this tab</button>{gatewayAuthenticated ? <button onClick={() => { clearEphemeralGatewayToken(); setGatewayAuthenticated(false); void loadDashboard(); }}>Clear token</button> : null}</div> : null}
       </section>
       <section className="engineer-card" id="repository-connector">
         <div className="engineer-section-title"><span>01</span><div><h2>Repository connector</h2><p>Local is the default. GitHub access is scoped to repositories you authorize.</p></div></div>
