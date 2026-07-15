@@ -10,6 +10,22 @@ export interface EngineerManifest { manifestVersion: number; runId: string; repo
 export interface PlanProposal { planProposalId: string; runId: string; manifest: EngineerManifest; planningAnalysis: { architectureSummary: string; assumptions: Array<{ assumptionId: string; statement: string; confidence: number; reversible: boolean; sourceRefs: string[] }>; unresolvedQuestions: Array<{ questionId: string; question: string; impact: string }>; touchedFileEstimates: Array<{ path: string; expectedChange: string; confidence: number }> }; proposalHash: string; artifactId: string; createdAt: string; }
 export interface RunEvent { eventId: string; sequence: number; previousState: string; nextState: string; reasonCode: string; timestamp: string; evidenceIds: string[]; }
 export interface EngineerRunStatus { run: EngineerRun; lastError: string | null; }
+export interface EngineerBudgetAmounts { costUsd: number; tokens: number; timeSeconds: number; }
+export interface EngineerBudgetLimits { costBudgetUsd: number; tokenBudget: number; timeBudgetSeconds: number; }
+export interface EngineerBudgetSnapshot {
+  runId: string;
+  status: "ACTIVE" | "WARNING" | "PAUSED";
+  limits: EngineerBudgetAmounts;
+  lifetimeLimits: EngineerBudgetAmounts;
+  used: EngineerBudgetAmounts;
+  reserved: Omit<EngineerBudgetAmounts, "timeSeconds">;
+  remaining: EngineerBudgetAmounts;
+  warningThreshold: number;
+  pauseReason: "COST_LIMIT_REACHED" | "TOKEN_LIMIT_REACHED" | "TIME_LIMIT_REACHED" | "MODEL_USAGE_UNKNOWN" | null;
+  resumeState: string | null;
+  revision: number;
+  updatedAt: string;
+}
 export interface EngineerData {
   claims: unknown[];
   evidenceBundles: unknown[];
@@ -50,7 +66,7 @@ export async function listGithubConnectorRepositories(): Promise<GithubConnector
 export async function getGithubBranchCommit(owner: string, repo: string, branch: string): Promise<string> { return (await relayRequest<{ sha: string }>(`/api/connectors/github/commit?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`)).sha; }
 export async function disconnectGithubConnector(): Promise<void> { await relayRequest("/api/connectors/github", { method: "DELETE" }); }
 
-export async function createEngineerRun(input: { repository: EngineerRepository; request: string }): Promise<EngineerRun> {
+export async function createEngineerRun(input: { repository: EngineerRepository; request: string; budget?: EngineerBudgetLimits }): Promise<EngineerRun> {
   return (await request<{ run: EngineerRun }>("/v1/engineer/runs", { method: "POST", body: JSON.stringify(input) })).run;
 }
 export async function getEngineerRepository(): Promise<EngineerRepository> { return (await request<{ repository: EngineerRepository }>("/v1/engineer/repository")).repository; }
@@ -64,6 +80,13 @@ export async function createCorrectedEngineerRun(runId: string): Promise<{ repla
   return request<{ replacementRun: EngineerRun; plan: PlanProposal }>(`/v1/engineer/runs/${runId}/corrected-run`, { method: "POST" });
 }
 export async function getEngineerRunStatus(runId: string): Promise<EngineerRunStatus> { return request<EngineerRunStatus>(`/v1/engineer/runs/${runId}`); }
+export async function getEngineerBudget(runId: string): Promise<EngineerBudgetSnapshot> { return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget`)).budget; }
+export async function topUpEngineerBudget(runId: string, input: { expectedRevision: number; addCostBudgetUsd: number; addTokenBudget: number; addTimeBudgetSeconds: number }): Promise<EngineerBudgetSnapshot> {
+  return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget/top-up`, { method: "POST", body: JSON.stringify(input) })).budget;
+}
+export async function resumeEngineerBudget(runId: string, input: { expectedStateVersion: number; expectedBudgetRevision: number }): Promise<EngineerRun> {
+  return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/resume-budget`, { method: "POST", body: JSON.stringify(input) })).run;
+}
 export async function getEngineerRun(runId: string): Promise<EngineerRun> { return (await getEngineerRunStatus(runId)).run; }
 export async function listEngineerRuns(): Promise<EngineerRun[]> { return (await request<{ runs: EngineerRun[] }>("/v1/engineer/runs")).runs; }
 export async function getEngineerEvidenceExport(runId: string): Promise<Record<string, unknown>> { return request<Record<string, unknown>>(`/v1/engineer/runs/${runId}/evidence-export`); }

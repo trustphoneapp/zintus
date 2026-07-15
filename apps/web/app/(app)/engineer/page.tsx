@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  createCorrectedEngineerRun,
   createEngineerRun,
   engineerDecision,
   resolveHumanEngineerReview,
@@ -9,6 +10,7 @@ import {
   freezeEngineerPlan,
   getEngineerEvidenceExport,
   getEngineerData,
+  getEngineerBudget,
   getEngineerPlan,
   getEngineerRepository,
   getGithubConnector,
@@ -20,9 +22,13 @@ import {
   listEngineerRuns,
   planEngineerRun,
   recoverEngineerStaleBase,
+  resumeEngineerBudget,
   resolveEngineerDecision,
   startEngineerRun,
   streamEngineerEvents,
+  topUpEngineerBudget,
+  type EngineerBudgetLimits,
+  type EngineerBudgetSnapshot,
   type EngineerRepository,
   type EngineerRun,
   type PlanProposal,
@@ -39,6 +45,40 @@ const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RE
 const RUN_STORAGE_KEY = "zintus-engineer-active-run";
 const cursorKey = (runId: string) => `zintus-engineer-event-cursor:${runId}`;
 const STATE_PROGRESS: Record<string, number> = { REQUEST_RECEIVED: 2, REQUEST_NORMALIZED: 5, PLANNING: 7, PLAN_READY: 10, PLAN_FROZEN: 12, QUEUED: 15, SANDBOX_WARM_CLAIMING: 18, SANDBOX_COLD_PROVISIONING: 18, SANDBOX_PREFLIGHT: 22, SANDBOX_READY: 25, CONTEXT_BUILDING: 30, IMPLEMENTING: 42, FAST_CHECKS: 50, UNIT_TESTING: 58, INTEGRATION_TESTING: 66, E2E_TESTING: 72, SECURITY_REVIEW: 78, REVIEWING: 86, REVIEW_APPROVED: 90, HUMAN_APPROVAL_PENDING: 94, HUMAN_APPROVED: 96, PR_PREFLIGHT: 97, PR_CREATING: 98, PR_CREATED: 99 };
+const DEFAULT_BUDGET: EngineerBudgetLimits = { costBudgetUsd: 5, tokenBudget: 100_000, timeBudgetSeconds: 3_600 };
+const TOP_UP_DEFAULTS = { addCostBudgetUsd: 2, addTokenBudget: 50_000, addTimeBudgetSeconds: 900 };
+const CORRECTABLE_TERMINAL_STATES = new Set(["SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "REJECTED", "FAILED"]);
+
+function recommendedBudget(request: string): EngineerBudgetLimits {
+  const riskTerms = /\b(auth|security|crypt|migration|database|distributed|architecture|payment|permission|webhook)\b/gi;
+  const riskMatches = request.match(riskTerms)?.length ?? 0;
+  if (request.length > 2_000 || riskMatches >= 3) return { costBudgetUsd: 10, tokenBudget: 200_000, timeBudgetSeconds: 7_200 };
+  if (request.length < 500 && riskMatches === 0) return { costBudgetUsd: 2, tokenBudget: 50_000, timeBudgetSeconds: 1_800 };
+  return DEFAULT_BUDGET;
+}
+
+function BudgetHud({ budget, manifest }: { budget: EngineerBudgetSnapshot | null; manifest: PlanProposal["manifest"] | null }) {
+  const limits = budget?.limits ?? (manifest ? { costUsd: manifest.costBudgetUsd, tokens: manifest.tokenBudget, timeSeconds: manifest.timeBudgetSeconds } : null);
+  if (!limits) return null;
+  if (!budget) return <section className="engineer-budget-hud engineer-budget-hud--pending"><div><span className="engineer-kicker">Run budget</span><strong>${limits.costUsd} · {limits.tokens.toLocaleString()} tokens · {Math.round(limits.timeSeconds / 60)} min</strong></div><small>Live spend appears when execution begins.</small></section>;
+  const rows = [
+    { label: "Cost", value: budget.used.costUsd + budget.reserved.costUsd, max: limits.costUsd, display: `$${budget.used.costUsd.toFixed(2)} used + $${budget.reserved.costUsd.toFixed(2)} reserved` },
+    { label: "Tokens", value: budget.used.tokens + budget.reserved.tokens, max: limits.tokens, display: `${budget.used.tokens.toLocaleString()} used + ${budget.reserved.tokens.toLocaleString()} reserved` },
+    { label: "Time", value: budget.used.timeSeconds, max: limits.timeSeconds, display: `${Math.round(budget.used.timeSeconds / 60)} min elapsed` },
+  ];
+  return <section className={`engineer-budget-hud engineer-budget-hud--${budget.status.toLowerCase()}`} aria-label="Live run budget">
+    <div className="engineer-budget-hud-title"><div><span className="engineer-kicker">Live autonomy budget</span><strong>{budget.status === "PAUSED" ? "Paused at the hard ceiling" : budget.status === "WARNING" ? "Approaching a limit" : "Within limits"}</strong></div><small>Actual + reserved · updated {new Date(budget.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></div>
+    <div className="engineer-budget-bars">{rows.map((row) => { const percent = row.max > 0 ? Math.min(100, (row.value / row.max) * 100) : 100; return <div key={row.label} className="engineer-budget-row"><div><span>{row.label}</span><strong>{row.display}</strong><small>{Math.max(0, 100 - percent).toFixed(0)}% remaining</small></div><progress max="100" value={percent} /></div>; })}</div>
+  </section>;
+}
+
+function BudgetTopUp({ value, onChange, disabled }: { value: typeof TOP_UP_DEFAULTS; onChange: (value: typeof TOP_UP_DEFAULTS) => void; disabled: boolean }) {
+  return <div className="engineer-budget-topup">
+    <label>Add cost allowance (USD)<input disabled={disabled} type="number" min="0" max="100" step="0.5" value={value.addCostBudgetUsd} onChange={(event) => onChange({ ...value, addCostBudgetUsd: Math.max(0, Number(event.target.value) || 0) })} /></label>
+    <label>Add token allowance<input disabled={disabled} type="number" min="0" max="1000000" step="10000" value={value.addTokenBudget} onChange={(event) => onChange({ ...value, addTokenBudget: Math.max(0, Number(event.target.value) || 0) })} /></label>
+    <label>Add time (minutes)<input disabled={disabled} type="number" min="0" max="480" step="5" value={Math.round(value.addTimeBudgetSeconds / 60)} onChange={(event) => onChange({ ...value, addTimeBudgetSeconds: Math.max(0, (Number(event.target.value) || 0) * 60) })} /></label>
+  </div>;
+}
 
 function isGatewayAuthorizationError(reason: unknown): boolean {
   return reason instanceof Error && /unauthorized|forbidden/i.test(reason.message);
@@ -67,14 +107,19 @@ export default function EngineerPage() {
   const [showAllRuns, setShowAllRuns] = useState(false);
   const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number; readOnly: boolean } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
+  const [budget, setBudget] = useState<EngineerBudgetSnapshot | null>(null);
+  const [budgetMode, setBudgetMode] = useState<"recommended" | "custom">("recommended");
+  const [customBudget, setCustomBudget] = useState<EngineerBudgetLimits>(DEFAULT_BUDGET);
+  const [topUp, setTopUp] = useState(TOP_UP_DEFAULTS);
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async (runId: string) => {
-    const [status, nextData] = await Promise.all([getEngineerRunStatus(runId), getEngineerData(runId)]);
+    const [status, nextData, nextBudget] = await Promise.all([getEngineerRunStatus(runId), getEngineerData(runId), getEngineerBudget(runId).catch(() => null)]);
     setRun((current) => !current || status.run.runId !== current.runId || status.run.stateVersion >= current.stateVersion ? status.run : current);
     setManagerError(status.lastError);
     setData(nextData);
+    setBudget(nextBudget);
   }, []);
 
   useEffect(() => () => { abortRef.current?.abort(); if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); }, []);
@@ -172,20 +217,20 @@ export default function EngineerPage() {
 
   const openRun = useCallback(async (runId: string) => {
     setError(null);
-    const [status, storedPlan, storedData] = await Promise.all([
-      getEngineerRunStatus(runId), getEngineerPlan(runId).catch(() => null), getEngineerData(runId),
+    const [status, storedPlan, storedData, storedBudget] = await Promise.all([
+      getEngineerRunStatus(runId), getEngineerPlan(runId).catch(() => null), getEngineerData(runId), getEngineerBudget(runId).catch(() => null),
     ]);
-    setRun(status.run); setPlan(storedPlan); setData(storedData); setEvents([]); setManagerError(status.lastError);
+    setRun(status.run); setPlan(storedPlan); setData(storedData); setBudget(storedBudget); setEvents([]); setManagerError(status.lastError);
     window.localStorage.setItem(RUN_STORAGE_KEY, runId);
     // The stream replays durable history from sequence zero and closes after a
     // terminal ledger is drained, so reopened completed runs get a full timeline.
-    watch(runId);
+    if (status.run.state !== "PAUSED_BUDGET") watch(runId);
   }, [watch]);
 
   const returnToRuns = useCallback(() => {
     abortRef.current?.abort();
     window.localStorage.removeItem(RUN_STORAGE_KEY);
-    setRun(null); setPlan(null); setData(null); setEvents([]); setManagerError(null); setError(null);
+    setRun(null); setPlan(null); setData(null); setBudget(null); setEvents([]); setManagerError(null); setError(null);
     void loadDashboard();
   }, [loadDashboard]);
 
@@ -205,11 +250,12 @@ export default function EngineerPage() {
     if (!request.trim() || !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(repository.baseCommitSha)) return;
     setBusy(true); setError(null);
     try {
-      const created = await createEngineerRun({ repository, request: request.trim() });
+      const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
+      const created = await createEngineerRun({ repository, request: request.trim(), budget: selectedBudget });
       setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
       const proposal = await planEngineerRun(created.runId);
       setPlan(proposal);
-      const [status, nextData] = await Promise.all([getEngineerRunStatus(created.runId), getEngineerData(created.runId)]); setRun(status.run); setData(nextData); setManagerError(status.lastError);
+      const [status, nextData, createdBudget] = await Promise.all([getEngineerRunStatus(created.runId), getEngineerData(created.runId), getEngineerBudget(created.runId).catch(() => null)]); setRun(status.run); setData(nextData); setBudget(createdBudget); setManagerError(status.lastError);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create Engineer run"); }
     finally { setBusy(false); }
   };
@@ -279,6 +325,17 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
 
+  const createCorrectedRun = async () => {
+    if (!run || !CORRECTABLE_TERMINAL_STATES.has(run.state)) return;
+    setBusy(true); setError(null);
+    try {
+      const corrected = await createCorrectedEngineerRun(run.runId);
+      await openRun(corrected.replacementRun.runId);
+      setPlan(corrected.plan);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create a corrected run"); }
+    finally { setBusy(false); }
+  };
+
   const decide = async (action: "approve" | "request-changes" | "reject" | "cancel") => {
     if (!run) return;
     setBusy(true); setError(null);
@@ -305,6 +362,20 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
 
+  const applyTopUp = async (resume: boolean) => {
+    if (!run || !budget) return;
+    setBusy(true); setError(null);
+    try {
+      const updated = await topUpEngineerBudget(run.runId, { expectedRevision: budget.revision, ...topUp });
+      setBudget(updated);
+      if (resume) {
+        const resumed = await resumeEngineerBudget(run.runId, { expectedStateVersion: run.stateVersion, expectedBudgetRevision: updated.revision });
+        setRun(resumed); setEvents([]); watch(resumed.runId);
+      }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to update the run budget"); }
+    finally { setBusy(false); }
+  };
+
   const latestState = run?.state ?? "NEW";
   const claims = (data?.claims ?? []) as Array<{ claimId?: string; claim?: string; status?: string; notes?: string }>;
   const tests = (data?.tests ?? []) as Array<{ testExecutionId?: string; type?: string; status?: string }>;
@@ -315,6 +386,13 @@ export default function EngineerPage() {
   const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; manifestHash?: string; diffHash?: string; evidenceBundleHash?: string } | null | undefined;
   const progress = useMemo(() => TERMINAL.has(latestState) ? 100 : STATE_PROGRESS[latestState] ?? 35, [latestState]);
   const costEstimate = useMemo(() => estimateEngineerCost(request, repository.name), [request, repository.name]);
+  const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
+  const budgetUsage = budget ? Math.max(
+    budget.limits.costUsd > 0 ? (budget.used.costUsd + budget.reserved.costUsd) / budget.limits.costUsd : 0,
+    budget.limits.tokens > 0 ? (budget.used.tokens + budget.reserved.tokens) / budget.limits.tokens : 0,
+    budget.limits.timeSeconds > 0 ? budget.used.timeSeconds / budget.limits.timeSeconds : 0,
+  ) : 0;
+  const approachingBudget = budget?.status === "WARNING" || budgetUsage >= (budget?.warningThreshold ?? 0.8);
 
   if (!run) return (
     <main className="engineer-screen">
@@ -360,6 +438,25 @@ export default function EngineerPage() {
           <p>Estimate only; actual provider billing depends on context and retries. No model call is made until you create the evidence plan.</p>
           <ul>{costEstimate.checks.map((check) => <li key={check}>{check}</li>)}</ul>
         </aside>
+        <section className="engineer-budget-picker" aria-labelledby="engineer-budget-title">
+          <div className="engineer-card-heading"><div><h3 id="engineer-budget-title">Run budget</h3><p>Choose a hard ceiling before planning makes its first model call.</p></div><span className="engineer-chip">No overages</span></div>
+          <div className="engineer-budget-options">
+            <button type="button" className={budgetMode === "recommended" ? "selected" : ""} onClick={() => setBudgetMode("recommended")} aria-pressed={budgetMode === "recommended"}>
+              <span><strong>Recommended</strong><small>Adjusted locally from task size and risk signals</small></span>
+              <b>${recommendedBudget(request).costBudgetUsd} · {(recommendedBudget(request).tokenBudget / 1_000).toLocaleString()}k tokens</b>
+            </button>
+            <button type="button" className={budgetMode === "custom" ? "selected" : ""} onClick={() => setBudgetMode("custom")} aria-pressed={budgetMode === "custom"}>
+              <span><strong>Custom</strong><small>Set your own cost, token, and time ceilings</small></span>
+              <b>${customBudget.costBudgetUsd} · {(customBudget.tokenBudget / 1_000).toLocaleString()}k tokens</b>
+            </button>
+          </div>
+          {budgetMode === "custom" ? <div className="engineer-budget-custom">
+            <label>Maximum cost (USD)<input type="number" min="0.5" max="100" step="0.5" value={customBudget.costBudgetUsd} onChange={(event) => setCustomBudget({ ...customBudget, costBudgetUsd: Math.max(0.5, Number(event.target.value) || 0.5) })} /></label>
+            <label>Maximum tokens<input type="number" min="10000" max="1000000" step="10000" value={customBudget.tokenBudget} onChange={(event) => setCustomBudget({ ...customBudget, tokenBudget: Math.min(1_000_000, Math.max(10_000, Number(event.target.value) || 10_000)) })} /></label>
+            <label>Maximum minutes<input type="number" min="10" max="480" step="10" value={Math.round(customBudget.timeBudgetSeconds / 60)} onChange={(event) => setCustomBudget({ ...customBudget, timeBudgetSeconds: Math.max(600, (Number(event.target.value) || 10) * 60) })} /></label>
+          </div> : null}
+          <p className="engineer-budget-note">The run pauses at ${selectedBudget.costBudgetUsd}, {selectedBudget.tokenBudget.toLocaleString()} tokens, or {Math.round(selectedBudget.timeBudgetSeconds / 60)} minutes—whichever comes first. You can inspect partial work and explicitly top up later.</p>
+        </section>
         {error ? <p className="engineer-error">{error}</p> : null}
         <button className="engineer-primary" onClick={() => void submit()} disabled={busy || !request.trim() || !repository.baseCommitSha}>{busy ? "Planning…" : "Create evidence plan"}</button>
       </section>
@@ -382,6 +479,7 @@ export default function EngineerPage() {
           <div><span>Human gate</span><strong>{plan.manifest.humanGateRequired ? "Required" : "Policy dependent"}</strong></div>
           <div><span>Allowed paths</span>{plan.manifest.allowedPaths.map((path) => <code key={path}>{path}</code>)}</div>
           <div><span>Commands</span>{plan.manifest.allowedCommands.map((command) => <code key={command}>{command}</code>)}</div>
+          <div><span>Hard budget</span><strong>${plan.manifest.costBudgetUsd} · {plan.manifest.tokenBudget.toLocaleString()} tokens</strong><small>{Math.round(plan.manifest.timeBudgetSeconds / 60)} minutes · pauses at the first limit</small></div>
           <div><span>Architecture</span><p>{plan.planningAnalysis.architectureSummary}</p></div>
           <div><span>Assumptions</span>{plan.planningAnalysis.assumptions.length ? plan.planningAnalysis.assumptions.map((item) => <p key={item.assumptionId}>{item.statement} · {Math.round(item.confidence * 100)}% confidence</p>) : <p>None recorded.</p>}</div>
           <div><span>Estimated files</span>{plan.planningAnalysis.touchedFileEstimates.map((item) => <code key={item.path}>{item.path}</code>)}</div>
@@ -397,6 +495,16 @@ export default function EngineerPage() {
   return (
     <main className="engineer-screen">
       <RunHeader run={run} progress={TERMINAL.has(latestState) ? 100 : progress} onBack={returnToRuns} />
+      <BudgetHud budget={budget} manifest={plan?.manifest ?? null} />
+      {approachingBudget && latestState !== "PAUSED_BUDGET" ? <section className="engineer-budget-warning" role="status">
+        <div><strong>Approaching the run budget</strong><p>Zintus has reserved or used {Math.min(100, Math.round(budgetUsage * 100))}% of at least one limit. It will pause safely before spending beyond your ceiling.</p></div>
+        <button disabled={busy || !budget} onClick={() => void applyTopUp(false)}>Add ${topUp.addCostBudgetUsd} / {(topUp.addTokenBudget / 1_000).toLocaleString()}k tokens</button>
+      </section> : null}
+      {latestState === "PAUSED_BUDGET" ? <section className="engineer-card engineer-budget-paused">
+        <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Run paused · budget exhausted</span><h2>Your work is checkpointed</h2><p>No new model call can start until you explicitly raise the budget. Current code is available to inspect, but publication remains disabled.</p></div><span className="engineer-unverified">Unverified partial work</span></div>
+        <BudgetTopUp value={topUp} onChange={setTopUp} disabled={busy} />
+        <div className="engineer-actions"><button className="engineer-primary" disabled={busy || !budget} onClick={() => void applyTopUp(true)}>{busy ? "Resuming…" : "Top up and resume checkpoint"}</button><button disabled={busy} onClick={() => setTab("diff")}>View partial diff</button></div>
+      </section> : null}
       {data?.errors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {data.errors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
       <nav className="engineer-tabs" aria-label="Engineer run views">{(["timeline", "diff", "evidence"] as const).map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
       {(["REQUEST_RECEIVED", "PLANNING", "REPLANNING"].includes(latestState) && (latestState !== "REQUEST_RECEIVED" || !plan)) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The durable run and prior human answers are intact. Planning can be retried without creating a duplicate run.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{busy ? "Planning…" : "Retry planning"}</button></section> : null}
@@ -407,14 +515,15 @@ export default function EngineerPage() {
         <div className="engineer-card"><h2>Live timeline</h2><div className="engineer-timeline">{events.length ? events.map((event) => <div key={event.eventId} className="engineer-event"><span /><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div><strong>{event.nextState.replaceAll("_", " ")}</strong><small>{event.reasonCode.replaceAll("_", " ")}</small></div></div>) : <p className="engineer-muted">Waiting for the first durable event…</p>}</div></div>
         <aside className="engineer-card engineer-verification"><h2>Verification</h2><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /><Metric label="Failures" value={String(failures.length)} /></aside>
       </section> : null}
-      {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><h2>Reviewed diff</h2><span className="engineer-chip">hash-bound</span></div><pre className="engineer-diff">{data?.diff || "The exact diff appears after implementation begins."}</pre></section> : null}
+      {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><div><h2>{latestState === "PAUSED_BUDGET" ? "Partial diff" : "Reviewed diff"}</h2>{latestState === "PAUSED_BUDGET" ? <p>This checkpoint has not completed verification and cannot be published.</p> : null}</div><span className={latestState === "PAUSED_BUDGET" ? "engineer-unverified" : "engineer-chip"}>{latestState === "PAUSED_BUDGET" ? "Unverified partial work" : "hash-bound"}</span></div><pre className="engineer-diff">{data?.diff || "The exact diff appears after implementation begins."}</pre></section> : null}
       {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed JSON</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div><PublicationOperations operations={gitOperations} /></section> : null}
       {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>Approve and publish</button><button disabled={busy} onClick={() => void decide("request-changes")}>Request changes</button><button disabled={busy} onClick={() => void extendApproval()}>Give me 24 hours</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>Reject</button></div></section> : null}
       {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Review the verified candidate</h2><p>The isolated Reviewer escalated this result for a human decision. Inspect the Diff and Evidence tabs, then either continue to the approval gate or reject the candidate.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("approve")}>Continue to approval</button><button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>Reject candidate</button></div></section> : null}
       {latestState === "REVIEW_APPROVED" && !approval ? <section className="engineer-card engineer-gate"><span className="engineer-kicker">Review approved</span><h2>Publication is not configured locally</h2><p>The candidate passed human review and is safe to inspect locally. Configure the GitHub publication credentials before enabling merge or pull-request creation.</p></section> : null}
+      {CORRECTABLE_TERMINAL_STATES.has(latestState) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{busy ? "Creating…" : "Create corrected run"}</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
-      {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
+      {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
       {error ? <p className="engineer-error">{error}</p> : null}
       {managerError ? <p className="engineer-error">{managerError}</p> : null}
     </main>
