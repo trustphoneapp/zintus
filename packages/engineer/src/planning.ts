@@ -348,11 +348,16 @@ export class EngineerPlanningManager {
       current = this.options.supervisor.normalizeRequest({ runId, expectedStateVersion: run.stateVersion, normalizedRequest: output.normalizedRequest, idempotencyKey: `plan:normalize:${inputHash}` }).run;
       current = this.options.supervisor.transition({ runId, expectedStateVersion: current.stateVersion, nextState: "PLANNING", reasonCode: "STRUCTURED_PLANNING_STARTED", idempotencyKey: `plan:start:${inputHash}` }).run;
     }
+    // Human answers may trigger replanning, but they must never rewrite the
+    // immutable request identity used by the Supervisor's manifest binding.
+    // The model can refine acceptance criteria and scope; the normalized run
+    // request remains the value captured during the first planning pass.
+    const normalizedRequest = current.requestNormalized || output.normalizedRequest;
     const risk = this.options.supervisor.assessRunRisk(runId, current.stateVersion, applyDeterministicRiskFloors(output), { autoApproveLowRisk: true });
     const manifest = TaskManifestContentSchema.parse({
       manifestVersion: this.options.supervisor.listManifestVersions(runId).length + 1,
       runId, repository: run.repository,
-      request: { original: run.requestOriginal, normalized: output.normalizedRequest },
+      request: { original: run.requestOriginal, normalized: normalizedRequest },
       acceptanceCriteria: output.acceptanceCriteria, testPlan: output.testPlan,
       allowedPaths: output.allowedPaths,
       deniedPaths: reconcileDeniedPaths(output),
