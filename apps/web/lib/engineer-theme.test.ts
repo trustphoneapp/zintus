@@ -21,4 +21,11 @@ describe("Engineer app-shell integration", () => {
     expect(sidebar).toContain('{ href: "/chat", icon: "chat", label: "Chat" }');
     expect(sidebar).toContain('{ href: "/engineer", icon: "zap", label: "Engineer" }');
   });
+
+  test("owns vertical scrolling inside the clipped app shell", () => {
+    const rule = engineerStyles.match(/\.engineer-screen\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(rule).toContain("flex: 1");
+    expect(rule).toContain("min-height: 0");
+    expect(rule).toContain("overflow-y: auto");
+  });
 });
