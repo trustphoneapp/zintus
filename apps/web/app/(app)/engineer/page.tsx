@@ -288,7 +288,7 @@ export default function EngineerPage() {
         {githubRepos.length ? <div className="engineer-list">{githubRepos.map((repo) => <button key={repo.id} onClick={() => void (async () => { const [owner, name] = repo.fullName.split("/"); try { setBusy(true); const sha = await getGithubBranchCommit(owner ?? "", name ?? "", repo.defaultBranch); setRepository({ repositoryId: repo.id, provider: "github", owner: owner ?? "", name: name ?? "", baseBranch: repo.defaultBranch, baseCommitSha: sha }); setGithubRepos([]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to inspect GitHub branch"); } finally { setBusy(false); } })()}><strong>{repo.fullName}</strong><span>{repo.private ? "Private" : "Public"} · {repo.defaultBranch}</span></button>)}</div> : null}
         {!githubConfigured ? <p className="engineer-muted">GitHub is not configured on this gateway. Local repositories remain available.</p> : null}
       </section>
-      {recentRuns.length ? <section className="engineer-card">
+      {recentRuns.length ? <section className="engineer-card" id="recent-runs">
         <div className="engineer-section-title"><span>02</span><div><h2>Recent durable runs</h2><p>Reopen any run from the gateway ledger, including after a browser restart.</p></div></div>
         <div className="engineer-list">{(showAllRuns ? recentRuns : recentRuns.slice(0, 2)).map((item) => <button key={item.runId} onClick={() => void openRun(item.runId)}>
           <span className={`engineer-status engineer-status--${item.state.toLowerCase()}`}>{item.state.replaceAll("_", " ")}</span>
@@ -297,7 +297,7 @@ export default function EngineerPage() {
         {recentRuns.length > 2 ? <button className="engineer-secondary" onClick={() => setShowAllRuns((value) => !value)}>{showAllRuns ? "Show fewer runs" : `Show ${recentRuns.length - 2} more runs`}</button> : null}
       </section> : null}
       <section className="engineer-card engineer-new-run">
-        <div className="engineer-section-title"><span>01</span><div><h2>New engineering run</h2><p>No chat transcript. One evidence-driven workflow.</p></div></div>
+        <div className="engineer-section-title"><span>03</span><div><h2>New engineering run</h2><p>No chat transcript. One evidence-driven workflow.</p></div></div>
         <label>Feature or bug<textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={5} placeholder="Add a bounded feature with measurable acceptance criteria…" /></label>
         <div className="engineer-form-grid">
           <label>Provider<select value={repository.provider} onChange={(event) => setRepository({ ...repository, provider: event.target.value as "github" | "local" })}><option value="local">Local repository</option><option value="github">GitHub</option></select></label>
