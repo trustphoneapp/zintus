@@ -38,6 +38,9 @@
 .engineer-list > button:hover, .engineer-list > a:hover { border-color: color-mix(in srgb, var(--engineer-accent) 42%, var(--engineer-border)); background: var(--engineer-accent-soft); transform: translateY(-1px); }
 .engineer-list > div { display: flex; gap: 10px; padding: 12px; border: .5px solid var(--c-border); border-radius: 12px; }
 .engineer-list strong, .engineer-list code { display: block; }
+.engineer-list > button > div, .engineer-list > a > div { min-width: 0; }
+.engineer-list > button strong, .engineer-list > a strong { overflow: hidden; font-size: 13px; line-height: 1.35; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.engineer-list > button code, .engineer-list > a code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .engineer-list code { margin-top: 5px; color: var(--color-text-muted); font-size: 11px; }
 .engineer-chip, .engineer-status { display: inline-flex; align-items: center; width: fit-content; height: 22px; padding: 0 8px; border-radius: 999px; background: var(--engineer-soft); color: var(--color-text-sub); font-size: 10px; font-weight: 750; letter-spacing: .05em; }
 .engineer-status--connected, .engineer-status--passed, .engineer-status--completed { background: #e5f5ee; color: #18704f; }
