@@ -350,7 +350,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
           diffForRun: (runId) => {
             const sandbox = engineerExecution?.getSandbox(runId);
             if (!sandbox) {
-              const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF").at(-1);
+              const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF" && item.trusted).at(-1);
               if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
               return engineerArtifactStore.read(artifact).toString("utf8");
             }
@@ -375,7 +375,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       diffForRun: (runId) => {
         const sandbox = engineerExecution?.getSandbox(runId);
         if (!sandbox) {
-          const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF").at(-1);
+          const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF" && item.trusted).at(-1);
           if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
           return engineerArtifactStore.read(artifact).toString("utf8");
         }
