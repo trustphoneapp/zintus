@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
-import { getGatewayUrl } from "@/lib/gateway";
+import { getGatewayUrl, type GatewayConnectionState } from "@/lib/gateway";
 import { useAppStore, type Thread } from "@/lib/app-store";
 import { signOut, getMe, googleSignInUrl } from "@/lib/cloud";
 import { fetchBillingStatus, type BillingStatus } from "@/lib/billing";
@@ -452,7 +452,13 @@ function useAccountInitial() {
  * estimated savings from the gateway, real sign-in/gateway state, and the
  * management links. No fake plan, no fake quota, no Top-up.
  */
-function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
+function AccountBlock({
+  gatewayConnected,
+  gatewayConnectionState,
+}: {
+  gatewayConnected: boolean;
+  gatewayConnectionState: GatewayConnectionState | null;
+}) {
   const gatewaySavings = useAppStore((s) => s.gatewaySavings);
   const { theme, setTheme } = useTheme();
   const pathname = usePathname();
@@ -486,6 +492,13 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
   const sub = signedIn ? "Account & billing synced" : "Chats stay on this device";
   const tierActive = signedIn && billing?.status === "active";
   const savedUsd = gatewaySavings?.estimatedUsdSaved ?? 0;
+  const gatewayAuthenticationRequired =
+    gatewayConnectionState === "authentication-required";
+  const gatewayLabel = gatewayConnected
+    ? "Gateway connected"
+    : gatewayAuthenticationRequired
+      ? "Gateway authentication required"
+      : "Gateway offline";
   const isDark = !mounted || theme !== "light";
   // Google OAuth round-trip: land the user back where they were (or /chat)
   // instead of the relay's default dashboard redirect.
@@ -581,12 +594,16 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
 
           {/* Gateway status — honest, links to the docs when offline. */}
           <div className="sidebar-account-gateway">
-            <span className={`status-dot${gatewayConnected ? " online" : ""}`} />
+            <span className={`status-dot${gatewayConnected ? " online" : gatewayAuthenticationRequired ? " attention" : ""}`} />
             <span className="sidebar-account-gateway-text">
-              {gatewayConnected ? "Gateway connected" : "Gateway offline"}
+              {gatewayLabel}
             </span>
             <span className="sidebar-account-gateway-url">
-              {gatewayConnected ? getGatewayUrl() : "zintus serve"}
+              {gatewayConnected
+                ? getGatewayUrl()
+                : gatewayAuthenticationRequired
+                  ? "Enter operator token"
+                  : "zintus serve"}
             </span>
           </div>
 
@@ -629,8 +646,12 @@ function AccountBlock({ gatewayConnected }: { gatewayConnected: boolean }) {
             {tierActive && billing ? <TierBadge tier={billing.tier} /> : null}
           </span>
           <span className="sidebar-account-trigger-meta">
-            <span className={`status-dot${gatewayConnected ? " online" : ""}`} />
-            {gatewayConnected ? `Saved $${savedUsd.toFixed(2)}` : "Gateway offline"}
+            <span className={`status-dot${gatewayConnected ? " online" : gatewayAuthenticationRequired ? " attention" : ""}`} />
+            {gatewayConnected
+              ? `Saved $${savedUsd.toFixed(2)}`
+              : gatewayAuthenticationRequired
+                ? "Authentication required"
+                : "Gateway offline"}
           </span>
         </div>
         <Icon name="chevron-down" size={13} />
@@ -643,10 +664,12 @@ export function Sidebar({
   collapsed,
   onToggle,
   gatewayConnected,
+  gatewayConnectionState,
 }: {
   collapsed: boolean;
   onToggle: () => void;
   gatewayConnected: boolean;
+  gatewayConnectionState: GatewayConnectionState | null;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -1013,17 +1036,32 @@ export function Sidebar({
 
       {!collapsed ? (
         <div className="sidebar-footer">
-          <AccountBlock gatewayConnected={gatewayConnected} />
+          <AccountBlock
+            gatewayConnected={gatewayConnected}
+            gatewayConnectionState={gatewayConnectionState}
+          />
         </div>
       ) : (
         <div className="sidebar-footer collapsed">
           <Tooltip
-            content={gatewayConnected ? "Gateway connected" : "Gateway offline"}
+            content={
+              gatewayConnected
+                ? "Gateway connected"
+                : gatewayConnectionState === "authentication-required"
+                  ? "Gateway authentication required"
+                  : "Gateway offline"
+            }
             side="right"
           >
             <span
-              className={`status-dot${gatewayConnected ? " online" : ""}`}
-              aria-label={gatewayConnected ? "Gateway connected" : "Gateway offline"}
+              className={`status-dot${gatewayConnected ? " online" : gatewayConnectionState === "authentication-required" ? " attention" : ""}`}
+              aria-label={
+                gatewayConnected
+                  ? "Gateway connected"
+                  : gatewayConnectionState === "authentication-required"
+                    ? "Gateway authentication required"
+                    : "Gateway offline"
+              }
             />
           </Tooltip>
         </div>

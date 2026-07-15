@@ -11,6 +11,7 @@ import {
   summarizeToolArgs,
   summarizeToolResult,
   clearEphemeralGatewayToken,
+  fetchGatewayConnection,
   gatewayAuthHeaders,
   setEphemeralGatewayToken,
 } from "./gateway.js";
@@ -24,6 +25,63 @@ describe("ephemeral gateway authority", () => {
     expect(gatewayAuthHeaders()).toEqual({ Authorization: "Bearer local-operator-secret" });
     clearEphemeralGatewayToken();
     expect(gatewayAuthHeaders()).toEqual({});
+  });
+});
+
+describe("gateway connection classification", () => {
+  const realFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    clearEphemeralGatewayToken();
+  });
+
+  test("returns connected with the authenticated status payload", async () => {
+    setEphemeralGatewayToken("operator-secret");
+    let authorization = "";
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      authorization = new Headers(init?.headers).get("Authorization") ?? "";
+      return Response.json({ ok: true, providers: [] });
+    }) as typeof fetch;
+
+    expect(await fetchGatewayConnection()).toEqual({
+      state: "connected",
+      health: { ok: true, providers: [] },
+    });
+    expect(authorization).toBe("Bearer operator-secret");
+  });
+
+  test("reports authentication-required when status rejects but public health is ready", async () => {
+    const paths: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      return path === "/v1/status"
+        ? new Response("Unauthorized", { status: 401 })
+        : Response.json({ ok: true, auth: "required" });
+    }) as typeof fetch;
+
+    expect(await fetchGatewayConnection()).toEqual({
+      state: "authentication-required",
+    });
+    expect(paths).toEqual(["/v1/status", "/health"]);
+  });
+
+  test("keeps a rejected status offline when public health is unavailable", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) =>
+      new URL(String(input)).pathname === "/v1/status"
+        ? new Response("Forbidden", { status: 403 })
+        : new Response("Unavailable", { status: 503 })) as typeof fetch;
+
+    expect(await fetchGatewayConnection()).toEqual({ state: "offline" });
+  });
+
+  test("reports offline when the gateway cannot be reached", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as unknown as typeof fetch;
+
+    expect(await fetchGatewayConnection()).toEqual({ state: "offline" });
   });
 });
 

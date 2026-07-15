@@ -32,6 +32,10 @@ const RUN_STORAGE_KEY = "zintus-engineer-active-run";
 const cursorKey = (runId: string) => `zintus-engineer-event-cursor:${runId}`;
 const STATE_PROGRESS: Record<string, number> = { REQUEST_RECEIVED: 2, REQUEST_NORMALIZED: 5, PLANNING: 7, PLAN_READY: 10, PLAN_FROZEN: 12, QUEUED: 15, SANDBOX_WARM_CLAIMING: 18, SANDBOX_COLD_PROVISIONING: 18, SANDBOX_PREFLIGHT: 22, SANDBOX_READY: 25, CONTEXT_BUILDING: 30, IMPLEMENTING: 42, FAST_CHECKS: 50, UNIT_TESTING: 58, INTEGRATION_TESTING: 66, E2E_TESTING: 72, SECURITY_REVIEW: 78, REVIEWING: 86, REVIEW_APPROVED: 90, HUMAN_APPROVAL_PENDING: 94, HUMAN_APPROVED: 96, PR_PREFLIGHT: 97, PR_CREATING: 98, PR_CREATED: 99 };
 
+function isGatewayAuthorizationError(reason: unknown): boolean {
+  return reason instanceof Error && /unauthorized|forbidden/i.test(reason.message);
+}
+
 export default function EngineerPage() {
   const [request, setRequest] = useState("");
   const [repository, setRepository] = useState<EngineerRepository>({ repositoryId: "local-repository", provider: "local", owner: "local", name: "zintus", baseBranch: "main", baseCommitSha: "" });
@@ -82,7 +86,12 @@ export default function EngineerPage() {
     if (history.status === "fulfilled") setRecentRuns(history.value);
     if (canonical.status === "fulfilled" || history.status === "fulfilled") setError(null);
     if (canonical.status === "rejected" && history.status === "rejected") {
-      setError(canonical.reason instanceof Error ? canonical.reason.message : "Engineer gateway is unavailable");
+      if (isGatewayAuthorizationError(canonical.reason) || isGatewayAuthorizationError(history.reason)) {
+        setGatewayAuthenticated(false);
+        setError(null);
+      } else {
+        setError(canonical.reason instanceof Error ? canonical.reason.message : "Engineer gateway is unavailable");
+      }
     }
   }, []);
 
@@ -224,7 +233,7 @@ export default function EngineerPage() {
   if (!run) return (
     <main className="engineer-screen">
       <header className="engineer-hero"><span className="engineer-kicker">Zintus Engineer</span><h1>AI writes the code. Zintus proves whether it works.</h1><p>Define the exact repository snapshot and the outcome. Zintus plans, isolates, verifies, reviews, and waits for you before risky publication.</p><a href="/engineer/operations">Open operations and cost health →</a></header>
-      <section className="engineer-card">
+      <section className="engineer-card" id="gateway-access">
         <div className="engineer-section-title"><span>00</span><div><h2>Secure gateway access</h2><p>Required for authenticated publication. The token stays in memory and is cleared on reload.</p></div></div>
         <label>Gateway operator token<input type="password" value={gatewayToken} autoComplete="off" onChange={(event) => setGatewayToken(event.target.value)} placeholder="Paste GATEWAY_TOKEN" /></label>
         <div className="engineer-actions">

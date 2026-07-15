@@ -45,6 +45,14 @@ describe("gateway-offline UX honesty", () => {
     expect(src.toLowerCase()).toContain("local-first");
   });
 
+  it("distinguishes a reachable gateway that needs authentication", () => {
+    const banner = read("app/_components/GatewayOfflineBanner.tsx");
+    const shell = read("app/_components/AppShell.tsx");
+    expect(banner).toContain("Gateway authentication required.");
+    expect(banner).toContain("/engineer#gateway-access");
+    expect(shell).toContain("fetchGatewayConnection");
+  });
+
   it("chat empty-state offline panel renders the self-host CTA", () => {
     const src = read("app/(app)/chat/page.tsx");
     expect(src).toContain("zintus serve");

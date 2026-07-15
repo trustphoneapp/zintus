@@ -2,7 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
-import { fetchGatewayHealth, GATEWAY_URL } from "@/lib/gateway";
+import {
+  fetchGatewayConnection,
+  type GatewayConnectionState,
+  GATEWAY_URL,
+} from "@/lib/gateway";
 import { useAppStore } from "@/lib/app-store";
 import { ThemeToggle } from "@/components/marketing/ThemeToggle";
 import { Tooltip } from "@/components/ui/Tooltip";
@@ -57,23 +61,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       useSidebarStore.setState({ open: false });
     }
   }, [pathname]);
-  const [checked, setChecked] = useState(false);
+  const [connectionState, setConnectionState] =
+    useState<GatewayConnectionState | null>(null);
   const { gatewayConnected, setGatewayStatus } = useAppStore();
 
   useEffect(() => {
     let active = true;
 
     async function refresh() {
-      const health = await fetchGatewayHealth();
+      const connection = await fetchGatewayConnection();
       if (!active) {
         return;
       }
+      const health = connection.health;
       setGatewayStatus(
-        Boolean(health?.ok),
+        connection.state === "connected" && Boolean(health?.ok),
         health?.providers ?? [],
         health?.savings,
       );
-      setChecked(true);
+      setConnectionState(connection.state);
     }
 
     refresh();
@@ -148,8 +154,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </header>
       ) : null}
 
-      {checked && !gatewayConnected && (
-        <GatewayOfflineBanner url={GATEWAY_URL} />
+      {connectionState && connectionState !== "connected" && (
+        <GatewayOfflineBanner url={GATEWAY_URL} state={connectionState} />
       )}
 
       <div className="app-body">
@@ -166,6 +172,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           collapsed={collapsed}
           onToggle={toggleSidebar}
           gatewayConnected={gatewayConnected}
+          gatewayConnectionState={connectionState}
         />
         <div className="app-content">
           {children}

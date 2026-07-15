@@ -123,6 +123,16 @@ export interface GatewayHealth {
   savings?: GatewaySavings;
 }
 
+export type GatewayConnectionState =
+  | "connected"
+  | "authentication-required"
+  | "offline";
+
+export interface GatewayConnectionCheck {
+  state: GatewayConnectionState;
+  health?: GatewayHealth;
+}
+
 export function getGatewayUrl(): string {
   return GATEWAY_URL;
 }
@@ -145,6 +155,45 @@ export async function fetchGatewayHealth(): Promise<GatewayHealth | null> {
     return (await response.json()) as GatewayHealth;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Distinguishes an unreachable gateway from a reachable gateway that rejected
+ * the current in-memory credential. `/v1/status` is the authoritative rich
+ * health check; the public, topology-free `/health` endpoint is consulted only
+ * after a 401/403 so the shell can give accurate recovery guidance without
+ * exposing or persisting the operator token.
+ */
+export async function fetchGatewayConnection(): Promise<GatewayConnectionCheck> {
+  try {
+    const response = await fetch(`${GATEWAY_URL}/v1/status`, {
+      cache: "no-store",
+      headers: { ...gatewayAuthHeaders() },
+    });
+    if (response.ok) {
+      return {
+        state: "connected",
+        health: (await response.json()) as GatewayHealth,
+      };
+    }
+
+    if (response.status !== 401 && response.status !== 403) {
+      return { state: "offline" };
+    }
+
+    const publicHealth = await fetch(`${GATEWAY_URL}/health`, {
+      cache: "no-store",
+    });
+    if (!publicHealth.ok) {
+      return { state: "offline" };
+    }
+    const body = (await publicHealth.json()) as { ok?: boolean };
+    return body.ok
+      ? { state: "authentication-required" }
+      : { state: "offline" };
+  } catch {
+    return { state: "offline" };
   }
 }
 
