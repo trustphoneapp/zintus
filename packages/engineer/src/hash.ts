@@ -34,3 +34,24 @@ export function canonicalJson(value: unknown): string {
 export function sha256(value: unknown): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(canonicalJson(value)).digest("hex")}`;
 }
+
+/** Conventional SHA-256 over the exact byte sequence, for content-addressed files. */
+export function sha256Bytes(value: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+/**
+ * Read compatibility for artifacts written before exact-byte hashing was
+ * introduced. New records always use sha256Bytes; the canonical Buffer form is
+ * accepted only so existing durable runs remain readable during migration.
+ */
+export function matchesSha256Bytes(value: Uint8Array, expected: string): boolean {
+  return sha256Bytes(value) === expected || sha256(value) === expected;
+}
+
+/** OpenAI prompt cache keys are limited to 64 characters; retain the canonical hash internally. */
+export function providerPromptCacheKey(hash: string): string {
+  const match = /^sha256:([a-f0-9]{64})$/.exec(hash);
+  if (!match) throw new TypeError("provider prompt cache key requires a canonical SHA-256 hash");
+  return match[1]!;
+}

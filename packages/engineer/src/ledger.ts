@@ -66,7 +66,7 @@ import {
   IdempotencyConflictError,
   StateVersionConflictError,
 } from "./errors.js";
-import { canonicalJson, sha256 } from "./hash.js";
+import { canonicalJson, matchesSha256Bytes, sha256 } from "./hash.js";
 import { PlanProposalSchema, type PlanProposal } from "./planning.js";
 import { estimateGpt56CostUsd, OPENAI_GPT56_PRICING_2026_07_14, RunBudgetUsageSchema, type RunBudgetUsage } from "./runtime-budget.js";
 import { ContextManifestSchema, StoredContextSnapshotSchema, type StoredContextSnapshot } from "./context-contracts.js";
@@ -427,7 +427,7 @@ export class EngineerLedger {
     if (!artifact || artifact.run_id !== proposal.runId) throw new EngineerNotFoundError("plan artifact", proposal.artifactId);
     if (artifact.type !== "PLAN_PROPOSAL") throw new TypeError("plan proposal must reference a PLAN_PROPOSAL artifact");
     const artifactBytes = readFileSync(artifact.storage_reference);
-    if (artifactBytes.byteLength !== artifact.size_bytes || sha256(artifactBytes) !== artifact.sha256) {
+    if (artifactBytes.byteLength !== artifact.size_bytes || !matchesSha256Bytes(artifactBytes, artifact.sha256)) {
       throw new TypeError("plan proposal artifact failed its content-addressed integrity check");
     }
     const artifactContent = JSON.parse(artifactBytes.toString("utf8")) as unknown;
@@ -471,7 +471,7 @@ export class EngineerLedger {
     const artifactStat = lstatSync(artifact.storage_reference);
     if (!artifactStat.isFile() || artifactStat.isSymbolicLink()) throw new Error("context artifact storage is not a regular file");
     const artifactBytes = readFileSync(artifact.storage_reference);
-    if (sha256(artifactBytes) !== artifact.sha256) throw new Error("context artifact content hash mismatch");
+    if (!matchesSha256Bytes(artifactBytes, artifact.sha256)) throw new Error("context artifact content hash mismatch");
     const artifactManifest = ContextManifestSchema.parse(JSON.parse(artifactBytes.toString("utf8")));
     if (canonicalJson(artifactManifest) !== canonicalJson(parsed.manifest)) throw new Error("context artifact bytes do not match the persisted manifest");
     const existing = this.db.query("SELECT manifest_json, artifact_id, created_at FROM context_manifests WHERE manifest_hash = ?")

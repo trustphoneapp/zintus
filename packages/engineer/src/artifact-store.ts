@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, statSync, lstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { ArtifactRecordSchema, type ArtifactRecord } from "./execution-contracts.js";
-import { sha256 } from "./hash.js";
+import { matchesSha256Bytes, sha256Bytes } from "./hash.js";
 import { DEFAULT_RUN_ARTIFACT_BUDGET_BYTES } from "./runtime-budget.js";
 
 export const DEFAULT_MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
@@ -63,7 +63,7 @@ export class LocalArtifactStore {
     if (bytes.byteLength > this.maxArtifactBytes) {
       throw new RangeError(`artifact exceeds ${this.maxArtifactBytes} byte limit`);
     }
-    const digest = sha256(bytes);
+    const digest = sha256Bytes(bytes);
     const hex = digest.slice("sha256:".length);
     const runRoot = join(this.root, runId);
     ensurePrivateDirectory(runRoot);
@@ -91,7 +91,7 @@ export class LocalArtifactStore {
         throw error;
       }
       const existing = readFileSync(storageReference);
-      if (sha256(existing) !== digest) throw new Error("content-addressed artifact collision or tampering detected");
+      if (!matchesSha256Bytes(existing, digest)) throw new Error("content-addressed artifact collision or tampering detected");
     } finally {
       if (fd !== null) closeSync(fd);
     }
@@ -120,7 +120,7 @@ export class LocalArtifactStore {
       throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
     }
     const bytes = readFileSync(path);
-    if (bytes.byteLength !== parsed.sizeBytes || sha256(bytes) !== parsed.sha256) {
+    if (bytes.byteLength !== parsed.sizeBytes || !matchesSha256Bytes(bytes, parsed.sha256)) {
       throw new Error(`artifact integrity check failed: ${parsed.artifactId}`);
     }
     return bytes;

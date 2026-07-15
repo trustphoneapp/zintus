@@ -82,6 +82,11 @@ export interface RunningGateway {
 }
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
+// Bun's default is 10 seconds, which is shorter than the Engineer's bounded
+// 120-second Responses API calls. Keep the connection alive long enough for
+// synchronous plan/freeze requests while application-level timeouts retain
+// authority over model execution. Bun currently caps this value at 255 seconds.
+export const GATEWAY_HTTP_IDLE_TIMEOUT_SECONDS = 255;
 
 /**
  * Boot the gateway HTTP server and return a handle. Overrides are applied via
@@ -445,6 +450,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
+    idleTimeout: GATEWAY_HTTP_IDLE_TIMEOUT_SECONDS,
     fetch: createGatewayHandler({
       engine,
       config,

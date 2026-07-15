@@ -147,6 +147,8 @@ describe("Phase 2 immutable artifacts", () => {
       runId: "run-1", type: "COMMAND_STDOUT", bytes: "trusted output",
       producerType: "EXECUTOR", producerId: "sandbox-1", trusted: true,
     });
+    expect(record.sha256).toBe(`sha256:${record.storageReference.split("/").at(-1)}`);
+    expect(record.sha256).toBe("sha256:ddf0f2a1a25187e39d547b4c3bb3ff9a5442dc2f7d5e7ad7593409d9c733ad52");
     expect(store.read(record).toString()).toBe("trusted output");
     writeFileSync(record.storageReference, "tampered");
     expect(() => store.read(record)).toThrow("integrity check failed");
@@ -276,6 +278,8 @@ describe("Phase 2 Docker sandbox", () => {
     expect(run).toContain("1000:1000");
     expect(run).toContain("--env");
     expect(run).toContain("PATH=/bin");
+    expect(run).toContain(`type=bind,src=${sandbox.workspace.workspaceRoot},dst=/workspace`);
+    expect(run.some((argument) => argument.endsWith("dst=/workspace,rw"))).toBe(false);
     manager.destroy(sandbox);
   });
 
@@ -370,6 +374,8 @@ describe("Phase 2 offline dependency bundle", () => {
     await sandbox.commandRunnerAsync!("bun", ["test"], { cwd: sandbox.workspace.workspaceRoot, timeoutMs: 1_000, maxOutputBytes: 1024, env: {} });
     const runArgs = dockerCalls.find((args) => args[0] === "run") ?? [];
     expect(runArgs).toContain("--network=none");
+    expect(runArgs).toContain(`type=bind,src=${sandbox.workspace.workspaceRoot},dst=/workspace`);
+    expect(runArgs.some((argument) => argument.endsWith("dst=/workspace,rw"))).toBe(false);
     expect(runArgs).toContain(`type=bind,src=${offlineDependencies.nodeModulesRoot},dst=/workspace/node_modules,readonly`);
     await manager.destroyAsync(sandbox);
   });

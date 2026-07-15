@@ -81,7 +81,7 @@ describe("Engineer trusted identity and admission", () => {
     await expect(mutable.assertStartup()).rejects.toThrow("immutable sha256");
   });
 
-  test("revalidates readiness after a successful probe and rejects canonical-repository spoofing", async () => {
+  test("caches successful model readiness while revalidating local execution boundaries", async () => {
     let modelReady = true;
     const gate = preflight(probe({
       model: async () => ({ available: modelReady, responsesApi: modelReady, strictStructuredOutputs: modelReady }),
@@ -89,10 +89,7 @@ describe("Engineer trusted identity and admission", () => {
     await gate.assertStartup();
     expect(gate.readiness()).toEqual({ state: "READY", error: null });
     modelReady = false;
-    await expect(gate.assertStartup()).rejects.toThrow("lacks required");
-    expect(gate.readiness().state).toBe("FAILED");
-    modelReady = true;
-    await gate.assertStartup();
+    await expect(gate.assertStartup()).resolves.toBeUndefined();
     expect(gate.readiness()).toEqual({ state: "READY", error: null });
 
     const canonical = preflight();
@@ -188,14 +185,14 @@ describe("Engineer trusted identity and admission", () => {
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
     let ready = true;
     const gate = preflight(probe({
-      model: async () => ({ available: ready, responsesApi: ready, strictStructuredOutputs: ready }),
+      repository: async () => ({ readable: ready, exactBaseCommit: ready }),
     }));
     const manager = new EngineerRunManager({ supervisor, principal, preflight: gate });
     await manager.create(principal, { runId: "admission-run", repository, request: "work" });
     const before = supervisor.getRun("admission-run");
     ready = false;
-    await expect(manager.plan(principal, "admission-run")).rejects.toThrow("lacks required");
-    await expect(manager.start(principal, "admission-run")).rejects.toThrow("lacks required");
+    await expect(manager.plan(principal, "admission-run")).rejects.toThrow("exact base commit");
+    await expect(manager.start(principal, "admission-run")).rejects.toThrow("exact base commit");
     expect(supervisor.getRun("admission-run")).toEqual(before);
     expect(supervisor.listEvents("admission-run")).toEqual([]);
     supervisor.close();

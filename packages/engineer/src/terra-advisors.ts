@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { TaskManifest, TrustedEvidence } from "./contracts.js";
 import type { ResponsesTransport } from "./codex-builder.js";
-import { sha256 } from "./hash.js";
+import { providerPromptCacheKey, sha256 } from "./hash.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 
 export const TERRA_ADVISOR_POLICY_VERSION = "engineer-terra-advisors-v1";
@@ -143,7 +143,7 @@ export class TerraAdvisors {
       reasoning: { effort: "medium", summary: "auto" },
       max_output_tokens: maxOutputTokens,
       store: false,
-      prompt_cache_key: cacheKey,
+      prompt_cache_key: providerPromptCacheKey(cacheKey),
       safety_identifier: this.options.safetyIdentifier ?? sha256((dynamicInput as { manifest: TaskManifest }).manifest.runId),
       metadata: { role: role.toLowerCase(), policy_version: TERRA_ADVISOR_POLICY_VERSION },
     };

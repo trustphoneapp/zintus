@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { FailureRecord } from "./control-contracts.js";
 import type { ResponsesTransport } from "./codex-builder.js";
-import { sha256 } from "./hash.js";
+import { providerPromptCacheKey, sha256 } from "./hash.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 
 export const LUNA_FAILURE_ADVISOR_POLICY_VERSION = "engineer-luna-failure-advisor-v1";
@@ -88,7 +88,7 @@ export class LunaFailureAdvisor {
       reasoning: { effort: "low", summary: "auto" },
       max_output_tokens: maxOutputTokens,
       store: false,
-      prompt_cache_key: cacheKey,
+      prompt_cache_key: providerPromptCacheKey(cacheKey),
       safety_identifier: this.options.safetyIdentifier ?? sha256(input.runId),
       metadata: { run_id: input.runId, role: "failure_classifier", policy_version: LUNA_FAILURE_ADVISOR_POLICY_VERSION },
     };

@@ -375,7 +375,9 @@ export class DockerSandboxManager {
         "--security-opt", "no-new-privileges", "--user", "1000:1000",
         "--cpus", String(limits.cpus), "--memory", limits.memory,
         "--pids-limit", String(limits.pids), "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
-        "--mount", `type=bind,src=${workspace.workspaceRoot},dst=/workspace,rw`,
+        // Writable is the default for Docker's long --mount syntax. Current
+        // Docker releases reject a bare `rw` field as an invalid key.
+        "--mount", `type=bind,src=${workspace.workspaceRoot},dst=/workspace`,
         ...(this.options.offlineDependencies ? ["--mount", `type=bind,src=${this.options.offlineDependencies.nodeModulesRoot},dst=/workspace/node_modules,readonly`] : []),
         "--workdir", "/workspace", ...containerEnvironment,
         this.options.imageReference, executable, ...args,
@@ -417,7 +419,7 @@ export class DockerSandboxManager {
         "--security-opt", "no-new-privileges", "--user", "1000:1000",
         "--cpus", String(limits.cpus), "--memory", limits.memory,
         "--pids-limit", String(limits.pids), "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
-        "--mount", `type=bind,src=${workspace.workspaceRoot},dst=/workspace,rw`,
+        "--mount", `type=bind,src=${workspace.workspaceRoot},dst=/workspace`,
         ...(this.options.offlineDependencies ? ["--mount", `type=bind,src=${this.options.offlineDependencies.nodeModulesRoot},dst=/workspace/node_modules,readonly`] : []),
         "--workdir", "/workspace", ...containerEnvironment,
         this.options.imageReference, executable, ...args,

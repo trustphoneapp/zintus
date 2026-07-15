@@ -6,7 +6,7 @@ import OpenAI from "openai";
 import type { RepairContext, TaskManifest } from "./contracts.js";
 import { BuilderResultSchema, type BuilderResult, type WorkspaceRecord } from "./execution-contracts.js";
 import type { GitWorkspaceManager } from "./git-workspace.js";
-import { sha256 } from "./hash.js";
+import { providerPromptCacheKey, sha256 } from "./hash.js";
 import { isManifestPathAllowed, resolveManifestPath } from "./manifest-files.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 import type { TrustedCommandExecutor } from "./trusted-executor.js";
@@ -236,7 +236,7 @@ export class CodexBuilder {
         reasoning: { effort: "high", summary: "auto" },
         max_output_tokens: maxOutputTokens,
         store: false,
-        prompt_cache_key: cacheKey,
+        prompt_cache_key: providerPromptCacheKey(cacheKey),
         safety_identifier: this.options.safetyIdentifier ?? sha256(this.options.manifest.runId),
         metadata: { run_id: this.options.manifest.runId, prompt_version: CODEX_BUILDER_PROMPT_VERSION },
       };

@@ -15,7 +15,7 @@ function plannerOutput(allowedCommands = ["bun test auth"], unresolvedQuestions:
   return {
     normalizedRequest: "Require authentication on the export endpoint.",
     acceptanceCriteria: [{ criterionId: "auth-1", statement: "Unauthenticated exports are rejected.", verificationMethod: "Run an authorization integration test.", priority: "MUST" }],
-    testPlan: [{ testId: "auth-test", criterionIds: ["auth-1"], type: "INTEGRATION", description: "Verify authorization.", command: allowedCommands[0] }],
+    testPlan: [{ testId: "auth-test", criterionIds: ["auth-1"], type: "SECURITY", description: "Verify authorization.", command: allowedCommands[0] }],
     allowedPaths: ["src/auth/**", "tests/auth/**"], deniedPaths: [], allowedCommands, riskFeatures,
     architectureSummary: "The export boundary delegates authorization to the existing authentication layer.",
     assumptions: [{ assumptionId: "assumption-1", statement: "The existing session middleware is authoritative.", sourceRefs: ["src/auth/session.ts"], confidence: 0.8, reversible: true }],
@@ -101,6 +101,36 @@ describe("Phase 5 structured planning", () => {
     });
     expect(supervisor.getRun(run.runId).state).toBe("PLAN_READY");
     expect(manager.get(run.runId)?.proposalHash).toBe(proposal.proposalHash);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("rejects a high-risk plan without an executable security gate before plan persistence", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-security-gate-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const run = supervisor.receiveRequest({
+      runId: "missing-security-gate", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Require authentication on the export endpoint.",
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    seedContext(supervisor, artifactStore, run);
+    const invalid = plannerOutput();
+    invalid.testPlan[0]!.type = "INTEGRATION";
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "missing-gate-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{
+          type: "function_call", name: "submit_plan", call_id: "missing-gate-call", arguments: JSON.stringify(invalid),
+        }] };
+      } }),
+    });
+
+    await expect(manager.plan(run.runId)).rejects.toThrow("requires an executable SECURITY test");
+    expect(supervisor.getRun(run.runId).state).toBe("REQUEST_RECEIVED");
+    expect(supervisor.latestPlanProposal(run.runId)).toBeNull();
+    expect(supervisor.listFailures(run.runId)).toMatchObject([{
+      failureClass: "MODEL_FAILURE", reasonCode: "PLANNER_OUTPUT_INVALID", retryable: true,
+    }]);
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

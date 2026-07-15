@@ -42,6 +42,7 @@ export interface EngineerCapabilityPreflightOptions {
 /** A cached, fail-closed admission gate. Failed checks are deliberately not cached. */
 export class EngineerCapabilityPreflight {
   private startupPromise: Promise<void> | null = null;
+  private readonly verifiedModels = new Set<string>();
   private readinessState: EngineerReadiness;
   private readonly options: EngineerCapabilityPreflightOptions;
   private acceptedBaseCommitSha: string;
@@ -122,10 +123,12 @@ export class EngineerCapabilityPreflight {
       throw new Error("Engineer preflight failed: exact model identifiers are required");
     }
     for (const model of models) {
+      if (this.verifiedModels.has(model)) continue;
       const capability = await this.options.probe.model(model);
       if (!capability.available || !capability.responsesApi || !capability.strictStructuredOutputs) {
         throw new Error(`Engineer preflight failed: ${model} lacks required Responses/structured-output capabilities`);
       }
+      this.verifiedModels.add(model);
     }
     if (this.options.execution) {
       if (!/^sha256:[a-f0-9]{64}$/i.test(this.options.execution.imageDigest)) {

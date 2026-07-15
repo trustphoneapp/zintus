@@ -38,6 +38,15 @@ import {
   type VerificationResult,
 } from "./verification-contracts.js";
 
+export function reviewerClaimEvidenceId(input: {
+  runId: string;
+  attempt: number;
+  kind: "CRITERION" | "UNSUPPORTED";
+  key: string;
+}): string {
+  return sha256({ namespace: "reviewer-claim-evidence-v1", ...input });
+}
+
 export interface EngineerVerificationManagerOptions {
   supervisor: EngineerSupervisor;
   executionManager: EngineerExecutionManager;
@@ -694,7 +703,9 @@ export class EngineerVerificationManager {
             ? "FAILED"
             : "UNVERIFIED";
       return ClaimEvidenceRecordSchema.parse({
-        claimId: `${criterion.criterionId}:review:${attempt}`,
+        claimId: reviewerClaimEvidenceId({
+          runId: manifest.runId, attempt, kind: "CRITERION", key: criterion.criterionId,
+        }),
         runId: manifest.runId,
         criterionId: criterion.criterionId,
         claim: criterion.statement,
@@ -706,7 +717,9 @@ export class EngineerVerificationManager {
     });
     for (const [index, unsupported] of review.unsupportedClaims.entries()) {
       claims.push(ClaimEvidenceRecordSchema.parse({
-        claimId: `unsupported:${attempt}:${index + 1}`, runId: manifest.runId, criterionId: null,
+        claimId: reviewerClaimEvidenceId({
+          runId: manifest.runId, attempt, kind: "UNSUPPORTED", key: String(index + 1),
+        }), runId: manifest.runId, criterionId: null,
         claim: unsupported, status: "UNVERIFIED", evidenceIds: [], notes: "Explicitly unsupported by the isolated Reviewer.", createdAt: now,
       }));
     }
