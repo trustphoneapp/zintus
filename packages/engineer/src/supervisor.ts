@@ -95,7 +95,13 @@ export interface SupervisorOptions {
   builderModelCallLimit?: number;
 }
 
-export const MAX_BUILDER_MODEL_CALLS_PER_RUN = 24;
+/**
+ * Durable backstop above the complete default workflow envelope:
+ * one initial Builder pass plus four authorized repair passes may each use
+ * thirteen model turns, and three transient retries may be admitted. Runtime
+ * token/cost/time budgets and retry progress guards remain the tighter limits.
+ */
+export const MAX_BUILDER_MODEL_CALLS_PER_RUN = 68;
 
 export interface ReceiveRequestInput {
   runId?: string;

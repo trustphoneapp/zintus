@@ -5,9 +5,14 @@ import {
   ManifestIntegrityError,
   StateVersionConflictError,
 } from "./errors.js";
-import { createEngineerSupervisor, type EngineerSupervisor } from "./supervisor.js";
+import {
+  createEngineerSupervisor,
+  MAX_BUILDER_MODEL_CALLS_PER_RUN,
+  type EngineerSupervisor,
+} from "./supervisor.js";
 import type { RepositoryReference, TaskManifestContent } from "./contracts.js";
-import { RiskFeaturesSchema } from "./contracts.js";
+import { RetryBudgetsSchema, RiskFeaturesSchema } from "./contracts.js";
+import { MAX_BUILDER_TOOL_ROUNDS } from "./codex-builder.js";
 import { sha256 } from "./hash.js";
 import { transitionReplanToPlanReadyForTest, transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 
@@ -103,6 +108,14 @@ function freeze(supervisor: EngineerSupervisor, runId = "run-1") {
 }
 
 describe("Engineer Supervisor foundation", () => {
+  test("the durable Builder-call backstop covers the default bounded workflow", () => {
+    const retries = RetryBudgetsSchema.parse({});
+    const completeWorkflowEnvelope =
+      (1 + retries.builderRepairAttempts) * (MAX_BUILDER_TOOL_ROUNDS + 1)
+      + retries.transientModelAttempts;
+    expect(MAX_BUILDER_MODEL_CALLS_PER_RUN).toBeGreaterThanOrEqual(completeWorkflowEnvelope);
+  });
+
   test("rejects invalid intake before it can poison the durable ledger", () => {
     const supervisor = createSupervisor();
     expect(() => supervisor.receiveRequest({
