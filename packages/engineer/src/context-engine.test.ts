@@ -63,7 +63,8 @@ describe("Context Engine Lite contracts and scanner", () => {
     expect(first.baseCommitSha).toBe(item.baseCommitSha);
     expect(first.filesConsidered).toBeLessThanOrEqual(2_000);
     expect(first.sources.length).toBeLessThanOrEqual(20);
-    expect(first.sources.reduce((sum, source) => sum + source.excerpt.length, 0)).toBeLessThanOrEqual(48_000);
+    expect(first.sources.reduce((sum, source) => sum + source.excerpt.length, 0)).toBeLessThanOrEqual(24_000);
+    expect(first.caps).toMatchObject({ maxRelevantFiles: 12, maxExcerptChars: 24_000 });
     expect(first.detections.stacks).toEqual(expect.arrayContaining(["Bun", "JavaScript/TypeScript", "React", "TypeScript"]));
     expect(first.detections.scripts).toEqual(expect.arrayContaining([expect.objectContaining({ name: "test", command: "bun test", trust: "UNTRUSTED_REPOSITORY_CONTENT" })]));
     expect(first.detections.ciCommands).toEqual([expect.objectContaining({ command: "bun test", trust: "UNTRUSTED_REPOSITORY_CONTENT" })]);
@@ -97,4 +98,40 @@ describe("Context Engine Lite contracts and scanner", () => {
     expect(ContextManifestContentSchema.safeParse({ ...content, runId: "different-run" }).success).toBe(false);
     rmSync(item.root, { recursive: true, force: true });
   });
+
+  test("filters secret paths before context selection and redacts credentials while preserving env examples", async () => {
+    const item = fixture();
+    writeFileSync(join(item.repositoryRoot, ".env.production"), "OPENAI_API_KEY=sk-proj-production-secret-material-1234567890\n");
+    writeFileSync(join(item.repositoryRoot, ".env.example"), "OPENAI_API_KEY=replace-with-your-key\nPUBLIC_ORIGIN=http://localhost:3000\n");
+    mkdirSync(join(item.repositoryRoot, "secrets"), { recursive: true });
+    writeFileSync(join(item.repositoryRoot, "secrets", "service-account.json"), '{"private_key":"do-not-read-this-secret"}\n');
+    writeFileSync(join(item.repositoryRoot, "src", "credentials.ts"), [
+      'export const apiKey = "sk-proj-source-secret-material-1234567890";',
+      'export const password = "correct-horse-battery-staple";',
+      'export const safeValue = "configuration remains useful";',
+      "",
+    ].join("\n"));
+    git(item.repositoryRoot, ["add", "-A", "--"]);
+    git(item.repositoryRoot, ["commit", "-m", "secret filtering fixture"]);
+    const baseCommitSha = git(item.repositoryRoot, ["rev-parse", "HEAD"]);
+
+    const manifest = await new ContextEngine({}).build({
+      runId: "secret-context-run", repositoryId: "fixture-repo", repositoryRoot: item.repositoryRoot,
+      baseCommitSha, request: "Inspect credentials configuration and environment example",
+    });
+    const serialized = JSON.stringify(manifest);
+    expect(manifest.sources.some((source) => source.path === ".env.production")).toBe(false);
+    expect(manifest.sources.some((source) => source.path.startsWith("secrets/"))).toBe(false);
+    expect(manifest.sources.some((source) => source.path === ".env.example")).toBe(true);
+    expect(manifest.detections.configPaths).toContain(".env.example");
+    expect(serialized).not.toContain("production-secret-material");
+    expect(serialized).not.toContain("do-not-read-this-secret");
+    expect(serialized).not.toContain("source-secret-material");
+    expect(serialized).not.toContain("correct-horse-battery-staple");
+    expect(serialized).toContain(REDACTED_CREDENTIAL_FOR_TEST);
+    expect(manifest.sources.find((source) => source.path === "src/credentials.ts")?.excerpt).toContain("configuration remains useful");
+    rmSync(item.root, { recursive: true, force: true });
+  });
 });
+
+const REDACTED_CREDENTIAL_FOR_TEST = "[REDACTED_CREDENTIAL]";

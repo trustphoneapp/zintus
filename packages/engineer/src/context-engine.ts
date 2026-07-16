@@ -4,11 +4,11 @@ import { execFile } from "node:child_process";
 import { z } from "zod";
 import {
   CONTEXT_CONTRACT_VERSION,
-  CONTEXT_MAX_EXCERPT_CHARS,
+  CONTEXT_DEFAULT_EXCERPT_CHARS,
+  CONTEXT_DEFAULT_RELEVANT_FILES,
   CONTEXT_MAX_DETECTED_COMMANDS,
   CONTEXT_MAX_DETECTION_PATHS,
   CONTEXT_MAX_FILE_BYTES,
-  CONTEXT_MAX_RELEVANT_FILES,
   CONTEXT_MAX_SOURCE_FILES,
   ContextManifestContentSchema,
   ContextManifestSchema,
@@ -31,7 +31,7 @@ const INPUT_SCHEMA = z.object({
   request: z.string().min(1).max(100_000),
 }).strict();
 
-const EXCERPT_CHARS_PER_FILE = Math.floor(CONTEXT_MAX_EXCERPT_CHARS / CONTEXT_MAX_RELEVANT_FILES);
+const EXCERPT_CHARS_PER_FILE = Math.floor(CONTEXT_DEFAULT_EXCERPT_CHARS / CONTEXT_DEFAULT_RELEVANT_FILES);
 const SOURCE_EXTENSIONS = new Set([
   ".c", ".cc", ".cpp", ".cs", ".css", ".go", ".h", ".hpp", ".html", ".java", ".js", ".jsx",
   ".kt", ".kts", ".php", ".py", ".rb", ".rs", ".scss", ".sh", ".sql", ".swift", ".ts", ".tsx", ".vue",
@@ -48,6 +48,49 @@ const PROMPT_INJECTION_PATTERNS = [
   /reveal|exfiltrat|upload\s+(?:the\s+)?(?:secret|credential|token)/i,
   /do\s+not\s+tell\s+(?:the\s+)?user/i,
 ];
+const SAFE_ENV_TEMPLATE_NAMES = new Set([".env.example", ".env.sample", ".env.template", ".env.dist"]);
+const SECRET_ASSIGNMENT_NAME = String.raw`(?:api[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret|private[_-]?key|secret(?:[_-]?key)?|password|passwd)`;
+const REDACTED_CREDENTIAL = "[REDACTED_CREDENTIAL]";
+
+/**
+ * Secret paths are rejected before their Git blobs are read. Environment
+ * templates remain eligible for stack/config discovery, but their values pass
+ * through the same content redaction as every other selected source.
+ */
+function isSecretContextPath(path: string): boolean {
+  const normalized = path.replace(/\\/g, "/");
+  const name = basename(normalized).toLowerCase();
+  if (/^\.env(?:\.|$)/i.test(name) && !SAFE_ENV_TEMPLATE_NAMES.has(name)) return true;
+  if (/(^|\/)(?:\.ssh|\.gnupg|\.aws|\.secrets?|secrets?)(\/|$)/i.test(normalized)) return true;
+  if (/^(?:id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?|\.npmrc|\.pypirc|\.netrc)$/i.test(name)) return true;
+  if (/^(?:credentials?|service[-_.]?account)(?:\.[^.]+)*\.(?:json|ya?ml|toml|ini)$/i.test(name)) return true;
+  return /\.(?:pem|key|p12|pfx|jks|keystore)$/i.test(name);
+}
+
+/** Redacts high-confidence credential material before relevance scoring or model context creation. */
+function redactCredentialMaterial(content: string): string {
+  let sanitized = content.replace(
+    /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g,
+    REDACTED_CREDENTIAL,
+  );
+  sanitized = sanitized.replace(
+    /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-(?:proj-)?[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/g,
+    REDACTED_CREDENTIAL,
+  );
+  sanitized = sanitized.replace(
+    new RegExp(`((?:["']?)${SECRET_ASSIGNMENT_NAME}(?:["']?)\\s*(?:=|:)\\s*)(["'\\x60])([^"'\\x60\\r\\n]+)\\2`, "gi"),
+    (_match, prefix: string, quote: string) => `${prefix}${quote}${REDACTED_CREDENTIAL}${quote}`,
+  );
+  sanitized = sanitized.replace(
+    new RegExp(`((?:["']?)${SECRET_ASSIGNMENT_NAME}(?:["']?)\\s*(?:=|:)\\s*)(?!["'\\x60])([^\\s,;#}\\]]+)`, "gi"),
+    `$1${REDACTED_CREDENTIAL}`,
+  );
+  sanitized = sanitized.replace(
+    /(\bAuthorization\s*:\s*(?:Bearer|Basic)\s+)[A-Za-z0-9._~+\/-]+=*/gi,
+    `$1${REDACTED_CREDENTIAL}`,
+  );
+  return sanitized;
+}
 
 interface TreeEntry {
   mode: string;
@@ -258,6 +301,7 @@ export class ContextEngine {
         continue;
       }
       const path = parsedPath.data;
+      if (isSecretContextPath(path)) continue;
       if (entry.mode === "120000") {
         symlinksSkipped += 1;
         warnings.push(warning({ runId: input.runId, code: "SYMLINK_SKIPPED", path, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: "Symbolic links are never read by the Context Engine." }));
@@ -283,6 +327,7 @@ export class ContextEngine {
         warnings.push(warning({ runId: input.runId, code: "BINARY_FILE_SKIPPED", path, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: "Non-UTF-8 content was excluded from context." }));
         continue;
       }
+      content = redactCredentialMaterial(content);
       const kind = classify(path);
       const addDetectionPath = (target: string[]) => {
         if (target.length < CONTEXT_MAX_DETECTION_PATHS) target.push(path);
@@ -304,7 +349,7 @@ export class ContextEngine {
       relevantCandidateCount += 1;
       candidates.push({ path, objectId: entry.objectId, byteSize: bytes.byteLength, content, kind, relevanceScore: scored.score, signals: [...new Set(scored.signals)].sort() });
       candidates.sort((left, right) => right.relevanceScore - left.relevanceScore || left.path.localeCompare(right.path, "en"));
-      if (candidates.length > CONTEXT_MAX_RELEVANT_FILES) candidates.pop();
+      if (candidates.length > CONTEXT_DEFAULT_RELEVANT_FILES) candidates.pop();
     }
 
     if (scriptCapReached) {
@@ -314,15 +359,15 @@ export class ContextEngine {
       warnings.push(warning({ runId: input.runId, code: "DETECTION_CAP_REACHED", path: null, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: `Detected config/test/CI/lockfile paths were limited to ${CONTEXT_MAX_DETECTION_PATHS} entries per category.` }));
     }
 
-    if (relevantCandidateCount > CONTEXT_MAX_RELEVANT_FILES) {
-      warnings.push(warning({ runId: input.runId, code: "RELEVANT_FILE_CAP_REACHED", path: null, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: `Relevant context was limited to ${CONTEXT_MAX_RELEVANT_FILES} files.` }));
+    if (relevantCandidateCount > CONTEXT_DEFAULT_RELEVANT_FILES) {
+      warnings.push(warning({ runId: input.runId, code: "RELEVANT_FILE_CAP_REACHED", path: null, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: `Relevant context was limited to ${CONTEXT_DEFAULT_RELEVANT_FILES} files.` }));
     }
-    const selected = candidates.slice(0, CONTEXT_MAX_RELEVANT_FILES);
-    if (selected.reduce((sum, candidate) => sum + candidate.content.length, 0) > CONTEXT_MAX_EXCERPT_CHARS) {
-      warnings.push(warning({ runId: input.runId, code: "EXCERPT_CAP_REACHED", path: null, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: `Context excerpts were limited to ${CONTEXT_MAX_EXCERPT_CHARS} characters.` }));
+    const selected = candidates.slice(0, CONTEXT_DEFAULT_RELEVANT_FILES);
+    if (selected.reduce((sum, candidate) => sum + candidate.content.length, 0) > CONTEXT_DEFAULT_EXCERPT_CHARS) {
+      warnings.push(warning({ runId: input.runId, code: "EXCERPT_CAP_REACHED", path: null, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: `Context excerpts were limited to ${CONTEXT_DEFAULT_EXCERPT_CHARS} characters.` }));
     }
 
-    let remainingExcerptChars = CONTEXT_MAX_EXCERPT_CHARS;
+    let remainingExcerptChars = CONTEXT_DEFAULT_EXCERPT_CHARS;
     const sources = selected.map((candidate) => {
       const excerptLength = Math.min(candidate.content.length, EXCERPT_CHARS_PER_FILE, remainingExcerptChars);
       const excerpt = candidate.content.slice(0, excerptLength);
@@ -356,8 +401,8 @@ export class ContextEngine {
       requestHash: sha256(input.request),
       caps: {
         maxSourceFiles: CONTEXT_MAX_SOURCE_FILES,
-        maxRelevantFiles: CONTEXT_MAX_RELEVANT_FILES,
-        maxExcerptChars: CONTEXT_MAX_EXCERPT_CHARS,
+        maxRelevantFiles: CONTEXT_DEFAULT_RELEVANT_FILES,
+        maxExcerptChars: CONTEXT_DEFAULT_EXCERPT_CHARS,
         maxFileBytes: CONTEXT_MAX_FILE_BYTES,
       },
       filesDiscovered: entries.length,

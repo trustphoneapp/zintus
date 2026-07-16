@@ -24,7 +24,7 @@ export function estimateEngineerCost(request: string, repositoryName = ""): Engi
     complexity,
     checks: [
       "Deterministic preflight runs before model calls",
-      "Terra/Luna handle routine checks; Sol is reserved for implementation or escalation",
+      "Terra/Luna handle routine work; Sol is reserved for isolated final review or explicit escalation",
       "Human approval is required before publication",
     ],
   };

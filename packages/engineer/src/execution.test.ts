@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
   BuilderNoProgressError,
+  BudgetPausedError,
   CodexBuilder,
   DockerSandboxManager,
   EngineerExecutionManager,
@@ -13,6 +14,11 @@ import {
   EngineerSupervisor,
   GitWorkspaceManager,
   LocalArtifactStore,
+  MAX_BUILDER_TOOL_CALLS_PER_RESPONSE,
+  MAX_BUILDER_TOOL_CALLS_PER_RUN,
+  BUILDER_CONTEXT_COMPACTION_THRESHOLD_TOKENS,
+  BUILDER_MAX_OUTPUT_TOKENS,
+  MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES,
   OpenAIResponsesTransport,
   countResponseInputTokens,
   estimateResponseInputTokens,
@@ -30,6 +36,7 @@ import {
   workspaceLockfileHash,
   hashDependencyTree,
   type ResponsesTransport,
+  type BuilderContinuation,
   type SandboxRecord,
   type TaskManifest,
   type WorkspaceRecord,
@@ -455,6 +462,259 @@ describe("Phase 2 Codex Builder", () => {
     workspaceManager.remove(workspace);
   });
 
+  test("stops alternating tool failures after two model rounds without semantic progress", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "alternating-failure-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-alternating-failures", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-alternating-failures", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "alternating-failure-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => { throw new Error("an unauthorized command must never reach the runner"); },
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        calls += 1;
+        return calls === 1
+          ? { id: "policy-failure", output: [{
+            type: "function_call", call_id: "policy-failure-call", name: "run_command",
+            arguments: JSON.stringify({ command: "bun run unauthorized" }),
+          }] }
+          : { id: "path-failure", output: [{
+            type: "function_call", call_id: "path-failure-call", name: "read_file",
+            arguments: JSON.stringify({ path: "../outside.ts" }),
+          }] };
+      } },
+    });
+    await expect(builder.run()).rejects.toThrow("no semantic progress in 2 consecutive model rounds");
+    expect(calls).toBe(2);
+    workspaceManager.remove(workspace);
+  });
+
+  test("does not treat write counters as progress when a round restores the candidate diff", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "no-op-mutation-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-no-op-mutations", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-no-op-mutations", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "no-op-mutation-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        calls += 1;
+        return { id: `no-op-mutation-${calls}`, output: [
+          { type: "function_call", call_id: `change-${calls}`, name: "write_file", arguments: JSON.stringify({
+            path: "src/value.ts", content: "export const value = 2;\n",
+          }) },
+          { type: "function_call", call_id: `restore-${calls}`, name: "write_file", arguments: JSON.stringify({
+            path: "src/value.ts", content: "export const value = 1;\n",
+          }) },
+        ] };
+      } },
+    });
+    await expect(builder.run()).rejects.toThrow("no semantic progress in 2 consecutive model rounds");
+    expect(calls).toBe(2);
+    expect(await workspaceManager.diffAsync(workspace)).toBe("");
+    workspaceManager.remove(workspace);
+  });
+
+  test("rolls back candidate mutations authored by an allowed repository command", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "command-mutation-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-command-mutation", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-command-mutation", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "command-mutation-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => {
+        writeFileSync(join(workspace.workspaceRoot, "src", "value.ts"), "export const value = 999;\n");
+        return { status: 0, stdout: "tests passed", stderr: "" };
+      },
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        calls += 1;
+        return { id: `command-mutation-${calls}`, output: [{
+          type: "function_call", call_id: `command-mutation-call-${calls}`, name: "run_command",
+          arguments: JSON.stringify({ command: "bun run test" }),
+        }] };
+      } },
+    });
+    await expect(builder.run()).rejects.toThrow("no semantic progress in 2 consecutive model rounds");
+    expect(readFileSync(join(workspace.workspaceRoot, "src", "value.ts"), "utf8")).toBe("export const value = 1;\n");
+    expect(await workspaceManager.diffAsync(workspace)).toBe("");
+    expect(calls).toBe(2);
+    workspaceManager.remove(workspace);
+  });
+
+  test("bounds large tool results before they enter the next paid model request", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    writeFileSync(join(repository.path, "src", "large.ts"), "x".repeat(MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES * 2));
+    execFileSync("git", ["-C", repository.path, "add", "src/large.ts"]);
+    execFileSync("git", ["-C", repository.path, "commit", "-m", "large fixture"]);
+    const baseCommitSha = execFileSync("git", ["-C", repository.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "bounded-output-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-bounded-output", repositoryRoot: repository.path, baseCommitSha });
+    const task = manifest("run-bounded-output", baseCommitSha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, baseCommitSha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "bounded-output-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create(request) {
+        calls += 1;
+        if (calls === 1) return { id: "bounded-output-read", output: [{
+          type: "function_call", call_id: "bounded-output-read-call", name: "read_file",
+          arguments: JSON.stringify({ path: "src/large.ts" }),
+        }] };
+        const serialized = JSON.stringify(request.input);
+        expect(serialized).toContain("MODEL_VIEW_TRUNCATED");
+        expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES + 4_000);
+        return { id: "bounded-output-finish", output: [], output_text: "Inspected bounded source context." };
+      } },
+    });
+    await builder.run();
+    expect(calls).toBe(2);
+    workspaceManager.remove(workspace);
+  });
+
+  test("resumes a durable Builder continuation without replaying completed paid rounds", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "continuation-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-continuation", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-continuation", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "continuation-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let paidCalls = 0;
+    let reservations = 0;
+    let continuation: BuilderContinuation | undefined;
+    const interrupted = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        paidCalls += 1;
+        return { id: "continuation-write", output: [{
+          type: "function_call", call_id: "continuation-write-call", name: "write_file",
+          arguments: JSON.stringify({ path: "src/value.ts", content: "export const value = 2;\n" }),
+        }] };
+      } },
+      reserveModelCall: () => {
+        reservations += 1;
+        if (reservations === 2) throw new BudgetPausedError(task.runId, "continuation checkpoint test");
+        return `reservation-${reservations}`;
+      },
+      onContinuation: (checkpoint) => { continuation = checkpoint; },
+    });
+    await expect(interrupted.run()).rejects.toThrow("continuation checkpoint test");
+    expect(paidCalls).toBe(1);
+    expect(continuation).toBeDefined();
+
+    const result = await new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor, continuation,
+      transport: { async create(request) {
+        paidCalls += 1;
+        expect(JSON.stringify(request.input)).toContain("continuation-write-call");
+        return { id: "continuation-finish", output: [], output_text: "Resumed from the durable tool transcript." };
+      } },
+    }).run();
+    expect(paidCalls).toBe(2);
+    expect(result.responseIds).toEqual(["continuation-write", "continuation-finish"]);
+    expect(result.changedFiles).toEqual(["src/value.ts"]);
+    workspaceManager.remove(workspace);
+  });
+
+  test("rejects a response above its tool-call ceiling before executing any call", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "response-call-limit-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-response-call-limit", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-response-call-limit", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "response-call-limit-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() { return {
+        id: "too-many-calls",
+        output: Array.from({ length: MAX_BUILDER_TOOL_CALLS_PER_RESPONSE + 1 }, (_, index) => ({
+          type: "function_call", call_id: `call-${index}`, name: "write_file",
+          arguments: JSON.stringify({ path: "src/value.ts", content: `export const value = ${index + 2};\n` }),
+        })),
+      }; } },
+    });
+    await expect(builder.run()).rejects.toThrow(`${MAX_BUILDER_TOOL_CALLS_PER_RESPONSE}-call per-response tool limit`);
+    expect(readFileSync(join(workspace.workspaceRoot, "src", "value.ts"), "utf8")).toBe("export const value = 1;\n");
+    workspaceManager.remove(workspace);
+  });
+
+  test("rejects calls above the Builder-run ceiling before executing the crossing response", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "run-call-limit-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-call-limit", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-call-limit", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "run-call-limit-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let response = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        response += 1;
+        const count = response <= MAX_BUILDER_TOOL_CALLS_PER_RUN / MAX_BUILDER_TOOL_CALLS_PER_RESPONSE
+          ? MAX_BUILDER_TOOL_CALLS_PER_RESPONSE
+          : 1;
+        return { id: `run-limit-${response}`, output: Array.from({ length: count }, (_, index) => ({
+          type: "function_call", call_id: `run-limit-${response}-${index}`, name: "write_file",
+          arguments: JSON.stringify({
+            path: "src/value.ts",
+            content: `// round ${response} call ${index + 1}\nexport const value = ${response};\n`,
+          }),
+        })) };
+      } },
+    });
+    await expect(builder.run()).rejects.toThrow(`${MAX_BUILDER_TOOL_CALLS_PER_RUN}-call per-run tool limit`);
+    expect(response).toBe(6);
+    expect(readFileSync(join(workspace.workspaceRoot, "src", "value.ts"), "utf8")).toContain("round 5 call 8");
+    workspaceManager.remove(workspace);
+  });
+
   test("classifies provider timeouts without treating unrelated failures as timeouts", () => {
     const timeout = new Error("Request timed out.");
     timeout.name = "APIConnectionTimeoutError";
@@ -529,9 +789,14 @@ describe("Phase 2 Codex Builder", () => {
     const transport: ResponsesTransport = {
       async create(request) {
         requestCount += 1;
-        expect(request.model).toBe("gpt-5.6-sol");
+        expect(request.model).toBe("gpt-5.6-terra");
         expect(request.store).toBe(false);
-        expect(request.max_output_tokens).toBe(8_000);
+        expect(request.max_output_tokens).toBe(BUILDER_MAX_OUTPUT_TOKENS);
+        expect(request.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
+        expect(request.context_management).toEqual([{ type: "compaction", compact_threshold: BUILDER_CONTEXT_COMPACTION_THRESHOLD_TOKENS }]);
+        expect(request.input).toEqual(expect.arrayContaining([expect.objectContaining({
+          content: expect.arrayContaining([expect.objectContaining({ prompt_cache_breakpoint: { mode: "explicit" } })]),
+        })]));
         cacheKeys.push(String(request.prompt_cache_key));
         if (requestCount === 1) return {
           id: "resp-1",
@@ -546,7 +811,7 @@ describe("Phase 2 Codex Builder", () => {
       transport, manifest: task, workspace, workspaceManager, executor,
       now: () => new Date("2026-07-14T12:00:00.000Z"),
     }).run();
-    expect(result.model).toBe("gpt-5.6-sol");
+    expect(result.model).toBe("gpt-5.6-terra");
     expect(result.changedFiles).toEqual(["src/value.ts"]);
     expect(result.diff).toContain("value = 2");
     expect(result.responseIds).toEqual(["resp-1", "resp-2"]);
@@ -598,11 +863,11 @@ describe("Phase 2 Codex Builder", () => {
   });
 
   test("resolves every fixed role without cross-tier fallback", () => {
-    expect(resolveEngineerModel("BUILDER").model).toBe("gpt-5.6-sol");
+    expect(resolveEngineerModel("BUILDER").model).toBe("gpt-5.6-terra");
     expect(resolveEngineerModel("PLANNER").model).toBe("gpt-5.6-terra");
     expect(resolveEngineerModel("DOCS").model).toBe("gpt-5.6-luna");
-    expect(resolveEngineerModel("BUILDER", { sol: "pinned-sol" }).model).toBe("pinned-sol");
-    expect(() => resolveEngineerModel("BUILDER", { sol: " " })).toThrow("must not be empty");
+    expect(resolveEngineerModel("BUILDER", { terra: "pinned-terra" }).model).toBe("pinned-terra");
+    expect(() => resolveEngineerModel("BUILDER", { terra: " " })).toThrow("must not be empty");
   });
 });
 
@@ -712,10 +977,22 @@ describe("Phase 2 authoritative execution worker", () => {
       workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest, dockerSpawn,
     });
     let response = 0;
-    let transportMode: "normal" | "partial-timeout" | "recovered" = "normal";
+    let transportMode: "normal" | "partial-budget" | "partial-timeout" | "recovered" = "normal";
+    let budgetResponse = 0;
     let timeoutResponse = 0;
     const transport: ResponsesTransport = {
+      async countInputTokens() { return 100; },
       async create() {
+        if (transportMode === "partial-budget") {
+          budgetResponse += 1;
+          if (budgetResponse === 1) return {
+            id: "worker-budget-partial", usage: { input_tokens: 100, output_tokens: 6_000 },
+            output: [{ type: "function_call", call_id: "budget-write", name: "write_file", arguments: JSON.stringify({
+              path: "src/value.ts", content: "export const value = 4;\n",
+            }) }],
+          };
+          throw new Error("a second budget model request must be stopped before transport");
+        }
         if (transportMode === "partial-timeout") {
           timeoutResponse += 1;
           if (timeoutResponse === 1) return {
@@ -755,10 +1032,9 @@ describe("Phase 2 authoritative execution worker", () => {
       maxConcurrentLeases: 1,
       recoverExpiredLease: () => undefined,
     });
-    const manager = new EngineerExecutionManager({
-      supervisor,
-      sandboxManager,
-      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const createExecutionManager = () => new EngineerExecutionManager({
+      supervisor, sandboxManager, artifactStore,
       repositoryRootFor: (repositoryId) => {
         expect(repositoryId).toBe("repo-1");
         return repository.path;
@@ -768,6 +1044,7 @@ describe("Phase 2 authoritative execution worker", () => {
       workerOwnerId: "test-worker",
       leaseTtlMs: 30_000,
     });
+    let manager = createExecutionManager();
     const result = await manager.execute(run.runId);
     expect(result.changedFiles).toEqual(["src/value.ts"]);
     expect(supervisor.getRun(run.runId).state).toBe("FAST_CHECKS");
@@ -787,6 +1064,11 @@ describe("Phase 2 authoritative execution worker", () => {
       { status: "SUCCEEDED", retry_count: 0, budget_reservation_id: expect.any(String) },
     ]);
     expect((auditDb.query("SELECT COUNT(*) AS count FROM cost_records WHERE source_type = 'MODEL_RESERVATION'").get() as { count: number }).count).toBe(1);
+    expect(auditDb.query("SELECT reservation_status FROM cost_records WHERE source_type = 'MODEL_RESERVATION'").get()).toEqual({
+      reservation_status: "AMBIGUOUS_PROVIDER_OUTCOME",
+    });
+    expect(supervisor.getBudget(run.runId).ambiguous).toMatchObject({ tokens: expect.any(Number), costUsd: expect.any(Number) });
+    expect(supervisor.getBudget(run.runId).ambiguous.tokens).toBeGreaterThan(0);
     auditDb.close();
 
     const budgetReceived = supervisor.receiveRequest({
@@ -797,7 +1079,7 @@ describe("Phase 2 authoritative execution worker", () => {
       },
       request: "Change value",
     });
-    const budgetTask = manifest(budgetReceived.runId, repository.sha, { tokenBudget: 100 });
+    const budgetTask = manifest(budgetReceived.runId, repository.sha, { tokenBudget: 7_000 });
     const { manifestHash: _budgetProposalHash, ...budgetProposalContent } = budgetTask;
     const budgetPlanReady = transitionToPlanReadyForTest({
       supervisor, received: budgetReceived,
@@ -814,6 +1096,7 @@ describe("Phase 2 authoritative execution worker", () => {
       idempotencyKey: "freeze-worker-budget-stop",
     }).run;
     expect(budgetFrozen.state).toBe("PLAN_FROZEN");
+    transportMode = "partial-budget";
     await expect(manager.execute(budgetFrozen.runId)).rejects.toThrow("paused safely");
     expect(supervisor.getRun(budgetFrozen.runId).state).toBe("PAUSED_BUDGET");
     expect(supervisor.listEvents(budgetFrozen.runId)).toContainEqual(expect.objectContaining({
@@ -821,6 +1104,12 @@ describe("Phase 2 authoritative execution worker", () => {
     }));
     expect(supervisor.listFailures(budgetFrozen.runId)).toEqual([]);
     expect(supervisor.exportRunRecords(budgetFrozen.runId).agent_executions).toMatchObject([{ status: "PAUSED" }]);
+    const pausedDiff = await workspaceManager.diffAsync(manager.getSandbox(budgetFrozen.runId)!.workspace);
+    expect(pausedDiff).toContain("value = 4");
+    manager.destroyAll({ preserveResumable: true });
+    expect(manager.getSandbox(run.runId)).toBeNull();
+    expect(manager.getSandbox(budgetFrozen.runId)).not.toBeNull();
+    manager = createExecutionManager();
     const pausedRun = supervisor.getRun(budgetFrozen.runId);
     const pausedBudget = supervisor.getBudget(budgetFrozen.runId);
     const toppedBudget = supervisor.topUpBudget({
@@ -833,6 +1122,8 @@ describe("Phase 2 authoritative execution worker", () => {
       expectedBudgetRevision: toppedBudget.revision, actorId: "user-1", idempotencyKey: "worker-budget-resume",
     });
     expect((await manager.resumeBudgetCheckpoint(budgetFrozen.runId)).state).toBe("QUEUED");
+    expect(await workspaceManager.diffAsync(manager.getSandbox(budgetFrozen.runId)!.workspace)).toBe(pausedDiff);
+    transportMode = "recovered";
     await manager.runQueued(budgetFrozen.runId);
     expect(supervisor.getRun(budgetFrozen.runId).state).toBe("FAST_CHECKS");
     expect((supervisor.exportRunRecords(budgetFrozen.runId).agent_executions ?? []).map((agent) => agent.status)).toEqual(["PAUSED", "SUCCEEDED"]);
@@ -870,15 +1161,22 @@ describe("Phase 2 authoritative execution worker", () => {
       .get(timeoutFrozen.runId) as { count: number }).count).toBe(1);
     timeoutAudit.close();
 
+    const timeoutDiff = await workspaceManager.diffAsync(manager.getSandbox(timeoutFrozen.runId)!.workspace);
+    expect(timeoutDiff).toContain("value = 3");
+    manager.destroyAll({ preserveResumable: true });
+    expect(manager.getSandbox(budgetFrozen.runId)).toBeNull();
+    expect(manager.getSandbox(timeoutFrozen.runId)).not.toBeNull();
+    manager = createExecutionManager();
     transportMode = "recovered";
     expect((await manager.retryProviderTimeout(timeoutFrozen.runId)).state).toBe("QUEUED");
+    expect(await workspaceManager.diffAsync(manager.getSandbox(timeoutFrozen.runId)!.workspace)).toBe(timeoutDiff);
     await manager.runQueued(timeoutFrozen.runId);
     expect(supervisor.getRun(timeoutFrozen.runId).state).toBe("FAST_CHECKS");
     expect(supervisor.listEvents(timeoutFrozen.runId)).toContainEqual(expect.objectContaining({
       nextState: "SANDBOX_READY", reasonCode: "RETAINED_WORKSPACE_CHECKPOINT_REUSED",
     }));
 
-    expect(manager.destroy(run.runId)?.status).toBe("DESTROYED");
+    expect(manager.destroy(timeoutFrozen.runId)?.status).toBe("DESTROYED");
     leaseManager.close();
     supervisor.close();
   });

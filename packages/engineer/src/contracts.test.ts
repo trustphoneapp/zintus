@@ -105,11 +105,11 @@ describe("mandatory isolation contracts", () => {
     }).success).toBe(false);
   });
 
-  test("SOL is statically reserved for Builder and Reviewer", () => {
-    expect(modelTierForRole("BUILDER")).toBe("GPT-5.6_SOL");
+  test("uses Terra for implementation and reserves SOL for isolated review", () => {
+    expect(modelTierForRole("BUILDER")).toBe("GPT-5.6_TERRA");
     expect(modelTierForRole("REVIEWER")).toBe("GPT-5.6_SOL");
     for (const [role, tier] of Object.entries(MODEL_ROLE_TIERS)) {
-      if (role !== "BUILDER" && role !== "REVIEWER") expect(tier).not.toBe("GPT-5.6_SOL");
+      if (role !== "REVIEWER") expect(tier).not.toBe("GPT-5.6_SOL");
     }
     expect(modelTierForRole("TESTER")).toBe("GPT-5.6_LUNA");
     expect(modelTierForRole("SECURITY")).toBe("GPT-5.6_TERRA");

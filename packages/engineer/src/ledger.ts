@@ -6,6 +6,7 @@ import {
   EngineerRunSchema,
   RiskAssessmentSchema,
   RunStateEventSchema,
+  TERMINAL_STATES,
   TaskManifestContentSchema,
   TaskManifestSchema,
   type ActorType,
@@ -78,6 +79,21 @@ import {
   type DecisionResolution,
 } from "./decision-contracts.js";
 import { DECISION_POLICY_VERSION } from "./decision-policy.js";
+
+const EXECUTION_CLOCK_WAIT_STATES = new Set<RunState>([
+  "CLARIFICATION_REQUIRED",
+  "PLAN_READY",
+  "PLAN_FROZEN",
+  "MODEL_PROVIDER_RETRY_PENDING",
+  "REVIEW_APPROVED",
+  "HUMAN_APPROVAL_PENDING",
+  "HUMAN_REVIEW_REQUIRED",
+  "FIX_REQUESTED",
+  "BASE_BRANCH_STALE",
+  "PR_CREATION_FAILED",
+  "PAUSED_BUDGET",
+  ...TERMINAL_STATES,
+]);
 import {
   EngineerBudgetSelectionSchema,
   EngineerBudgetSnapshotSchema,
@@ -148,6 +164,7 @@ interface BudgetRow {
   lifetime_cost_limit_usd: number; lifetime_token_limit: number; lifetime_time_limit_seconds: number;
   used_cost_usd: number; used_tokens: number; used_time_seconds: number;
   reserved_cost_usd: number; reserved_tokens: number; status: "ACTIVE" | "WARNING" | "PAUSED";
+  ambiguous_cost_usd: number; ambiguous_tokens: number;
   pause_reason: BudgetPauseReason | null; resume_state: RunState | null; warning_threshold: number;
   revision: number; active_since: string | null; updated_at: string;
 }
@@ -371,12 +388,29 @@ export class EngineerLedger {
     ] as const) {
       if (!costColumns.has(name)) this.db.exec(`ALTER TABLE cost_records ADD COLUMN ${name} ${type}`);
     }
+    if (!costColumns.has("reservation_status")) {
+      this.db.exec("ALTER TABLE cost_records ADD COLUMN reservation_status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(reservation_status IN ('ACTIVE', 'AMBIGUOUS_PROVIDER_OUTCOME'))");
+    }
+    const budgetColumns = new Set((this.db.query("PRAGMA table_info(run_budgets)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!budgetColumns.has("ambiguous_cost_usd")) this.db.exec("ALTER TABLE run_budgets ADD COLUMN ambiguous_cost_usd REAL NOT NULL DEFAULT 0 CHECK(ambiguous_cost_usd >= 0)");
+    if (!budgetColumns.has("ambiguous_tokens")) this.db.exec("ALTER TABLE run_budgets ADD COLUMN ambiguous_tokens INTEGER NOT NULL DEFAULT 0 CHECK(ambiguous_tokens >= 0)");
     const routingColumns = new Set((this.db.query("PRAGMA table_info(model_routing_decisions)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!routingColumns.has("agent_execution_id")) this.db.exec("ALTER TABLE model_routing_decisions ADD COLUMN agent_execution_id TEXT");
     const modelCallColumns = new Set((this.db.query("PRAGMA table_info(model_calls)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!modelCallColumns.has("budget_reservation_id")) this.db.exec("ALTER TABLE model_calls ADD COLUMN budget_reservation_id TEXT");
     if (!modelCallColumns.has("cached_input_tokens")) this.db.exec("ALTER TABLE model_calls ADD COLUMN cached_input_tokens INTEGER");
     if (!modelCallColumns.has("cache_write_input_tokens")) this.db.exec("ALTER TABLE model_calls ADD COLUMN cache_write_input_tokens INTEGER");
+    // Classify historical unknown-outcome failures during migration. They
+    // remain fenced at their worst-case allowance, but are no longer displayed
+    // as if a provider request were still actively in flight.
+    this.db.exec(`UPDATE cost_records SET reservation_status = 'AMBIGUOUS_PROVIDER_OUTCOME'
+      WHERE source_type = 'MODEL_RESERVATION' AND reservation_status = 'ACTIVE' AND EXISTS (
+        SELECT 1 FROM model_calls
+        WHERE model_calls.run_id = cost_records.run_id
+          AND model_calls.budget_reservation_id = cost_records.id
+          AND model_calls.status = 'FAILED'
+          AND (model_calls.input_tokens IS NULL OR model_calls.output_tokens IS NULL)
+      )`);
     const testExecutionColumns = new Set((this.db.query("PRAGMA table_info(test_executions)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!testExecutionColumns.has("verification_pass")) this.db.exec("ALTER TABLE test_executions ADD COLUMN verification_pass INTEGER NOT NULL DEFAULT 1");
     const proposalColumns = this.db.query("PRAGMA table_info(plan_proposals)").all() as Array<{ name: string }>;
@@ -614,15 +648,25 @@ export class EngineerLedger {
   getBudget(runId: string, now: string): EngineerBudgetSnapshot {
     const usage = this.runtimeBudgetUsage(runId, new Date(now));
     const reservations = this.db.query(`SELECT COALESCE(SUM(estimated_cost_usd), 0) AS cost,
-      COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens
-      FROM cost_records WHERE run_id = ? AND source_type = 'MODEL_RESERVATION'`).get(runId) as { cost: number; tokens: number };
+      COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens,
+      COALESCE(SUM(CASE WHEN reservation_status = 'AMBIGUOUS_PROVIDER_OUTCOME' THEN estimated_cost_usd ELSE 0 END), 0) AS ambiguous_cost,
+      COALESCE(SUM(CASE WHEN reservation_status = 'AMBIGUOUS_PROVIDER_OUTCOME' THEN input_tokens + output_tokens ELSE 0 END), 0) AS ambiguous_tokens
+      FROM cost_records WHERE run_id = ? AND source_type = 'MODEL_RESERVATION'
+        AND reservation_status IN ('ACTIVE', 'AMBIGUOUS_PROVIDER_OUTCOME')`).get(runId) as { cost: number; tokens: number; ambiguous_cost: number; ambiguous_tokens: number };
     const reservedCost = Number(reservations.cost);
     const reservedTokens = Number(reservations.tokens);
     const settledCost = Math.max(0, usage.estimatedCostUsd - reservedCost);
     const settledTokens = Math.max(0, usage.inputTokens + usage.outputTokens - reservedTokens);
+    // Roll the active interval forward whenever the snapshot is materialized.
+    // Without advancing active_since, adding the persisted total to the same
+    // interval on the next read would count active time twice. A paused budget
+    // has no active_since value, so human wait time remains frozen.
     this.db.query(`UPDATE run_budgets SET used_cost_usd = ?, used_tokens = ?, used_time_seconds = ?,
-      reserved_cost_usd = ?, reserved_tokens = ?, updated_at = ? WHERE run_id = ?`)
-      .run(settledCost, settledTokens, Math.floor(usage.elapsedSeconds), reservedCost, reservedTokens, now, runId);
+      reserved_cost_usd = ?, reserved_tokens = ?, ambiguous_cost_usd = ?, ambiguous_tokens = ?,
+      active_since = CASE WHEN active_since IS NULL THEN NULL ELSE ? END,
+      updated_at = ? WHERE run_id = ?`)
+      .run(settledCost, settledTokens, Math.floor(usage.elapsedSeconds), reservedCost, reservedTokens,
+        Number(reservations.ambiguous_cost), Number(reservations.ambiguous_tokens), now, now, runId);
     const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(runId) as BudgetRow | null;
     if (!row) throw new EngineerNotFoundError("run budget", runId);
     return this.budgetSnapshot(row);
@@ -1198,6 +1242,12 @@ export class EngineerLedger {
       if (Number(result.changes) !== 1) {
         throw new StateVersionConflictError(command.runId, command.expectedStateVersion, this.getRun(command.runId).stateVersion);
       }
+      this.updateExecutionClockForTransition(
+        command.runId,
+        command.previousState,
+        command.nextState,
+        command.timestamp,
+      );
       this.insertAudit(command.runId, "STATE_TRANSITION", command.actorType, command.actorId, {
         eventId: event.eventId,
         previousState: event.previousState,
@@ -1208,6 +1258,36 @@ export class EngineerLedger {
       return { applied: true, event, run: this.getRun(command.runId) };
     });
     return transact();
+  }
+
+  private updateExecutionClockForTransition(
+    runId: string,
+    previousState: RunState,
+    nextState: RunState,
+    timestamp: string,
+  ): void {
+    const previousMetered = !EXECUTION_CLOCK_WAIT_STATES.has(previousState);
+    const nextMetered = !EXECUTION_CLOCK_WAIT_STATES.has(nextState);
+    if (previousMetered === nextMetered) return;
+    const row = this.db.query(`SELECT status, used_time_seconds, active_since
+      FROM run_budgets WHERE run_id = ?`).get(runId) as {
+        status: "ACTIVE" | "WARNING" | "PAUSED" | "EXHAUSTED";
+        used_time_seconds: number;
+        active_since: string | null;
+      } | null;
+    if (!row) return;
+    if (previousMetered && !nextMetered) {
+      const elapsed = row.active_since
+        ? Math.max(0, Math.floor((Date.parse(timestamp) - Date.parse(row.active_since)) / 1_000))
+        : 0;
+      this.db.query(`UPDATE run_budgets SET used_time_seconds = ?, active_since = NULL, updated_at = ?
+        WHERE run_id = ?`).run(Number(row.used_time_seconds) + elapsed, timestamp, runId);
+      return;
+    }
+    if (!previousMetered && nextMetered && row.status !== "PAUSED" && row.status !== "EXHAUSTED") {
+      this.db.query(`UPDATE run_budgets SET active_since = ?, updated_at = ? WHERE run_id = ?`)
+        .run(timestamp, timestamp, runId);
+    }
   }
 
   freezeManifest(command: LedgerTransitionCommand, manifest: TaskManifest): LedgerTransitionResult {
@@ -1509,6 +1589,26 @@ export class EngineerLedger {
     );
   }
 
+  finalizeRunningAgentExecutions(
+    runId: string,
+    status: "PAUSED" | "FAILED",
+    completedAt: string,
+    reason: string,
+  ): number {
+    this.getRun(runId);
+    const changed = this.db.query(`UPDATE agent_executions
+      SET status = ?, completed_at = ?
+      WHERE run_id = ? AND status = 'RUNNING'`).run(status, completedAt, runId).changes;
+    if (changed > 0) {
+      this.insertAudit(runId, "ORPHAN_AGENT_EXECUTIONS_FINALIZED", "SYSTEM", "engineer-recovery", {
+        status,
+        reason,
+        count: changed,
+      }, completedAt);
+    }
+    return changed;
+  }
+
   recordModelCall(record: ModelCallRecord, budgetReservationId?: string): void {
     const parsed = ModelCallRecordSchema.parse(record);
     this.getRun(parsed.runId);
@@ -1615,7 +1715,8 @@ export class EngineerLedger {
 
   modelBudgetReservation(runId: string, reservationId: string): { inputTokens: number; outputTokens: number; estimatedCostUsd: number; agentExecutionId: string; model: string; routingDecisionId: string } {
     const row = this.db.query(`SELECT input_tokens, output_tokens, estimated_cost_usd, agent_execution_id, resolved_model, routing_decision_id FROM cost_records
-      WHERE id = ? AND run_id = ? AND source_type = 'MODEL_RESERVATION'`)
+      WHERE id = ? AND run_id = ? AND source_type = 'MODEL_RESERVATION'
+        AND reservation_status IN ('ACTIVE', 'AMBIGUOUS_PROVIDER_OUTCOME')`)
       .get(reservationId, runId) as { input_tokens: number; output_tokens: number; estimated_cost_usd: number; agent_execution_id: string | null; resolved_model: string | null; routing_decision_id: string | null } | null;
     if (!row) throw new Error("model budget reservation is missing or already finalized");
     if (!row.agent_execution_id || !row.resolved_model || !row.routing_decision_id) throw new Error("legacy model reservation cannot authorize a new call");
@@ -1628,9 +1729,17 @@ export class EngineerLedger {
     if (Number(result.changes) !== 1) throw new Error("model budget reservation is missing or already finalized");
   }
 
+  markModelBudgetReservationAmbiguous(runId: string, reservationId: string): void {
+    const result = this.db.query(`UPDATE cost_records SET reservation_status = 'AMBIGUOUS_PROVIDER_OUTCOME'
+      WHERE id = ? AND run_id = ? AND source_type = 'MODEL_RESERVATION' AND reservation_status = 'ACTIVE'`)
+      .run(reservationId, runId);
+    if (Number(result.changes) !== 1) throw new Error("model budget reservation is missing, finalized, or already ambiguous");
+  }
+
   runtimeBudgetUsage(runId: string, now = new Date()): RunBudgetUsage {
-    const run = this.db.query("SELECT created_at FROM engineer_runs WHERE id = ?").get(runId) as { created_at: string } | null;
-    if (!run) throw new EngineerNotFoundError("run", runId);
+    const budget = this.db.query("SELECT used_time_seconds, active_since FROM run_budgets WHERE run_id = ?")
+      .get(runId) as { used_time_seconds: number; active_since: string | null } | null;
+    if (!budget) throw new EngineerNotFoundError("run budget", runId);
     const models = this.db.query(`SELECT COUNT(*) AS calls,
       COALESCE(SUM(input_tokens), 0) AS input_tokens,
       COALESCE(SUM(output_tokens), 0) AS output_tokens,
@@ -1645,7 +1754,10 @@ export class EngineerLedger {
       COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens,
       COALESCE(SUM(estimated_cost_usd), 0) AS cost FROM cost_records WHERE run_id = ?`)
       .get(runId) as { records: number; model_call_records: number; input_tokens: number; output_tokens: number; cost: number };
-    const reservations = this.db.query("SELECT COUNT(*) AS count, COALESCE(SUM(input_tokens), 0) AS input_tokens, COALESCE(SUM(output_tokens), 0) AS output_tokens FROM cost_records WHERE run_id = ? AND source_type = 'MODEL_RESERVATION'")
+    const reservations = this.db.query(`SELECT COUNT(*) AS count, COALESCE(SUM(input_tokens), 0) AS input_tokens,
+      COALESCE(SUM(output_tokens), 0) AS output_tokens FROM cost_records
+      WHERE run_id = ? AND source_type = 'MODEL_RESERVATION'
+        AND reservation_status IN ('ACTIVE', 'AMBIGUOUS_PROVIDER_OUTCOME')`)
       .get(runId) as { count: number; input_tokens: number; output_tokens: number };
     const commands = this.db.query("SELECT started_at, finished_at FROM command_executions WHERE run_id = ?").all(runId) as Array<{ started_at: string; finished_at: string | null }>;
     const artifact = this.db.query(`SELECT COALESCE(SUM(size_bytes), 0) AS bytes FROM (
@@ -1655,8 +1767,11 @@ export class EngineerLedger {
     const longestCommandSeconds = commands.reduce((longest, command) => command.finished_at
       ? Math.max(longest, Math.max(0, (Date.parse(command.finished_at) - Date.parse(command.started_at)) / 1_000))
       : longest, 0);
+    const activeIntervalSeconds = budget.active_since
+      ? Math.max(0, (now.getTime() - Date.parse(budget.active_since)) / 1_000)
+      : 0;
     return RunBudgetUsageSchema.parse({
-      elapsedSeconds: Math.max(0, (now.getTime() - Date.parse(run.created_at)) / 1_000),
+      elapsedSeconds: Math.max(0, Number(budget.used_time_seconds) + activeIntervalSeconds),
       modelCalls: Number(models.calls) + Number(reservations.count),
       inputTokens: Number(models.input_tokens) + Number(reservations.input_tokens),
       outputTokens: Number(models.output_tokens) + Number(reservations.output_tokens),
@@ -2279,6 +2394,7 @@ export class EngineerLedger {
       lifetimeLimits: { costUsd: row.lifetime_cost_limit_usd, tokens: row.lifetime_token_limit, timeSeconds: row.lifetime_time_limit_seconds },
       used: { costUsd: row.used_cost_usd, tokens: row.used_tokens, timeSeconds: row.used_time_seconds },
       reserved: { costUsd: row.reserved_cost_usd, tokens: row.reserved_tokens },
+      ambiguous: { costUsd: row.ambiguous_cost_usd, tokens: row.ambiguous_tokens },
       remaining: { costUsd: remainingCost, tokens: remainingTokens, timeSeconds: remainingTime },
       warningThreshold: row.warning_threshold, pauseReason: row.pause_reason, resumeState: row.resume_state,
       revision: row.revision, updatedAt: row.updated_at,

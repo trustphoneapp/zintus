@@ -40,7 +40,12 @@ describe("Engineer database schema", () => {
     expect(admissionColumns.has("authorization_generation")).toBe(true);
     const runColumns = new Set((db.query("PRAGMA table_info(engineer_runs)").all() as Array<{ name: string }>).map((row) => row.name));
     expect(runColumns.has("last_error")).toBe(true);
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(12);
+    const costColumns = new Set((db.query("PRAGMA table_info(cost_records)").all() as Array<{ name: string }>).map((row) => row.name));
+    expect(costColumns.has("reservation_status")).toBe(true);
+    const budgetColumns = new Set((db.query("PRAGMA table_info(run_budgets)").all() as Array<{ name: string }>).map((row) => row.name));
+    expect(budgetColumns.has("ambiguous_cost_usd")).toBe(true);
+    expect(budgetColumns.has("ambiguous_tokens")).toBe(true);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(13);
     db.close();
   });
 });

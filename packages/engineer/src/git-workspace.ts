@@ -245,6 +245,19 @@ export class GitWorkspaceManager {
     return this.currentCommitAsync(workspace);
   }
 
+  /** Restores one locally created checkpoint without widening the frozen base. */
+  async restoreCheckpointAsync(workspace: WorkspaceRecord, checkpointSha: string): Promise<void> {
+    if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(checkpointSha)) throw new Error("invalid workspace checkpoint SHA");
+    const resolved = await this.gitAsync(workspace.workspaceRoot, ["rev-parse", "--verify", `${checkpointSha}^{commit}`]);
+    if (resolved.toLowerCase() !== checkpointSha.toLowerCase()) throw new Error("workspace checkpoint did not resolve exactly");
+    const withinFrozenHistory = await this.runGitAsync(workspace.workspaceRoot, [
+      "merge-base", "--is-ancestor", workspace.baseCommitSha, checkpointSha,
+    ]);
+    if (withinFrozenHistory.status !== 0) throw new Error("workspace checkpoint is outside the frozen base history");
+    await this.gitAsync(workspace.workspaceRoot, ["reset", "--hard", checkpointSha]);
+    await this.gitAsync(workspace.workspaceRoot, ["clean", "-ffdx"]);
+  }
+
   diff(workspace: WorkspaceRecord): string {
     this.markUntrackedForDiff(workspace.workspaceRoot);
     return this.git(workspace.workspaceRoot, ["diff", "--binary", "--no-ext-diff", workspace.baseCommitSha, "--"]);
@@ -268,6 +281,8 @@ export class GitWorkspaceManager {
   }
 
   changedFiles(workspace: WorkspaceRecord): string[] {
+    const baseDiff = this.runGit(workspace.workspaceRoot, ["diff", "--name-only", "-z", workspace.baseCommitSha, "--"]);
+    if (baseDiff.status !== 0) throw new Error(`git diff names failed: ${baseDiff.stderr || baseDiff.error?.message || "unknown error"}`);
     const result = this.runGit(workspace.workspaceRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
     if (result.status !== 0) throw new Error(`git status failed: ${result.stderr || result.error?.message || "unknown error"}`);
     const entries = result.stdout.split("\0").filter(Boolean);
@@ -279,10 +294,12 @@ export class GitWorkspaceManager {
       if (status.includes("R") || status.includes("C")) index += 1;
       files.push(path.replace(/\\/g, "/"));
     }
-    return [...new Set(files)].sort();
+    return [...new Set([...baseDiff.stdout.split("\0").filter(Boolean), ...files])].sort();
   }
 
   async changedFilesAsync(workspace: WorkspaceRecord): Promise<string[]> {
+    const baseDiff = await this.runGitAsync(workspace.workspaceRoot, ["diff", "--name-only", "-z", workspace.baseCommitSha, "--"]);
+    if (baseDiff.status !== 0) throw new Error(`git diff names failed: ${baseDiff.stderr || baseDiff.error?.message || "unknown error"}`);
     const result = await this.runGitAsync(workspace.workspaceRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
     if (result.status !== 0) throw new Error(`git status failed: ${result.stderr || result.error?.message || "unknown error"}`);
     const entries = result.stdout.split("\0").filter(Boolean);
@@ -294,7 +311,7 @@ export class GitWorkspaceManager {
       if (status.includes("R") || status.includes("C")) index += 1;
       files.push(path.replace(/\\/g, "/"));
     }
-    return [...new Set(files)].sort();
+    return [...new Set([...baseDiff.stdout.split("\0").filter(Boolean), ...files])].sort();
   }
 
   remove(workspace: WorkspaceRecord): void {

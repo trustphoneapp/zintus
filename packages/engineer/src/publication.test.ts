@@ -35,6 +35,7 @@ function restartPublicationHarness(root: string, reconciliation: "SUCCEEDED" | "
   const failures: unknown[] = [];
   const supervisor = {
     getRun: () => run(),
+    listOpenDecisions: () => [],
     getPublicationEvidence: () => ({
       runId: "run-restart", reviewerSessionId: "reviewer-1", reviewerDecision: "APPROVE",
       reviewerDiffHash: sha256(diff), reviewerEvidenceBundleHash: evidenceBundleHash, reviewerIsolationVerified: true,
@@ -74,6 +75,73 @@ function restartPublicationHarness(root: string, reconciliation: "SUCCEEDED" | "
 }
 
 describe("Phase 4 approval deadlines", () => {
+  test("defers every Git call until deferred decisions resolve and replay does not duplicate publication", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-phase4-deferred-decisions-"));
+    const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n";
+    const resultCommitSha = "b".repeat(40);
+    const evidenceBundleHash = `sha256:${"c".repeat(64)}`;
+    let state: EngineerRun["state"] = "REVIEW_APPROVED";
+    let deferredOpen = true;
+    const operations = new Map<string, GitOperationRecord>();
+    const calls = { inspect: 0, createBranch: 0, push: 0, createPr: 0 };
+    const run = (): EngineerRun => ({
+      runId: "run-deferred", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "github", owner: "o", name: "r", baseBranch: "main", baseCommitSha: "d".repeat(40) },
+      requestOriginal: "change", requestNormalized: "change", state, stateVersion: 10,
+      manifestHash: `sha256:${"a".repeat(64)}`, riskTier: "LOW", humanGateRequired: false,
+      createdAt: "2026-07-14T09:00:00.000Z", updatedAt: "2026-07-14T10:00:00.000Z",
+      terminalAt: state === "COMPLETED" ? "2026-07-14T10:05:00.000Z" : null,
+    });
+    const supervisor = {
+      getRun: () => run(),
+      listOpenDecisions: () => deferredOpen ? [{ decisionId: "decision-b", classification: "DEFER" }, { decisionId: "decision-a", classification: "DEFER" }] : [],
+      getPublicationEvidence: () => ({
+        runId: "run-deferred", reviewerSessionId: "reviewer-1", reviewerDecision: "APPROVE",
+        reviewerDiffHash: sha256(diff), reviewerEvidenceBundleHash: evidenceBundleHash, reviewerIsolationVerified: true,
+        evidenceBundleId: "bundle-1", evidenceBundleHash, resultCommitSha,
+        allRequiredChecksPassed: true, openCriticalSecurityFindings: 0,
+      }),
+      findGitOperation: (_runId: string, key: string) => operations.get(key) ?? null,
+      recordGitOperation: (record: GitOperationRecord) => { operations.set(record.idempotencyKey, record); return record; },
+      recordArtifact: (artifact: unknown) => artifact,
+      transition: (input: { nextState: EngineerRun["state"] }) => { state = input.nextState; return { run: run() }; },
+      getManifest: () => null,
+      listClaimEvidence: () => [],
+    } as unknown as EngineerSupervisor;
+    const manager = new EngineerPublicationManager({
+      supervisor,
+      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
+      diffForRun: () => diff,
+      commandSigningSecret: "phase4-deferred-signing-secret-at-least-32-bytes",
+      autoPublishLowRisk: true,
+      gitService: {
+        async inspectBaseBranch(input) { calls.inspect += 1; return { currentCommitSha: input.expectedBaseCommitSha, matchesExpected: true, protectionEnforced: true }; },
+        async createRunBranch() { calls.createBranch += 1; return { branchName: "zintus/engineer/run-deferred", remoteReference: "refs/heads/zintus/engineer/run-deferred" }; },
+        async pushVerifiedCommit(input) { calls.push += 1; return { remoteReference: `refs/heads/${input.branchName}` }; },
+        async createPullRequest() { calls.createPr += 1; return { id: "pr-1", number: 1, url: "https://github.test/pull/1" }; },
+      },
+    });
+
+    await expect(manager.start("run-deferred", "reviewer-1")).resolves.toEqual({
+      status: "DEFERRED_DECISIONS_PENDING",
+      decisionIds: ["decision-a", "decision-b"],
+    });
+    await expect(manager.resume("run-deferred")).resolves.toEqual({
+      status: "DEFERRED_DECISIONS_PENDING",
+      decisionIds: ["decision-a", "decision-b"],
+    });
+    expect(calls).toEqual({ inspect: 0, createBranch: 0, push: 0, createPr: 0 });
+
+    deferredOpen = false;
+    await expect(manager.start("run-deferred", "reviewer-1")).resolves.toMatchObject({ status: "PUBLISHED" });
+    expect(String(state)).toBe("COMPLETED");
+    expect(calls).toEqual({ inspect: 1, createBranch: 1, push: 1, createPr: 1 });
+
+    await expect(manager.resume("run-deferred")).resolves.toMatchObject({ status: "PUBLISHED" });
+    expect(calls).toEqual({ inspect: 1, createBranch: 1, push: 1, createPr: 1 });
+    rmSync(root, { recursive: true, force: true });
+  });
+
   test("restart reconciles an expired STARTED operation without repeating its remote action", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-phase4-restart-reconcile-"));
     const harness = restartPublicationHarness(root, "SUCCEEDED");

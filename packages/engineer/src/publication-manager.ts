@@ -48,6 +48,7 @@ export interface EngineerPublicationManagerOptions {
 
 export type PublicationStartResult =
   | { status: "AWAITING_APPROVAL"; approval: ApprovalRequestRecord }
+  | { status: "DEFERRED_DECISIONS_PENDING"; decisionIds: string[] }
   | { status: "PUBLISHED"; pullRequest: PullRequestResult }
   | { status: "BASE_STALE"; currentBaseCommitSha: string };
 
@@ -67,6 +68,8 @@ export class EngineerPublicationManager {
     if (!assignedReviewerId.trim()) throw new Error("an authenticated assigned reviewer is required for publication");
     const run = this.options.supervisor.getRun(runId);
     if (run.state !== "REVIEW_APPROVED") throw new Error(`publication requires REVIEW_APPROVED, not ${run.state}`);
+    const deferred = this.deferredDecisionsPending(runId);
+    if (deferred) return deferred;
     if (run.riskTier === "CRITICAL") {
       const policy = operationalFailurePolicy("PUBLICATION");
       this.recordFailure(runId, policy.failureClass, "CRITICAL_RISK_PUBLICATION_BLOCKED", new Error("critical-risk publication denied"), false);
@@ -107,6 +110,8 @@ export class EngineerPublicationManager {
 
   /** Replays an interrupted publication idempotently; successful PR creation is never duplicated. */
   resume(runId: string): Promise<PublicationStartResult> {
+    const deferred = this.deferredDecisionsPending(runId);
+    if (deferred) return Promise.resolve(deferred);
     return this.publish(runId);
   }
 
@@ -231,6 +236,8 @@ export class EngineerPublicationManager {
   }
 
   private async publish(runId: string): Promise<PublicationStartResult> {
+    const deferred = this.deferredDecisionsPending(runId);
+    if (deferred) return deferred;
     if (this.activePublicationRuns.has(runId)) throw new PublicationOperationInProgressError(runId);
     this.activePublicationRuns.add(runId);
     try {
@@ -242,6 +249,8 @@ export class EngineerPublicationManager {
 
   private async publishFenced(runId: string): Promise<PublicationStartResult> {
     const supervisor = this.options.supervisor;
+    const deferred = this.deferredDecisionsPending(runId);
+    if (deferred) return deferred;
     let run = supervisor.getRun(runId);
     const evidence = this.currentEvidence(runId);
     const approval = run.humanGateRequired ? this.requireApprovedBinding(runId, evidence.evidenceBundleHash) : null;
@@ -346,6 +355,15 @@ export class EngineerPublicationManager {
     if (sha256(diff) !== evidence.reviewerDiffHash) throw new Error("current diff no longer matches the isolated Reviewer decision");
     if (!evidence.allRequiredChecksPassed || evidence.openCriticalSecurityFindings > 0) throw new Error("publication evidence gates are not satisfied");
     return evidence;
+  }
+
+  /** Publication never crosses into Git while an end-of-run human choice remains unresolved. */
+  private deferredDecisionsPending(runId: string): Extract<PublicationStartResult, { status: "DEFERRED_DECISIONS_PENDING" }> | null {
+    const decisionIds = this.options.supervisor.listOpenDecisions(runId)
+      .filter((decision) => decision.classification === "DEFER")
+      .map((decision) => decision.decisionId)
+      .sort();
+    return decisionIds.length > 0 ? { status: "DEFERRED_DECISIONS_PENDING", decisionIds } : null;
   }
 
   private requirePendingApproval(runId: string): ApprovalRequestRecord {
