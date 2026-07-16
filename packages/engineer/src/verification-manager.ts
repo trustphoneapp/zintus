@@ -14,7 +14,7 @@ import {
 } from "./contracts.js";
 import { FailureRecordSchema } from "./control-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
-import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, type ResponsesTransport } from "./codex-builder.js";
+import { BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, type ResponsesTransport } from "./codex-builder.js";
 import type { AgentExecutionRecord, ArtifactRecord, SandboxRecord } from "./execution-contracts.js";
 import type { EngineerExecutionManager } from "./execution-manager.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
@@ -1031,6 +1031,21 @@ export class EngineerVerificationManager {
       if (canTransition(run.state, nextState)) {
         this.transition(runId, nextState, error.reasonCode, error.evidenceId ? [error.evidenceId] : []);
       }
+      return;
+    }
+    if (error instanceof BuilderNoProgressError) {
+      const nextState = canTransition(run.state, "VERIFICATION_INCOMPLETE") ? "VERIFICATION_INCOMPLETE" : "FAILED";
+      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: this.id(),
+        runId,
+        failureClass: "DEPENDENCY_FAILURE",
+        reasonCode: "BUILDER_NO_PROGRESS",
+        fingerprint: sha256({ reasonCode: "BUILDER_NO_PROGRESS", command: error.command, state: run.state }),
+        evidenceIds: [...error.commandExecutionIds],
+        retryable: false,
+        createdAt: this.timestamp(),
+      }));
+      if (canTransition(run.state, nextState)) this.transition(runId, nextState, "BUILDER_NO_PROGRESS", [...error.commandExecutionIds]);
       return;
     }
     const preferred = ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "VERIFICATION_RECOVERY", "REVERIFYING"].includes(run.state)

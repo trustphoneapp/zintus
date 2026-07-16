@@ -73,7 +73,7 @@ export async function runEngineerDoctor(options: { env?: NodeJS.ProcessEnv; runn
           add("offline dependencies", false, "dependency-bearing repository requires bundle root and toolchain hash");
         } else {
           try {
-            const bundle = new OfflineDependencyBundle({ root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash });
+            const bundle = new OfflineDependencyBundle({ root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash, expectedRepositoryCommit: base });
             await bundle.verify();
             add("offline dependencies", true, bundle.manifest.contentHash);
           } catch (error) {

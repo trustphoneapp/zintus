@@ -20,6 +20,18 @@ export const MAX_BUILDER_ARGUMENT_BYTES_PER_ROUND = 128 * 1024;
 export const DEFAULT_BUILDER_MODEL_TIMEOUT_MS = 600_000;
 const BUILDER_TOOL_NAMES = new Set(["list_files", "read_file", "write_file", "run_command", "git_diff"]);
 
+export class BuilderNoProgressError extends Error {
+  readonly command: string;
+  readonly commandExecutionIds: readonly string[];
+
+  constructor(command: string, commandExecutionIds: readonly string[]) {
+    super(`Builder repeated the same failed command without a workspace mutation: ${command}`);
+    this.name = "BuilderNoProgressError";
+    this.command = command;
+    this.commandExecutionIds = commandExecutionIds;
+  }
+}
+
 function builderToolFailureFeedback(toolName: string, error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (toolName === "run_command" && /(?:policy|not allowed|prohibited|allowlist|metacharacter|unsupported command)/i.test(message)) {
@@ -297,6 +309,7 @@ export class CodexBuilder {
     let mutations = 0;
     let successfulEvidenceMutation = -1;
     let successfulEvidenceCommand: string | null = null;
+    const failedCommands = new Map<string, { fingerprint: string; mutations: number; commandExecutionId: string }>();
     const evidenceCommands = new Set(this.options.manifest.testPlan.flatMap((item) =>
       item.command?.trim() ? [item.command.trim()] : [],
     ));
@@ -417,6 +430,22 @@ export class CodexBuilder {
             requestedCommands.push(args.command);
             const record = await this.options.executor.executeAsync(args.command, `builder:${call.call_id}`);
             commandExecutionIds.push(record.commandExecutionId);
+            if (record.status === "SUCCEEDED") {
+              failedCommands.delete(args.command);
+            } else {
+              const fingerprint = sha256({
+                command: args.command,
+                status: record.status,
+                exitCode: record.exitCode,
+                stdoutHash: record.stdoutArtifact.sha256,
+                stderrHash: record.stderrArtifact.sha256,
+              });
+              const previous = failedCommands.get(args.command);
+              if (previous && previous.mutations === mutations && previous.fingerprint === fingerprint) {
+                throw new BuilderNoProgressError(args.command, [previous.commandExecutionId, record.commandExecutionId]);
+              }
+              failedCommands.set(args.command, { fingerprint, mutations, commandExecutionId: record.commandExecutionId });
+            }
             if (evidenceCommands.has(args.command)) {
               if (record.status === "SUCCEEDED" && mutations > 0) {
                 successfulEvidenceMutation = mutations;
@@ -441,6 +470,7 @@ export class CodexBuilder {
             throw new Error(`unknown Builder tool: ${call.name}`);
           }
         } catch (error) {
+          if (error instanceof BuilderNoProgressError) throw error;
           isError = true;
           output = builderToolFailureFeedback(call.name, error);
         }

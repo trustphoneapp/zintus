@@ -117,8 +117,8 @@ export async function getEngineerSnapshot(runId: string): Promise<{ status: Engi
 }
 export async function getEngineerBudget(runId: string): Promise<EngineerBudgetSnapshot> { return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget`)).budget; }
 export async function getEngineerDiff(runId: string): Promise<string> { return (await request<{ diff: string }>(`/v1/engineer/runs/${runId}/diff`)).diff; }
-export async function topUpEngineerBudget(runId: string, input: { expectedRevision: number; addCostBudgetUsd: number; addTokenBudget: number; addTimeBudgetSeconds: number }): Promise<EngineerBudgetSnapshot> {
-  const idempotencyKey = `ui:budget-top-up:${runId}:${input.expectedRevision}:${input.addCostBudgetUsd}:${input.addTokenBudget}:${input.addTimeBudgetSeconds}`;
+export async function topUpEngineerBudget(runId: string, input: { operationId: string; expectedRevision: number; addCostBudgetUsd: number; addTokenBudget: number; addTimeBudgetSeconds: number }): Promise<EngineerBudgetSnapshot> {
+  const idempotencyKey = `ui:budget-top-up:${runId}:${input.operationId}`;
   return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget/top-up`, { method: "POST", body: JSON.stringify({ ...input, idempotencyKey }) })).budget;
 }
 export async function resumeEngineerBudget(runId: string, input: { expectedStateVersion: number; expectedBudgetRevision: number }): Promise<EngineerRun> {

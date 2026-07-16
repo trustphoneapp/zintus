@@ -81,4 +81,29 @@ describe("durable Engineer budgets", () => {
       actorId: "owner", idempotencyKey: "cap-bypass",
     })).toThrow("lifetime budget cap");
   });
+
+  test("replays one top-up operation but rejects payload changes under the same key", () => {
+    const sup = supervisor();
+    const run = sup.receiveRequest({
+      runId: "run-idempotent-top-up", userId: "owner", repository, request: "bounded task",
+      budget: { tokenBudget: 100, lifetimeTokenBudget: 1_000 },
+    });
+    const budget = sup.getBudget(run.runId);
+    const first = sup.topUpBudget({
+      runId: run.runId, expectedRevision: budget.revision,
+      topUp: { addCostBudgetUsd: 0, addTokenBudget: 100, addTimeBudgetSeconds: 0 },
+      actorId: "owner", idempotencyKey: "one-logical-click",
+    });
+    const replay = sup.topUpBudget({
+      runId: run.runId, expectedRevision: budget.revision,
+      topUp: { addCostBudgetUsd: 0, addTokenBudget: 100, addTimeBudgetSeconds: 0 },
+      actorId: "owner", idempotencyKey: "one-logical-click",
+    });
+    expect(replay.limits.tokens).toBe(first.limits.tokens);
+    expect(() => sup.topUpBudget({
+      runId: run.runId, expectedRevision: first.revision,
+      topUp: { addCostBudgetUsd: 0, addTokenBudget: 200, addTimeBudgetSeconds: 0 },
+      actorId: "owner", idempotencyKey: "one-logical-click",
+    })).toThrow("reused with different allowance values");
+  });
 });

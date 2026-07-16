@@ -637,9 +637,14 @@ export class EngineerLedger {
 
   topUpBudget(input: { runId: string; expectedRevision: number; topUp: BudgetTopUp; actorId: string; idempotencyKey: string; createdAt: string }): EngineerBudgetSnapshot {
     return this.atomic(() => {
-      const replay = this.db.query("SELECT id FROM budget_events WHERE run_id = ? AND idempotency_key = ?")
-        .get(input.runId, input.idempotencyKey);
-      if (replay) return this.getBudget(input.runId, input.createdAt);
+      const replay = this.db.query("SELECT details_json FROM budget_events WHERE run_id = ? AND idempotency_key = ?")
+        .get(input.runId, input.idempotencyKey) as { details_json: string } | null;
+      if (replay) {
+        if (sha256(JSON.parse(replay.details_json)) !== sha256(input.topUp)) {
+          throw new Error("budget top-up idempotency key was reused with different allowance values");
+        }
+        return this.getBudget(input.runId, input.createdAt);
+      }
       const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(input.runId) as BudgetRow | null;
       if (!row) throw new EngineerNotFoundError("run budget", input.runId);
       if (row.revision !== input.expectedRevision) throw new StateVersionConflictError(input.runId, input.expectedRevision, row.revision);

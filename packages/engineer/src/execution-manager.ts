@@ -6,7 +6,7 @@ import {
 } from "./execution-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import type { CodexBuilderOptions, ResponsesTransport } from "./codex-builder.js";
-import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, isProviderModelTimeout } from "./codex-builder.js";
+import { BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, isProviderModelTimeout } from "./codex-builder.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import { TrustedCommandExecutor } from "./trusted-executor.js";
@@ -546,6 +546,7 @@ export class EngineerExecutionManager {
       }
       const budgetExhausted = error instanceof RuntimeBudgetExhaustedError;
       const builderCallLimitReached = error instanceof BuilderModelCallLimitError;
+      const builderNoProgress = error instanceof BuilderNoProgressError;
       const providerTimedOut = isProviderModelTimeout(error);
       const testIntegrityFailure = error instanceof TestIntegrityViolationError;
       const domain = executionFailureDomain(run.state, error);
@@ -555,6 +556,8 @@ export class EngineerExecutionManager {
         ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }
         : builderCallLimitReached
         ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "BUILDER_MODEL_CALL_LIMIT_REACHED", retryable: false }
+        : builderNoProgress
+        ? { failureClass: "DEPENDENCY_FAILURE" as const, reasonCode: "BUILDER_NO_PROGRESS", retryable: false }
         : providerTimedOut
         ? { failureClass: "MODEL_FAILURE" as const, reasonCode: "MODEL_PROVIDER_TIMEOUT", retryable: true }
         : operationalFailurePolicy(domain);
@@ -567,6 +570,7 @@ export class EngineerExecutionManager {
         evidenceIds: [
           ...(provisioned ? [provisioned.record.sandboxId] : []),
           ...(testIntegrityFailure && error.evidenceId ? [error.evidenceId] : []),
+          ...(builderNoProgress ? [...error.commandExecutionIds] : []),
         ],
         createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
       }));
@@ -609,7 +613,7 @@ export class EngineerExecutionManager {
             ? builderCallLimitReached ? "BUILDER_MODEL_CALL_LIMIT_REACHED" : "RUNTIME_BUDGET_EXHAUSTED"
             : next === "MODEL_PROVIDER_RETRY_PENDING"
             ? "MODEL_PROVIDER_TIMEOUT"
-            : next === "FAILED" ? "CODEX_BUILDER_FAILED" : "SANDBOX_OR_CONTEXT_FAILED",
+            : next === "FAILED" ? builderNoProgress ? "BUILDER_NO_PROGRESS" : "CODEX_BUILDER_FAILED" : "SANDBOX_OR_CONTEXT_FAILED",
           manifestHash: run.manifestHash,
           idempotencyKey: `phase2:failure:${run.stateVersion + 1}`,
         });

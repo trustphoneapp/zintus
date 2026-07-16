@@ -22,4 +22,11 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("setPreview(null)");
     expect(source).toContain("<ArtifactViewer key={run.runId}");
   });
+
+  it("locks a budget top-up synchronously and exposes an applying state", () => {
+    expect(source).toContain("if (!run || !budget || topUpPendingRef.current) return");
+    expect(source).toContain("topUpPendingRef.current = true");
+    expect(source).toContain('"Applying one top-up…"');
+    expect(source).toContain("Allowance added once. New ceiling:");
+  });
 });

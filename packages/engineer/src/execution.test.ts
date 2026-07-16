@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
+  BuilderNoProgressError,
   CodexBuilder,
   DockerSandboxManager,
   EngineerExecutionManager,
@@ -347,6 +348,29 @@ describe("Phase 2 Docker sandbox", () => {
 });
 
 describe("Phase 2 offline dependency bundle", () => {
+  test("requires production bundles to match the exact repository commit", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root, true);
+    const bundleRoot = join(root, "commit-bound-bundle");
+    mkdirSync(join(bundleRoot, "node_modules", "fixture"), { recursive: true });
+    writeFileSync(join(bundleRoot, "node_modules", "fixture", "index.js"), "export {};\n");
+    const lockfileHash = workspaceLockfileHash(repository.path);
+    const toolchainHash = sha256("commit-bound-toolchain");
+    const contentHash = await hashDependencyTree(join(bundleRoot, "node_modules"));
+    writeFileSync(join(bundleRoot, OFFLINE_DEPENDENCY_MANIFEST), JSON.stringify({
+      schemaVersion: 1, lockfileHash, toolchainHash, contentHash, nodeModulesPath: "node_modules",
+    }));
+    expect(() => new OfflineDependencyBundle({
+      root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash, expectedRepositoryCommit: repository.sha,
+    })).toThrow("not bound to a repository commit");
+    writeFileSync(join(bundleRoot, OFFLINE_DEPENDENCY_MANIFEST), JSON.stringify({
+      schemaVersion: 2, lockfileHash, toolchainHash, repositoryCommit: "f".repeat(40), contentHash, nodeModulesPath: "node_modules",
+    }));
+    expect(() => new OfflineDependencyBundle({
+      root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash, expectedRepositoryCommit: repository.sha,
+    })).toThrow("repository commit mismatch");
+  });
+
   test("binds dependency bytes to the exact lockfile and detects later tampering", async () => {
     const root = temporaryRoot();
     const repository = initRepository(root, true);
@@ -405,6 +429,32 @@ describe("Phase 2 offline dependency bundle", () => {
 });
 
 describe("Phase 2 Codex Builder", () => {
+  test("stops repeated identical command failures before exhausting tool rounds", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "no-progress-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-no-progress", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-no-progress", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "no-progress-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 2, stdout: "", stderr: "same dependency failure" }),
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() { calls += 1; return {
+        id: `no-progress-${calls}`,
+        output: [{ type: "function_call", call_id: `no-progress-call-${calls}`, name: "run_command", arguments: JSON.stringify({ command: "bun run test" }) }],
+      }; } },
+    });
+    await expect(builder.run()).rejects.toBeInstanceOf(BuilderNoProgressError);
+    expect(calls).toBe(2);
+    workspaceManager.remove(workspace);
+  });
+
   test("classifies provider timeouts without treating unrelated failures as timeouts", () => {
     const timeout = new Error("Request timed out.");
     timeout.name = "APIConnectionTimeoutError";

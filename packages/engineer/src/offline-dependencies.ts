@@ -6,14 +6,29 @@ import { z } from "zod";
 
 export const OFFLINE_DEPENDENCY_MANIFEST = "zintus-engineer-dependencies.json";
 const HashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+const CommitSchema = z.string().regex(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i);
 
-export const OfflineDependencyManifestSchema = z.object({
+const OfflineDependencyManifestV1Schema = z.object({
   schemaVersion: z.literal(1),
   lockfileHash: HashSchema,
   toolchainHash: HashSchema,
   contentHash: HashSchema,
   nodeModulesPath: z.string().min(1).max(500).default("node_modules"),
 }).strict();
+
+const OfflineDependencyManifestV2Schema = z.object({
+  schemaVersion: z.literal(2),
+  lockfileHash: HashSchema,
+  toolchainHash: HashSchema,
+  repositoryCommit: CommitSchema,
+  contentHash: HashSchema,
+  nodeModulesPath: z.string().min(1).max(500).default("node_modules"),
+}).strict();
+
+export const OfflineDependencyManifestSchema = z.discriminatedUnion("schemaVersion", [
+  OfflineDependencyManifestV1Schema,
+  OfflineDependencyManifestV2Schema,
+]);
 
 export type OfflineDependencyManifest = z.infer<typeof OfflineDependencyManifestSchema>;
 
@@ -59,13 +74,19 @@ export class OfflineDependencyBundle {
   readonly nodeModulesRoot: string;
   readonly manifest: OfflineDependencyManifest;
 
-  constructor(input: { root: string; expectedLockfileHash: string; expectedToolchainHash: string }) {
+  constructor(input: { root: string; expectedLockfileHash: string; expectedToolchainHash: string; expectedRepositoryCommit?: string }) {
     this.root = realpathSync(resolve(input.root));
     this.manifest = OfflineDependencyManifestSchema.parse(JSON.parse(
       readFileSync(join(this.root, OFFLINE_DEPENDENCY_MANIFEST), "utf8"),
     ));
     if (this.manifest.lockfileHash !== input.expectedLockfileHash) throw new Error("offline dependency lockfile hash mismatch");
     if (this.manifest.toolchainHash !== input.expectedToolchainHash) throw new Error("offline dependency toolchain hash mismatch");
+    if (input.expectedRepositoryCommit) {
+      if (this.manifest.schemaVersion !== 2) throw new Error("offline dependency bundle is not bound to a repository commit");
+      if (this.manifest.repositoryCommit.toLowerCase() !== input.expectedRepositoryCommit.toLowerCase()) {
+        throw new Error("offline dependency repository commit mismatch");
+      }
+    }
     const configured = resolve(this.root, this.manifest.nodeModulesPath);
     if (!inside(this.root, configured)) throw new Error("offline dependency path escapes bundle root");
     const stat = lstatSync(configured);

@@ -270,6 +270,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
           root: engineerDependencyBundleRoot,
           expectedLockfileHash: engineerRepositoryLockfileHash,
           expectedToolchainHash: engineerToolchainHash,
+          expectedRepositoryCommit: engineerBaseCommitSha,
         })
       : undefined;
     engineerWarmPool = warmLockfileHash && warmToolchainHash

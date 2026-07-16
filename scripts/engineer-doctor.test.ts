@@ -34,7 +34,7 @@ describe("Phase 2 activation doctor", () => {
     const lockfileHash = workspaceLockfileHash(repositoryRoot);
     const toolchainHash = sha256("toolchain");
     writeFileSync(join(bundleRoot, OFFLINE_DEPENDENCY_MANIFEST), JSON.stringify({
-      schemaVersion: 1, lockfileHash, toolchainHash,
+      schemaVersion: 2, lockfileHash, toolchainHash, repositoryCommit: "a".repeat(40),
       contentHash: await hashDependencyTree(join(bundleRoot, "node_modules")), nodeModulesPath: "node_modules",
     }));
     const base = "a".repeat(40);
