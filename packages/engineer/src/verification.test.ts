@@ -118,9 +118,10 @@ function setupFastChecks(
   testType: "UNIT" | "SECURITY" = "UNIT",
   overrides: Partial<Pick<TaskManifest, "tokenBudget" | "costBudgetUsd" | "timeBudgetSeconds">> = {},
   recordSandbox = true,
+  supervisorOptions: { builderModelCallLimit?: number } = {},
 ) {
   const repo = repository(path);
-  const supervisor = new EngineerSupervisor({ dbPath: join(path, "engineer.db") });
+  const supervisor = new EngineerSupervisor({ dbPath: join(path, "engineer.db"), ...supervisorOptions });
   const manifest = task("run-phase3", repo.sha, testType, overrides);
   const { manifestHash: _hash, ...content } = manifest;
   const received = supervisor.receiveRequest({ runId: manifest.runId, userId: "user-1", repository: manifest.repository, request: manifest.request.original });
@@ -1042,7 +1043,7 @@ describe("Phase 3 authoritative verification manager", () => {
 
   test("honors a Sol Reviewer change request, runs a bounded repair, then fully reverifies in a fresh session", async () => {
     const path = root();
-    const setup = setupFastChecks(path);
+    const setup = setupFastChecks(path, "UNIT", {}, true, { builderModelCallLimit: 2 });
     const digest = `sha256:${"a".repeat(64)}`;
     const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
     const sandboxManager = new DockerSandboxManager({ workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest });
@@ -1102,6 +1103,7 @@ describe("Phase 3 authoritative verification manager", () => {
     const result = await manager.verify(setup.manifest.runId);
     expect(reviewAttempt).toBe(2);
     expect(builderRound).toBe(2);
+    expect(setup.supervisor.modelCallCountForRole(setup.manifest.runId, "BUILDER")).toBe(2);
     expect(result.reviewerSession.attempt).toBe(2);
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
     // Publication evidence must be scoped to the latest complete verification pass;

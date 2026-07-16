@@ -39,3 +39,15 @@ export class BudgetPausedError extends Error {
     this.name = "BudgetPausedError";
   }
 }
+
+export class BuilderModelCallLimitError extends Error {
+  readonly runId: string;
+  readonly limit: number;
+
+  constructor(runId: string, limit: number) {
+    super(`run ${runId} reached the durable Builder model-call limit of ${limit}`);
+    this.name = "BuilderModelCallLimitError";
+    this.runId = runId;
+    this.limit = limit;
+  }
+}

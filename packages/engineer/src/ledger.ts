@@ -1533,6 +1533,26 @@ export class EngineerLedger {
     }
   }
 
+  modelCallCountForRole(runId: string, role: string): number {
+    this.getRun(runId);
+    const recorded = this.db.query(`SELECT COUNT(*) AS count
+      FROM model_calls call
+      JOIN agent_executions agent ON agent.id = call.agent_execution_id
+      WHERE call.run_id = ? AND agent.run_id = call.run_id AND agent.role = ?`)
+      .get(runId, role) as { count: number };
+    const orphanedReservations = this.db.query(`SELECT COUNT(*) AS count
+      FROM cost_records reservation
+      JOIN agent_executions agent ON agent.id = reservation.agent_execution_id
+      WHERE reservation.run_id = ? AND agent.run_id = reservation.run_id AND agent.role = ?
+        AND reservation.source_type = 'MODEL_RESERVATION'
+        AND NOT EXISTS (
+          SELECT 1 FROM model_calls call
+          WHERE call.run_id = reservation.run_id AND call.budget_reservation_id = reservation.id
+        )`)
+      .get(runId, role) as { count: number };
+    return Number(recorded.count) + Number(orphanedReservations.count);
+  }
+
   reserveModelBudget(input: {
     runId: string;
     reservationId: string;
@@ -1554,7 +1574,7 @@ export class EngineerLedger {
         OPENAI_GPT56_PRICING_2026_07_14.version, OPENAI_GPT56_PRICING_2026_07_14.currency, input.createdAt);
   }
 
-  modelRouteForAgent(runId: string, agentExecutionId: string, model: string): { routingDecisionId: string } {
+  modelRouteForAgent(runId: string, agentExecutionId: string, model: string): { routingDecisionId: string; agentRole: string } {
     this.getRun(runId);
     const agent = this.db.query("SELECT role, model_tier FROM agent_executions WHERE id = ? AND run_id = ?")
       .get(agentExecutionId, runId) as { role: string; model_tier: string } | null;
@@ -1564,7 +1584,7 @@ export class EngineerLedger {
       .get(runId, agentExecutionId, agent.role, model) as { id: string; logical_tier: string } | null;
     if (!route) throw new TypeError("model budget reservation does not match a recorded route");
     if (route.logical_tier !== agent.model_tier) throw new TypeError("model budget reservation route does not match its agent tier");
-    return { routingDecisionId: route.id };
+    return { routingDecisionId: route.id, agentRole: agent.role };
   }
 
   modelBudgetReservation(runId: string, reservationId: string): { inputTokens: number; outputTokens: number; estimatedCostUsd: number; agentExecutionId: string; model: string; routingDecisionId: string } {

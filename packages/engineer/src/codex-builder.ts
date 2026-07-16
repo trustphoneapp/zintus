@@ -295,6 +295,11 @@ export class CodexBuilder {
     }];
     let finalText = "";
     let mutations = 0;
+    let successfulEvidenceMutation = -1;
+    let successfulEvidenceCommand: string | null = null;
+    const evidenceCommands = new Set(this.options.manifest.testPlan.flatMap((item) =>
+      item.command?.trim() ? [item.command.trim()] : [],
+    ));
     const maxRounds = Math.min(this.options.maxRounds ?? MAX_BUILDER_TOOL_ROUNDS, MAX_BUILDER_TOOL_ROUNDS);
 
     for (let round = 0; round <= maxRounds; round += 1) {
@@ -412,6 +417,15 @@ export class CodexBuilder {
             requestedCommands.push(args.command);
             const record = await this.options.executor.executeAsync(args.command, `builder:${call.call_id}`);
             commandExecutionIds.push(record.commandExecutionId);
+            if (evidenceCommands.has(args.command)) {
+              if (record.status === "SUCCEEDED" && mutations > 0) {
+                successfulEvidenceMutation = mutations;
+                successfulEvidenceCommand = args.command;
+              } else {
+                successfulEvidenceMutation = -1;
+                successfulEvidenceCommand = null;
+              }
+            }
             output = JSON.stringify({
               commandExecutionId: record.commandExecutionId,
               status: record.status,
@@ -435,6 +449,13 @@ export class CodexBuilder {
           call_id: call.call_id,
           output: JSON.stringify({ ok: !isError, output }),
         });
+      }
+      if (successfulEvidenceMutation === mutations && successfulEvidenceCommand) {
+        const currentChangedFiles = await this.options.workspaceManager.changedFilesAsync(this.options.workspace);
+        if (currentChangedFiles.length > 0) {
+          finalText = `Executor evidence recorded for ${successfulEvidenceCommand} after the latest mutation; independent verification is pending.`;
+          break;
+        }
       }
     }
 

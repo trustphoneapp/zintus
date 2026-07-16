@@ -691,6 +691,52 @@ describe("Engineer Supervisor foundation", () => {
     supervisor.close();
   });
 
+  test("enforces one durable Builder call ceiling across agent executions and reservations", () => {
+    let id = 0;
+    const supervisor = createEngineerSupervisor({
+      dbPath: ":memory:",
+      idFactory: () => `builder-limit-${++id}`,
+      now: () => new Date("2026-07-14T12:00:00.000Z"),
+      builderModelCallLimit: 2,
+    });
+    const run = supervisor.receiveRequest({
+      runId: "run-builder-limit", userId: "user-1", repository, request: "Bound Builder calls",
+    });
+    supervisor.recordAgentExecution({
+      agentExecutionId: "builder-limit-agent", runId: run.runId, role: "BUILDER", modelTier: "GPT-5.6_SOL",
+      status: "RUNNING", inputHash: sha256("builder-limit-input"), outputArtifactId: null,
+      startedAt: "2026-07-14T12:00:00.000Z", completedAt: null,
+    });
+    supervisor.recordModelRouting({
+      routingDecisionId: "builder-limit-route", runId: run.runId, agentExecutionId: "builder-limit-agent",
+      agentRole: "BUILDER", logicalTier: "GPT-5.6_SOL", resolvedModel: "gpt-5.6-sol",
+      routingPolicyVersion: "test-routing-v1", fallbackUsed: false, fallbackReason: null, cacheKey: null,
+      timestamp: "2026-07-14T12:00:00.000Z",
+    });
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const reservationId = supervisor.reserveModelBudget({
+        runId: run.runId, reservationId: `builder-limit-reservation-${attempt}`,
+        agentExecutionId: "builder-limit-agent", model: "gpt-5.6-sol",
+        inputTokenUpperBound: 10, maxOutputTokens: 10,
+      });
+      supervisor.recordModelCall({
+        modelCallId: `builder-limit-call-${attempt}`, runId: run.runId, agentExecutionId: "builder-limit-agent",
+        logicalTier: "GPT-5.6_SOL", resolvedModel: "gpt-5.6-sol", promptTemplateVersion: "test-v1",
+        inputContextRefs: [sha256(`builder-limit-${attempt}`)], outputSchemaVersion: null,
+        cacheKey: sha256("builder-limit-cache"), cacheHit: null, latencyMs: 1, inputTokens: 1, outputTokens: 1,
+        retryCount: 0, status: "SUCCEEDED", createdAt: "2026-07-14T12:00:00.000Z",
+      }, reservationId);
+    }
+    expect(supervisor.modelCallCountForRole(run.runId, "BUILDER")).toBe(2);
+    expect(() => supervisor.reserveModelBudget({
+      runId: run.runId, reservationId: "builder-limit-reservation-3",
+      agentExecutionId: "builder-limit-agent", model: "gpt-5.6-sol",
+      inputTokenUpperBound: 10, maxOutputTokens: 10,
+    })).toThrow("durable Builder model-call limit of 2");
+    expect(supervisor.exportRunRecords(run.runId).cost_records).toHaveLength(2);
+    supervisor.close();
+  });
+
   test("permits failed-agent finalization after the runtime budget has expired", () => {
     let clock = new Date("2026-07-14T12:00:00.000Z");
     const supervisor = createEngineerSupervisor({ dbPath: ":memory:", now: () => clock });

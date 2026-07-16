@@ -357,7 +357,8 @@ export class EngineerRunManager {
         }
       });
     })().catch((error) => {
-      this.persistError(runId, error);
+      if (error instanceof BudgetPausedError) this.clearError(runId);
+      else this.persistError(runId, error);
     });
     this.background.add(job);
     void job.finally(() => this.background.delete(job));

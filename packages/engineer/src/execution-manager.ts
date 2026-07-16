@@ -18,7 +18,7 @@ import type { EngineerWorkerLeaseManager, WorkerLeaseGrant } from "./worker-leas
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import { canTransition } from "./state-machine.js";
 import { TestIntegrityGuard, TestIntegrityViolationError } from "./test-integrity.js";
-import { BudgetPausedError } from "./errors.js";
+import { BudgetPausedError, BuilderModelCallLimitError } from "./errors.js";
 
 const PHASE2_RECOVERABLE_STATES = new Set([
   "SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED",
@@ -545,6 +545,7 @@ export class EngineerExecutionManager {
         throw error;
       }
       const budgetExhausted = error instanceof RuntimeBudgetExhaustedError;
+      const builderCallLimitReached = error instanceof BuilderModelCallLimitError;
       const providerTimedOut = isProviderModelTimeout(error);
       const testIntegrityFailure = error instanceof TestIntegrityViolationError;
       const domain = executionFailureDomain(run.state, error);
@@ -552,6 +553,8 @@ export class EngineerExecutionManager {
         ? { failureClass: "SECURITY_FAILURE" as const, reasonCode: error.reasonCode, retryable: false }
         : budgetExhausted
         ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }
+        : builderCallLimitReached
+        ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "BUILDER_MODEL_CALL_LIMIT_REACHED", retryable: false }
         : providerTimedOut
         ? { failureClass: "MODEL_FAILURE" as const, reasonCode: "MODEL_PROVIDER_TIMEOUT", retryable: true }
         : operationalFailurePolicy(domain);
@@ -586,7 +589,7 @@ export class EngineerExecutionManager {
       ]);
       const next = testIntegrityFailure && canTransition(run.state, "SECURITY_ESCALATION")
         ? "SECURITY_ESCALATION"
-        : budgetExhausted && canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")
+        : (budgetExhausted || builderCallLimitReached) && canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")
         ? "RETRY_BUDGET_EXHAUSTED"
         : providerTimedOut && canTransition(run.state, "MODEL_PROVIDER_RETRY_PENDING")
         ? "MODEL_PROVIDER_RETRY_PENDING"
@@ -603,7 +606,7 @@ export class EngineerExecutionManager {
           reasonCode: testIntegrityFailure
             ? error.reasonCode
             : next === "RETRY_BUDGET_EXHAUSTED"
-            ? "RUNTIME_BUDGET_EXHAUSTED"
+            ? builderCallLimitReached ? "BUILDER_MODEL_CALL_LIMIT_REACHED" : "RUNTIME_BUDGET_EXHAUSTED"
             : next === "MODEL_PROVIDER_RETRY_PENDING"
             ? "MODEL_PROVIDER_TIMEOUT"
             : next === "FAILED" ? "CODEX_BUILDER_FAILED" : "SANDBOX_OR_CONTEXT_FAILED",

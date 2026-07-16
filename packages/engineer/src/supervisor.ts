@@ -46,7 +46,7 @@ import type {
   PublicationEvidence,
   TestExecutionView,
 } from "./control-contracts.js";
-import { BudgetPausedError, IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
+import { BudgetPausedError, BuilderModelCallLimitError, IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
 import { canonicalJson, sha256 } from "./hash.js";
 import {
   EngineerLedger,
@@ -90,7 +90,10 @@ export interface SupervisorOptions {
   dbPath?: string;
   now?: () => Date;
   idFactory?: () => string;
+  builderModelCallLimit?: number;
 }
+
+export const MAX_BUILDER_MODEL_CALLS_PER_RUN = 24;
 
 export interface ReceiveRequestInput {
   runId?: string;
@@ -190,11 +193,16 @@ export class EngineerSupervisor {
   private readonly ledger: EngineerLedger;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
+  private readonly builderModelCallLimit: number;
 
   constructor(options: SupervisorOptions = {}) {
     this.ledger = new EngineerLedger(options.dbPath ?? join(homedir(), ".zintus", "engineer.db"));
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
+    this.builderModelCallLimit = options.builderModelCallLimit ?? MAX_BUILDER_MODEL_CALLS_PER_RUN;
+    if (!Number.isSafeInteger(this.builderModelCallLimit) || this.builderModelCallLimit < 1) {
+      throw new TypeError("Builder model-call limit must be a positive safe integer");
+    }
   }
 
   /**
@@ -847,6 +855,9 @@ export class EngineerSupervisor {
     try {
       this.ledger.atomic(() => {
         const route = this.ledger.modelRouteForAgent(input.runId, input.agentExecutionId, input.model);
+        if (route.agentRole === "BUILDER" && this.ledger.modelCallCountForRole(input.runId, "BUILDER") >= this.builderModelCallLimit) {
+          throw new BuilderModelCallLimitError(input.runId, this.builderModelCallLimit);
+        }
         this.ledger.reserveModelBudget({
           runId: input.runId, reservationId: input.reservationId,
           inputTokens: input.inputTokenUpperBound, outputTokens: input.maxOutputTokens,
@@ -865,6 +876,10 @@ export class EngineerSupervisor {
       throw new BudgetPausedError(input.runId, reason);
     }
     return input.reservationId;
+  }
+
+  modelCallCountForRole(runId: string, role: string): number {
+    return this.ledger.modelCallCountForRole(runId, role);
   }
 
   assertRuntimeBudget(runId: string, overrides: Partial<RunBudgetUsage> = {}): RunBudgetDecision | null {
