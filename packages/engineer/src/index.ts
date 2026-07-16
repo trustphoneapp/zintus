@@ -34,6 +34,7 @@ export * from "./corrected-run.js";
 export * from "./git-service.js";
 export * from "./publication-manager.js";
 export * from "./planning.js";
+export * from "./adversarial-coverage.js";
 export * from "./hardening.js";
 export * from "./observability.js";
 export * from "./database-schema.js";

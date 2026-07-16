@@ -37,6 +37,10 @@ import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import { BudgetPausedError, BuilderModelCallLimitError } from "./errors.js";
 import { TestIntegrityGuard, TestIntegrityViolationError, type TestIntegrityComparison } from "./test-integrity.js";
 import {
+  buildAdversarialCoverageReport,
+  type AdversarialCoverageReport,
+} from "./adversarial-coverage.js";
+import {
   ClaimEvidenceRecordSchema,
   EvidenceBundleRecordSchema,
   ReviewerSessionRecordSchema,
@@ -328,9 +332,29 @@ export class EngineerVerificationManager {
     const testerAgent = this.startAgent(runId, "TESTER", sha256({ manifest: manifest.manifestHash, diff: sha256(diff), evidence: verified.trustedEvidence }));
     advisorAgents.set("TESTER", testerAgent);
     let testAdvisory;
+    let adversarialCoverage: AdversarialCoverageReport;
     try {
       testAdvisory = await advisors.testCoverage(manifest, diff, verified.trustedEvidence);
       this.storeAgentOutput(runId, testerAgent, "TEST_ADVISORY", testAdvisory);
+      adversarialCoverage = buildAdversarialCoverageReport(manifest, testAdvisory);
+      const coverageArtifact = supervisor.recordArtifact(this.options.artifactStore.put({
+        runId,
+        type: "ADVERSARIAL_COVERAGE_REPORT",
+        bytes: JSON.stringify(adversarialCoverage),
+        producerType: "SYSTEM",
+        producerId: "adversarial-coverage-policy",
+        trusted: true,
+      }));
+      verified.trustedEvidence.push(TrustedEvidenceSchema.parse({
+        evidenceId: coverageArtifact.artifactId,
+        runId,
+        eventType: "ADVERSARIAL_COVERAGE_REPORT",
+        producerType: "SYSTEM",
+        producerId: "adversarial-coverage-policy",
+        sha256: coverageArtifact.sha256,
+        payload: adversarialCoverage,
+        createdAt: coverageArtifact.createdAt,
+      }));
     } catch (error) {
       this.failAgent(runId, testerAgent);
       throw error;
@@ -355,8 +379,9 @@ export class EngineerVerificationManager {
         evidenceIds: [securityArtifact.artifactId], status: "OPEN", createdAt: this.timestamp(),
       })),
     );
-    // Model advisories remain auditable artifacts/findings, but never cross the
-    // trust boundary into Reviewer evidence or acceptance-claim certification.
+    // Model security advice remains non-certifying. The adversarial coverage
+    // report above is trusted only as a system-validated risk-floor record; it
+    // can block approval but can never substantiate an acceptance criterion.
     const trustedEvidence = verified.trustedEvidence;
     const preReviewIntegrity = testIntegrity.attest("PRE_REVIEW");
     trustedEvidence.push(this.testIntegrityEvidence(preReviewIntegrity.artifact, preReviewIntegrity.comparison));
@@ -364,7 +389,9 @@ export class EngineerVerificationManager {
       diff,
       requiredChecksPassed: verified.executions.every((execution) => execution.status === "PASSED"),
       retryCount: supervisor.retryAttemptCount(runId),
-      unresolvedWarnings: securityAdvisory.findings.length,
+      unresolvedWarnings: securityAdvisory.findings.length
+        + adversarialCoverage.blockingGapIds.length
+        + adversarialCoverage.warnings.length,
       securityFindings: [
         ...verified.securityFindings,
         ...advisoryFindingRecords,

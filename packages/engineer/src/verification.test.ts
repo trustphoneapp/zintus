@@ -5,6 +5,8 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AdversarialCoverageReportSchema,
+  buildAdversarialCoverageReport,
   buildVerificationCoverageMatrix,
   EngineerSupervisor,
   EngineerPublicationManager,
@@ -19,6 +21,7 @@ import {
   ReviewerInputSchema,
   SandboxWorkspaceCheckpointSchema,
   TaskManifestSchema,
+  TestAdvisorySchema,
   TestIntegrityGuard,
   TrustedCommandExecutor,
   TrustedEvidenceSchema,
@@ -398,6 +401,25 @@ describe("Phase 3 isolated Reviewer", () => {
     expect(reviewerFindingRecordId({ reviewerSessionId: "review-2", providerFindingId: "F-1" })).not.toBe(first);
   });
 
+  test("synthesizes a bounded blocking gap when Terra marks a MUST criterion uncovered", () => {
+    const manifest = task("run-synthetic-gap", "1".repeat(40));
+    const report = buildAdversarialCoverageReport(manifest, TestAdvisorySchema.parse({
+      uncoveredCriterionIds: ["criterion-1"], warnings: ["Evidence is too broad."], adversarialGaps: [],
+    }));
+    expect(report.blockingGapIds).toHaveLength(1);
+    expect(report.gaps[0]).toMatchObject({
+      criterionIds: ["criterion-1"], criterionPriorities: ["MUST"], blocking: true,
+    });
+    expect(() => AdversarialCoverageReportSchema.parse({
+      ...report, warnings: [...report.warnings, "tampered after hashing"],
+    })).toThrow("adversarial coverage report hash mismatch");
+    const sanitized = buildAdversarialCoverageReport(manifest, TestAdvisorySchema.parse({
+      uncoveredCriterionIds: ["unknown-criterion"], warnings: [], adversarialGaps: [],
+    }));
+    expect(sanitized.uncoveredCriterionIds).toEqual([]);
+    expect(sanitized.warnings).toContain("Ignored ungrounded uncovered criterion unknown-criterion.");
+  });
+
   test("never receives Builder narrative and rejects tampered diff or evidence", async () => {
     const sentinel = "BUILDER-SECRET-SENTINEL-7f3d";
     const manifest = task("run-review", "1".repeat(40));
@@ -508,6 +530,81 @@ describe("Phase 3 isolated Reviewer", () => {
     await expect(new IsolatedReviewer({ transport: emptyChangeTransport }).review(input, 4))
       .rejects.toThrow("REQUEST_CHANGES requires at least one structured finding");
   });
+
+  test("cannot approve a MUST-level adversarial gap and requires an evidence-bound repair finding", async () => {
+    const manifest = task("run-adversarial-review", "1".repeat(40));
+    const executorEvidence = TrustedEvidenceSchema.parse({
+      evidenceId: "executor-evidence", runId: manifest.runId, eventType: "INDEPENDENT_VERIFICATION",
+      producerType: "EXECUTOR", producerId: "sandbox-1", sha256: sha256({ passed: true }),
+      payload: { status: "SUCCEEDED", criterionIds: ["criterion-1"] }, createdAt: "2026-07-14T12:00:00.000Z",
+    });
+    const advisory = TestAdvisorySchema.parse({
+      uncoveredCriterionIds: ["criterion-1"], warnings: ["Cancellation may release capacity before execution settles."],
+      adversarialGaps: [{
+        gapId: "cancelled-executor-still-running", criterionIds: ["criterion-1"],
+        invariant: "Actual executing tasks never exceed maxConcurrency.",
+        counterexample: "With maxConcurrency=1, cancel task A while its executor ignores abort and remains pending, then queue task B.",
+        expectedObservation: "Task B must not start and observed peak concurrency must remain one until task A settles.",
+        recommendedTest: "Hold task A behind a deferred promise, cancel it, assert B remains queued, then settle A and assert B starts with peak one.",
+      }],
+    });
+    const report = buildAdversarialCoverageReport(manifest, advisory);
+    expect(report.blockingGapIds).toEqual(["cancelled-executor-still-running"]);
+    const gapEvidence = TrustedEvidenceSchema.parse({
+      evidenceId: "adversarial-report", runId: manifest.runId, eventType: "ADVERSARIAL_COVERAGE_REPORT",
+      producerType: "SYSTEM", producerId: "adversarial-coverage-policy", sha256: sha256(report),
+      payload: report, createdAt: "2026-07-14T12:00:00.000Z",
+    });
+    const diff = "diff --git a/src/scheduler.ts b/src/scheduler.ts\n+export class DagScheduler {}\n";
+    const base = {
+      reviewSessionId: "adversarial-review", runId: manifest.runId, reviewAttempt: 1, manifest,
+      manifestHash: manifest.manifestHash, finalDiff: diff, diffHash: sha256(diff),
+      trustedEvidence: [executorEvidence, gapEvidence], resultCommitSha: "2".repeat(40),
+      reviewPolicyVersion: REVIEWER_POLICY_VERSION, createdAt: "2026-07-14T12:00:00.000Z",
+    };
+    const input = ReviewerInputSchema.parse({ ...base, evidenceBundleHash: reviewerEvidenceBundleHash(base) });
+    let offeredDecisions: unknown;
+    const transport: ResponsesTransport = {
+      async create(request) {
+        const tools = request.tools as Array<{ parameters: { properties: { decision: { enum: string[] } } } }>;
+        offeredDecisions = tools[0]?.parameters.properties.decision.enum;
+        return { id: "adversarial-review-response", output: [{
+          type: "function_call", call_id: "adversarial-review-call", name: "submit_review",
+          arguments: JSON.stringify({
+            decision: "REQUEST_CHANGES",
+            requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: [executorEvidence.evidenceId], explanation: "The declared test passed but misses the counterexample." }],
+            findings: [{
+              findingId: "cancelled-executor-still-running", severity: "HIGH", category: "ADVERSARIAL_COVERAGE_GAP",
+              file: "src/scheduler.ts", lineStart: 0, lineEnd: 0, criterionIds: ["criterion-1"],
+              description: advisory.adversarialGaps[0]!.counterexample,
+              requiredChange: `Add the recommended regression test and repair slot accounting: ${advisory.adversarialGaps[0]!.recommendedTest}`,
+              evidenceIds: [gapEvidence.evidenceId],
+            }],
+            unsupportedClaims: [], residualRisks: [], reviewedDiffHash: input.diffHash,
+            reviewedEvidenceBundleHash: input.evidenceBundleHash, reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+          }),
+        }] };
+      },
+    };
+    const result = await new IsolatedReviewer({ transport }).review(input, 1);
+    expect(offeredDecisions).toEqual(["REQUEST_CHANGES"]);
+    expect(result.session.decision).toBe("REQUEST_CHANGES");
+    expect(result.findings[0]?.findingId).toBeTruthy();
+
+    const invalidApproval: ResponsesTransport = { async create() {
+      return { id: "invalid-adversarial-approval", output: [{
+        type: "function_call", call_id: "invalid-adversarial-call", name: "submit_review",
+        arguments: JSON.stringify({
+          decision: "APPROVE",
+          requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: [executorEvidence.evidenceId], explanation: "Declared test passed." }],
+          findings: [], unsupportedClaims: [], residualRisks: [], reviewedDiffHash: input.diffHash,
+          reviewedEvidenceBundleHash: input.evidenceBundleHash, reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+        }),
+      }] };
+    } };
+    await expect(new IsolatedReviewer({ transport: invalidApproval }).review(input, 2))
+      .rejects.toThrow("blocking adversarial coverage gaps require Reviewer changes");
+  });
 });
 
 describe("Phase 3 authoritative verification manager", () => {
@@ -604,7 +701,7 @@ describe("Phase 3 authoritative verification manager", () => {
         async create(request) {
           if (role === "TESTER") return { id: "mutation-tester", output: [{
             type: "function_call", call_id: "mutation-tester-call", name: "submit_test_advisory",
-            arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+            arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [], adversarialGaps: [] }),
           }] };
           if (role === "SECURITY") return { id: "mutation-security", output: [{
             type: "function_call", call_id: "mutation-security-call", name: "submit_security_advisory",
@@ -691,7 +788,7 @@ describe("Phase 3 authoritative verification manager", () => {
       async create(request) {
         if (role === "TESTER") return { id: "recovery-tester", output: [{
           type: "function_call", call_id: "recovery-tester-call", name: "submit_test_advisory",
-          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [], adversarialGaps: [] }),
         }] };
         if (role === "SECURITY") return { id: "recovery-security", output: [{
           type: "function_call", call_id: "recovery-security-call", name: "submit_security_advisory",
@@ -790,7 +887,7 @@ describe("Phase 3 authoritative verification manager", () => {
         if (role === "TESTER") {
           return { id: "tester-response", output: [{
             type: "function_call", call_id: "tester-call", name: "submit_test_advisory",
-            arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+            arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [], adversarialGaps: [] }),
           }] };
         }
         if (role === "SECURITY") {
@@ -938,7 +1035,7 @@ describe("Phase 3 authoritative verification manager", () => {
         }
         if (role === "TESTER") return { id: "tester-after-repair", output: [{
           type: "function_call", call_id: "tester-after-repair-call", name: "submit_test_advisory",
-          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [], adversarialGaps: [] }),
         }] };
         if (role === "SECURITY") return { id: "security-after-repair", output: [{
           type: "function_call", call_id: "security-after-repair-call", name: "submit_security_advisory",
@@ -1069,7 +1166,7 @@ describe("Phase 3 authoritative verification manager", () => {
       async create(request) {
         if (role === "TESTER") return { id: `tester-${reviewerAttempt}`, output: [{
           type: "function_call", call_id: "tester", name: "submit_test_advisory",
-          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [], adversarialGaps: [] }),
         }], usage: { input_tokens: 100, output_tokens: 100 } };
         if (role === "SECURITY") return { id: `security-${reviewerAttempt}`, output: [{
           type: "function_call", call_id: "security", name: "submit_security_advisory",
@@ -1161,13 +1258,28 @@ describe("Phase 3 authoritative verification manager", () => {
       async create(request) {
         if (role === "TESTER") return { id: `tester-${reviewAttempt}`, output: [{
           type: "function_call", call_id: "tester", name: "submit_test_advisory",
-          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+          arguments: JSON.stringify(reviewAttempt === 0 ? {
+            uncoveredCriterionIds: ["criterion-1"],
+            warnings: ["Cancellation may free capacity while the executor is still running."],
+            adversarialGaps: [{
+              gapId: "cancelled-executor-still-running", criterionIds: ["criterion-1"],
+              invariant: "Actual execution never exceeds maxConcurrency.",
+              counterexample: "Cancel a running task whose executor ignores abort, then queue another task with maxConcurrency one.",
+              expectedObservation: "The replacement stays queued until the cancelled executor settles and peak concurrency remains one.",
+              recommendedTest: "Add a deferred executor regression test that observes active and peak execution around cancellation.",
+            }],
+          } : { uncoveredCriterionIds: [], warnings: [], adversarialGaps: [] }),
         }] };
         if (role === "SECURITY") return { id: `security-${reviewAttempt}`, output: [{
           type: "function_call", call_id: "security", name: "submit_security_advisory", arguments: JSON.stringify({ findings: [] }),
         }] };
         if (role === "BUILDER") {
           builderRound += 1;
+          if (builderRound === 1) {
+            const serialized = JSON.stringify(request);
+            expect(serialized).toContain("cancelled-executor-still-running");
+            expect(serialized).toContain("retain capacity until executor settlement");
+          }
           if (builderRound === 1) return { id: "repair-1", output: [{
             type: "function_call", call_id: "repair-write", name: "write_file",
             arguments: JSON.stringify({ path: "src/value.ts", content: "// reviewer-requested regression note\nexport const value = 2;\n" }),
@@ -1180,6 +1292,7 @@ describe("Phase 3 authoritative verification manager", () => {
           diffHash: string; evidenceBundleHash: string; trustedEvidence: Array<{ evidenceId: string; eventType: string }>;
         };
         const evidenceId = input.trustedEvidence.find((item) => item.eventType === "INDEPENDENT_VERIFICATION")!.evidenceId;
+        const adversarialEvidenceId = input.trustedEvidence.find((item) => item.eventType === "ADVERSARIAL_COVERAGE_REPORT")!.evidenceId;
         const requestChanges = reviewAttempt === 1;
         return { id: `review-${reviewAttempt}`, output: [{
           type: "function_call", call_id: `review-call-${reviewAttempt}`, name: "submit_review",
@@ -1187,9 +1300,11 @@ describe("Phase 3 authoritative verification manager", () => {
             decision: requestChanges ? "REQUEST_CHANGES" : "APPROVE",
             requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: [evidenceId], explanation: "Independent test passed." }],
             findings: requestChanges ? [{
-              findingId: "finding-1", severity: "MEDIUM", category: "REGRESSION_COVERAGE",
+              findingId: "cancelled-executor-still-running", severity: "HIGH", category: "ADVERSARIAL_COVERAGE_GAP",
               file: "src/value.ts", lineStart: 1, lineEnd: 1, criterionIds: ["criterion-1"],
-              description: "The change needs an explicit regression note.", requiredChange: "Add the scoped regression note.", evidenceIds: [evidenceId],
+              description: "A cancelled executor that ignores abort can still consume a real concurrency slot.",
+              requiredChange: "Add the deferred cancellation regression test and retain capacity until executor settlement.",
+              evidenceIds: [adversarialEvidenceId],
             }] : [],
             unsupportedClaims: [], residualRisks: [], reviewedDiffHash: input.diffHash,
             reviewedEvidenceBundleHash: input.evidenceBundleHash, reviewPolicyVersion: REVIEWER_POLICY_VERSION,

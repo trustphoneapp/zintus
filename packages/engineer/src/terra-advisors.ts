@@ -4,11 +4,21 @@ import { countResponseInputTokens, type ResponsesTransport } from "./codex-build
 import { providerPromptCacheKey, sha256 } from "./hash.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 
-export const TERRA_ADVISOR_POLICY_VERSION = "engineer-terra-advisors-v1";
+export const TERRA_ADVISOR_POLICY_VERSION = "engineer-terra-advisors-v2";
+
+export const AdversarialTestGapSchema = z.object({
+  gapId: z.string().min(1).max(200),
+  criterionIds: z.array(z.string().min(1).max(200)).min(1).max(20),
+  invariant: z.string().min(1).max(500),
+  counterexample: z.string().min(1).max(1_000),
+  expectedObservation: z.string().min(1).max(500),
+  recommendedTest: z.string().min(1).max(1_000),
+}).strict();
 
 export const TestAdvisorySchema = z.object({
-  uncoveredCriterionIds: z.array(z.string().min(1).max(200)),
-  warnings: z.array(z.string().min(1).max(10_000)),
+  uncoveredCriterionIds: z.array(z.string().min(1).max(200)).max(20),
+  warnings: z.array(z.string().min(1).max(10_000)).max(20),
+  adversarialGaps: z.array(AdversarialTestGapSchema).max(4),
 }).strict();
 
 export const SecurityAdvisorySchema = z.object({
@@ -33,10 +43,25 @@ const FunctionCallSchema = z.object({
 }).passthrough();
 
 const TEST_SCHEMA = {
-  type: "object", additionalProperties: false, required: ["uncoveredCriterionIds", "warnings"],
+  type: "object", additionalProperties: false, required: ["uncoveredCriterionIds", "warnings", "adversarialGaps"],
   properties: {
-    uncoveredCriterionIds: { type: "array", items: { type: "string" } },
-    warnings: { type: "array", items: { type: "string" } },
+    uncoveredCriterionIds: { type: "array", maxItems: 20, items: { type: "string", maxLength: 200 } },
+    warnings: { type: "array", maxItems: 20, items: { type: "string", maxLength: 10_000 } },
+    adversarialGaps: {
+      type: "array", maxItems: 4,
+      items: {
+        type: "object", additionalProperties: false,
+        required: ["gapId", "criterionIds", "invariant", "counterexample", "expectedObservation", "recommendedTest"],
+        properties: {
+          gapId: { type: "string", maxLength: 200 },
+          criterionIds: { type: "array", minItems: 1, maxItems: 20, items: { type: "string", maxLength: 200 } },
+          invariant: { type: "string", maxLength: 500 },
+          counterexample: { type: "string", maxLength: 1_000 },
+          expectedObservation: { type: "string", maxLength: 500 },
+          recommendedTest: { type: "string", maxLength: 1_000 },
+        },
+      },
+    },
   },
 } as const;
 
@@ -102,7 +127,13 @@ export class TerraAdvisors {
       manifest,
       diff,
       trustedVerificationEvidence: evidence.filter((item) => item.eventType === "INDEPENDENT_VERIFICATION"),
-    }, "Identify uncovered acceptance criteria and missing adversarial verification. Do not decide workflow state.");
+    }, [
+      "Identify uncovered acceptance criteria and missing adversarial verification.",
+      "Return a bounded adversarialGaps entry for every concrete behavioral risk that the supplied executor evidence does not distinguish.",
+      "Each gap must state an invariant, a minimal counterexample, the expected observable result, and a regression test recommendation.",
+      "Pay special attention to cooperative cancellation, executors that ignore abort signals, late settlement, timeouts, concurrency-slot accounting, dependency failure propagation, boundary values, and races when those concepts appear in the contract or diff.",
+      "Do not invent criterion IDs, propose scope outside the frozen manifest, include executable code, or decide workflow state.",
+    ].join(" "));
   }
 
   security(manifest: TaskManifest, diff: string): Promise<SecurityAdvisory> {

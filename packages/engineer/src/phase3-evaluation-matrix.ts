@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { sha256 } from "./hash.js";
 
-export const PHASE3_EVALUATION_POLICY_VERSION = "engineer-phase3-evaluation-v1";
+export const PHASE3_EVALUATION_POLICY_VERSION = "engineer-phase3-evaluation-v2";
 
 const ScenarioSchema = z.object({
   scenarioId: z.string().regex(/^[a-z0-9_]+$/),
@@ -37,13 +37,14 @@ const scenarios = [
   { scenarioId: "blocking_deterministic_finding", category: "SECURITY", expectedOutcome: "HIGH deterministic findings block model review.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "blocks HIGH deterministic findings before model review" },
   { scenarioId: "stable_required_repair", category: "REPAIR", expectedOutcome: "A stable required failure gets one bounded repair and full reverification.", authority: "EXECUTOR", testFile: "verification.test.ts", testName: "repairs a stable failed MUST check within budget and fully reverifies from FAST_CHECKS" },
   { scenarioId: "identical_patch_stop", category: "REPAIR", expectedOutcome: "A no-progress repair exhausts the loop deterministically.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "stops a stable required-test repair loop when the Builder makes an identical patch" },
-  { scenarioId: "reviewer_change_repair", category: "REPAIR", expectedOutcome: "Structured review changes trigger bounded repair and a fresh review.", authority: "REVIEWER", testFile: "verification.test.ts", testName: "honors a Sol Reviewer change request, runs a bounded repair, then fully reverifies in a fresh session" },
+  { scenarioId: "adversarial_gap_approval_block", category: "COVERAGE", expectedOutcome: "A manifest-grounded MUST adversarial gap makes approval structurally unavailable until repaired.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "cannot approve a MUST-level adversarial gap and requires an evidence-bound repair finding" },
+  { scenarioId: "reviewer_change_repair", category: "REPAIR", expectedOutcome: "A concurrency counterexample triggers bounded repair and a fresh full verification/review pass.", authority: "REVIEWER", testFile: "verification.test.ts", testName: "honors a Sol Reviewer change request, runs a bounded repair, then fully reverifies in a fresh session" },
   { scenarioId: "hash_tampering", category: "ISOLATION", expectedOutcome: "Diff or evidence mutation invalidates Reviewer input.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "never receives Builder narrative and rejects tampered diff or evidence" },
   { scenarioId: "workspace_mutation_during_review", category: "ISOLATION", expectedOutcome: "Concurrent workspace mutation makes the Reviewer decision stale.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "rejects a Reviewer decision when the workspace changes during review" },
   { scenarioId: "interrupted_verification_recovery", category: "RECOVERY", expectedOutcome: "Retained state is validated and verification restarts from FAST_CHECKS.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "reconstructs a retained sandbox and restarts interrupted verification from FAST_CHECKS" },
   { scenarioId: "runtime_budget_stop", category: "BUDGET", expectedOutcome: "Admission failure pauses before provider dispatch.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "pauses safely before dispatch when model admission exceeds the runtime budget" },
   { scenarioId: "luna_advisory_only", category: "ROUTING", expectedOutcome: "LUNA summarizes deterministic failure without changing authority.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "uses LUNA only for non-authoritative triage after deterministic failure classification" },
-  { scenarioId: "terra_advisory_only", category: "ROUTING", expectedOutcome: "TERRA output stays outside trusted acceptance evidence.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "uses Terra advisories and a fresh Sol review to produce a hash-bound evidence bundle" },
+  { scenarioId: "terra_advisory_risk_floor", category: "ROUTING", expectedOutcome: "Raw TERRA output cannot certify acceptance; only a manifest-grounded system report may raise the review floor.", authority: "SYSTEM", testFile: "verification.test.ts", testName: "uses Terra advisories and a fresh Sol review to produce a hash-bound evidence bundle" },
 ] as const;
 
 const content = { policyVersion: PHASE3_EVALUATION_POLICY_VERSION, scenarios } as const;
