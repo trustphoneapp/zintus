@@ -249,6 +249,72 @@ describe("Phase 5 structured planning", () => {
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
+  test("canonicalizes an unambiguous local test launcher without a paid planner retry", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-command-repair-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const run = supervisor.receiveRequest({
+      runId: "command-repair-run", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Create src/scheduler.ts and test/scheduler.test.ts.",
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    seedContext(supervisor, artifactStore, run);
+    const output = plannerOutput(["bunx vitest run test/scheduler.test.ts"]);
+    output.allowedPaths = ["src/scheduler.ts", "test/scheduler.test.ts"];
+    output.touchedFileEstimates = [
+      { path: "src/scheduler.ts", expectedChange: "Implement the scheduler.", confidence: 0.9 },
+      { path: "test/scheduler.test.ts", expectedChange: "Add scheduler tests.", confidence: 0.9 },
+    ];
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "repair-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{
+          type: "function_call", name: "submit_plan", call_id: "repair-call", arguments: JSON.stringify(output),
+        }] };
+      } }),
+    });
+
+    const proposal = await manager.plan(run.runId);
+    expect(proposal.manifest.allowedCommands).toEqual(["bun test test/scheduler.test.ts"]);
+    expect(proposal.manifest.testPlan[0]?.command).toBe("bun test test/scheduler.test.ts");
+    expect(supervisor.listFailures(run.runId)).toEqual([]);
+    expect(supervisor.exportRunRecords(run.runId).model_calls).toHaveLength(1);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("does not repair an ambiguous package-executor command", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-command-ambiguous-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const run = supervisor.receiveRequest({
+      runId: "command-ambiguous-run", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Add two independent test surfaces.",
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    seedContext(supervisor, artifactStore, run);
+    const output = plannerOutput(["bunx vitest run"]);
+    output.allowedPaths = ["test/first.test.ts", "test/second.test.ts"];
+    output.touchedFileEstimates = [
+      { path: "test/first.test.ts", expectedChange: "Add the first test.", confidence: 0.9 },
+      { path: "test/second.test.ts", expectedChange: "Add the second test.", confidence: 0.9 },
+    ];
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "ambiguous-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{
+          type: "function_call", name: "submit_plan", call_id: "ambiguous-call", arguments: JSON.stringify(output),
+        }] };
+      } }),
+    });
+
+    await expect(manager.plan(run.runId)).rejects.toThrow("executable/subcommand is blocked by engineer-command-v1");
+    expect(supervisor.latestPlanProposal(run.runId)).toBeNull();
+    expect(supervisor.listFailures(run.runId)).toMatchObject([{
+      reasonCode: "PLANNER_COMMAND_POLICY_VIOLATION", retryable: true,
+    }]);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("rejects a high-risk plan without an executable security gate before plan persistence", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-security-gate-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
