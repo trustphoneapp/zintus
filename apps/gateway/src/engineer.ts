@@ -24,6 +24,7 @@ import {
   canTransition,
   EngineerPlanningCancelledError,
   EngineerPlanningTimeoutError,
+  BudgetPausedError,
   FailureRecordSchema,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
@@ -173,6 +174,14 @@ export class EngineerRunManager {
     this.assertOwner(runId, principal);
     const result = this.options.supervisor.resumeBudget({ runId, ...input, actorId: principal.ownerId });
     this.clearError(runId);
+    if (result.run.state === "PLANNING" && this.options.planning) {
+      const job = (async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        await this.plan(principal, runId);
+      })().catch(() => { /* plan() persists actionable failures; safe budget pauses are already durable */ });
+      this.background.add(job);
+      void job.finally(() => this.background.delete(job));
+    }
     return result.run;
   }
 
@@ -235,6 +244,10 @@ export class EngineerRunManager {
       if (cancellation.signal.aborted || error instanceof EngineerPlanningCancelledError) {
         this.clearError(runId);
         throw error instanceof EngineerPlanningCancelledError ? error : new EngineerPlanningCancelledError();
+      }
+      if (error instanceof BudgetPausedError) {
+        this.clearError(runId);
+        throw error;
       }
       const message = this.persistError(runId, error);
       const failures = this.options.supervisor.listFailures(runId);
@@ -758,8 +771,12 @@ export class EngineerRunManager {
           plan = await this.options.planning.plan(runId);
           this.clearError(runId);
         } catch (error) {
-          planningError = redactSecrets(error instanceof Error ? error.message : String(error));
-          this.options.supervisor.setLastError(runId, planningError);
+          if (error instanceof BudgetPausedError) {
+            this.clearError(runId);
+          } else {
+            planningError = redactSecrets(error instanceof Error ? error.message : String(error));
+            this.options.supervisor.setLastError(runId, planningError);
+          }
         }
       }
     }

@@ -13,6 +13,8 @@ import {
   GitWorkspaceManager,
   LocalArtifactStore,
   OpenAIResponsesTransport,
+  countResponseInputTokens,
+  estimateResponseInputTokens,
   isProviderModelTimeout,
   modelRetryBackoffMs,
   OfflineDependencyBundle,
@@ -417,6 +419,30 @@ describe("Phase 2 Codex Builder", () => {
     expect(modelRetryBackoffMs(5, () => 0.999999)).toBe(3_999);
     expect(modelRetryBackoffMs(20, () => 0.999999)).toBe(3_999);
     expect(() => modelRetryBackoffMs(0)).toThrow("positive integer");
+  });
+
+  test("counts the exact provider input instead of treating UTF-8 bytes as tokens", async () => {
+    const request = { model: "gpt-5.6-sol", instructions: "Plan safely", input: "a".repeat(120_000), max_output_tokens: 8_000 };
+    const localEstimate = estimateResponseInputTokens(request);
+    expect(localEstimate).toBe(Buffer.byteLength(JSON.stringify({ model: request.model, instructions: request.instructions, input: request.input })));
+    const fallback = await countResponseInputTokens({ async create() { return { id: "unused", output: [] }; } }, request);
+    expect(fallback).toBe(localEstimate);
+
+    const countBodies: Array<Record<string, unknown>> = [];
+    const transport = new OpenAIResponsesTransport({
+      apiKey: "sk-test-never-in-prompt",
+      fetch: (async (url, init) => {
+        if (String(url).endsWith("/responses/input_tokens")) {
+          countBodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+          return new Response(JSON.stringify({ object: "response.input_tokens", input_tokens: 31_337 }), {
+            status: 200, headers: { "Content-Type": "application/json" },
+          });
+        }
+        throw new Error("unexpected endpoint");
+      }) as typeof fetch,
+    });
+    expect(await countResponseInputTokens(transport, request)).toBe(31_337);
+    expect(countBodies).toEqual([{ model: request.model, instructions: request.instructions, input: request.input }]);
   });
 
   test("keeps the OpenAI credential in the transport header and requests no provider storage", async () => {

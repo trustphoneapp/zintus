@@ -117,6 +117,52 @@ describe("Engineer trusted identity and admission", () => {
     reopened.close(); rmSync(root, { recursive: true, force: true });
   });
 
+  test("automatically restarts planning after a budget pause resumes to PLANNING", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-budget-resume-plan-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    let run = supervisor.receiveRequest({
+      runId: "resume-plan", userId: principal.ownerId, repository, request: "Resume the exact planning checkpoint",
+      budget: { tokenBudget: 0, lifetimeTokenBudget: 1_000 },
+    });
+    run = supervisor.transition({
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "REQUEST_NORMALIZED",
+      reasonCode: "REQUEST_NORMALIZED", idempotencyKey: "resume-plan-normalized",
+    }).run;
+    run = supervisor.transition({
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING",
+      reasonCode: "PLANNING_STARTED", idempotencyKey: "resume-plan-started",
+    }).run;
+    supervisor.reconcileBudget(run.runId);
+    const paused = supervisor.getRun(run.runId);
+    const pausedBudget = supervisor.getBudget(run.runId);
+    expect(paused).toMatchObject({ state: "PAUSED_BUDGET" });
+    expect(pausedBudget).toMatchObject({ resumeState: "PLANNING" });
+    const topped = supervisor.topUpBudget({
+      runId: run.runId, expectedRevision: pausedBudget.revision,
+      topUp: { addTokenBudget: 100, addCostBudgetUsd: 0, addTimeBudgetSeconds: 0 },
+      actorId: principal.ownerId, idempotencyKey: "resume-plan-top-up",
+    });
+    let signalPlanning!: () => void;
+    const planningStarted = new Promise<void>((resolve) => { signalPlanning = resolve; });
+    let planningCalls = 0;
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => ({}) } as never,
+      planning: { plan: async () => { planningCalls += 1; signalPlanning(); return null; } } as never,
+    });
+    const resumed = manager.resumeBudget(principal, run.runId, {
+      expectedStateVersion: paused.stateVersion, expectedBudgetRevision: topped.revision,
+      idempotencyKey: "resume-plan-budget",
+    });
+    expect(resumed.state).toBe("PLANNING");
+    await planningStarted;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(planningCalls).toBe(1);
+    expect(supervisor.listFailures(run.runId)).toEqual([]);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("terminates a timed-out planning attempt with an exact durable event", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-planning-timeout-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });

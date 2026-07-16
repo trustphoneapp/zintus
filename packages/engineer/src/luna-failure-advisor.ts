@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { FailureRecord } from "./control-contracts.js";
-import type { ResponsesTransport } from "./codex-builder.js";
+import { countResponseInputTokens, type ResponsesTransport } from "./codex-builder.js";
 import { providerPromptCacheKey, sha256 } from "./hash.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 
@@ -92,9 +92,10 @@ export class LunaFailureAdvisor {
       safety_identifier: this.options.safetyIdentifier ?? sha256(input.runId),
       metadata: { run_id: input.runId, role: "failure_classifier", policy_version: LUNA_FAILURE_ADVISOR_POLICY_VERSION },
     };
+    const inputTokenCount = await countResponseInputTokens(this.options.transport, request);
     const reservationId = this.options.reserveModelCall?.({
       model: route.model,
-      inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
+      inputTokenUpperBound: inputTokenCount,
       maxOutputTokens,
     });
     const started = Date.now();

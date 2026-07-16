@@ -356,6 +356,7 @@ describe("Phase 5 structured planning", () => {
     const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
     seedContext(supervisor, artifactStore, run);
     let calls = 0;
+    let countCalls = 0;
     let secondInput = "";
     let thirdInput = "";
     const question = {
@@ -374,12 +375,15 @@ describe("Phase 5 structured planning", () => {
     };
     const manager = new EngineerPlanningManager({
       supervisor, artifactStore,
-      transportForRun: () => ({ async create(request) {
+      transportForRun: () => ({
+        async countInputTokens() { countCalls += 1; return 1_000; },
+        async create(request) {
         calls += 1;
         if (calls === 2) secondInput = JSON.stringify(request.input);
         if (calls === 3) thirdInput = JSON.stringify(request.input);
         return { id: `response-${calls}`, usage: { input_tokens: 100, output_tokens: 100 }, output: [{ type: "function_call", name: "submit_plan", call_id: `call-${calls}`, arguments: JSON.stringify(plannerOutput(["bun test auth"], calls === 1 ? [question, secondQuestion] : [])) }] };
-      } }),
+        },
+      }),
     });
     await manager.plan(run.runId);
     expect(supervisor.getRun(run.runId).state).toBe("CLARIFICATION_REQUIRED");
@@ -410,6 +414,7 @@ describe("Phase 5 structured planning", () => {
     expect(secondInput).toContain("existing");
     expect(thirdInput).toContain("Authentication errors must fail closed");
     expect(calls).toBe(3);
+    expect(countCalls).toBe(3);
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
@@ -518,6 +523,34 @@ describe("Phase 5 structured planning", () => {
     expect(transportCalled).toBe(false);
     expect(supervisor.getRun(run.runId).state).toBe("PAUSED_BUDGET");
     expect(supervisor.listFailures(run.runId)).toMatchObject([{ reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }]);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("a provider-counted reservation pause is not misreported as a planner model failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-admission-pause-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const run = supervisor.receiveRequest({
+      runId: "admission-pause", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Plan safely.",
+      budget: { tokenBudget: 1_000, lifetimeTokenBudget: 20_000 },
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    seedContext(supervisor, artifactStore, run);
+    let createCalled = false;
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({
+        async countInputTokens() { return 900; },
+        async create() { createCalled = true; return { id: "unexpected", output: [] }; },
+      }),
+    });
+    await expect(manager.plan(run.runId)).rejects.toThrow("paused safely");
+    expect(createCalled).toBe(false);
+    expect(supervisor.getRun(run.runId).state).toBe("PAUSED_BUDGET");
+    expect(supervisor.listFailures(run.runId)).toEqual([]);
+    expect(supervisor.exportRunRecords(run.runId).model_calls).toEqual([]);
+    expect(supervisor.getBudget(run.runId).reserved).toEqual({ costUsd: 0, tokens: 0 });
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 });

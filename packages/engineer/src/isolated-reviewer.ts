@@ -5,7 +5,7 @@ import {
   type ReviewerInput,
   type ReviewerOutput,
 } from "./contracts.js";
-import type { ResponsesTransport } from "./codex-builder.js";
+import { countResponseInputTokens, type ResponsesTransport } from "./codex-builder.js";
 import { providerPromptCacheKey, sha256 } from "./hash.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 import {
@@ -218,13 +218,14 @@ export class IsolatedReviewer {
       safety_identifier: this.options.safetyIdentifier ?? sha256(input.runId),
       metadata: { run_id: input.runId, role: "reviewer", policy_version: REVIEWER_POLICY_VERSION },
     };
+    const inputTokenCount = await countResponseInputTokens(this.options.transport, request);
     let transportAttempt = 0;
     let reservationId: string | undefined;
     let response: Awaited<ReturnType<ResponsesTransport["create"]>>;
     while (true) {
       reservationId = this.options.reserveModelCall?.({
         model: route.model,
-        inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
+        inputTokenUpperBound: inputTokenCount,
         maxOutputTokens,
         attempt: transportAttempt,
       });

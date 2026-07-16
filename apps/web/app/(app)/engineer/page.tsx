@@ -494,6 +494,17 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
 
+  const resumeCurrentBudget = async () => {
+    if (!run || !budget) return;
+    setBusy(true); setError(null);
+    try {
+      const resumed = await resumeEngineerBudget(run.runId, { expectedStateVersion: run.stateVersion, expectedBudgetRevision: budget.revision });
+      const latestSequence = events.at(-1)?.sequence ?? 0;
+      setRun(resumed); setManagerError(null); watch(resumed.runId, latestSequence);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to resume with the current budget"); }
+    finally { setBusy(false); }
+  };
+
   const retryProviderTimeout = async () => {
     if (!run || run.state !== "MODEL_PROVIDER_RETRY_PENDING") return;
     setBusy(true); setError(null);
@@ -528,6 +539,8 @@ export default function EngineerPage() {
     budget.limits.tokens > 0 ? (budget.used.tokens + budget.reserved.tokens) / budget.limits.tokens : 0,
     budget.limits.timeSeconds > 0 ? budget.used.timeSeconds / budget.limits.timeSeconds : 0,
   ) : 0;
+  const hasRemainingBudget = Boolean(budget && budget.remaining.costUsd > 0 && budget.remaining.tokens > 0 && budget.remaining.timeSeconds > 0);
+  const canRetryLegacyReservation = Boolean(hasRemainingBudget && budget?.resumeState === "PLANNING" && failures.some((failure) => failure.reasonCode === "PLANNER_MODEL_CALL_FAILED"));
   const approachingBudget = budget?.status === "WARNING" || budgetUsage >= (budget?.warningThreshold ?? 0.8);
 
   if (!run) return (
@@ -638,9 +651,9 @@ export default function EngineerPage() {
         <button disabled={busy || !budget} onClick={() => void applyTopUp(false)}>Add ${topUp.addCostBudgetUsd} / {(topUp.addTokenBudget / 1_000).toLocaleString()}k tokens</button>
       </section> : null}
       {latestState === "PAUSED_BUDGET" ? <section className="engineer-card engineer-budget-paused">
-        <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Run paused · budget exhausted</span><h2>Your work is checkpointed</h2><p>No new model call can start until you explicitly raise the budget. Current code is available to inspect, but publication remains disabled.</p></div><span className="engineer-unverified">Unverified partial work</span></div>
+        <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Run paused · model admission stopped</span><h2>Your work is checkpointed</h2><p>{canRetryLegacyReservation ? "This run used the earlier byte-based reservation. Retry once with the corrected provider token count, without adding allowance." : hasRemainingBudget ? "The next exact model reservation exceeds the remaining allowance. Add only the cost, tokens, or time needed before resuming." : "One of the hard limits is exhausted. Add allowance before resuming; publication remains disabled."}</p></div><span className="engineer-unverified">Unverified partial work</span></div>
         <BudgetTopUp value={topUp} onChange={setTopUp} disabled={busy} />
-        <div className="engineer-actions"><button className="engineer-primary" disabled={busy || !budget} onClick={() => void applyTopUp(true)}>{busy ? "Resuming…" : "Top up and resume checkpoint"}</button><button disabled={busy} onClick={() => setTab("diff")}>View partial diff</button></div>
+        <div className="engineer-actions">{canRetryLegacyReservation ? <button className="engineer-primary" disabled={busy || !budget} onClick={() => void resumeCurrentBudget()}>{busy ? "Resuming…" : "Retry with current limits"}</button> : null}<button className={canRetryLegacyReservation ? undefined : "engineer-primary"} disabled={busy || !budget} onClick={() => void applyTopUp(true)}>{busy ? "Resuming…" : "Top up and resume checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>View partial diff</button></div>
       </section> : null}
       {latestState === "MODEL_PROVIDER_RETRY_PENDING" ? <section className="engineer-card engineer-budget-paused" role="alert">
         <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Provider timeout · balance is not the issue</span><h2>Your workspace checkpoint is retained</h2><p>The model request exceeded its execution timeout. Zintus stopped automatic replay to prevent duplicate charges. Planning, the frozen manifest, and current workspace are preserved.</p>{managerError ? <p className="engineer-error">{managerError}</p> : null}</div><span className="engineer-unverified">Unverified partial work</span></div>

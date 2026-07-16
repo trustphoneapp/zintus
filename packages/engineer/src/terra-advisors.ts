@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { TaskManifest, TrustedEvidence } from "./contracts.js";
-import type { ResponsesTransport } from "./codex-builder.js";
+import { countResponseInputTokens, type ResponsesTransport } from "./codex-builder.js";
 import { providerPromptCacheKey, sha256 } from "./hash.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 
@@ -147,13 +147,14 @@ export class TerraAdvisors {
       safety_identifier: this.options.safetyIdentifier ?? sha256((dynamicInput as { manifest: TaskManifest }).manifest.runId),
       metadata: { role: role.toLowerCase(), policy_version: TERRA_ADVISOR_POLICY_VERSION },
     };
+    const inputTokenCount = await countResponseInputTokens(transport, request);
     let attempt = 0;
     let reservationId: string | undefined;
     let response: Awaited<ReturnType<typeof transport.create>>;
     while (true) {
       reservationId = this.options.reserveModelCall?.({
         role, model: route.model,
-        inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
+        inputTokenUpperBound: inputTokenCount,
         maxOutputTokens, attempt,
       });
       const attemptStarted = Date.now();

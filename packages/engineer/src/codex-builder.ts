@@ -53,6 +53,43 @@ export type ResponsesResult = z.infer<typeof ResponsesResultSchema>;
 
 export interface ResponsesTransport {
   create(request: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<ResponsesResult>;
+  /** Authoritative provider-side count when the transport exposes one. */
+  countInputTokens?(request: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<number>;
+}
+
+const INPUT_TOKEN_COUNT_FIELDS = [
+  "conversation", "input", "instructions", "model", "parallel_tool_calls",
+  "personality", "previous_response_id", "reasoning", "text", "tool_choice",
+  "tools", "truncation",
+] as const;
+
+function inputTokenCountRequest(request: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(INPUT_TOKEN_COUNT_FIELDS.flatMap((field) =>
+    request[field] === undefined ? [] : [[field, request[field]]],
+  ));
+}
+
+/**
+ * Deterministic fail-closed fallback for compatible transports that do not
+ * expose the Responses input-token counter. UTF-8 bytes are a deliberately
+ * loose upper bound, but unlike a chars-per-token heuristic they cannot
+ * under-reserve adversarial or code-heavy input.
+ */
+export function estimateResponseInputTokens(request: Record<string, unknown>): number {
+  const serialized = JSON.stringify(inputTokenCountRequest(request));
+  return Buffer.byteLength(serialized, "utf8");
+}
+
+export async function countResponseInputTokens(
+  transport: ResponsesTransport,
+  request: Record<string, unknown>,
+  options?: { signal?: AbortSignal },
+): Promise<number> {
+  const count = transport.countInputTokens
+    ? await transport.countInputTokens(request, options)
+    : estimateResponseInputTokens(request);
+  if (!Number.isSafeInteger(count) || count < 0) throw new TypeError("model input token count must be a non-negative safe integer");
+  return count;
 }
 
 export interface OpenAIResponsesTransportOptions {
@@ -107,6 +144,17 @@ export class OpenAIResponsesTransport implements ResponsesTransport {
       { headers: { "X-Client-Request-Id": randomUUID() }, signal: options?.signal },
     );
     return ResponsesResultSchema.parse(response);
+  }
+
+  async countInputTokens(request: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<number> {
+    const response = await this.client.responses.inputTokens.count(
+      inputTokenCountRequest(request),
+      { signal: options?.signal },
+    );
+    if (!Number.isSafeInteger(response.input_tokens) || response.input_tokens < 0) {
+      throw new TypeError("OpenAI returned an invalid input token count");
+    }
+    return response.input_tokens;
   }
 }
 
@@ -275,13 +323,14 @@ export class CodexBuilder {
         safety_identifier: this.options.safetyIdentifier ?? sha256(this.options.manifest.runId),
         metadata: { run_id: this.options.manifest.runId, prompt_version: CODEX_BUILDER_PROMPT_VERSION },
       };
+      const inputTokenCount = await countResponseInputTokens(this.options.transport, request, { signal: this.options.signal });
       let attempt = 0;
       let reservationId: string | undefined;
       let response: ResponsesResult;
       while (true) {
         reservationId = this.options.reserveModelCall?.({
           model: route.model,
-          inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
+          inputTokenUpperBound: inputTokenCount,
           maxOutputTokens,
           round,
           attempt,

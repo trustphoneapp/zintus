@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { LocalArtifactStore } from "./artifact-store.js";
-import type { ResponsesTransport } from "./codex-builder.js";
+import { countResponseInputTokens, type ResponsesTransport } from "./codex-builder.js";
 import {
   AcceptanceCriterionSchema,
   PlanningAnalysisSchema,
@@ -28,6 +28,7 @@ import {
   SAFE_CORRECTION_DESCRIPTIONS,
   type CorrectedRunDirective,
 } from "./corrected-run.js";
+import { BudgetPausedError } from "./errors.js";
 
 export const PLANNER_POLICY_VERSION = "engineer-planner-v1";
 export const DEFAULT_PLANNING_TIMEOUT_MS = 120_000;
@@ -444,14 +445,6 @@ export class EngineerPlanningManager {
       safety_identifier: safetyIdentifier,
       metadata: { run_id: runId, role: "planner", policy_version: PLANNER_POLICY_VERSION, ...(sessionIdentifier ? { session_id: sessionIdentifier } : {}) },
     };
-    reservationId = this.options.supervisor.reserveModelBudget({
-      runId,
-      reservationId: sha256({ runId, agentId, purpose: "planner-model-call" }),
-      agentExecutionId: agentId,
-      model: route.model,
-      inputTokenUpperBound: Buffer.byteLength(JSON.stringify(request)),
-      maxOutputTokens: 8_000,
-    });
     const timeoutMs = this.options.planningTimeoutMs ?? DEFAULT_PLANNING_TIMEOUT_MS;
     const abortController = new AbortController();
     const cancelPlanning = () => abortController.abort(new EngineerPlanningCancelledError());
@@ -460,6 +453,15 @@ export class EngineerPlanningManager {
     const timeout = setTimeout(() => abortController.abort(new EngineerPlanningTimeoutError(timeoutMs)), timeoutMs);
     let response;
     try {
+      const inputTokenCount = await countResponseInputTokens(transport, request, { signal: abortController.signal });
+      reservationId = this.options.supervisor.reserveModelBudget({
+        runId,
+        reservationId: sha256({ runId, agentId, purpose: "planner-model-call" }),
+        agentExecutionId: agentId,
+        model: route.model,
+        inputTokenUpperBound: inputTokenCount,
+        maxOutputTokens: 8_000,
+      });
       response = await transport.create(request, { signal: abortController.signal });
     } catch (error) {
       if (abortController.signal.aborted) {
@@ -598,10 +600,11 @@ export class EngineerPlanningManager {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const cancelled = error instanceof EngineerPlanningCancelledError;
+      const safelyPaused = error instanceof BudgetPausedError;
       const failure = error instanceof RuntimeBudgetExhaustedError
         ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }
         : this.classifyFailure(failureStage);
-      if (!cancelled) {
+      if (!cancelled && !safelyPaused) {
         this.options.supervisor.recordFailure(FailureRecordSchema.parse({
           failureId: this.id(), runId,
           failureClass: failure.failureClass,
