@@ -79,6 +79,11 @@ export class TestIntegrityViolationError extends Error {
 interface IndexedFile { path: string; mode: string; objectId: string }
 interface CurrentEntry { path: string; contentSha256: string; byteLength: number; fileMode: string }
 
+/** Match JavaScript's deterministic default string ordering without locale-dependent collation. */
+function compareRepositoryPaths(left: { path: string }, right: { path: string }): number {
+  return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+}
+
 /** Tests, fixtures, snapshots, runner policy, and CI test definitions form one protected surface. */
 export function isTestSurfacePath(rawPath: string): boolean {
   const path = normalizeRepositoryPath(rawPath).toLowerCase();
@@ -153,7 +158,7 @@ export function createTestBaseline(input: { runId: string; manifest: TaskManifes
       throw new TestIntegrityViolationError("TEST_BASELINE_TAMPERED", `test surface was modified before baseline capture: ${entry.path}`);
     }
     return TestBaselineEntrySchema.parse({ ...current, gitBlobObjectId: entry.objectId, classification: isManifestPathAllowed(entry.path, input.manifest) ? "PLAN_AUTHORIZED_CHANGE" : "IMMUTABLE" });
-  }).sort((left, right) => left.path.localeCompare(right.path));
+  }).sort(compareRepositoryPaths);
   assertSurfaceBounds(entries);
   const content = TestBaselineContentSchema.parse({
     policyVersion: TEST_BASELINE_POLICY_VERSION, runId: input.runId, manifestHash: input.manifest.manifestHash,
@@ -164,7 +169,7 @@ export function createTestBaseline(input: { runId: string; manifest: TaskManifes
 
 function currentTestSurface(workspaceRoot: string): CurrentEntry[] {
   const entries = currentPaths(workspaceRoot).filter(isTestSurfacePath).map((path) => readCurrentEntry(workspaceRoot, path));
-  entries.sort((left, right) => left.path.localeCompare(right.path)); assertSurfaceBounds(entries); return entries;
+  entries.sort(compareRepositoryPaths); assertSurfaceBounds(entries); return entries;
 }
 
 export function currentTestSurfaceHash(workspaceRoot: string): string {

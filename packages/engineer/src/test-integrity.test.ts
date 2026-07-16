@@ -20,7 +20,7 @@ import {
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
-function repository(): { root: string; sha: string } {
+function repository(includeOrderingFixtures = false): { root: string; sha: string } {
   const root = mkdtempSync(join(tmpdir(), "zintus-test-integrity-"));
   roots.push(root);
   mkdirSync(join(root, "src"), { recursive: true });
@@ -28,6 +28,11 @@ function repository(): { root: string; sha: string } {
   writeFileSync(join(root, "src", "value.ts"), "export const value = 1;\n");
   writeFileSync(join(root, "tests", "value.test.ts"), "import { value } from '../src/value';\nif (value !== 1) throw new Error('bad');\n");
   writeFileSync(join(root, "package.json"), "{\"scripts\":{\"test\":\"bun test\"}}\n");
+  if (includeOrderingFixtures) {
+    mkdirSync(join(root, ".github", "workflows"), { recursive: true });
+    writeFileSync(join(root, ".github", "workflows", "test.yml"), "name: test\n");
+    writeFileSync(join(root, "_root.test.ts"), "// root test\n");
+  }
   execFileSync("git", ["init", "-q", root]);
   execFileSync("git", ["-C", root, "config", "user.email", "test@zintus.local"]);
   execFileSync("git", ["-C", root, "config", "user.name", "Zintus Test"]);
@@ -36,8 +41,8 @@ function repository(): { root: string; sha: string } {
   return { root, sha: execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim() };
 }
 
-function fixture(allowedPaths: string[] = ["src/**"]): { manifest: TaskManifest; workspace: WorkspaceRecord; root: string } {
-  const repo = repository();
+function fixture(allowedPaths: string[] = ["src/**"], includeOrderingFixtures = false): { manifest: TaskManifest; workspace: WorkspaceRecord; root: string } {
+  const repo = repository(includeOrderingFixtures);
   const content = {
     manifestVersion: 1,
     runId: "run-test-integrity",
@@ -81,6 +86,18 @@ function fakeSupervisor(): { supervisor: EngineerSupervisor; artifacts: Artifact
 }
 
 describe("Supervisor test integrity baselines", () => {
+  test("uses canonical code-unit ordering for mixed repository test paths", () => {
+    const { manifest, workspace } = fixture(["src/**"], true);
+    const baseline = createTestBaseline({ runId: manifest.runId, manifest, workspace });
+
+    expect(baseline.entries.map((entry) => entry.path)).toEqual([
+      ".github/workflows/test.yml",
+      "_root.test.ts",
+      "package.json",
+      "tests/value.test.ts",
+    ]);
+  });
+
   test("hashes the exact tracked test surface and classifies it from the frozen plan", () => {
     const { manifest, workspace } = fixture(["src/**", "tests/new.test.ts"]);
     const baseline = createTestBaseline({ runId: manifest.runId, manifest, workspace, now: () => new Date("2026-07-14T12:01:00.000Z") });
