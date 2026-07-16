@@ -750,6 +750,9 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(setup.supervisor.listEvents(setup.manifest.runId)).toContainEqual(expect.objectContaining({
       nextState: "PAUSED_BUDGET", reasonCode: "TOKEN_LIMIT_REACHED",
     }));
+    expect(setup.supervisor.exportRunRecords(setup.manifest.runId).agent_executions).toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "PAUSED" })]),
+    );
     setup.supervisor.close();
   });
 

@@ -2861,7 +2861,7 @@ export function createGatewayHandler(
           if (typeof body.expectedStateVersion !== "number" || typeof body.expectedBudgetRevision !== "number" || !body.idempotencyKey) {
             throw new Error("expectedStateVersion, expectedBudgetRevision, and idempotencyKey are required");
           }
-          const run = engineerRuns.resumeBudget(engineerPrincipal!, runId, body as Required<typeof body>);
+          const run = await engineerRuns.resumeBudget(engineerPrincipal!, runId, body as Required<typeof body>);
           return json(request, { run, budget: engineerRuns.budget(engineerPrincipal!, runId) });
         }
         if (action === "plan" && request.method === "POST") {

@@ -9,6 +9,7 @@ import {
   extendEngineerApproval,
   freezeEngineerPlan,
   getEngineerEvidenceStream,
+  getEngineerDiff,
   getEngineerArtifactPreview,
   getEngineerLiveSummary,
   getEngineerPlan,
@@ -32,6 +33,7 @@ import {
   type EngineerArtifact,
   type EngineerRepository,
   type EngineerRun,
+  type EngineerRunStatus,
   type PlanProposal,
   type RunEvent,
 } from "@/lib/engineer";
@@ -177,6 +179,7 @@ export default function EngineerPage() {
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [managerError, setManagerError] = useState<string | null>(null);
+  const [activity, setActivity] = useState<EngineerRunStatus["activity"] | null>(null);
   const [gatewayToken, setGatewayToken] = useState("");
   const [gatewayAuthenticated, setGatewayAuthenticated] = useState(false);
   const [gatewayState, setGatewayState] = useState<"connected" | "authentication-required" | "offline">("offline");
@@ -204,6 +207,7 @@ export default function EngineerPage() {
     const status = snapshot.status; const nextData = snapshot.data; const nextBudget = snapshot.status.budget;
     setRun((current) => !current || status.run.runId !== current.runId || status.run.stateVersion >= current.stateVersion ? status.run : current);
     setManagerError(status.lastError);
+    setActivity(status.activity);
     setData(nextData);
     setBudget(nextBudget);
     setEvents(snapshot.events);
@@ -214,6 +218,7 @@ export default function EngineerPage() {
     if (activeRunIdRef.current !== runId) return;
     setRun((current) => current?.runId === runId && status.run.stateVersion >= current.stateVersion ? status.run : current);
     setManagerError(status.lastError);
+    setActivity(status.activity);
     if (nextBudget) setBudget((current) => !current || current.runId !== runId || nextBudget.revision >= current.revision ? nextBudget : current);
   }, []);
 
@@ -239,6 +244,23 @@ export default function EngineerPage() {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Timeline disconnected");
     });
   }, [refresh, refreshLiveSummary]);
+
+  useEffect(() => {
+    if (!run || TERMINAL.has(run.state) || run.state === "PAUSED_BUDGET" || run.state === "CLARIFICATION_REQUIRED") return;
+    const runId = run.runId;
+    const update = async () => {
+      await refreshLiveSummary(runId).catch(() => undefined);
+      if (run.state === "IMPLEMENTING") {
+        const diff = await getEngineerDiff(runId).catch(() => null);
+        if (diff !== null && activeRunIdRef.current === runId) {
+          setData((current) => current ? { ...current, diff } : current);
+        }
+      }
+    };
+    void update();
+    const timer = window.setInterval(() => void update(), 2_000);
+    return () => window.clearInterval(timer);
+  }, [refreshLiveSummary, run?.runId, run?.state]);
 
   const loadDashboard = useCallback(async (reportAuthorizationError = false) => {
     const connection = await fetchGatewayConnection();
@@ -314,7 +336,7 @@ export default function EngineerPage() {
       getEngineerSnapshot(runId), getEngineerPlan(runId).catch(() => null),
     ]);
     if (activeRunIdRef.current !== runId) return;
-    setRun(snapshot.status.run); setPlan(storedPlan); setData(snapshot.data); setBudget(snapshot.status.budget); setEvents(snapshot.events); setManagerError(snapshot.status.lastError);
+    setRun(snapshot.status.run); setPlan(storedPlan); setData(snapshot.data); setBudget(snapshot.status.budget); setEvents(snapshot.events); setManagerError(snapshot.status.lastError); setActivity(snapshot.status.activity);
     window.localStorage.setItem(RUN_STORAGE_KEY, runId);
     if (snapshot.status.run.state !== "PAUSED_BUDGET" && !TERMINAL.has(snapshot.status.run.state)) watch(runId, snapshot.latestEventSequence);
   }, [watch]);
@@ -324,7 +346,7 @@ export default function EngineerPage() {
     activeRunIdRef.current = null;
     if (refreshTimerRef.current) { clearTimeout(refreshTimerRef.current); refreshTimerRef.current = null; }
     window.localStorage.removeItem(RUN_STORAGE_KEY);
-    setRun(null); setPlan(null); setData(null); setBudget(null); setEvents([]); setManagerError(null); setError(null);
+    setRun(null); setPlan(null); setData(null); setBudget(null); setEvents([]); setManagerError(null); setActivity(null); setError(null);
     void loadDashboard();
   }, [loadDashboard]);
 
@@ -542,6 +564,10 @@ export default function EngineerPage() {
   const hasRemainingBudget = Boolean(budget && budget.remaining.costUsd > 0 && budget.remaining.tokens > 0 && budget.remaining.timeSeconds > 0);
   const canRetryLegacyReservation = Boolean(hasRemainingBudget && budget?.resumeState === "PLANNING" && failures.some((failure) => failure.reasonCode === "PLANNER_MODEL_CALL_FAILED"));
   const approachingBudget = budget?.status === "WARNING" || budgetUsage >= (budget?.warningThreshold ?? 0.8);
+  const liveDiff = data?.diff ?? "";
+  const liveChangedFiles = liveDiff.match(/^diff --git /gm)?.length ?? 0;
+  const liveAddedLines = liveDiff.match(/^\+(?!\+\+)/gm)?.length ?? 0;
+  const machineStage = /^(PLANNING|REPLANNING|QUEUED|SANDBOX_|CONTEXT_BUILDING|IMPLEMENTING|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|SECURITY_REVIEW|CODE_REVIEW|EVIDENCE_SYNTHESIS|REVIEWING|VERIFICATION_|REVERIFYING)/.test(latestState);
 
   if (!run) return (
     <main className="engineer-screen">
@@ -638,7 +664,7 @@ export default function EngineerPage() {
           <button className="engineer-primary" onClick={() => void freezeAndStart()} disabled={busy}>{busy ? "Starting…" : "Freeze plan and start"}</button>
         </aside>
       </section>
-      <DecisionPresentation decisions={decisions} onResolve={busy ? undefined : resolveDecision} />
+      <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} />
     </main>
   );
 
@@ -660,13 +686,13 @@ export default function EngineerPage() {
         <div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void retryProviderTimeout()}>{busy ? "Retrying…" : "Retry from workspace checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>Inspect partial diff</button></div>
       </section> : null}
       {data?.errors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {data.errors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
+      {machineStage && latestState !== "PAUSED_BUDGET" ? <section className="engineer-card engineer-gate" role="status" aria-live="polite"><div><span className="engineer-kicker">Truthful live activity</span><h2>{activity?.active ? `${activity.role?.toLowerCase() ?? "worker"} is active` : "No worker is currently active"}</h2><p>{activity?.detail ?? "Waiting for an authoritative worker signal."}</p>{latestState === "IMPLEMENTING" ? <p>{liveChangedFiles ? `${liveChangedFiles} changed ${liveChangedFiles === 1 ? "file" : "files"} · ${liveAddedLines.toLocaleString()} added lines in the live checkpoint.` : "No workspace change has been recorded yet."}</p> : null}</div><div><Metric label="Reserved now" value={budget ? `${budget.reserved.tokens.toLocaleString()} tokens · $${budget.reserved.costUsd.toFixed(2)}` : "Unavailable"} /><Metric label="Worker signal" value={activity?.active ? "ACTIVE" : "IDLE"} /></div></section> : null}
       <nav className="engineer-tabs" aria-label="Engineer run views">{visibleTabs.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
       {!reachedImplementation ? <p className="engineer-stage-availability"><strong>Nothing is missing.</strong> Diff appears after implementation changes a file. Evidence appears after tests and independent verification. No implementation change has been recorded for this run yet.</p> : !reachedVerification ? <p className="engineer-stage-availability">Evidence appears after tests and independent verification begin.</p> : null}
-      {busy && ["REQUEST_RECEIVED", "REQUEST_NORMALIZED", "PLANNING", "REPLANNING"].includes(latestState) ? <section className="engineer-card engineer-gate" role="status"><div><span className="engineer-kicker">Planning in progress</span><h2>Creating the evidence plan</h2><p>The durable timeline records this step. Planning is automatically aborted if it exceeds two minutes.</p></div><button className="engineer-primary" disabled>Planning…</button></section> : null}
-      {!busy && ["PLANNING", "REPLANNING"].includes(latestState) && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The exact failure is recorded below. The durable run and prior human answers remain intact.</p></div><button className="engineer-primary" onClick={() => void retryPlanning()}>Retry planning</button></section> : null}
+      {!busy && !activity?.active && ["PLANNING", "REPLANNING"].includes(latestState) && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The exact failure is recorded below. The durable run and prior human answers remain intact.</p></div><button className="engineer-primary" onClick={() => void retryPlanning()}>Retry planning</button></section> : null}
       {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{busy ? "Starting…" : "Start frozen plan"}</button></section> : null}
       {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recreate and verify on the current base</h2><p>The reviewed candidate will not be published. A new immutable run will plan, execute, test, and obtain fresh review and approval.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void recoverStaleBase()}>{busy ? "Recovering…" : "Start controlled recovery"}</button></section> : null}
-      <DecisionPresentation decisions={decisions} onResolve={busy ? undefined : resolveDecision} />
+      <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} />
       {tab === "timeline" ? <section className="engineer-run-grid">
         <div className="engineer-card"><h2>Live timeline</h2><Timeline events={events} /></div>
         <aside className="engineer-card engineer-verification"><h2>{reachedVerification ? "Verification" : "Current stage"}</h2>{reachedVerification ? <><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /></> : <Metric label="Activity" value={latestState.replaceAll("_", " ")} />}<Metric label="Failures" value={String(failures.length)} /></aside>

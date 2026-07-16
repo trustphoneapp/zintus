@@ -87,9 +87,16 @@ describe("Engineer trusted identity and admission", () => {
     });
     const planning = manager.plan(principal, "active-plan-cancel");
     await ready;
+    expect(manager.get("active-plan-cancel").activity).toEqual({
+      active: true,
+      role: "PLANNER",
+      detail: "Planner model request or reconciliation is active.",
+    });
     await manager.cancel(principal, "active-plan-cancel", "Stop during planning");
     await expect(planning).rejects.toBeInstanceOf(EngineerPlanningCancelledError);
-    expect(manager.get("active-plan-cancel")).toMatchObject({ run: { state: "CANCELLED" }, lastError: null });
+    expect(manager.get("active-plan-cancel")).toMatchObject({
+      run: { state: "CANCELLED" }, lastError: null, activity: { active: false, role: null },
+    });
     expect(supervisor.listFailures("active-plan-cancel")).toEqual([]);
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
@@ -151,7 +158,7 @@ describe("Engineer trusted identity and admission", () => {
       context: { build: async () => ({}) } as never,
       planning: { plan: async () => { planningCalls += 1; signalPlanning(); return null; } } as never,
     });
-    const resumed = manager.resumeBudget(principal, run.runId, {
+    const resumed = await manager.resumeBudget(principal, run.runId, {
       expectedStateVersion: paused.stateVersion, expectedBudgetRevision: topped.revision,
       idempotencyKey: "resume-plan-budget",
     });

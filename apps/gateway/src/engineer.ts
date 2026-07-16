@@ -89,9 +89,18 @@ export class EngineerRunManager {
     });
   }
 
-  get(runId: string): { run: EngineerRun; budget: EngineerBudgetSnapshot; lastError: string | null } {
+  get(runId: string): { run: EngineerRun; budget: EngineerBudgetSnapshot; lastError: string | null; activity: { active: boolean; role: "PLANNER" | "BUILDER" | "VERIFIER" | null; detail: string } } {
     this.assertOwner(runId, this.options.principal);
-    return { run: this.options.supervisor.getRun(runId), budget: this.options.supervisor.reconcileBudget(runId), lastError: this.options.supervisor.getLastError(runId) };
+    const budget = this.options.supervisor.reconcileBudget(runId);
+    const run = this.options.supervisor.getRun(runId);
+    const activity = this.activePlanning.has(runId)
+      ? { active: true, role: "PLANNER" as const, detail: "Planner model request or reconciliation is active." }
+      : this.options.execution?.isActive(runId)
+        ? { active: true, role: "BUILDER" as const, detail: "Builder model or sandbox tool work is active." }
+        : this.options.verification?.isActive(runId)
+          ? { active: true, role: "VERIFIER" as const, detail: "Independent verification or review is active." }
+          : { active: false, role: null, detail: run.state === "PAUSED_BUDGET" ? "Checkpoint retained; no worker is consuming model budget." : "No worker is currently active for this run." };
+    return { run, budget, lastError: this.options.supervisor.getLastError(runId), activity };
   }
 
   /** One ownership-checked projection for the active UI; individual routes remain for compatibility. */
@@ -168,10 +177,11 @@ export class EngineerRunManager {
     return this.options.supervisor.topUpBudget({ runId, ...input, actorId: principal.ownerId });
   }
 
-  resumeBudget(principal: EngineerPrincipal, runId: string, input: {
+  async resumeBudget(principal: EngineerPrincipal, runId: string, input: {
     expectedStateVersion: number; expectedBudgetRevision: number; idempotencyKey: string;
-  }): EngineerRun {
+  }): Promise<EngineerRun> {
     this.assertOwner(runId, principal);
+    const verificationOwnedCheckpoint = this.options.verification?.ownsBudgetCheckpoint(runId) ?? false;
     const result = this.options.supervisor.resumeBudget({ runId, ...input, actorId: principal.ownerId });
     this.clearError(runId);
     if (result.run.state === "PLANNING" && this.options.planning) {
@@ -181,8 +191,33 @@ export class EngineerRunManager {
       })().catch(() => { /* plan() persists actionable failures; safe budget pauses are already durable */ });
       this.background.add(job);
       void job.finally(() => this.background.delete(job));
+    } else if (result.run.state === "IMPLEMENTING" && verificationOwnedCheckpoint && this.options.verification) {
+      this.launchVerificationRecovery(runId);
+    } else if (result.run.state === "IMPLEMENTING" && this.options.execution) {
+      const queued = await this.options.execution.resumeBudgetCheckpoint(runId);
+      this.launchExecution(runId);
+      return queued;
+    } else if (this.options.verification && [
+      "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE",
+      "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING",
+      "REVIEW_CHANGES_REQUESTED", "REVIEW_FIX_PREPARING", "VERIFICATION_RECOVERY", "REVERIFYING",
+    ].includes(result.run.state)) {
+      this.launchVerificationRecovery(runId);
     }
     return result.run;
+  }
+
+  private launchVerificationRecovery(runId: string): void {
+    if (!this.options.verification) return;
+    const job = this.options.verification.resumeBudgetCheckpoint(runId)
+      .then(() => undefined)
+      .catch((error) => {
+        if (!(error instanceof BudgetPausedError)) {
+          this.options.supervisor.setLastError(runId, redactSecrets(error instanceof Error ? error.message : String(error)));
+        }
+      });
+    this.background.add(job);
+    void job.finally(() => this.background.delete(job));
   }
 
   list(principal: EngineerPrincipal): EngineerRun[] {

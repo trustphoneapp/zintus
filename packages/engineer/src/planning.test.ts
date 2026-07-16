@@ -345,7 +345,7 @@ describe("Phase 5 structured planning", () => {
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
-  test("turns a mandatory planner question into ASK_NOW, then replans with the human answer", async () => {
+  test("batches mandatory questions and performs one compact replan after every answer", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-decision-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
     const run = supervisor.receiveRequest({
@@ -358,7 +358,7 @@ describe("Phase 5 structured planning", () => {
     let calls = 0;
     let countCalls = 0;
     let secondInput = "";
-    let thirdInput = "";
+    let firstInput = "";
     const question = {
       questionId: "auth-method", question: "Must authentication use OAuth?", impact: "Changes the required authentication boundary.", sourceRefs: ["src/auth/session.ts"],
       options: [
@@ -379,15 +379,17 @@ describe("Phase 5 structured planning", () => {
         async countInputTokens() { countCalls += 1; return 1_000; },
         async create(request) {
         calls += 1;
+        if (calls === 1) firstInput = JSON.stringify(request.input);
         if (calls === 2) secondInput = JSON.stringify(request.input);
-        if (calls === 3) thirdInput = JSON.stringify(request.input);
         return { id: `response-${calls}`, usage: { input_tokens: 100, output_tokens: 100 }, output: [{ type: "function_call", name: "submit_plan", call_id: `call-${calls}`, arguments: JSON.stringify(plannerOutput(["bun test auth"], calls === 1 ? [question, secondQuestion] : [])) }] };
         },
       }),
     });
     await manager.plan(run.runId);
     expect(supervisor.getRun(run.runId).state).toBe("CLARIFICATION_REQUIRED");
-    const decision = supervisor.listOpenDecisions(run.runId).find((item) => item.classification === "ASK_NOW")!;
+    const openDecisions = supervisor.listOpenDecisions(run.runId).filter((item) => item.classification === "ASK_NOW");
+    expect(openDecisions).toHaveLength(2);
+    const decision = openDecisions.find((item) => item.question === question.question)!;
     expect(decision.classification).toBe("ASK_NOW");
     const paused = supervisor.getRun(run.runId);
     supervisor.resolveDecision({
@@ -396,10 +398,9 @@ describe("Phase 5 structured planning", () => {
       sourceEvidence: [{ evidenceId: "human-answer-1", runId: run.runId, sourceType: "HUMAN_RESPONSE", trust: "TRUSTED_HUMAN", summary: "Authenticated user answer." }],
       idempotencyKey: "resolve:auth-method",
     });
-    expect(supervisor.getRun(run.runId).state).toBe("PLANNING");
-    await manager.plan(run.runId);
     expect(supervisor.getRun(run.runId).state).toBe("CLARIFICATION_REQUIRED");
-    const secondDecision = supervisor.listOpenDecisions(run.runId).find((item) => item.classification === "ASK_NOW")!;
+    expect(calls).toBe(1);
+    const secondDecision = supervisor.listOpenDecisions(run.runId).find((item) => item.question === secondQuestion.question)!;
     expect(secondDecision.question).toBe(secondQuestion.question);
     const secondPause = supervisor.getRun(run.runId);
     supervisor.resolveDecision({
@@ -408,13 +409,19 @@ describe("Phase 5 structured planning", () => {
       sourceEvidence: [{ evidenceId: "human-answer-2", runId: run.runId, sourceType: "HUMAN_RESPONSE", trust: "TRUSTED_HUMAN", summary: "Authenticated user answer." }],
       idempotencyKey: "resolve:auth-fallback",
     });
+    expect(supervisor.getRun(run.runId).state).toBe("PLANNING");
     await manager.plan(run.runId);
     expect(supervisor.getRun(run.runId).state).toBe("PLAN_READY");
     expect(secondInput).toContain("Use the established session boundary");
     expect(secondInput).toContain("existing");
-    expect(thirdInput).toContain("Authentication errors must fail closed");
-    expect(calls).toBe(3);
-    expect(countCalls).toBe(3);
+    expect(secondInput).toContain("Authentication errors must fail closed");
+    expect(secondInput).toContain("HUMAN_DECISION_RECONCILIATION");
+    expect(secondInput).toContain("priorProposal");
+    expect(firstInput).toContain("INITIAL_PLAN");
+    expect(secondInput).toContain("contextReference");
+    expect(secondInput).not.toContain('"planningMode":"INITIAL_PLAN"');
+    expect(calls).toBe(2);
+    expect(countCalls).toBe(2);
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

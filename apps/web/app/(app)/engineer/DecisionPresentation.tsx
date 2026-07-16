@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   getDecisionPresentation,
   getDeferredHumanTaskSummary,
@@ -5,9 +6,10 @@ import {
   type EngineerDecisionItem,
 } from "@/lib/engineer-decisions";
 
-export function DecisionPresentation({ decisions, onResolve }: {
+export function DecisionPresentation({ decisions, onResolve, disabled = false }: {
   decisions: EngineerDecisionItem[];
   onResolve?: (decisionId: string, optionId: string) => void | Promise<void>;
+  disabled?: boolean;
 }) {
   if (!decisions.length) return null;
 
@@ -21,18 +23,27 @@ export function DecisionPresentation({ decisions, onResolve }: {
         <span className="engineer-chip">{decisions.length} {decisions.length === 1 ? "decision" : "decisions"}</span>
       </div>
       <div className="engineer-decision-list">
-        {decisions.map((decision) => <DecisionCard key={decision.decisionId} decision={decision} onResolve={onResolve} />)}
+        {decisions.map((decision) => <DecisionCard key={decision.decisionId} decision={decision} onResolve={onResolve} disabled={disabled} />)}
       </div>
     </section>
   );
 }
 
-function DecisionCard({ decision, onResolve }: {
+function DecisionCard({ decision, onResolve, disabled = false }: {
   decision: EngineerDecisionItem;
   onResolve?: (decisionId: string, optionId: string) => void | Promise<void>;
+  disabled?: boolean;
 }) {
   const presentation = getDecisionPresentation(decision.classification);
   const options = getPresentedDecisionOptions(decision);
+  const [pendingOptionId, setPendingOptionId] = useState<string | null>(null);
+
+  const apply = async (optionId: string) => {
+    if (!onResolve || disabled || pendingOptionId) return;
+    setPendingOptionId(optionId);
+    try { await onResolve(decision.decisionId, optionId); }
+    finally { setPendingOptionId(null); }
+  };
 
   return (
     <article className={`engineer-decision engineer-decision--${presentation.tone}`}>
@@ -63,7 +74,7 @@ function DecisionCard({ decision, onResolve }: {
               <p>{option.impact}</p>
               <small>{option.riskTier} risk · {option.reversibility.replaceAll("_", " ").toLowerCase()}</small>
               {decision.status === "OPEN" && decision.classification !== "AUTO" && !option.synthetic && onResolve
-                ? <button type="button" onClick={() => void onResolve(decision.decisionId, option.optionId)}>Choose this option</button>
+                ? <button type="button" disabled={disabled || pendingOptionId !== null} onClick={() => void apply(option.optionId)}>{pendingOptionId === option.optionId ? "Applying choice…" : "Choose this option"}</button>
                 : null}
             </div>
           );

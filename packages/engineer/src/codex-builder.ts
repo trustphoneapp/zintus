@@ -12,7 +12,7 @@ import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-r
 import type { TrustedCommandExecutor } from "./trusted-executor.js";
 
 export const CODEX_BUILDER_PROMPT_VERSION = "engineer-codex-builder-v1";
-export const MAX_BUILDER_TOOL_ROUNDS = 20;
+export const MAX_BUILDER_TOOL_ROUNDS = 12;
 export const MAX_BUILDER_FILE_BYTES = 1024 * 1024;
 export const MAX_BUILDER_MUTATIONS = 50;
 export const MAX_BUILDER_ARGUMENT_BYTES_PER_ROUND = 128 * 1024;
@@ -304,10 +304,9 @@ export class CodexBuilder {
         promptVersion: CODEX_BUILDER_PROMPT_VERSION,
         manifestHash: this.options.manifest.manifestHash,
         model: route.model,
-        inputHash,
       });
       const callStarted = Date.now();
-      const maxOutputTokens = 16_000;
+      const maxOutputTokens = 8_000;
       const instructions = builderInstructions(this.options.manifest, this.options.repairContext);
       const request = {
         model: route.model,

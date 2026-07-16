@@ -106,7 +106,7 @@ export const AgentExecutionRecordSchema = z.object({
   runId: IdentifierSchema,
   role: ModelRoleSchema,
   modelTier: LogicalModelTierSchema,
-  status: z.enum(["RUNNING", "SUCCEEDED", "FAILED"]),
+  status: z.enum(["RUNNING", "SUCCEEDED", "PAUSED", "FAILED"]),
   inputHash: HashSchema,
   outputArtifactId: IdentifierSchema.nullable(),
   startedAt: IsoTimestampSchema,

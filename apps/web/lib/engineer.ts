@@ -9,7 +9,11 @@ export interface GithubConnectorRepository { id: string; fullName: string; defau
 export interface EngineerManifest { manifestVersion: number; runId: string; repository: EngineerRepository; request: { original: string; normalized: string }; acceptanceCriteria: Array<{ criterionId: string; statement: string; verificationMethod: string; priority: string }>; testPlan: Array<{ testId: string; criterionIds: string[]; type: string; description: string; command?: string }>; allowedPaths: string[]; deniedPaths: string[]; allowedCommands: string[]; prohibitedCommands: string[]; riskTier: EngineerRun["riskTier"]; humanGateRequired: boolean; retryBudgets: Record<string, number>; timeBudgetSeconds: number; tokenBudget: number; costBudgetUsd: number; createdAt: string; }
 export interface PlanProposal { planProposalId: string; runId: string; manifest: EngineerManifest; planningAnalysis: { architectureSummary: string; assumptions: Array<{ assumptionId: string; statement: string; confidence: number; reversible: boolean; sourceRefs: string[] }>; unresolvedQuestions: Array<{ questionId: string; question: string; impact: string }>; touchedFileEstimates: Array<{ path: string; expectedChange: string; confidence: number }> }; proposalHash: string; artifactId: string; createdAt: string; }
 export interface RunEvent { eventId: string; sequence: number; previousState: string; nextState: string; reasonCode: string; timestamp: string; evidenceIds: string[]; }
-export interface EngineerRunStatus { run: EngineerRun; lastError: string | null; }
+export interface EngineerRunStatus {
+  run: EngineerRun;
+  lastError: string | null;
+  activity: { active: boolean; role: "PLANNER" | "BUILDER" | "VERIFIER" | null; detail: string };
+}
 export interface EngineerBudgetAmounts { costUsd: number; tokens: number; timeSeconds: number; }
 export interface EngineerBudgetLimits { costBudgetUsd: number; tokenBudget: number; timeBudgetSeconds: number; }
 export interface EngineerBudgetSnapshot {
@@ -112,6 +116,7 @@ export async function getEngineerSnapshot(runId: string): Promise<{ status: Engi
   return request(`/v1/engineer/runs/${runId}/snapshot`);
 }
 export async function getEngineerBudget(runId: string): Promise<EngineerBudgetSnapshot> { return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget`)).budget; }
+export async function getEngineerDiff(runId: string): Promise<string> { return (await request<{ diff: string }>(`/v1/engineer/runs/${runId}/diff`)).diff; }
 export async function topUpEngineerBudget(runId: string, input: { expectedRevision: number; addCostBudgetUsd: number; addTokenBudget: number; addTimeBudgetSeconds: number }): Promise<EngineerBudgetSnapshot> {
   const idempotencyKey = `ui:budget-top-up:${runId}:${input.expectedRevision}:${input.addCostBudgetUsd}:${input.addTokenBudget}:${input.addTimeBudgetSeconds}`;
   return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget/top-up`, { method: "POST", body: JSON.stringify({ ...input, idempotencyKey }) })).budget;

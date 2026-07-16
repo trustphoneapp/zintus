@@ -217,6 +217,37 @@ describe("decision ledger and clarification lifecycle", () => {
     supervisor.close();
   });
 
+  test("batches ASK_NOW decisions and resumes only after the final human answer", () => {
+    const supervisor = new EngineerSupervisor({ dbPath: ":memory:", now: () => new Date("2026-07-14T20:00:00.000Z") });
+    const run = normalizedRun(supervisor, "ask-batch-run");
+    const first = supervisor.createDecision({
+      runId: run.runId, expectedStateVersion: run.stateVersion,
+      question: "Which authorization boundary should apply?", factors: baseFactors({ affectsAuthorization: true }),
+      options: options(), recommendedOptionId: "safe", sourceEvidence: [evidence(run.runId)], idempotencyKey: "ask-batch:first",
+    });
+    const paused = supervisor.getRun(run.runId);
+    const second = supervisor.createDecision({
+      runId: run.runId, expectedStateVersion: paused.stateVersion,
+      question: "Should failures deny access?", factors: baseFactors({ affectsAuthorization: true }),
+      options: options(), recommendedOptionId: "safe", sourceEvidence: [evidence(run.runId)], idempotencyKey: "ask-batch:second",
+    });
+    expect(supervisor.listOpenDecisions(run.runId)).toHaveLength(2);
+    supervisor.resolveDecision({
+      runId: run.runId, decisionId: first.decisionId, expectedStateVersion: paused.stateVersion,
+      selectedOptionId: "safe", actorId: "user-1", rationale: "Use the existing boundary.",
+      sourceEvidence: [evidence(run.runId, "human-batch-1", "HUMAN_RESPONSE")], idempotencyKey: "ask-batch:resolve-first",
+    });
+    expect(supervisor.getRun(run.runId).state).toBe("CLARIFICATION_REQUIRED");
+    supervisor.resolveDecision({
+      runId: run.runId, decisionId: second.decisionId, expectedStateVersion: paused.stateVersion,
+      selectedOptionId: "safe", actorId: "user-1", rationale: "Fail closed.",
+      sourceEvidence: [evidence(run.runId, "human-batch-2", "HUMAN_RESPONSE")], idempotencyKey: "ask-batch:resolve-second",
+    });
+    expect(supervisor.getRun(run.runId).state).toBe("PLANNING");
+    expect(supervisor.listOpenDecisions(run.runId)).toHaveLength(0);
+    supervisor.close();
+  });
+
   test("AUTO resolves only the recommended safe option; DEFER remains a human task without pausing", () => {
     const supervisor = new EngineerSupervisor({ dbPath: ":memory:" });
     const autoRun = normalizedRun(supervisor, "auto-run", { documentationOnly: true });

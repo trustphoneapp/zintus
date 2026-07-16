@@ -164,7 +164,7 @@ describe("gateway handler", () => {
     }));
     expect(read.status).toBe(200);
     const readBody = (await read.json()) as { run: { state: string }; budget: { limits: { tokens: number } } };
-    expect(readBody.run.state).toBe("REQUEST_RECEIVED");
+    expect(readBody.run.state).toBe("PAUSED_BUDGET");
     expect(readBody.budget.limits.tokens).toBe(0);
     const snapshot = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/snapshot", { headers: { Authorization: "Bearer secret" } }));
     expect(snapshot.status).toBe(200);

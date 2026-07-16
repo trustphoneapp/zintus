@@ -27,6 +27,7 @@ import { TrustedCommandExecutor } from "./trusted-executor.js";
 import { canTransition, isTerminalState } from "./state-machine.js";
 import { derivePostVerificationRiskFeatures } from "./post-verification-risk.js";
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
+import { BudgetPausedError } from "./errors.js";
 import { TestIntegrityGuard, TestIntegrityViolationError, type TestIntegrityComparison } from "./test-integrity.js";
 import {
   ClaimEvidenceRecordSchema,
@@ -78,12 +79,33 @@ export class EngineerVerificationManager {
     this.options = options;
   }
 
+  isActive(runId: string): boolean { return this.active.has(runId); }
+
+  ownsBudgetCheckpoint(runId: string): boolean {
+    const sequence = this.options.supervisor.latestEventSequence(runId);
+    if (sequence === 0) return false;
+    const events = this.options.supervisor.listEvents(runId, Math.max(0, sequence - 20), 20).reverse();
+    const latestWorkTransition = events.find((event) =>
+      event.nextState !== "PAUSED_BUDGET" && event.reasonCode !== "BUDGET_RESUMED",
+    );
+    return latestWorkTransition?.nextState === "IMPLEMENTING"
+      && ["REVIEW_REPAIR_STARTED", "STABLE_REQUIRED_TEST_REPAIR_STARTED"].includes(latestWorkTransition.reasonCode);
+  }
+
   verify(runId: string): Promise<VerificationResult> {
+    return this.runActive(runId, () => this.verifyPass(runId));
+  }
+
+  resumeBudgetCheckpoint(runId: string): Promise<VerificationResult> {
+    return this.runActive(runId, () => this.recoverInterruptedVerification(runId));
+  }
+
+  private runActive(runId: string, operation: () => Promise<VerificationResult>): Promise<VerificationResult> {
     const existing = this.active.get(runId);
     if (existing) return existing;
-    const promise = this.verifyPass(runId)
+    const promise = operation()
       .catch((error) => {
-        this.failClosed(runId, error);
+        if (!(error instanceof BudgetPausedError)) this.failClosed(runId, error);
         throw error;
       })
       .finally(() => this.active.delete(runId));
@@ -101,7 +123,7 @@ export class EngineerVerificationManager {
       .filter((run) => run.state !== "IMPLEMENTING" || this.isInterruptedPhase3Repair(run.runId))
       .map((run) => ({
         runId: run.runId,
-        promise: run.state === "FAST_CHECKS" ? this.verify(run.runId) : this.recoverInterruptedVerification(run.runId),
+        promise: run.state === "FAST_CHECKS" ? this.verify(run.runId) : this.resumeBudgetCheckpoint(run.runId),
       }));
   }
 
@@ -599,18 +621,13 @@ export class EngineerVerificationManager {
   }
 
   private async recoverInterruptedVerification(runId: string): Promise<VerificationResult> {
-    try {
-      const initial = this.options.supervisor.getRun(runId);
-      const sandbox = await this.options.executionManager.recoverSandbox(runId, true);
-      if (initial.state !== "VERIFICATION_RECOVERY") {
-        this.transition(runId, "VERIFICATION_RECOVERY", "PHASE3_PROCESS_INTERRUPTED", [sandbox.record.sandboxId]);
-      }
-      this.transition(runId, "FAST_CHECKS", "PHASE3_RECOVERY_RESTARTED", [sandbox.record.sandboxId]);
-      return this.verify(runId);
-    } catch (error) {
-      this.failClosed(runId, error);
-      throw error;
+    const initial = this.options.supervisor.getRun(runId);
+    const sandbox = await this.options.executionManager.recoverSandbox(runId, true);
+    if (initial.state !== "VERIFICATION_RECOVERY") {
+      this.transition(runId, "VERIFICATION_RECOVERY", "PHASE3_PROCESS_INTERRUPTED", [sandbox.record.sandboxId]);
     }
+    this.transition(runId, "FAST_CHECKS", "PHASE3_RECOVERY_RESTARTED", [sandbox.record.sandboxId]);
+    return this.verifyPass(runId);
   }
 
   private isInterruptedPhase3Repair(runId: string): boolean {
@@ -663,9 +680,10 @@ export class EngineerVerificationManager {
   }
 
   private failAgent(runId: string, agent: AgentContext): void {
+    const paused = this.options.supervisor.getRun(runId).state === "PAUSED_BUDGET";
     this.options.supervisor.recordAgentExecution({
       agentExecutionId: agent.id, runId, role: agent.role, modelTier: agent.route.logicalTier,
-      status: "FAILED", inputHash: agent.inputHash, outputArtifactId: null,
+      status: paused ? "PAUSED" : "FAILED", inputHash: agent.inputHash, outputArtifactId: null,
       startedAt: agent.startedAt, completedAt: this.timestamp(),
     });
   }

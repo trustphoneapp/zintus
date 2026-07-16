@@ -475,11 +475,14 @@ describe("Phase 2 Codex Builder", () => {
       runner: () => ({ status: 0, stdout: "pass", stderr: "" }),
     });
     let requestCount = 0;
+    const cacheKeys: string[] = [];
     const transport: ResponsesTransport = {
       async create(request) {
         requestCount += 1;
         expect(request.model).toBe("gpt-5.6-sol");
         expect(request.store).toBe(false);
+        expect(request.max_output_tokens).toBe(8_000);
+        cacheKeys.push(String(request.prompt_cache_key));
         if (requestCount === 1) return {
           id: "resp-1",
           output: [{ type: "function_call", call_id: "call-1", name: "write_file", arguments: JSON.stringify({
@@ -497,6 +500,8 @@ describe("Phase 2 Codex Builder", () => {
     expect(result.changedFiles).toEqual(["src/value.ts"]);
     expect(result.diff).toContain("value = 2");
     expect(result.responseIds).toEqual(["resp-1", "resp-2"]);
+    expect(new Set(cacheKeys).size).toBe(1);
+    expect(cacheKeys[0]).not.toBe("undefined");
     workspaceManager.remove(workspace);
   });
 
@@ -723,6 +728,23 @@ describe("Phase 2 authoritative execution worker", () => {
     expect(supervisor.listEvents(budgetFrozen.runId)).toContainEqual(expect.objectContaining({
       nextState: "PAUSED_BUDGET", reasonCode: "TOKEN_LIMIT_REACHED",
     }));
+    expect(supervisor.listFailures(budgetFrozen.runId)).toEqual([]);
+    expect(supervisor.exportRunRecords(budgetFrozen.runId).agent_executions).toMatchObject([{ status: "PAUSED" }]);
+    const pausedRun = supervisor.getRun(budgetFrozen.runId);
+    const pausedBudget = supervisor.getBudget(budgetFrozen.runId);
+    const toppedBudget = supervisor.topUpBudget({
+      runId: budgetFrozen.runId, expectedRevision: pausedBudget.revision,
+      topUp: { addTokenBudget: 100_000, addCostBudgetUsd: 1, addTimeBudgetSeconds: 60 },
+      actorId: "user-1", idempotencyKey: "worker-budget-top-up",
+    });
+    supervisor.resumeBudget({
+      runId: budgetFrozen.runId, expectedStateVersion: pausedRun.stateVersion,
+      expectedBudgetRevision: toppedBudget.revision, actorId: "user-1", idempotencyKey: "worker-budget-resume",
+    });
+    expect((await manager.resumeBudgetCheckpoint(budgetFrozen.runId)).state).toBe("QUEUED");
+    await manager.runQueued(budgetFrozen.runId);
+    expect(supervisor.getRun(budgetFrozen.runId).state).toBe("FAST_CHECKS");
+    expect((supervisor.exportRunRecords(budgetFrozen.runId).agent_executions ?? []).map((agent) => agent.status)).toEqual(["PAUSED", "SUCCEEDED"]);
 
     const timeoutReceived = supervisor.receiveRequest({
       runId: "run-worker-provider-timeout", userId: "user-1",

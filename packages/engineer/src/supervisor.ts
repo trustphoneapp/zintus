@@ -527,12 +527,8 @@ export class EngineerSupervisor {
     }
     if (isTerminalState(run.state)) throw new InvalidTransitionError(`terminal state ${run.state} cannot create a decision`);
     if (policy.classification === "ASK_NOW" &&
-        !["REQUEST_NORMALIZED", "PLANNING", "PLAN_READY", "REPLANNING"].includes(run.state)) {
+        !["REQUEST_NORMALIZED", "PLANNING", "PLAN_READY", "REPLANNING", "CLARIFICATION_REQUIRED"].includes(run.state)) {
       throw new InvalidTransitionError(`ASK_NOW cannot safely interrupt ${run.state}`);
-    }
-    if (policy.classification === "ASK_NOW" &&
-        this.ledger.listOpenDecisions(run.runId).some((decision) => decision.classification === "ASK_NOW")) {
-      throw new InvalidTransitionError("an unresolved ASK_NOW decision already blocks this run");
     }
     const createdAt = this.timestamp();
     const content = DecisionRecordContentSchema.parse({
@@ -1081,6 +1077,9 @@ export class EngineerSupervisor {
     }
     if (run.stateVersion !== expectedStateVersion) {
       throw new StateVersionConflictError(run.runId, expectedStateVersion, run.stateVersion);
+    }
+    if (this.ledger.listOpenDecisions(run.runId).some((open) => open.classification === "ASK_NOW")) {
+      return;
     }
     this.transition({
       runId: run.runId,

@@ -18,6 +18,7 @@ import type { EngineerWorkerLeaseManager, WorkerLeaseGrant } from "./worker-leas
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import { canTransition } from "./state-machine.js";
 import { TestIntegrityGuard, TestIntegrityViolationError } from "./test-integrity.js";
+import { BudgetPausedError } from "./errors.js";
 
 const PHASE2_RECOVERABLE_STATES = new Set([
   "SANDBOX_WARM_CLAIMING", "SANDBOX_WARM_VALIDATING", "SANDBOX_WARM_CLAIMED",
@@ -84,6 +85,26 @@ export class EngineerExecutionManager {
     });
     this.active.set(runId, promise);
     return promise;
+  }
+
+  isActive(runId: string): boolean { return this.active.has(runId); }
+
+  /** Requeue a human-resumed implementation while preserving its workspace checkpoint. */
+  async resumeBudgetCheckpoint(runId: string) {
+    const run = this.options.supervisor.getRun(runId);
+    if (run.state !== "IMPLEMENTING" || !run.manifestHash) {
+      throw new Error(`implementation budget resume requires IMPLEMENTING, not ${run.state}`);
+    }
+    if (this.active.has(runId)) return run;
+    if (!this.sandboxes.has(runId)) await this.recoverSandbox(runId, false);
+    return this.options.supervisor.transition({
+      runId,
+      expectedStateVersion: run.stateVersion,
+      nextState: "QUEUED",
+      reasonCode: "BUDGET_CHECKPOINT_REQUEUED",
+      manifestHash: run.manifestHash,
+      idempotencyKey: `phase2:budget-resume:${run.stateVersion}`,
+    }).run;
   }
 
   /** Human-authorized retry after an ambiguous provider timeout. */
@@ -507,6 +528,22 @@ export class EngineerExecutionManager {
       return result;
     } catch (error) {
       const run = supervisor.getRun(runId);
+      if (error instanceof BudgetPausedError) {
+        if (agentExecutionId && agentStartedAt) {
+          supervisor.recordAgentExecution({
+            agentExecutionId,
+            runId,
+            role: "BUILDER",
+            modelTier: "GPT-5.6_SOL",
+            status: "PAUSED",
+            inputHash: sha256(supervisor.getManifest(runId)),
+            outputArtifactId: null,
+            startedAt: agentStartedAt,
+            completedAt: (this.options.now ?? (() => new Date()))().toISOString(),
+          });
+        }
+        throw error;
+      }
       const budgetExhausted = error instanceof RuntimeBudgetExhaustedError;
       const providerTimedOut = isProviderModelTimeout(error);
       const testIntegrityFailure = error instanceof TestIntegrityViolationError;
