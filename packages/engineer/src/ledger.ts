@@ -243,6 +243,18 @@ export interface FailureClassProjection {
   count: number;
 }
 
+export interface ReviewerPersistenceRecoveryCandidate {
+  agentExecutionId: string;
+  inputHash: string;
+  modelTier: "GPT-5.6_SOL";
+  resolvedModel: string;
+  cacheKey: string;
+  cacheHit: boolean | null;
+  startedAt: string;
+  completedAt: string;
+  outputArtifactId: string;
+}
+
 const RUN_SELECT = `
   SELECT r.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
   FROM engineer_runs r
@@ -1745,6 +1757,45 @@ export class EngineerLedger {
     const row = this.db.query("SELECT COALESCE(MAX(attempt), 0) AS attempt FROM reviewer_sessions WHERE run_id = ?")
       .get(runId) as { attempt: number };
     return row.attempt + 1;
+  }
+
+  latestReviewerPersistenceRecoveryCandidate(runId: string): ReviewerPersistenceRecoveryCandidate | null {
+    this.getRun(runId);
+    const row = this.db.query(`
+      SELECT a.id AS agent_execution_id, a.input_hash, a.model_tier,
+        a.started_at, a.completed_at, a.output_artifact_id,
+        m.resolved_model, m.cache_key, m.cache_hit
+      FROM agent_executions a
+      JOIN artifacts ar ON ar.id = a.output_artifact_id
+      JOIN model_calls m ON m.agent_execution_id = a.id AND m.status = 'SUCCEEDED'
+      LEFT JOIN reviewer_sessions rs ON rs.run_id = a.run_id AND rs.input_hash = a.input_hash
+      WHERE a.run_id = ? AND a.role = 'REVIEWER' AND a.status = 'SUCCEEDED'
+        AND ar.type = 'REVIEWER_OUTPUT' AND ar.producer_id = a.id AND rs.id IS NULL
+      ORDER BY a.rowid DESC, m.rowid DESC
+      LIMIT 1
+    `).get(runId) as {
+      agent_execution_id: string;
+      input_hash: string;
+      model_tier: "GPT-5.6_SOL";
+      resolved_model: string;
+      cache_key: string;
+      cache_hit: number | null;
+      started_at: string;
+      completed_at: string;
+      output_artifact_id: string;
+    } | null;
+    if (!row) return null;
+    return {
+      agentExecutionId: row.agent_execution_id,
+      inputHash: row.input_hash,
+      modelTier: row.model_tier,
+      resolvedModel: row.resolved_model,
+      cacheKey: row.cache_key,
+      cacheHit: row.cache_hit === null ? null : row.cache_hit === 1,
+      startedAt: row.started_at,
+      completedAt: row.completed_at,
+      outputArtifactId: row.output_artifact_id,
+    };
   }
 
   recordClaimEvidence(record: ClaimEvidenceRecord): ClaimEvidenceRecord {

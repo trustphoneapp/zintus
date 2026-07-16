@@ -39,6 +39,7 @@ import { MCPRegistry } from "./mcp-registry.js";
 import { getKey as getProviderKey } from "@zintus/keychain";
 import {
   DockerSandboxManager,
+  BudgetPausedError,
   ContextEngine,
   EngineerContextManager,
   EngineerExecutionManager,
@@ -441,6 +442,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   }
   for (const recovery of engineerVerification?.recoverReady() ?? []) {
     recovery.promise.catch((error) => {
+      if (error instanceof BudgetPausedError) return;
       log("error", "engineer.verification_recovery_failed", {
         runId: recovery.runId,
         error: error instanceof Error ? error.message : String(error),

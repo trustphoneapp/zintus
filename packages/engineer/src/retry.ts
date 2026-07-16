@@ -1,6 +1,6 @@
 import type { RetryBudgets, RetryKind } from "./contracts.js";
 
-export const RETRY_POLICY_VERSION = "retry-policy-v1";
+export const RETRY_POLICY_VERSION = "retry-policy-v2";
 
 export interface RetryHistoryItem {
   kind: RetryKind;
@@ -77,7 +77,11 @@ export function evaluateRetry(
   }
 
   const last = [...history].reverse().find((item) => item.allowed);
-  if (request.patchHash && last?.patchHash === request.patchHash) {
+  // An unchanged patch is conclusive no-progress evidence only when the same
+  // failure recurs. A later isolated review may legitimately discover a new,
+  // independently fingerprinted defect in the same candidate snapshot.
+  if (request.patchHash && last?.patchHash === request.patchHash &&
+      last.failureFingerprint === request.failureFingerprint) {
     return result(false, "IDENTICAL_PATCH_REPEATED");
   }
   if (

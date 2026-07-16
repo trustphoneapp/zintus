@@ -3,6 +3,7 @@ import {
   EvidenceBundleSchema,
   RepairContextSchema,
   ReviewerInputSchema,
+  ReviewerOutputSchema,
   TrustedEvidenceSchema,
   reviewerEvidenceBundleHash,
   type ModelRole,
@@ -18,7 +19,7 @@ import type { EngineerExecutionManager } from "./execution-manager.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import { sha256 } from "./hash.js";
 import { IndependentVerifier, IndependentVerificationFailure, StableRequiredTestFailure } from "./independent-verifier.js";
-import { IsolatedReviewer, REVIEWER_POLICY_VERSION } from "./isolated-reviewer.js";
+import { IsolatedReviewer, REVIEWER_POLICY_VERSION, reviewerFindingRecords } from "./isolated-reviewer.js";
 import { LUNA_FAILURE_ADVISOR_POLICY_VERSION, LunaFailureAdvisor } from "./luna-failure-advisor.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 import type { EngineerSupervisor } from "./supervisor.js";
@@ -32,6 +33,7 @@ import { TestIntegrityGuard, TestIntegrityViolationError, type TestIntegrityComp
 import {
   ClaimEvidenceRecordSchema,
   EvidenceBundleRecordSchema,
+  ReviewerSessionRecordSchema,
   SecurityFindingRecordSchema,
   trustedEvidenceSupportsCriterion,
   VerificationResultSchema,
@@ -118,13 +120,110 @@ export class EngineerVerificationManager {
       "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE",
       "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING",
       "REVIEW_CHANGES_REQUESTED", "REVIEW_FIX_PREPARING", "VERIFICATION_RECOVERY", "IMPLEMENTING",
+      "HUMAN_REVIEW_REQUIRED",
     ] as const;
     return this.options.supervisor.listRuns([...states])
-      .filter((run) => run.state !== "IMPLEMENTING" || this.isInterruptedPhase3Repair(run.runId))
+      .filter((run) => run.state === "HUMAN_REVIEW_REQUIRED"
+        ? this.options.supervisor.reviewerPersistenceRecoveryCandidate(run.runId) !== null
+        : run.state !== "IMPLEMENTING" || this.isInterruptedPhase3Repair(run.runId))
       .map((run) => ({
         runId: run.runId,
-        promise: run.state === "FAST_CHECKS" ? this.verify(run.runId) : this.resumeBudgetCheckpoint(run.runId),
+        promise: run.state === "FAST_CHECKS"
+          ? this.verify(run.runId)
+          : run.state === "HUMAN_REVIEW_REQUIRED"
+            ? this.runActive(run.runId, () => this.recoverReviewerPersistence(run.runId))
+            : this.resumeBudgetCheckpoint(run.runId),
       }));
+  }
+
+  private async recoverReviewerPersistence(runId: string): Promise<VerificationResult> {
+    const supervisor = this.options.supervisor;
+    const candidate = supervisor.reviewerPersistenceRecoveryCandidate(runId);
+    if (!candidate) throw new Error("run has no recoverable isolated Reviewer persistence failure");
+    const artifact = supervisor.listArtifacts(runId).find((item) => item.artifactId === candidate.outputArtifactId);
+    if (!artifact || artifact.type !== "REVIEWER_OUTPUT" || artifact.producerId !== candidate.agentExecutionId || artifact.trusted) {
+      throw new Error("recoverable Reviewer output artifact is missing or has invalid provenance");
+    }
+    const output = ReviewerOutputSchema.parse(JSON.parse(this.options.artifactStore.read(artifact).toString("utf8")));
+    const run = supervisor.getRun(runId);
+    const manifest = supervisor.getManifest(runId);
+    if (!manifest || !run.manifestHash || output.reviewPolicyVersion !== REVIEWER_POLICY_VERSION) {
+      throw new Error("recoverable Reviewer output is not bound to the current frozen contract");
+    }
+    const reviewerSessionId = sha256({
+      namespace: "recovered-reviewer-session-v1",
+      runId,
+      outputArtifactId: artifact.artifactId,
+      inputHash: candidate.inputHash,
+    });
+    const session = ReviewerSessionRecordSchema.parse({
+      reviewerSessionId,
+      runId,
+      attempt: supervisor.nextReviewerAttempt(runId),
+      modelTier: candidate.modelTier,
+      resolvedModel: candidate.resolvedModel,
+      inputHash: candidate.inputHash,
+      manifestHash: run.manifestHash,
+      diffHash: output.reviewedDiffHash,
+      evidenceBundleHash: output.reviewedEvidenceBundleHash,
+      policyVersion: REVIEWER_POLICY_VERSION,
+      cacheKey: candidate.cacheKey,
+      cacheHit: candidate.cacheHit,
+      startedAt: candidate.startedAt,
+      completedAt: candidate.completedAt,
+      decision: output.decision,
+      isolationVerified: true,
+      output,
+    });
+    const findings = reviewerFindingRecords(reviewerSessionId, output);
+    if (findings.length === 0 || output.decision !== "REQUEST_CHANGES") {
+      throw new Error("only a structured REQUEST_CHANGES result can use automatic Reviewer persistence recovery");
+    }
+
+    const sandbox = await this.options.executionManager.recoverSandbox(runId, true);
+    const workspaceManager = this.options.sandboxManager.workspaceManager();
+    const [currentCommitSha, currentDiff] = await Promise.all([
+      workspaceManager.currentCommitAsync(sandbox.workspace),
+      workspaceManager.diffAsync(sandbox.workspace),
+    ]);
+    if (sha256(currentDiff) !== output.reviewedDiffHash) {
+      throw new Error("workspace changed after the isolated review; persistence recovery is stale");
+    }
+
+    supervisor.recoverReviewerSession(session, findings, artifact.artifactId);
+    supervisor.setLastError(runId, null);
+    this.transition(runId, "REVIEW_CHANGES_REQUESTED", "REVIEWER_PERSISTENCE_RECOVERED", [artifact.artifactId], {
+      reviewerFindingsActionable: true,
+    });
+    const retry = supervisor.authorizeRetry({
+      runId,
+      expectedStateVersion: supervisor.getRun(runId).stateVersion,
+      kind: "REVIEWER_FIX",
+      failureFingerprint: sha256(findings.map((finding) => finding.fingerprint).sort()),
+      patchHash: sha256(currentDiff),
+      progressMetric: -findings.length,
+    });
+    if (!retry.allowed) {
+      this.transition(runId, "RETRY_BUDGET_EXHAUSTED", retry.reasonCode, [artifact.artifactId]);
+      throw new Error(`Reviewer persistence recovered, but repair was not authorized: ${retry.reasonCode}`);
+    }
+    this.transition(runId, "REVIEW_FIX_PREPARING", "REVIEW_REPAIR_CONTEXT_PREPARING", [artifact.artifactId], {
+      retryBudgetAvailable: true,
+      scopeWithinManifest: true,
+    });
+    const repairContext = RepairContextSchema.parse({
+      runId,
+      manifestHash: manifest.manifestHash,
+      manifest,
+      reviewFindings: output.findings,
+      reviewFindingsHash: sha256(output.findings),
+      currentCommitSha,
+      allowedPaths: manifest.allowedPaths,
+      remainingReviewFixAttempts: retry.remainingKindAttempts,
+    });
+    this.transition(runId, "IMPLEMENTING", "REVIEW_REPAIR_STARTED", [artifact.artifactId], { scopeWithinManifest: true });
+    await this.repair(manifest, sandbox, repairContext, "REVIEW_REPAIR_IMPLEMENTED");
+    return this.verifyPass(runId);
   }
 
   private async verifyPass(runId: string): Promise<VerificationResult> {

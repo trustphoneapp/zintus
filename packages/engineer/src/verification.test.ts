@@ -24,6 +24,7 @@ import {
   TrustedEvidenceSchema,
   reviewerEvidenceBundleHash,
   reviewerClaimEvidenceId,
+  reviewerFindingRecordId,
   sha256,
   type ResponsesTransport,
   type EngineerExecutionManager,
@@ -389,6 +390,12 @@ describe("Phase 3 isolated Reviewer", () => {
     expect(reviewerClaimEvidenceId({ runId: "run-1", attempt: 1, kind: "CRITERION", key: "AC-1" })).toBe(first);
     expect(reviewerClaimEvidenceId({ runId: "run-2", attempt: 1, kind: "CRITERION", key: "AC-1" })).not.toBe(first);
     expect(reviewerClaimEvidenceId({ runId: "run-1", attempt: 1, kind: "UNSUPPORTED", key: "AC-1" })).not.toBe(first);
+  });
+
+  test("namespaces provider-local finding labels by Reviewer session", () => {
+    const first = reviewerFindingRecordId({ reviewerSessionId: "review-1", providerFindingId: "F-1" });
+    expect(reviewerFindingRecordId({ reviewerSessionId: "review-1", providerFindingId: "F-1" })).toBe(first);
+    expect(reviewerFindingRecordId({ reviewerSessionId: "review-2", providerFindingId: "F-1" })).not.toBe(first);
   });
 
   test("never receives Builder narrative and rejects tampered diff or evidence", async () => {

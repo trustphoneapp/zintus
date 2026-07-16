@@ -16,6 +16,55 @@ import {
   type ReviewerSessionRecord,
 } from "./verification-contracts.js";
 
+export function reviewerFindingFingerprint(
+  finding: ReviewerOutput["findings"][number],
+): string {
+  return sha256({
+    severity: finding.severity,
+    category: finding.category.trim().toLowerCase(),
+    file: finding.file,
+    description: finding.description.trim().toLowerCase(),
+    requiredChange: finding.requiredChange.trim().toLowerCase(),
+  });
+}
+
+/** Provider finding labels (often F-1) are local to one response, not global IDs. */
+export function reviewerFindingRecordId(input: {
+  reviewerSessionId: string;
+  providerFindingId: string;
+}): string {
+  return sha256({ namespace: "review-finding-record-v1", ...input });
+}
+
+export function reviewerFindingRecords(
+  reviewerSessionId: string,
+  output: ReviewerOutput,
+): ReviewFindingRecord[] {
+  const providerIds = new Set<string>();
+  const fingerprints = new Set<string>();
+  return output.findings.map((finding) => {
+    if (providerIds.has(finding.findingId)) {
+      throw new Error(`Reviewer output repeats findingId ${finding.findingId}`);
+    }
+    providerIds.add(finding.findingId);
+    const fingerprint = reviewerFindingFingerprint(finding);
+    if (fingerprints.has(fingerprint)) {
+      throw new Error("Reviewer output repeats an equivalent structured finding");
+    }
+    fingerprints.add(fingerprint);
+    return ReviewFindingRecordSchema.parse({
+      reviewerSessionId,
+      ...finding,
+      findingId: reviewerFindingRecordId({
+        reviewerSessionId,
+        providerFindingId: finding.findingId,
+      }),
+      fingerprint,
+      status: "OPEN",
+    });
+  });
+}
+
 export const REVIEWER_POLICY_VERSION = "engineer-isolated-reviewer-v2";
 
 const FunctionCallSchema = z.object({
@@ -267,18 +316,7 @@ export class IsolatedReviewer {
     }
     const completedAt = (this.options.now ?? (() => new Date()))().toISOString();
     const reviewerSessionId = input.reviewSessionId;
-    const findings = output.findings.map((finding) => ReviewFindingRecordSchema.parse({
-      reviewerSessionId,
-      ...finding,
-      fingerprint: sha256({
-        severity: finding.severity,
-        category: finding.category.trim().toLowerCase(),
-        file: finding.file,
-        description: finding.description.trim().toLowerCase(),
-        requiredChange: finding.requiredChange.trim().toLowerCase(),
-      }),
-      status: "OPEN",
-    }));
+    const findings = reviewerFindingRecords(reviewerSessionId, output);
     const session = ReviewerSessionRecordSchema.parse({
       reviewerSessionId,
       runId: input.runId,

@@ -54,6 +54,7 @@ import {
   type LedgerTransitionResult,
   type RunExportTable,
   type RunObservabilityProjection,
+  type ReviewerPersistenceRecoveryCandidate,
 } from "./ledger.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
 import { evaluateRetry, type RetryDecision } from "./retry.js";
@@ -954,6 +955,34 @@ export class EngineerSupervisor {
     }
     if (!record.isolationVerified || record.modelTier !== "GPT-5.6_SOL") {
       throw new InvalidTransitionError("Reviewer session must be fresh, isolated, and routed to SOL");
+    }
+    return this.ledger.recordReviewerSession(record, findings);
+  }
+
+  reviewerPersistenceRecoveryCandidate(runId: string): ReviewerPersistenceRecoveryCandidate | null {
+    const run = this.ledger.getRun(runId);
+    if (run.state !== "HUMAN_REVIEW_REQUIRED" ||
+        this.ledger.getLastError(runId) !== "UNIQUE constraint failed: review_findings.id") return null;
+    const sequence = this.ledger.latestEventSequence(runId);
+    const latest = sequence > 0 ? this.ledger.listEvents(runId, sequence - 1, 1)[0] : undefined;
+    if (latest?.previousState !== "REVIEWING" || latest.reasonCode !== "PHASE3_UNEXPECTED_FAILURE") return null;
+    return this.ledger.latestReviewerPersistenceRecoveryCandidate(runId);
+  }
+
+  recoverReviewerSession(
+    record: ReviewerSessionRecord,
+    findings: ReviewFindingRecord[],
+    outputArtifactId: string,
+  ): ReviewerSessionRecord {
+    const candidate = this.reviewerPersistenceRecoveryCandidate(record.runId);
+    if (!candidate || candidate.outputArtifactId !== outputArtifactId ||
+        candidate.inputHash !== record.inputHash || candidate.modelTier !== record.modelTier ||
+        candidate.resolvedModel !== record.resolvedModel || candidate.cacheKey !== record.cacheKey ||
+        candidate.cacheHit !== record.cacheHit ||
+        candidate.startedAt !== record.startedAt || candidate.completedAt !== record.completedAt ||
+        record.attempt !== this.ledger.nextReviewerAttempt(record.runId) ||
+        record.decision !== "REQUEST_CHANGES" || !record.isolationVerified) {
+      throw new InvalidTransitionError("Reviewer persistence recovery evidence does not match the failed isolated review");
     }
     return this.ledger.recordReviewerSession(record, findings);
   }

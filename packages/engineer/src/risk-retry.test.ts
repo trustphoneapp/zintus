@@ -68,7 +68,7 @@ describe("bounded retry policy", () => {
     expect(result.reasonCode).toBe("SAME_FAILURE_LIMIT_REACHED");
   });
 
-  test("identical patches and no-progress attempts stop immediately", () => {
+  test("identical patches stop the same failure but permit a newly fingerprinted finding", () => {
     const history: RetryHistoryItem[] = [{
       kind: "REVIEWER_FIX",
       failureFingerprint: "finding-a",
@@ -79,6 +79,12 @@ describe("bounded retry policy", () => {
     expect(evaluateRetry({
       kind: "REVIEWER_FIX",
       failureFingerprint: "finding-b",
+      patchHash: "same-patch",
+      progressMetric: 5,
+    }, history, budgets).reasonCode).toBe("RETRY_ALLOWED");
+    expect(evaluateRetry({
+      kind: "REVIEWER_FIX",
+      failureFingerprint: "finding-a",
       patchHash: "same-patch",
       progressMetric: 5,
     }, history, budgets).reasonCode).toBe("IDENTICAL_PATCH_REPEATED");
