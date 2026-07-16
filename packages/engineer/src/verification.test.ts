@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   AdversarialCoverageReportSchema,
   buildAdversarialCoverageReport,
+  BudgetPausedError,
   buildVerificationCoverageMatrix,
   EngineerSupervisor,
   EngineerPublicationManager,
@@ -999,7 +1000,7 @@ describe("Phase 3 authoritative verification manager", () => {
     setup.supervisor.close();
   });
 
-  test("repairs a stable failed MUST check within budget and fully reverifies from FAST_CHECKS", async () => {
+  test("persists and resumes a stable required-test repair without rerunning its paid failure probe", async () => {
     const path = root();
     const setup = setupFastChecks(path);
     const digest = `sha256:${"a".repeat(64)}`;
@@ -1017,7 +1018,10 @@ describe("Phase 3 authoritative verification manager", () => {
           : { status: 1, stdout: "0 pass", stderr: "expected repair" };
       },
     };
-    const executionManager = { getSandbox: () => provisioned } as unknown as EngineerExecutionManager;
+    const executionManager = {
+      getSandbox: () => provisioned,
+      recoverSandbox: async () => provisioned,
+    } as unknown as EngineerExecutionManager;
     let builderCalls = 0;
     let reviewerCalls = 0;
     const transportForRole = (_runId: string, role: "BUILDER" | "TESTER" | "SECURITY" | "REVIEWER"): ResponsesTransport => ({
@@ -1069,7 +1073,26 @@ describe("Phase 3 authoritative verification manager", () => {
       transportForRole: (runId, role) => metered(transportForRole(runId, role)),
     });
 
-    const result = await manager.verify(setup.manifest.runId);
+    const interrupted = manager as unknown as { repair: () => Promise<void> };
+    interrupted.repair = async () => {
+      throw new BudgetPausedError(setup.manifest.runId, "simulated repair handoff");
+    };
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("simulated repair handoff");
+    expect(commandRuns).toBe(3);
+    expect(builderCalls).toBe(0);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("IMPLEMENTING");
+    const contextArtifact = setup.supervisor.listArtifacts(setup.manifest.runId)
+      .find((artifact) => artifact.type === "STABLE_REQUIRED_TEST_REPAIR_CONTEXT");
+    expect(contextArtifact).toMatchObject({ trusted: true, producerId: "engineer-verification" });
+
+    const recoveredManager = new EngineerVerificationManager({
+      supervisor: setup.supervisor,
+      executionManager,
+      sandboxManager,
+      artifactStore,
+      transportForRole: (runId, role) => metered(transportForRole(runId, role)),
+    });
+    const result = await recoveredManager.resumeBudgetCheckpoint(setup.manifest.runId);
 
     expect(commandRuns).toBe(4);
     expect(builderCalls).toBe(2);
@@ -1147,7 +1170,7 @@ describe("Phase 3 authoritative verification manager", () => {
 
   test("resumes an interrupted Reviewer repair instead of skipping to verification", async () => {
     const path = root();
-    const setup = setupFastChecks(path, "UNIT", { tokenBudget: 25_000 }, true, { builderModelCallLimit: 6 });
+    const setup = setupFastChecks(path, "UNIT", {}, true, { builderModelCallLimit: 6 });
     const digest = `sha256:${"a".repeat(64)}`;
     const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
     const sandboxManager = new DockerSandboxManager({ workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest });
@@ -1180,9 +1203,7 @@ describe("Phase 3 authoritative verification manager", () => {
               path: "src/value.ts",
               content: `// recovered repair ${builderCall}\nexport const value = 2;\n`,
             }),
-          }], usage: builderCall === 1
-            ? { input_tokens: 1_000, output_tokens: 8_000 }
-            : { input_tokens: 100, output_tokens: 100 } };
+          }], usage: { input_tokens: 100, output_tokens: 100 } };
           return { id: "repair-handoff", output: [], output_text: "Reviewer repair is complete.", usage: { input_tokens: 100, output_tokens: 100 } };
         }
         reviewerAttempt += 1;
@@ -1214,23 +1235,18 @@ describe("Phase 3 authoritative verification manager", () => {
       supervisor: setup.supervisor, executionManager, sandboxManager, artifactStore, transportForRole,
     });
 
-    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("paused safely");
-    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("PAUSED_BUDGET");
-    expect(builderCall).toBe(1);
-    expect(readFileSync(join(setup.workspace.workspaceRoot, "src", "value.ts"), "utf8")).toContain("recovered repair 1");
+    const interrupted = manager as unknown as { repair: () => Promise<void> };
+    interrupted.repair = async () => {
+      throw new BudgetPausedError(setup.manifest.runId, "simulated Reviewer repair handoff");
+    };
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("simulated Reviewer repair handoff");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("IMPLEMENTING");
+    expect(builderCall).toBe(0);
 
-    const paused = setup.supervisor.getRun(setup.manifest.runId);
-    const budget = setup.supervisor.getBudget(setup.manifest.runId);
-    const topped = setup.supervisor.topUpBudget({
-      runId: setup.manifest.runId, expectedRevision: budget.revision,
-      topUp: { addTokenBudget: 50_000, addCostBudgetUsd: 0, addTimeBudgetSeconds: 0 },
-      actorId: "user-1", idempotencyKey: "resume-review-repair-budget",
+    const recoveredManager = new EngineerVerificationManager({
+      supervisor: setup.supervisor, executionManager, sandboxManager, artifactStore, transportForRole,
     });
-    setup.supervisor.resumeBudget({
-      runId: setup.manifest.runId, expectedStateVersion: paused.stateVersion, expectedBudgetRevision: topped.revision,
-      actorId: "user-1", idempotencyKey: "resume-review-repair",
-    });
-    await manager.resumeBudgetCheckpoint(setup.manifest.runId);
+    await recoveredManager.resumeBudgetCheckpoint(setup.manifest.runId);
 
     expect(builderCall).toBe(3);
     expect(reviewerAttempt).toBe(2);

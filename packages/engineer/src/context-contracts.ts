@@ -5,6 +5,8 @@ export const CONTEXT_CONTRACT_VERSION = 1 as const;
 export const CONTEXT_MAX_SOURCE_FILES = 2_000 as const;
 export const CONTEXT_MAX_RELEVANT_FILES = 20 as const;
 export const CONTEXT_MAX_EXCERPT_CHARS = 48_000 as const;
+export const CONTEXT_DEFAULT_RELEVANT_FILES = 12 as const;
+export const CONTEXT_DEFAULT_EXCERPT_CHARS = 24_000 as const;
 export const CONTEXT_MAX_FILE_BYTES = 256 * 1024;
 export const CONTEXT_MAX_DETECTION_PATHS = 200 as const;
 export const CONTEXT_MAX_DETECTED_COMMANDS = 100 as const;
@@ -138,8 +140,8 @@ export const ContextDetectionsSchema = z.object({
 
 export const ContextScanCapsSchema = z.object({
   maxSourceFiles: z.literal(CONTEXT_MAX_SOURCE_FILES),
-  maxRelevantFiles: z.literal(CONTEXT_MAX_RELEVANT_FILES),
-  maxExcerptChars: z.literal(CONTEXT_MAX_EXCERPT_CHARS),
+  maxRelevantFiles: z.number().int().positive().max(CONTEXT_MAX_RELEVANT_FILES),
+  maxExcerptChars: z.number().int().positive().max(CONTEXT_MAX_EXCERPT_CHARS),
   maxFileBytes: z.literal(CONTEXT_MAX_FILE_BYTES),
 }).strict();
 

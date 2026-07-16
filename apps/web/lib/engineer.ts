@@ -23,6 +23,7 @@ export interface EngineerBudgetSnapshot {
   lifetimeLimits: EngineerBudgetAmounts;
   used: EngineerBudgetAmounts;
   reserved: Omit<EngineerBudgetAmounts, "timeSeconds">;
+  ambiguous: Omit<EngineerBudgetAmounts, "timeSeconds">;
   remaining: EngineerBudgetAmounts;
   warningThreshold: number;
   pauseReason: "COST_LIMIT_REACHED" | "TOKEN_LIMIT_REACHED" | "TIME_LIMIT_REACHED" | "MODEL_USAGE_UNKNOWN" | null;
@@ -59,7 +60,17 @@ export interface EngineerData {
   diff: string;
   approval: unknown | null;
   decisions: EngineerDecisionItem[];
+  reviewBinding: EngineerReviewBinding | null;
   errors: Array<{ section: string; message: string }>;
+}
+export interface EngineerReviewBinding {
+  reviewerSessionId: string;
+  reviewerDecision: "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "HUMAN_REVIEW_REQUIRED";
+  reviewerDiffHash: string;
+  reviewerEvidenceBundleHash: string;
+  reviewerIsolationVerified: boolean;
+  evidenceBundleId: string;
+  evidenceBundleHash: string;
 }
 export interface EngineerObservability {
   generatedAt: string; totalRuns: number; activeRuns: number; terminalRuns: number; pendingApprovals: number;
@@ -163,13 +174,14 @@ export async function getEngineerData(runId: string): Promise<EngineerData> {
   return {
     ...results[0].data, ...results[1].data, ...results[2].data, ...results[3].data, ...results[4].data,
     ...results[5].data, ...results[6].data, ...results[7].data, ...results[8].data, ...results[9].data,
+    reviewBinding: null,
     errors: results.flatMap((result) => result.error ? [result.error] : []),
   };
 }
 export async function engineerDecision(runId: string, action: "approve" | "request-changes" | "reject" | "cancel", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/${action}`, { method: "POST", body: JSON.stringify({ reason }) }); }
 export async function resolveHumanEngineerReview(runId: string, decision: "approve" | "reject", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/human-review`, { method: "POST", body: JSON.stringify({ decision, reason }) }); }
 export async function extendEngineerApproval(runId: string, reason: string, extensionSeconds = 86_400): Promise<void> { await request(`/v1/engineer/runs/${runId}/extend-approval`, { method: "POST", body: JSON.stringify({ reason, extensionSeconds }) }); }
-export async function resolveEngineerDecision(run: EngineerRun, decisionId: string, selectedOptionId: string, rationale: string): Promise<{ plan: PlanProposal | null; planningError: string | null }> {
+export async function resolveEngineerDecision(run: EngineerRun, decisionId: string, selectedOptionId: string, rationale: string): Promise<{ plan: PlanProposal | null; planningError: string | null; publication?: { status: string } | null }> {
   return request(`/v1/engineer/runs/${run.runId}/decisions/${decisionId}/resolve`, {
     method: "POST",
     body: JSON.stringify({

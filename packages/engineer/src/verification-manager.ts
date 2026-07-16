@@ -14,7 +14,7 @@ import {
 } from "./contracts.js";
 import { FailureRecordSchema } from "./control-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
-import { BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, type ResponsesTransport } from "./codex-builder.js";
+import { BuilderContinuationSchema, BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, type ResponsesTransport } from "./codex-builder.js";
 import type { AgentExecutionRecord, ArtifactRecord, SandboxRecord } from "./execution-contracts.js";
 import type { EngineerExecutionManager } from "./execution-manager.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
@@ -592,7 +592,15 @@ export class EngineerVerificationManager {
       allowedPaths: manifest.allowedPaths,
       remainingReviewFixAttempts: retry.remainingKindAttempts,
     });
-    this.transition(runId, "IMPLEMENTING", "STABLE_REQUIRED_TEST_REPAIR_STARTED", evidenceIds, {
+    const repairContextArtifact = supervisor.recordArtifact(this.options.artifactStore.put({
+      runId,
+      type: "STABLE_REQUIRED_TEST_REPAIR_CONTEXT",
+      bytes: JSON.stringify(repairContext),
+      producerType: "SYSTEM",
+      producerId: "engineer-verification",
+      trusted: true,
+    }));
+    this.transition(runId, "IMPLEMENTING", "STABLE_REQUIRED_TEST_REPAIR_STARTED", [...evidenceIds, repairContextArtifact.artifactId], {
       retryBudgetAvailable: true,
       scopeWithinManifest: true,
     });
@@ -623,6 +631,19 @@ export class EngineerVerificationManager {
       this.failAgent(runId, agent);
       throw error;
     }
+    const continuation = this.options.supervisor.listArtifacts(runId)
+      .filter((artifact) => artifact.type === "BUILDER_REPAIR_CONTINUATION" && artifact.trusted &&
+        artifact.producerType === "SYSTEM" && artifact.producerId === "engineer-builder-checkpoint")
+      .reverse()
+      .flatMap((artifact) => {
+        try {
+          const parsed = BuilderContinuationSchema.parse(
+            JSON.parse(this.options.artifactStore.read(artifact).toString("utf8")),
+          );
+          return parsed.manifestHash === manifest.manifestHash &&
+            parsed.inputContextHash === sha256(repairContext) ? [parsed] : [];
+        } catch { return []; }
+      })[0];
     const builder = new CodexBuilder({
       transport,
       manifest,
@@ -631,6 +652,17 @@ export class EngineerVerificationManager {
       executor,
       modelConfiguration: this.options.modelConfiguration,
       repairContext,
+      ...(continuation ? { continuation } : {}),
+      onContinuation: (checkpoint) => {
+        this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+          runId,
+          type: "BUILDER_REPAIR_CONTINUATION",
+          bytes: JSON.stringify(checkpoint),
+          producerType: "SYSTEM",
+          producerId: "engineer-builder-checkpoint",
+          trusted: true,
+        }));
+      },
       now: this.options.now,
       safetyIdentifier: this.options.safetyIdentifierForUser?.(this.options.supervisor.getRun(runId).userId),
       reserveModelCall: ({ model, inputTokenUpperBound, maxOutputTokens, round, attempt }) => this.options.supervisor.reserveModelBudget({
@@ -749,11 +781,20 @@ export class EngineerVerificationManager {
 
   private async recoverInterruptedVerification(runId: string): Promise<VerificationResult> {
     const initial = this.options.supervisor.getRun(runId);
+    this.options.supervisor.finalizeRunningAgentExecutions(
+      runId,
+      "FAILED",
+      "VERIFICATION_PROCESS_INTERRUPTED",
+      this.timestamp(),
+    );
     const sandbox = await this.options.executionManager.recoverSandbox(runId, true);
     const repairCheckpoint = this.latestRepairCheckpoint(runId);
     if (repairCheckpoint?.reasonCode === "REVIEW_REPAIR_STARTED" ||
         repairCheckpoint?.reasonCode === "REVIEW_REPAIR_CONTEXT_PREPARING") {
       return this.recoverInterruptedReviewRepair(runId, sandbox, repairCheckpoint);
+    }
+    if (repairCheckpoint?.reasonCode === "STABLE_REQUIRED_TEST_REPAIR_STARTED") {
+      return this.recoverInterruptedStableRequiredTestRepair(runId, sandbox, repairCheckpoint);
     }
     if (initial.state !== "VERIFICATION_RECOVERY") {
       this.transition(runId, "VERIFICATION_RECOVERY", "PHASE3_PROCESS_INTERRUPTED", [sandbox.record.sandboxId]);
@@ -830,6 +871,36 @@ export class EngineerVerificationManager {
       throw new Error(`Reviewer repair recovery requires IMPLEMENTING, not ${current.state}`);
     }
     await this.repair(manifest, sandbox, repairContext, "REVIEW_REPAIR_IMPLEMENTED");
+    return this.verifyPass(runId);
+  }
+
+  private async recoverInterruptedStableRequiredTestRepair(
+    runId: string,
+    sandbox: ProvisionedSandbox,
+    checkpoint: RunStateEvent,
+  ): Promise<VerificationResult> {
+    const supervisor = this.options.supervisor;
+    const manifest = supervisor.getManifest(runId);
+    if (!manifest) throw new Error("frozen manifest is unavailable for stable required-test repair recovery");
+    const artifacts = supervisor.listArtifacts(runId);
+    const artifact = checkpoint.evidenceIds
+      .map((artifactId) => artifacts.find((item) => item.artifactId === artifactId))
+      .find((item) => item?.type === "STABLE_REQUIRED_TEST_REPAIR_CONTEXT");
+    if (!artifact || !artifact.trusted || artifact.producerType !== "SYSTEM" || artifact.producerId !== "engineer-verification") {
+      throw new Error("stable required-test repair recovery requires its trusted repair context artifact");
+    }
+    const repairContext = RepairContextSchema.parse(
+      JSON.parse(this.options.artifactStore.read(artifact).toString("utf8")),
+    );
+    if (repairContext.runId !== runId || repairContext.manifestHash !== manifest.manifestHash ||
+        repairContext.manifest.manifestHash !== manifest.manifestHash) {
+      throw new Error("stable required-test repair recovery context is stale or belongs to another run");
+    }
+    const current = supervisor.getRun(runId);
+    if (current.state !== "IMPLEMENTING") {
+      throw new Error(`stable required-test repair recovery requires IMPLEMENTING, not ${current.state}`);
+    }
+    await this.repair(manifest, sandbox, repairContext, "STABLE_REQUIRED_TEST_REPAIR_IMPLEMENTED");
     return this.verifyPass(runId);
   }
 

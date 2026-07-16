@@ -6,7 +6,7 @@ import {
 } from "./execution-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import type { CodexBuilderOptions, ResponsesTransport } from "./codex-builder.js";
-import { BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, isProviderModelTimeout } from "./codex-builder.js";
+import { BuilderContinuationSchema, BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, isProviderModelTimeout } from "./codex-builder.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import { TrustedCommandExecutor } from "./trusted-executor.js";
@@ -25,6 +25,12 @@ const PHASE2_RECOVERABLE_STATES = new Set([
   "SANDBOX_COLD_PROVISIONING", "SANDBOX_PREWARM_INVALID", "SANDBOX_PROVISIONING",
   "SANDBOX_PREFLIGHT", "SANDBOX_READY", "CONTEXT_BUILDING", "IMPLEMENTING",
 ]);
+const GRACEFUL_DRAIN_RESUMABLE_STATES = new Set(["PAUSED_BUDGET", "MODEL_PROVIDER_RETRY_PENDING"]);
+
+export interface SandboxCleanupOptions {
+  /** Retain exact local workspaces/checkpoints that require an explicit human resume or retry. */
+  preserveResumable?: boolean;
+}
 
 export interface EngineerExecutionManagerOptions {
   supervisor: EngineerSupervisor;
@@ -134,10 +140,17 @@ export class EngineerExecutionManager {
     if (cleanupSandboxes) await this.destroyAllAsync();
   }
 
-  destroyAll(): void { for (const runId of [...this.sandboxes.keys()]) this.destroy(runId); }
+  destroyAll(options: SandboxCleanupOptions = {}): void {
+    for (const runId of [...this.sandboxes.keys()]) {
+      if (options.preserveResumable && GRACEFUL_DRAIN_RESUMABLE_STATES.has(this.options.supervisor.getRun(runId).state)) continue;
+      this.destroy(runId);
+    }
+  }
 
-  async destroyAllAsync(): Promise<void> {
-    await Promise.allSettled([...this.sandboxes.keys()].map((runId) => this.destroyAsync(runId)));
+  async destroyAllAsync(options: SandboxCleanupOptions = {}): Promise<void> {
+    const destroyable = [...this.sandboxes.keys()].filter((runId) =>
+      !options.preserveResumable || !GRACEFUL_DRAIN_RESUMABLE_STATES.has(this.options.supervisor.getRun(runId).state));
+    await Promise.allSettled(destroyable.map((runId) => this.destroyAsync(runId)));
   }
 
   recoverQueued(): Array<{ runId: string; promise: Promise<BuilderResult> }> {
@@ -151,6 +164,8 @@ export class EngineerExecutionManager {
     const supervisor = this.options.supervisor;
     const interrupted = supervisor.getRun(runId);
     if (!PHASE2_RECOVERABLE_STATES.has(interrupted.state)) return "IGNORED";
+    supervisor.finalizeRunningAgentExecutions(runId, "FAILED", "WORKER_PROCESS_INTERRUPTED",
+      (this.options.now ?? (() => new Date()))().toISOString());
     this.abortControllers.get(runId)?.abort(new Error("Engineer worker lease expired"));
     const repositoryRoot = this.options.repositoryRootFor(interrupted.repository.repositoryId);
     await this.options.sandboxManager.workspaceManager().cleanupRunAsync(runId, repositoryRoot);
@@ -271,6 +286,7 @@ export class EngineerExecutionManager {
     if (initial.state !== "QUEUED" || !initial.manifestHash) {
       throw new Error(`Phase 2 execution requires QUEUED, not ${initial.state}`);
     }
+    const route = resolveEngineerModel("BUILDER", this.options.builderOptions?.modelConfiguration);
     const transition = (
       nextState: Parameters<EngineerSupervisor["transition"]>[0]["nextState"],
       reasonCode: string,
@@ -400,14 +416,13 @@ export class EngineerExecutionManager {
       testIntegrity = retainedWorkspace
         ? TestIntegrityGuard.load(integrityOptions)
         : TestIntegrityGuard.createAndRecord(integrityOptions);
-      const route = resolveEngineerModel("BUILDER", this.options.builderOptions?.modelConfiguration);
       agentExecutionId = (this.options.idFactory ?? randomUUID)();
       agentStartedAt = (this.options.now ?? (() => new Date()))().toISOString();
       supervisor.recordAgentExecution({
         agentExecutionId,
         runId,
         role: "BUILDER",
-        modelTier: "GPT-5.6_SOL",
+        modelTier: route.logicalTier,
         status: "RUNNING",
         inputHash: sha256(manifest),
         outputArtifactId: null,
@@ -439,6 +454,19 @@ export class EngineerExecutionManager {
         currentCommitAsync: () => this.options.sandboxManager.currentCommitAsync(provisioned!.workspace),
         onRecord: (record) => { supervisor.recordCommandExecution(record); },
       });
+      const continuation = supervisor.listArtifacts(runId)
+        .filter((artifact) => artifact.type === "BUILDER_CONTINUATION" && artifact.trusted &&
+          artifact.producerType === "SYSTEM" && artifact.producerId === "engineer-builder-checkpoint")
+        .reverse()
+        .flatMap((artifact) => {
+          try {
+            const parsed = BuilderContinuationSchema.parse(
+              JSON.parse(this.options.artifactStore.read(artifact).toString("utf8")),
+            );
+            return parsed.manifestHash === manifest.manifestHash &&
+              parsed.inputContextHash === sha256(manifest.request.normalized) ? [parsed] : [];
+          } catch { return []; }
+        })[0];
       const builder = new CodexBuilder({
         transport: await this.options.transportForRun(runId),
         manifest,
@@ -448,6 +476,17 @@ export class EngineerExecutionManager {
         ...this.options.builderOptions,
         now: this.options.now,
         signal,
+        ...(continuation ? { continuation } : {}),
+        onContinuation: (checkpoint) => {
+          supervisor.recordArtifact(this.options.artifactStore.put({
+            runId,
+            type: "BUILDER_CONTINUATION",
+            bytes: JSON.stringify(checkpoint),
+            producerType: "SYSTEM",
+            producerId: "engineer-builder-checkpoint",
+            trusted: true,
+          }));
+        },
         safetyIdentifier: this.options.safetyIdentifierForUser?.(supervisor.getRun(runId).userId),
         reserveModelCall: ({ model, inputTokenUpperBound, maxOutputTokens, round, attempt }) => supervisor.reserveModelBudget({
           runId, reservationId: sha256({ runId, agentExecutionId, round, attempt, purpose: "builder-model-call" }),
@@ -483,7 +522,7 @@ export class EngineerExecutionManager {
             modelCallId: (this.options.idFactory ?? randomUUID)(),
             runId,
             agentExecutionId: agentExecutionId!,
-            logicalTier: "GPT-5.6_SOL",
+            logicalTier: route.logicalTier,
             resolvedModel: route.model,
             promptTemplateVersion: CODEX_BUILDER_PROMPT_VERSION,
             inputContextRefs: [manifest.manifestHash, observation.inputHash, observation.responseId],
@@ -517,7 +556,7 @@ export class EngineerExecutionManager {
         agentExecutionId,
         runId,
         role: "BUILDER",
-        modelTier: "GPT-5.6_SOL",
+        modelTier: route.logicalTier,
         status: "SUCCEEDED",
         inputHash: sha256(manifest),
         outputArtifactId: artifact.artifactId,
@@ -534,7 +573,7 @@ export class EngineerExecutionManager {
             agentExecutionId,
             runId,
             role: "BUILDER",
-            modelTier: "GPT-5.6_SOL",
+            modelTier: route.logicalTier,
             status: "PAUSED",
             inputHash: sha256(supervisor.getManifest(runId)),
             outputArtifactId: null,
@@ -579,7 +618,7 @@ export class EngineerExecutionManager {
           agentExecutionId,
           runId,
           role: "BUILDER",
-          modelTier: "GPT-5.6_SOL",
+          modelTier: route.logicalTier,
           status: "FAILED",
           inputHash: sha256(supervisor.getManifest(runId)),
           outputArtifactId: null,

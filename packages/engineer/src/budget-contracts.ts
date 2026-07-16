@@ -48,6 +48,7 @@ export const EngineerBudgetSnapshotSchema = z.object({
   lifetimeLimits: z.object({ costUsd: MoneySchema, tokens: z.number().int().nonnegative(), timeSeconds: z.number().int().nonnegative() }).strict(),
   used: z.object({ costUsd: MoneySchema, tokens: z.number().int().nonnegative(), timeSeconds: z.number().int().nonnegative() }).strict(),
   reserved: z.object({ costUsd: MoneySchema, tokens: z.number().int().nonnegative() }).strict(),
+  ambiguous: z.object({ costUsd: MoneySchema, tokens: z.number().int().nonnegative() }).strict(),
   remaining: z.object({ costUsd: MoneySchema, tokens: z.number().int().nonnegative(), timeSeconds: z.number().int().nonnegative() }).strict(),
   warningThreshold: z.number().min(0.5).max(0.99),
   pauseReason: BudgetPauseReasonSchema.nullable(),

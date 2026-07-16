@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EngineerPlanningCancelledError, EngineerPlanningManager, EngineerPlanningTimeoutError, PlanProposalSchema } from "./planning.js";
@@ -9,8 +10,15 @@ import { ContextManifestContentSchema, contextSourceId } from "./context-contrac
 import { sha256 } from "./hash.js";
 import type { EngineerRun } from "./contracts.js";
 import { createCorrectedRunDirective } from "./corrected-run.js";
+import { ContextEngine } from "./context-engine.js";
 
 const riskFeatures = { documentationOnly: false, sensitiveFilesChanged: true, touchesAuthentication: true, touchesAuthorization: true, touchesPayments: false, changesDatabaseSchema: false, destructiveProductionOperation: false, privilegeEscalation: false, changesInfrastructure: false, accessesSecrets: false, exposesSecrets: false, changesDependencies: false, changesPublicApi: true, requiredChecksPassed: false, testCoveragePercent: null, unresolvedWarnings: 0, highestSecuritySeverity: "NONE", retryCount: 0, dependsOnExternalService: false, diffLines: 0, generatedCodePercent: 0, reviewerDisagreement: false, suspectedRunnerCompromise: false };
+
+function git(cwd: string, args: string[]): string {
+  const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", shell: false });
+  if (result.status !== 0) throw new Error(result.stderr || `git ${args.join(" ")} failed`);
+  return result.stdout.trim();
+}
 
 function plannerOutput(allowedCommands = ["bun test auth"], unresolvedQuestions: Array<Record<string, unknown>> = []) {
   return {
@@ -220,6 +228,62 @@ describe("Phase 5 structured planning", () => {
     });
     expect(supervisor.getRun(run.runId).state).toBe("PLAN_READY");
     expect(manager.get(run.runId)?.proposalHash).toBe(proposal.proposalHash);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("passes only secret-filtered and credential-redacted exact-base excerpts to the planner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-secret-plan-"));
+    const repositoryRoot = join(root, "repository");
+    mkdirSync(join(repositoryRoot, "src"), { recursive: true });
+    git(root, ["init", "-b", "main", repositoryRoot]);
+    git(repositoryRoot, ["config", "user.email", "fixture@zintus.local"]);
+    git(repositoryRoot, ["config", "user.name", "Zintus Fixture"]);
+    writeFileSync(join(repositoryRoot, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+    writeFileSync(join(repositoryRoot, ".env.production"), "OPENAI_API_KEY=sk-proj-planner-secret-material-1234567890\n");
+    writeFileSync(join(repositoryRoot, ".env.example"), "OPENAI_API_KEY=replace-with-your-key\nPUBLIC_ORIGIN=http://localhost:3000\n");
+    writeFileSync(join(repositoryRoot, "src", "config.ts"), [
+      'export const clientSecret = "planner-source-secret-material";',
+      'export const publicOrigin = "http://localhost:3000";',
+      "",
+    ].join("\n"));
+    git(repositoryRoot, ["add", "-A", "--"]);
+    git(repositoryRoot, ["commit", "-m", "secret-safe planner fixture"]);
+    const baseCommitSha = git(repositoryRoot, ["rev-parse", "HEAD"]);
+
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const run = supervisor.receiveRequest({
+      runId: "secret-plan-run", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha },
+      request: "Plan a bounded credentials configuration change using the environment example.",
+    });
+    const contextManifest = await new ContextEngine({}).build({
+      runId: run.runId, repositoryId: run.repository.repositoryId, repositoryRoot,
+      baseCommitSha, request: run.requestOriginal,
+    });
+    const contextArtifact = supervisor.recordArtifact(artifactStore.put({
+      runId: run.runId, type: "CONTEXT_MANIFEST", bytes: JSON.stringify(contextManifest),
+      producerType: "SYSTEM", producerId: "context-engine", trusted: false,
+    }));
+    supervisor.recordContextSnapshot({ manifest: contextManifest, artifactId: contextArtifact.artifactId, createdAt: new Date().toISOString() });
+
+    let plannerInput = "";
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create(request) {
+        plannerInput = JSON.stringify(request.input);
+        return { id: "secret-safe-plan-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{
+          type: "function_call", name: "submit_plan", call_id: "secret-safe-plan-call", arguments: JSON.stringify(plannerOutput(["bun test"])),
+        }] };
+      } }),
+    });
+    await manager.plan(run.runId);
+    expect(plannerInput).not.toContain(".env.production");
+    expect(plannerInput).not.toContain("planner-secret-material");
+    expect(plannerInput).not.toContain("planner-source-secret-material");
+    expect(plannerInput).toContain(".env.example");
+    expect(plannerInput).toContain("[REDACTED_CREDENTIAL]");
+    expect(plannerInput).toContain("http://localhost:3000");
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

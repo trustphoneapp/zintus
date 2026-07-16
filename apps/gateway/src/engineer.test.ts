@@ -71,6 +71,86 @@ describe("Engineer trusted identity and admission", () => {
     expect(admissionChecks).toBe(0);
   });
 
+  test("surfaces deferred publication decisions without treating the safe fence as an error", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const now = "2026-07-16T12:00:00.000Z";
+    let run: EngineerRun = {
+      runId: "deferred-publication", userId: principal.ownerId, repository,
+      requestOriginal: "Review verified work", requestNormalized: "Review verified work",
+      state: "HUMAN_REVIEW_REQUIRED", stateVersion: 7, manifestHash: `sha256:${"a".repeat(64)}`,
+      riskTier: "MEDIUM", humanGateRequired: true, createdAt: now, updatedAt: now, terminalAt: null,
+    };
+    let publicationCalls = 0;
+    const manager = new EngineerRunManager({
+      supervisor: {
+        getRun: () => run,
+        listEvidenceBundles: () => [{ evidenceBundleId: "bundle-1" }],
+        transition: (input: { nextState: "REVIEW_APPROVED" }) => {
+          run = { ...run, state: input.nextState, stateVersion: run.stateVersion + 1 };
+          return { run };
+        },
+      } as never,
+      publication: {
+        start: async () => {
+          publicationCalls += 1;
+          return { status: "DEFERRED_DECISIONS_PENDING" as const, decisionIds: ["decision-1"] };
+        },
+      } as never,
+      principal,
+      preflight: { assertRunAdmission: async () => undefined } as never,
+    });
+
+    const result = await manager.resolveHumanReview(
+      principal,
+      run.runId,
+      "approve",
+      "Verified evidence reviewed; deferred preference remains.",
+    );
+
+    expect(result).toEqual({
+      run: expect.objectContaining({ state: "REVIEW_APPROVED", stateVersion: 8 }),
+      publication: { status: "DEFERRED_DECISIONS_PENDING", decisionIds: ["decision-1"] },
+    });
+    expect(publicationCalls).toBe(1);
+  });
+
+  test("resumes publication exactly when the final deferred decision is resolved", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const now = "2026-07-16T12:00:00.000Z";
+    const run: EngineerRun = {
+      runId: "resolve-final-deferred", userId: principal.ownerId, repository,
+      requestOriginal: "Review verified work", requestNormalized: "Review verified work",
+      state: "REVIEW_APPROVED", stateVersion: 8, manifestHash: `sha256:${"a".repeat(64)}`,
+      riskTier: "MEDIUM", humanGateRequired: true, createdAt: now, updatedAt: now, terminalAt: null,
+    };
+    let open = true;
+    let publicationCalls = 0;
+    const manager = new EngineerRunManager({
+      supervisor: {
+        getRun: () => run,
+        resolveDecision: () => { open = false; return { resolutionId: "resolution-1" }; },
+        listOpenDecisions: () => open ? [{ decisionId: "decision-1", classification: "DEFER" }] : [],
+      } as never,
+      publication: {
+        start: async () => {
+          publicationCalls += 1;
+          return { status: "AWAITING_APPROVAL" as const, approval: { approvalRequestId: "approval-1" } };
+        },
+      } as never,
+      principal,
+      preflight: { assertRunAdmission: async () => undefined } as never,
+    });
+
+    const result = await manager.resolveDecision(principal, run.runId, "decision-1", {
+      expectedStateVersion: run.stateVersion,
+      selectedOptionId: "recommended",
+      rationale: "Apply the reviewed option.",
+      idempotencyKey: "resolve-final-deferred-once",
+    });
+    expect(result.publication).toMatchObject({ status: "AWAITING_APPROVAL" });
+    expect(publicationCalls).toBe(1);
+  });
+
   test("keeps owned cancellation available when repository admission becomes stale", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-stale-cancel-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
@@ -232,6 +312,26 @@ describe("Engineer trusted identity and admission", () => {
     supervisor.setLastError(run.runId, new BudgetPausedError(run.runId, "TOKEN_LIMIT_REACHED").message);
     expect(manager.get(run.runId).lastError).toBeNull();
     supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("graceful drain preserves resumable execution workspaces while cleaning other sandboxes", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const calls: string[] = [];
+    let cleanupOptions: { preserveResumable?: boolean } | undefined;
+    const manager = new EngineerRunManager({
+      principal,
+      preflight: preflight(),
+      supervisor: { listRuns: () => [] } as never,
+      execution: {
+        drain: async (cleanupSandboxes: boolean) => { calls.push(`drain:${cleanupSandboxes}`); },
+        destroyAll: (options?: { preserveResumable?: boolean }) => { calls.push("destroy"); cleanupOptions = options; },
+      } as never,
+    });
+
+    await manager.drain();
+
+    expect(calls).toEqual(["drain:false", "destroy"]);
+    expect(cleanupOptions).toEqual({ preserveResumable: true });
   });
 
   test("terminates a timed-out planning attempt with an exact durable event", async () => {

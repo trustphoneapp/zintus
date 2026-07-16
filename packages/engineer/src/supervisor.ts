@@ -816,6 +816,16 @@ export class EngineerSupervisor {
     });
   }
 
+  finalizeRunningAgentExecutions(
+    runId: string,
+    status: "PAUSED" | "FAILED",
+    reason: string,
+    completedAt = new Date().toISOString(),
+  ): number {
+    return this.ledger.atomic(() =>
+      this.ledger.finalizeRunningAgentExecutions(runId, status, completedAt, reason));
+  }
+
   recordModelCall(record: ModelCallRecord, reservationId?: string): void {
     if (record.status === "SUCCEEDED" && !reservationId) {
       throw new Error("successful model calls require a pre-admitted budget reservation");
@@ -851,6 +861,12 @@ export class EngineerSupervisor {
         }
         if (record.inputTokens !== null && record.outputTokens !== null) {
           this.ledger.releaseModelBudgetReservation(record.runId, reservationId);
+        } else {
+          // The provider outcome is unknown. Keep the worst-case allowance
+          // fenced across restarts, but identify it separately from an active
+          // in-flight request so the UI and a later reconciliation cannot call
+          // it settled spend.
+          this.ledger.markModelBudgetReservationAmbiguous(record.runId, reservationId);
         }
       }
       this.ledger.recordModelCall(record, reservationId);

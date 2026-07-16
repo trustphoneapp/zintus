@@ -141,7 +141,31 @@ export class EngineerRunManager {
         "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING",
         "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED",
       ].includes(event.nextState));
+      const reachedReviewDecision = events.some((event) => [
+        "REVIEW_APPROVED", "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED",
+        "HUMAN_APPROVAL_PENDING", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED",
+      ].includes(event.nextState));
       const status = this.get(runId);
+      const reviewBinding = reachedReviewDecision ? section<{
+        reviewerSessionId: string;
+        reviewerDecision: string;
+        reviewerDiffHash: string;
+        reviewerEvidenceBundleHash: string;
+        reviewerIsolationVerified: boolean;
+        evidenceBundleId: string;
+        evidenceBundleHash: string;
+      } | null>("reviewBinding", () => {
+        const evidence = this.options.supervisor.getPublicationEvidence(runId);
+        return {
+          reviewerSessionId: evidence.reviewerSessionId,
+          reviewerDecision: evidence.reviewerDecision,
+          reviewerDiffHash: evidence.reviewerDiffHash,
+          reviewerEvidenceBundleHash: evidence.reviewerEvidenceBundleHash,
+          reviewerIsolationVerified: evidence.reviewerIsolationVerified,
+          evidenceBundleId: evidence.evidenceBundleId,
+          evidenceBundleHash: evidence.evidenceBundleHash,
+        };
+      }, null) : null;
       const data = {
         artifacts: section("artifacts", () => this.artifacts(runId), []),
         claims: reachedVerification ? section("claims", () => this.claims(runId), []) : [],
@@ -153,6 +177,7 @@ export class EngineerRunManager {
         diff: reachedImplementation ? section("diff", () => this.diff(runId), "") : "",
         approval: reachedVerification ? section("approval", () => this.approval(runId), null) : null,
         decisions: section("decisions", () => this.decisions(principal, runId), []),
+        reviewBinding,
         errors,
       };
       const afterSequence = this.options.supervisor.latestEventSequence(runId);
@@ -586,7 +611,7 @@ export class EngineerRunManager {
         idempotencyKey: `gateway-drain:${run.stateVersion}`,
       });
     }
-    this.options.execution?.destroyAll();
+    this.options.execution?.destroyAll({ preserveResumable: true });
   }
 
   events(runId: string) {
@@ -830,7 +855,18 @@ export class EngineerRunManager {
         }
       }
     }
-    return { resolution, plan, planningError };
+    let publication: Awaited<ReturnType<EngineerPublicationManager["start"]>> | null = null;
+    const afterDecision = this.options.supervisor.getRun(runId);
+    const deferredRemaining = this.options.supervisor.listOpenDecisions(runId)
+      .some((decision) => decision.classification === "DEFER");
+    if (this.options.publication && !deferredRemaining) {
+      if (afterDecision.state === "REVIEW_APPROVED") {
+        publication = await this.options.publication.start(runId, principal.reviewerId);
+      } else if (afterDecision.state === "HUMAN_APPROVED") {
+        publication = await this.options.publication.resume(runId);
+      }
+    }
+    return { resolution, plan, planningError, publication };
   }
 
   private beginPlanning(runId: string): void {

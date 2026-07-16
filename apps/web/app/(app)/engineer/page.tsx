@@ -42,6 +42,9 @@ import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresen
 import { clearEphemeralGatewayToken, fetchGatewayConnection, setEphemeralGatewayToken } from "@/lib/gateway";
 import { estimateEngineerCost, formatUsd } from "@/lib/engineer-cost";
 import { downloadBlob } from "@/lib/download";
+import { deriveDiffProvenance, deriveSecurityStatus, DIFF_PROVENANCE_PRESENTATION, engineerTextSha256 } from "@/lib/engineer-truth";
+import { frozenPlanCapabilities } from "@/lib/engineer-capabilities";
+import { EngineerActionLock } from "@/lib/engineer-action-lock";
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerSnapshot>>["data"];
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
@@ -68,18 +71,26 @@ function recommendedBudget(request: string): EngineerBudgetLimits {
   return DEFAULT_BUDGET;
 }
 
+const FOLDER_INVENTORY_MAX_FILES = 5_000;
+const FOLDER_INVENTORY_MAX_ENTRIES = 10_000;
+const FOLDER_INVENTORY_MAX_DEPTH = 32;
+
 function BudgetHud({ budget, manifest }: { budget: EngineerBudgetSnapshot | null; manifest: PlanProposal["manifest"] | null }) {
   const limits = budget?.limits ?? (manifest ? { costUsd: manifest.costBudgetUsd, tokens: manifest.tokenBudget, timeSeconds: manifest.timeBudgetSeconds } : null);
   if (!limits) return null;
   if (!budget) return <section className="engineer-budget-hud engineer-budget-hud--pending"><div><span className="engineer-kicker">Run budget</span><strong>${limits.costUsd} · {limits.tokens.toLocaleString()} tokens · {Math.round(limits.timeSeconds / 60)} min</strong></div><small>Live spend appears when execution begins.</small></section>;
+  const activeReservedCost = Math.max(0, budget.reserved.costUsd - budget.ambiguous.costUsd);
+  const activeReservedTokens = Math.max(0, budget.reserved.tokens - budget.ambiguous.tokens);
+  const hasAmbiguousProviderUsage = budget.ambiguous.costUsd > 0 || budget.ambiguous.tokens > 0;
   const rows = [
-    { label: "Cost", value: budget.used.costUsd + budget.reserved.costUsd, max: limits.costUsd, display: `$${budget.used.costUsd.toFixed(2)} settled + $${budget.reserved.costUsd.toFixed(2)} reserved/unsettled` },
-    { label: "Tokens", value: budget.used.tokens + budget.reserved.tokens, max: limits.tokens, display: `${budget.used.tokens.toLocaleString()} settled + ${budget.reserved.tokens.toLocaleString()} reserved/unsettled` },
+    { label: "Cost", value: budget.used.costUsd + budget.reserved.costUsd, max: limits.costUsd, display: `$${budget.used.costUsd.toFixed(2)} settled + $${activeReservedCost.toFixed(2)} active${hasAmbiguousProviderUsage ? ` + $${budget.ambiguous.costUsd.toFixed(2)} awaiting provider reconciliation` : ""}` },
+    { label: "Tokens", value: budget.used.tokens + budget.reserved.tokens, max: limits.tokens, display: `${budget.used.tokens.toLocaleString()} settled + ${activeReservedTokens.toLocaleString()} active${hasAmbiguousProviderUsage ? ` + ${budget.ambiguous.tokens.toLocaleString()} awaiting provider reconciliation` : ""}` },
     { label: "Time", value: budget.used.timeSeconds, max: limits.timeSeconds, display: `${Math.round(budget.used.timeSeconds / 60)} min elapsed` },
   ];
   return <section className={`engineer-budget-hud engineer-budget-hud--${budget.status.toLowerCase()}`} aria-label="Live run budget">
-    <div className="engineer-budget-hud-title"><div><span className="engineer-kicker">Live autonomy budget</span><strong>{budget.status === "PAUSED" ? "Paused at the hard ceiling" : budget.status === "WARNING" ? "Approaching a limit" : "Within limits"}</strong></div><small>Settled + conservative reservation · updated {new Date(budget.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></div>
+    <div className="engineer-budget-hud-title"><div><span className="engineer-kicker">Live autonomy budget</span><strong>{budget.status === "PAUSED" ? "Paused at the hard ceiling" : budget.status === "WARNING" ? "Approaching a limit" : "Within limits"}</strong></div><small>Settled + active + provider-ambiguous allowance · updated {new Date(budget.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></div>
     <div className="engineer-budget-bars">{rows.map((row) => { const percent = row.max > 0 ? Math.min(100, (row.value / row.max) * 100) : 100; return <div key={row.label} className="engineer-budget-row"><div><span>{row.label}</span><strong>{row.display}</strong><small>{Math.max(0, 100 - percent).toFixed(0)}% remaining</small></div><progress max="100" value={percent} /></div>; })}</div>
+    {hasAmbiguousProviderUsage ? <p className="engineer-budget-note" role="status">A timed-out provider request may still be billed. Zintus keeps that allowance fenced and will not replay it automatically.</p> : null}
   </section>;
 }
 
@@ -176,10 +187,12 @@ export default function EngineerPage() {
   const [tab, setTab] = useState<"timeline" | "diff" | "evidence">("timeline");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [managerError, setManagerError] = useState<string | null>(null);
   const [activity, setActivity] = useState<EngineerRunStatus["activity"] | null>(null);
+  const [displayedDiffHash, setDisplayedDiffHash] = useState<string | null>(null);
   const [gatewayToken, setGatewayToken] = useState("");
   const [gatewayAuthenticated, setGatewayAuthenticated] = useState(false);
   const [gatewayState, setGatewayState] = useState<"connected" | "authentication-required" | "offline">("offline");
@@ -189,7 +202,7 @@ export default function EngineerPage() {
   const [recentRuns, setRecentRuns] = useState<EngineerRun[]>([]);
   const [recentRunsCursor, setRecentRunsCursor] = useState<string | null>(null);
   const [showAllRuns, setShowAllRuns] = useState(false);
-  const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number } | null>(null);
+  const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number; truncated: boolean } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   const [budget, setBudget] = useState<EngineerBudgetSnapshot | null>(null);
   const [budgetMode, setBudgetMode] = useState<"recommended" | "custom">("recommended");
@@ -203,6 +216,19 @@ export default function EngineerPage() {
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRunIdRef = useRef<string | null>(null);
   const topUpPendingRef = useRef(false);
+  const actionLockRef = useRef(new EngineerActionLock());
+
+  const withRunMutation = useCallback(async (action: string, work: () => Promise<void>) => {
+    await actionLockRef.current.run("run-control", async () => {
+      setPendingAction(action);
+      setBusy(true);
+      try { await work(); }
+      finally {
+        setPendingAction((current) => current === action ? null : current);
+        setBusy(false);
+      }
+    });
+  }, []);
 
   const refresh = useCallback(async (runId: string) => {
     const snapshot = await getEngineerSnapshot(runId);
@@ -265,6 +291,13 @@ export default function EngineerPage() {
     return () => window.clearInterval(timer);
   }, [refreshLiveSummary, run?.runId, run?.state]);
 
+  useEffect(() => {
+    let current = true;
+    setDisplayedDiffHash(null);
+    void engineerTextSha256(data?.diff ?? "").then((hash) => { if (current) setDisplayedDiffHash(hash); });
+    return () => { current = false; };
+  }, [data?.diff, run?.runId]);
+
   const loadDashboard = useCallback(async (reportAuthorizationError = false) => {
     const connection = await fetchGatewayConnection();
     setGatewayState(connection.state);
@@ -315,17 +348,25 @@ export default function EngineerPage() {
     setFolderBusy(true); setError(null);
     try {
       const root = await picker({ mode: "read" }) as { name: string; values?: () => AsyncIterable<unknown> };
-      let files = 0; let bytes = 0;
-      const visit = async (directory: { values?: () => AsyncIterable<unknown> }) => {
-        if (!directory.values) return;
+      let files = 0; let bytes = 0; let entries = 0; let truncated = false;
+      const visit = async (directory: { values?: () => AsyncIterable<unknown> }, depth: number): Promise<void> => {
+        if (!directory.values || truncated) return;
+        if (depth > FOLDER_INVENTORY_MAX_DEPTH) { truncated = true; return; }
         for await (const entry of directory.values()) {
-          const item = entry as { kind?: string; values?: () => AsyncIterable<unknown>; getFile?: () => Promise<{ size: number }> };
-          if (item.kind === "directory") await visit(item);
-          else if (item.kind === "file" && item.getFile) { const file = await item.getFile(); files += 1; bytes += file.size; }
+          entries += 1;
+          if (entries > FOLDER_INVENTORY_MAX_ENTRIES || files >= FOLDER_INVENTORY_MAX_FILES) { truncated = true; return; }
+          const item = entry as { kind?: string; name?: string; values?: () => AsyncIterable<unknown>; getFile?: () => Promise<{ size: number }> };
+          if (item.kind === "directory") {
+            if (item.name === ".git" || item.name === "node_modules") continue;
+            await visit(item, depth + 1);
+          } else if (item.kind === "file" && item.getFile) {
+            const file = await item.getFile(); files += 1; bytes += file.size;
+          }
+          if (truncated) return;
         }
       };
-      await visit(root);
-      setFolderSnapshot({ name: root.name, files, bytes });
+      await visit(root, 0);
+      setFolderSnapshot({ name: root.name, files, bytes, truncated });
     } catch (cause) {
       if ((cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to read the selected folder");
     } finally { setFolderBusy(false); }
@@ -391,14 +432,16 @@ export default function EngineerPage() {
 
   const retryPlanning = async () => {
     if (!run) return;
-    setBusy(true); setError(null); setManagerError(null);
-    cancellationRequestedRef.current = false;
-    watch(run.runId, events.at(-1)?.sequence ?? 0);
-    const planningRequest = new AbortController();
-    planningRequestRef.current = planningRequest;
-    try { const proposal = await planEngineerRun(run.runId, planningRequest.signal); setPlan(proposal); await refresh(run.runId); }
-    catch (cause) { await refresh(run.runId).catch(() => undefined); if (!cancellationRequestedRef.current && (cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
-    finally { planningRequestRef.current = null; setBusy(false); }
+    await withRunMutation("retry-planning", async () => {
+      setError(null); setManagerError(null);
+      cancellationRequestedRef.current = false;
+      watch(run.runId, events.at(-1)?.sequence ?? 0);
+      const planningRequest = new AbortController();
+      planningRequestRef.current = planningRequest;
+      try { const proposal = await planEngineerRun(run.runId, planningRequest.signal); setPlan(proposal); await refresh(run.runId); }
+      catch (cause) { await refresh(run.runId).catch(() => undefined); if (!cancellationRequestedRef.current && (cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
+      finally { planningRequestRef.current = null; }
+    });
   };
 
   const downloadEvidence = async () => {
@@ -419,89 +462,97 @@ export default function EngineerPage() {
 
   const resolveDecision = useCallback(async (decisionId: string, optionId: string) => {
     if (!run) return;
-    setBusy(true); setError(null);
-    try {
-      const result = await resolveEngineerDecision(run, decisionId, optionId, "Selected through the Zintus decision inbox.");
-      if (result.plan) setPlan(result.plan);
-      if (result.planningError) setError(result.planningError);
-      await refresh(run.runId);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Unable to resolve decision");
-    } finally {
-      setBusy(false);
-    }
-  }, [refresh, run]);
+    await withRunMutation(`decision:${decisionId}`, async () => {
+      setError(null);
+      try {
+        const result = await resolveEngineerDecision(run, decisionId, optionId, "Selected through the Zintus decision inbox.");
+        if (result.plan) setPlan(result.plan);
+        if (result.planningError) setError(result.planningError);
+        await refresh(run.runId);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "Unable to resolve decision");
+      }
+    });
+  }, [refresh, run, withRunMutation]);
 
   const freezeAndStart = async () => {
     if (!run || !plan) return;
-    setBusy(true); setError(null);
-    try {
-      const frozen = await freezeEngineerPlan(run, plan.manifest);
-      setRun(frozen);
-      const queued = await startEngineerRun(frozen.runId);
-      setRun(queued); setEvents([]); watch(queued.runId);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
-    finally { setBusy(false); }
+    await withRunMutation("freeze-start", async () => {
+      setError(null);
+      try {
+        const frozen = await freezeEngineerPlan(run, plan.manifest);
+        setRun(frozen);
+        const queued = await startEngineerRun(frozen.runId);
+        setRun(queued); setEvents([]); watch(queued.runId);
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
+    });
   };
 
   const startFrozen = async () => {
     if (!run || run.state !== "PLAN_FROZEN") return;
-    setBusy(true); setError(null);
-    try { const queued = await startEngineerRun(run.runId); setRun(queued); setEvents([]); watch(queued.runId); }
-    catch (cause) { const status = await getEngineerRunStatus(run.runId).catch(() => null); if (status) { setRun(status.run); setManagerError(status.lastError); } setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
-    finally { setBusy(false); }
+    await withRunMutation("start-frozen", async () => {
+      setError(null);
+      try { const queued = await startEngineerRun(run.runId); setRun(queued); setEvents([]); watch(queued.runId); }
+      catch (cause) { const status = await getEngineerRunStatus(run.runId).catch(() => null); if (status) { setRun(status.run); setManagerError(status.lastError); } setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
+    });
   };
 
   const recoverStaleBase = async () => {
     if (!run) return;
-    setBusy(true); setError(null);
-    try {
-      const replacement = await recoverEngineerStaleBase(run.runId);
-      await openRun(replacement.runId);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to recover the stale base"); }
-    finally { setBusy(false); }
+    await withRunMutation("recover-stale-base", async () => {
+      setError(null);
+      try {
+        const replacement = await recoverEngineerStaleBase(run.runId);
+        await openRun(replacement.runId);
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to recover the stale base"); }
+    });
   };
 
   const createCorrectedRun = async () => {
     if (!run || !CORRECTABLE_TERMINAL_STATES.has(run.state)) return;
-    setBusy(true); setError(null);
-    try {
-      const corrected = await createCorrectedEngineerRun(run.runId);
-      await openRun(corrected.replacementRun.runId);
-      setPlan(corrected.plan);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create a corrected run"); }
-    finally { setBusy(false); }
+    await withRunMutation("create-corrected-run", async () => {
+      setError(null);
+      try {
+        const corrected = await createCorrectedEngineerRun(run.runId);
+        await openRun(corrected.replacementRun.runId);
+        setPlan(corrected.plan);
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create a corrected run"); }
+    });
   };
 
   const decide = async (action: "approve" | "request-changes" | "reject" | "cancel") => {
     if (!run) return;
-    if (action === "cancel") {
-      cancellationRequestedRef.current = true;
-      planningRequestRef.current?.abort();
-      setCancelling(true);
-    }
-    setBusy(true); setError(null);
-    try { await engineerDecision(run.runId, action, reason.trim() || `${action} from Zintus Engineer`); setReason(""); await refresh(run.runId); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Decision failed"); }
-    finally { setBusy(false); setCancelling(false); }
+    await withRunMutation(`approval:${action}`, async () => {
+      if (action === "cancel") {
+        cancellationRequestedRef.current = true;
+        planningRequestRef.current?.abort();
+        setCancelling(true);
+      }
+      setError(null);
+      try { await engineerDecision(run.runId, action, reason.trim() || `${action} from Zintus Engineer`); setReason(""); await refresh(run.runId); }
+      catch (cause) { setError(cause instanceof Error ? cause.message : "Decision failed"); }
+      finally { setCancelling(false); }
+    });
   };
 
   const extendApproval = async () => {
     if (!run) return;
-    setBusy(true); setError(null);
-    try { await extendEngineerApproval(run.runId, reason.trim() || "More time required for human review."); setReason(""); await refresh(run.runId); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to extend approval"); }
-    finally { setBusy(false); }
+    await withRunMutation("approval:extend", async () => {
+      setError(null);
+      try { await extendEngineerApproval(run.runId, reason.trim() || "More time required for human review."); setReason(""); await refresh(run.runId); }
+      catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to extend approval"); }
+    });
   };
 
   const resolveHumanReview = async (decision: "approve" | "reject") => {
     if (!run) return;
-    setBusy(true); setError(null);
-    try {
-      await resolveHumanEngineerReview(run.runId, decision, reason.trim() || `${decision} human review from Zintus Engineer`);
-      setReason(""); await refresh(run.runId);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Human review decision failed"); }
-    finally { setBusy(false); }
+    await withRunMutation(`human-review:${decision}`, async () => {
+      setError(null);
+      try {
+        await resolveHumanEngineerReview(run.runId, decision, reason.trim() || `${decision} human review from Zintus Engineer`);
+        setReason(""); await refresh(run.runId);
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "Human review decision failed"); }
+    });
   };
 
   const applyTopUp = async (resume: boolean) => {
@@ -524,24 +575,26 @@ export default function EngineerPage() {
 
   const resumeCurrentBudget = async () => {
     if (!run || !budget) return;
-    setBusy(true); setError(null);
-    try {
-      const resumed = await resumeEngineerBudget(run.runId, { expectedStateVersion: run.stateVersion, expectedBudgetRevision: budget.revision });
-      const latestSequence = events.at(-1)?.sequence ?? 0;
-      setRun(resumed); setManagerError(null); watch(resumed.runId, latestSequence);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to resume with the current budget"); }
-    finally { setBusy(false); }
+    await withRunMutation("resume-budget", async () => {
+      setError(null);
+      try {
+        const resumed = await resumeEngineerBudget(run.runId, { expectedStateVersion: run.stateVersion, expectedBudgetRevision: budget.revision });
+        const latestSequence = events.at(-1)?.sequence ?? 0;
+        setRun(resumed); setManagerError(null); watch(resumed.runId, latestSequence);
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to resume with the current budget"); }
+    });
   };
 
   const retryProviderTimeout = async () => {
     if (!run || run.state !== "MODEL_PROVIDER_RETRY_PENDING") return;
-    setBusy(true); setError(null);
-    try {
-      const resumed = await retryEngineerProviderTimeout(run.runId);
-      const latestSequence = events.at(-1)?.sequence ?? 0;
-      setRun(resumed); setManagerError(null); watch(resumed.runId, latestSequence);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to retry from the workspace checkpoint"); }
-    finally { setBusy(false); }
+    await withRunMutation("retry-provider", async () => {
+      setError(null);
+      try {
+        const resumed = await retryEngineerProviderTimeout(run.runId);
+        const latestSequence = events.at(-1)?.sequence ?? 0;
+        setRun(resumed); setManagerError(null); watch(resumed.runId, latestSequence);
+      } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to retry from the workspace checkpoint"); }
+    });
   };
 
   const latestState = run?.state ?? "NEW";
@@ -550,9 +603,20 @@ export default function EngineerPage() {
   const tests = (data?.tests ?? []) as Array<{ testExecutionId?: string; type?: string; status?: string }>;
   const findings = (data?.securityFindings ?? []) as Array<{ securityFindingId?: string; severity?: string; category?: string; description?: string }>;
   const failures = (data?.failures ?? []) as Array<{ failureId?: string; reasonCode?: string; failureClass?: string }>;
-  const gitOperations = (data?.gitOperations ?? []) as Array<{ gitOperationId?: string; operationType?: string; status?: string; remoteReference?: string | null; errorCode?: string | null }>;
+  const gitOperations = (data?.gitOperations ?? []) as Array<{ gitOperationId?: string; operationType?: string; status?: string; evidenceBundleHash?: string | null; remoteReference?: string | null; errorCode?: string | null }>;
+  const evidenceBundles = (data?.evidenceBundles ?? []) as Array<{ evidenceBundleId?: string; bundleHash?: string }>;
   const decisions = (data?.decisions ?? []) as EngineerDecisionItem[];
   const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; manifestHash?: string; diffHash?: string; evidenceBundleHash?: string } | null | undefined;
+  const diffProvenance = deriveDiffProvenance({
+    state: latestState,
+    displayedDiffHash,
+    reviewBinding: data?.reviewBinding ?? null,
+    evidenceBundles,
+    approval,
+    gitOperations,
+  });
+  const diffPresentation = DIFF_PROVENANCE_PRESENTATION[diffProvenance];
+  const securityStatus = deriveSecurityStatus({ events, findingCount: findings.length, errors: data?.errors ?? [] });
   const reachedImplementation = events.some((event) => ["IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "VERIFICATION_RECOVERY", "REVERIFYING"].includes(event.nextState));
   const reachedVerification = events.some((event) => ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE", "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING", "REVIEW_APPROVED", "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED"].includes(event.nextState));
   const visibleTabs = ["timeline", ...(reachedImplementation ? ["diff"] : []), ...(reachedVerification ? ["evidence"] : [])] as Array<"timeline" | "diff" | "evidence">;
@@ -561,6 +625,7 @@ export default function EngineerPage() {
   }, [reachedImplementation, reachedVerification, tab]);
   const stage = useMemo(() => workflowStage(latestState), [latestState]);
   const costEstimate = useMemo(() => estimateEngineerCost(request, repository.name), [request, repository.name]);
+  const planCapabilities = useMemo(() => plan ? frozenPlanCapabilities(plan.manifest, { githubConnected }) : [], [githubConnected, plan]);
   const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
   const budgetUsage = budget ? Math.max(
     budget.limits.costUsd > 0 ? (budget.used.costUsd + budget.reserved.costUsd) / budget.limits.costUsd : 0,
@@ -591,7 +656,7 @@ export default function EngineerPage() {
         <div className="engineer-folder-picker">
           <div><strong>Inspect a local folder in this browser</strong><p className="engineer-muted">Read-only inventory only. This does not change the repository used by Engineer; execution remains bound to the verified gateway repository.</p></div>
           <div className="engineer-actions"><button onClick={() => void chooseLocalFolder()} disabled={folderBusy}>{folderBusy ? "Reading folder…" : "Inspect folder"}</button></div>
-          {folderSnapshot ? <p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · browser-only inspection</p> : null}
+          {folderSnapshot ? <p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · browser-only inspection{folderSnapshot.truncated ? " · inventory safely truncated" : ""}</p> : null}
         </div>
       </section>
       {recentRuns.length ? <section className="engineer-card" id="recent-runs">
@@ -660,14 +725,17 @@ export default function EngineerPage() {
           <div><span>Risk</span><strong className={`engineer-risk engineer-risk--${plan.manifest.riskTier.toLowerCase()}`}>{plan.manifest.riskTier}</strong></div>
           <div><span>Human gate</span><strong>{plan.manifest.humanGateRequired ? "Required" : "Policy dependent"}</strong></div>
           <div><span>Allowed paths</span>{plan.manifest.allowedPaths.map((path) => <code key={path}>{path}</code>)}</div>
+          <div><span>Denied paths</span>{plan.manifest.deniedPaths.length ? plan.manifest.deniedPaths.map((path) => <code key={path}>{path}</code>) : <p>None beyond mandatory Supervisor protections.</p>}</div>
           <div><span>Commands</span>{plan.manifest.allowedCommands.map((command) => <code key={command}>{command}</code>)}</div>
+          <div><span>Prohibited commands</span>{plan.manifest.prohibitedCommands.length ? plan.manifest.prohibitedCommands.map((command) => <code key={command}>{command}</code>) : <p>Supervisor policy still blocks shell, network, credential, push, merge, and deploy operations.</p>}</div>
+          <div><span>Capability summary</span>{planCapabilities.map((capability) => <p key={capability.id}><strong>{capability.label}</strong><br />{capability.summary}</p>)}</div>
           <div><span>Hard budget</span><strong>${plan.manifest.costBudgetUsd} · {plan.manifest.tokenBudget.toLocaleString()} tokens</strong><small>{Math.round(plan.manifest.timeBudgetSeconds / 60)} minutes · pauses at the first limit</small></div>
           <div><span>Architecture</span><p>{plan.planningAnalysis.architectureSummary}</p></div>
           <div><span>Assumptions</span>{plan.planningAnalysis.assumptions.length ? plan.planningAnalysis.assumptions.map((item) => <p key={item.assumptionId}>{item.statement} · {Math.round(item.confidence * 100)}% confidence</p>) : <p>None recorded.</p>}</div>
           <div><span>Estimated files</span>{plan.planningAnalysis.touchedFileEstimates.map((item) => <code key={item.path}>{item.path}</code>)}</div>
           {error ? <p className="engineer-error">{error}</p> : null}
           {managerError ? <p className="engineer-error">{managerError}</p> : null}
-          <button className="engineer-primary" onClick={() => void freezeAndStart()} disabled={busy}>{busy ? "Starting…" : "Freeze plan and start"}</button>
+          <button className="engineer-primary" onClick={() => void freezeAndStart()} disabled={busy}>{pendingAction === "freeze-start" ? "Starting…" : "Freeze plan and start"}</button>
         </aside>
       </section>
       <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} />
@@ -686,30 +754,30 @@ export default function EngineerPage() {
         <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Run paused · model admission stopped</span><h2>Your work is checkpointed</h2><p>{canRetryLegacyReservation ? "This run used the earlier byte-based reservation. Retry once with the corrected provider token count, without adding allowance." : hasRemainingBudget ? "The next exact model reservation exceeds the remaining allowance. Add only the cost, tokens, or time needed before resuming." : "One of the hard limits is exhausted. Add allowance before resuming; publication remains disabled."}</p></div><span className="engineer-unverified">Unverified partial work</span></div>
         <BudgetTopUp value={topUp} onChange={(value) => { setTopUp(value); setTopUpNotice(null); }} disabled={busy || topUpPending} />
         {topUpNotice ? <p className="engineer-muted" role="status">{topUpNotice} Review the ceiling before adding more.</p> : null}
-        <div className="engineer-actions">{canRetryLegacyReservation ? <button className="engineer-primary" disabled={busy || topUpPending || !budget} onClick={() => void resumeCurrentBudget()}>{busy ? "Resuming…" : "Retry with current limits"}</button> : null}<button className={canRetryLegacyReservation ? undefined : "engineer-primary"} disabled={busy || topUpPending || !budget} onClick={() => { if (topUpNotice) setTopUpNotice(null); else void applyTopUp(true); }}>{topUpPending ? "Applying one top-up…" : topUpNotice ? "Prepare another top-up" : busy ? "Resuming…" : "Top up and resume checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>View partial diff</button></div>
+        <div className="engineer-actions">{canRetryLegacyReservation ? <button className="engineer-primary" disabled={busy || topUpPending || !budget} onClick={() => void resumeCurrentBudget()}>{pendingAction === "resume-budget" ? "Resuming…" : "Retry with current limits"}</button> : null}<button className={canRetryLegacyReservation ? undefined : "engineer-primary"} disabled={busy || topUpPending || !budget} onClick={() => { if (topUpNotice) setTopUpNotice(null); else void applyTopUp(true); }}>{topUpPending ? "Applying one top-up…" : topUpNotice ? "Prepare another top-up" : "Top up and resume checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>View partial diff</button></div>
       </section> : null}
       {latestState === "MODEL_PROVIDER_RETRY_PENDING" ? <section className="engineer-card engineer-budget-paused" role="alert">
         <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Provider timeout · balance is not the issue</span><h2>Your workspace checkpoint is retained</h2><p>The model request exceeded its execution timeout. Zintus stopped automatic replay to prevent duplicate charges. Planning, the frozen manifest, and current workspace are preserved.</p>{managerError ? <p className="engineer-error">{managerError}</p> : null}</div><span className="engineer-unverified">Unverified partial work</span></div>
-        <div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void retryProviderTimeout()}>{busy ? "Retrying…" : "Retry from workspace checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>Inspect partial diff</button></div>
+        <div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void retryProviderTimeout()}>{pendingAction === "retry-provider" ? "Retrying…" : "Retry from workspace checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>Inspect partial diff</button></div>
       </section> : null}
       {data?.errors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {data.errors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
-      {machineStage && latestState !== "PAUSED_BUDGET" ? <section className="engineer-card engineer-gate" role="status" aria-live="polite"><div><span className="engineer-kicker">Truthful live activity</span><h2>{activity?.active ? `${activity.role?.toLowerCase() ?? "worker"} is active` : "No worker is currently active"}</h2><p>{activity?.detail ?? "Waiting for an authoritative worker signal."}</p>{latestState === "IMPLEMENTING" ? <p>{liveChangedFiles ? `${liveChangedFiles} changed ${liveChangedFiles === 1 ? "file" : "files"} · ${liveAddedLines.toLocaleString()} added lines in the live checkpoint.` : "No workspace change has been recorded yet."}</p> : null}</div><div><Metric label="Reserved now" value={budget ? `${budget.reserved.tokens.toLocaleString()} tokens · $${budget.reserved.costUsd.toFixed(2)}` : "Unavailable"} /><Metric label="Worker signal" value={activity?.active ? "ACTIVE" : "IDLE"} /></div></section> : null}
+      {machineStage && latestState !== "PAUSED_BUDGET" ? <section className="engineer-card engineer-gate" role="status" aria-live="polite"><div><span className="engineer-kicker">Truthful live activity</span><h2>{activity?.active ? `${activity.role?.toLowerCase() ?? "worker"} is active` : "No worker is currently active"}</h2><p>{activity?.detail ?? "Waiting for an authoritative worker signal."}</p>{latestState === "IMPLEMENTING" ? <p>{liveChangedFiles ? `${liveChangedFiles} changed ${liveChangedFiles === 1 ? "file" : "files"} · ${liveAddedLines.toLocaleString()} added lines in the live checkpoint.` : "No workspace change has been recorded yet."}</p> : null}</div><div><Metric label="Reserved now" value={budget ? `${Math.max(0, budget.reserved.tokens - budget.ambiguous.tokens).toLocaleString()} active · ${budget.ambiguous.tokens.toLocaleString()} ambiguous` : "Unavailable"} /><Metric label="Worker signal" value={activity?.active ? "ACTIVE" : "IDLE"} /></div></section> : null}
       <nav className="engineer-tabs" aria-label="Engineer run views">{visibleTabs.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
       {!reachedImplementation ? <p className="engineer-stage-availability"><strong>Nothing is missing.</strong> Diff appears after implementation changes a file. Evidence appears after tests and independent verification. No implementation change has been recorded for this run yet.</p> : !reachedVerification ? <p className="engineer-stage-availability">Evidence appears after tests and independent verification begin.</p> : null}
-      {!busy && !activity?.active && ["PLANNING", "REPLANNING"].includes(latestState) && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The exact failure is recorded below. The durable run and prior human answers remain intact.</p></div><button className="engineer-primary" onClick={() => void retryPlanning()}>Retry planning</button></section> : null}
-      {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{busy ? "Starting…" : "Start frozen plan"}</button></section> : null}
-      {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recreate and verify on the current base</h2><p>The reviewed candidate will not be published. A new immutable run will plan, execute, test, and obtain fresh review and approval.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void recoverStaleBase()}>{busy ? "Recovering…" : "Start controlled recovery"}</button></section> : null}
+      {!activity?.active && ["PLANNING", "REPLANNING"].includes(latestState) && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The exact failure is recorded below. The durable run and prior human answers remain intact.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{pendingAction === "retry-planning" ? "Retrying…" : "Retry planning"}</button></section> : null}
+      {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{pendingAction === "start-frozen" ? "Starting…" : "Start frozen plan"}</button></section> : null}
+      {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recreate and verify on the current base</h2><p>The reviewed candidate will not be published. A new immutable run will plan, execute, test, and obtain fresh review and approval.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void recoverStaleBase()}>{pendingAction === "recover-stale-base" ? "Recovering…" : "Start controlled recovery"}</button></section> : null}
       <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} />
       {tab === "timeline" ? <section className="engineer-run-grid">
         <div className="engineer-card"><h2>Live timeline</h2><Timeline events={events} /></div>
-        <aside className="engineer-card engineer-verification"><h2>{reachedVerification ? "Verification" : "Current stage"}</h2>{reachedVerification ? <><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /></> : <Metric label="Activity" value={latestState.replaceAll("_", " ")} />}<Metric label="Failures" value={String(failures.length)} /></aside>
+        <aside className="engineer-card engineer-verification"><h2>{reachedVerification ? "Verification" : "Current stage"}</h2>{reachedVerification ? <><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={securityStatus.label} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /></> : <Metric label="Activity" value={latestState.replaceAll("_", " ")} />}<Metric label="Failures" value={String(failures.length)} /></aside>
       </section> : null}
-      {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><div><h2>{latestState === "PAUSED_BUDGET" ? "Partial diff" : "Reviewed diff"}</h2>{latestState === "PAUSED_BUDGET" ? <p>This checkpoint has not completed verification and cannot be published.</p> : null}</div><span className={latestState === "PAUSED_BUDGET" ? "engineer-unverified" : "engineer-chip"}>{latestState === "PAUSED_BUDGET" ? "Unverified partial work" : "hash-bound"}</span></div><DiffViewer diff={data?.diff ?? ""} /></section> : null}
-      {tab === "evidence" ? <><ArtifactViewer key={run.runId} runId={run.runId} artifacts={artifacts} /><section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed stream</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div><PublicationOperations operations={gitOperations} /></section></> : null}
-      {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>Approve and publish</button><button disabled={busy} onClick={() => void decide("request-changes")}>Request changes</button><button disabled={busy} onClick={() => void extendApproval()}>Give me 24 hours</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>Reject</button></div></section> : null}
-      {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Review the verified candidate</h2><p>The isolated Reviewer escalated this result for a human decision. Inspect the Diff and Evidence tabs, then either continue to the approval gate or reject the candidate.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("approve")}>Continue to approval</button><button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>Reject candidate</button></div></section> : null}
+      {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><div><h2>{diffPresentation.title}</h2><p>{diffPresentation.description}</p></div><span className={diffPresentation.verified ? "engineer-chip" : "engineer-unverified"}>{diffProvenance}</span></div><DiffViewer diff={data?.diff ?? ""} /></section> : null}
+      {tab === "evidence" ? <><ArtifactViewer key={run.runId} runId={run.runId} artifacts={artifacts} /><section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed stream</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">{securityStatus.status === "NO_FINDINGS" ? "No findings." : securityStatus.status === "UNAVAILABLE" ? "Security results are unavailable. Retry loading the evidence before making a decision." : "Security review is pending."}</p>}</div><PublicationOperations operations={gitOperations} /></section></> : null}
+      {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>{pendingAction === "approval:approve" ? "Publishing…" : "Approve and publish"}</button><button disabled={busy} onClick={() => void decide("request-changes")}>{pendingAction === "approval:request-changes" ? "Requesting changes…" : "Request changes"}</button><button disabled={busy} onClick={() => void extendApproval()}>{pendingAction === "approval:extend" ? "Applying extension…" : "Give me 24 hours"}</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>{pendingAction === "approval:reject" ? "Rejecting…" : "Reject"}</button></div></section> : null}
+      {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Review the verified candidate</h2><p>The isolated Reviewer escalated this result for a human decision. Inspect the Diff and Evidence tabs, then either continue to the approval gate or reject the candidate.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("approve")}>{pendingAction === "human-review:approve" ? "Applying…" : "Continue to approval"}</button><button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>{pendingAction === "human-review:reject" ? "Rejecting…" : "Reject candidate"}</button></div></section> : null}
       {latestState === "REVIEW_APPROVED" && !approval ? <section className="engineer-card engineer-gate"><span className="engineer-kicker">Review approved</span><h2>Publication is not configured locally</h2><p>The candidate passed human review and is safe to inspect locally. Configure the GitHub publication credentials before enabling merge or pull-request creation.</p></section> : null}
-      {CORRECTABLE_TERMINAL_STATES.has(latestState) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{busy ? "Creating…" : "Create corrected run"}</button></div></section> : null}
+      {CORRECTABLE_TERMINAL_STATES.has(latestState) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{pendingAction === "create-corrected-run" ? "Creating…" : "Create corrected run"}</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
       {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" && !NON_CANCELLABLE_PUBLICATION_STATES.has(latestState) ? <button className="engineer-cancel" disabled={cancelling} onClick={() => void decide("cancel")}>{cancelling ? "Cancelling…" : "Cancel run"}</button> : null}

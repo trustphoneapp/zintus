@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 12;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 13;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -475,6 +475,8 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     routing_decision_id TEXT,
     pricing_version TEXT,
     currency TEXT,
+    reservation_status TEXT NOT NULL DEFAULT 'ACTIVE'
+      CHECK(reservation_status IN ('ACTIVE', 'AMBIGUOUS_PROVIDER_OUTCOME')),
     created_at TEXT NOT NULL
   );
 
@@ -487,7 +489,10 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     lifetime_time_limit_seconds INTEGER NOT NULL CHECK(lifetime_time_limit_seconds >= time_limit_seconds),
     used_cost_usd REAL NOT NULL DEFAULT 0 CHECK(used_cost_usd >= 0), used_tokens INTEGER NOT NULL DEFAULT 0 CHECK(used_tokens >= 0),
     used_time_seconds INTEGER NOT NULL DEFAULT 0 CHECK(used_time_seconds >= 0), reserved_cost_usd REAL NOT NULL DEFAULT 0 CHECK(reserved_cost_usd >= 0),
-    reserved_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reserved_tokens >= 0), status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'WARNING', 'PAUSED')),
+    reserved_tokens INTEGER NOT NULL DEFAULT 0 CHECK(reserved_tokens >= 0),
+    ambiguous_cost_usd REAL NOT NULL DEFAULT 0 CHECK(ambiguous_cost_usd >= 0),
+    ambiguous_tokens INTEGER NOT NULL DEFAULT 0 CHECK(ambiguous_tokens >= 0),
+    status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'WARNING', 'PAUSED')),
     pause_reason TEXT, resume_state TEXT, warning_threshold REAL NOT NULL DEFAULT 0.8 CHECK(warning_threshold >= 0.5 AND warning_threshold <= 0.99),
     revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0), active_since TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   );

@@ -716,25 +716,25 @@ describe("Engineer Supervisor foundation", () => {
       runId: "run-builder-limit", userId: "user-1", repository, request: "Bound Builder calls",
     });
     supervisor.recordAgentExecution({
-      agentExecutionId: "builder-limit-agent", runId: run.runId, role: "BUILDER", modelTier: "GPT-5.6_SOL",
+      agentExecutionId: "builder-limit-agent", runId: run.runId, role: "BUILDER", modelTier: "GPT-5.6_TERRA",
       status: "RUNNING", inputHash: sha256("builder-limit-input"), outputArtifactId: null,
       startedAt: "2026-07-14T12:00:00.000Z", completedAt: null,
     });
     supervisor.recordModelRouting({
       routingDecisionId: "builder-limit-route", runId: run.runId, agentExecutionId: "builder-limit-agent",
-      agentRole: "BUILDER", logicalTier: "GPT-5.6_SOL", resolvedModel: "gpt-5.6-sol",
-      routingPolicyVersion: "test-routing-v1", fallbackUsed: false, fallbackReason: null, cacheKey: null,
+      agentRole: "BUILDER", logicalTier: "GPT-5.6_TERRA", resolvedModel: "gpt-5.6-terra",
+      routingPolicyVersion: "test-routing-v2", fallbackUsed: false, fallbackReason: null, cacheKey: null,
       timestamp: "2026-07-14T12:00:00.000Z",
     });
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       const reservationId = supervisor.reserveModelBudget({
         runId: run.runId, reservationId: `builder-limit-reservation-${attempt}`,
-        agentExecutionId: "builder-limit-agent", model: "gpt-5.6-sol",
+        agentExecutionId: "builder-limit-agent", model: "gpt-5.6-terra",
         inputTokenUpperBound: 10, maxOutputTokens: 10,
       });
       supervisor.recordModelCall({
         modelCallId: `builder-limit-call-${attempt}`, runId: run.runId, agentExecutionId: "builder-limit-agent",
-        logicalTier: "GPT-5.6_SOL", resolvedModel: "gpt-5.6-sol", promptTemplateVersion: "test-v1",
+        logicalTier: "GPT-5.6_TERRA", resolvedModel: "gpt-5.6-terra", promptTemplateVersion: "test-v1",
         inputContextRefs: [sha256(`builder-limit-${attempt}`)], outputSchemaVersion: null,
         cacheKey: sha256("builder-limit-cache"), cacheHit: null, latencyMs: 1, inputTokens: 1, outputTokens: 1,
         retryCount: 0, status: "SUCCEEDED", createdAt: "2026-07-14T12:00:00.000Z",
@@ -743,7 +743,7 @@ describe("Engineer Supervisor foundation", () => {
     expect(supervisor.modelCallCountForRole(run.runId, "BUILDER")).toBe(2);
     expect(() => supervisor.reserveModelBudget({
       runId: run.runId, reservationId: "builder-limit-reservation-3",
-      agentExecutionId: "builder-limit-agent", model: "gpt-5.6-sol",
+      agentExecutionId: "builder-limit-agent", model: "gpt-5.6-terra",
       inputTokenUpperBound: 10, maxOutputTokens: 10,
     })).toThrow("durable Builder model-call limit of 2");
     expect(supervisor.exportRunRecords(run.runId).cost_records).toHaveLength(2);
@@ -769,6 +769,31 @@ describe("Engineer Supervisor foundation", () => {
       startedAt, completedAt: clock.toISOString(),
     })).not.toThrow();
     expect(supervisor.exportRunRecords(run.runId).agent_executions).toMatchObject([{ status: "FAILED" }]);
+    supervisor.close();
+  });
+
+  test("finalizes orphaned RUNNING agents once before restart recovery", () => {
+    const supervisor = createEngineerSupervisor({ dbPath: ":memory:" });
+    const run = supervisor.receiveRequest({
+      runId: "run-orphan-agent", userId: "user-1", repository, request: "Recover an interrupted agent",
+    });
+    supervisor.recordAgentExecution({
+      agentExecutionId: "orphan-planner", runId: run.runId, role: "PLANNER", modelTier: "GPT-5.6_TERRA",
+      status: "RUNNING", inputHash: sha256("orphan-input"), outputArtifactId: null,
+      startedAt: "2026-07-14T12:00:00.000Z", completedAt: null,
+    });
+
+    expect(supervisor.finalizeRunningAgentExecutions(
+      run.runId, "FAILED", "PROCESS_RESTART", "2026-07-14T12:01:00.000Z",
+    )).toBe(1);
+    expect(supervisor.finalizeRunningAgentExecutions(
+      run.runId, "FAILED", "PROCESS_RESTART", "2026-07-14T12:02:00.000Z",
+    )).toBe(0);
+    expect(supervisor.exportRunRecords(run.runId).agent_executions).toMatchObject([{
+      id: "orphan-planner",
+      status: "FAILED",
+      completed_at: "2026-07-14T12:01:00.000Z",
+    }]);
     supervisor.close();
   });
 });
