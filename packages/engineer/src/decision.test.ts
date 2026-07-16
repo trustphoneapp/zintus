@@ -143,6 +143,45 @@ describe("deterministic decision policy", () => {
 });
 
 describe("decision ledger and clarification lifecycle", () => {
+  test("unanswered decisions cannot prevent cancellation cleanup or cleanup failure", () => {
+    for (const terminalState of ["CANCELLED", "FAILED"] as const) {
+      const supervisor = new EngineerSupervisor({ dbPath: ":memory:" });
+      const run = normalizedRun(supervisor, `cancel-open-${terminalState.toLowerCase()}`);
+      supervisor.createDecision({
+        runId: run.runId,
+        expectedStateVersion: run.stateVersion,
+        question: "Which behavior should be used if execution continues?",
+        factors: baseFactors({ noSafeDefault: true }),
+        options: options(),
+        recommendedOptionId: "safe",
+        sourceEvidence: [evidence(run.runId)],
+        idempotencyKey: `${run.runId}:decision`,
+      });
+      let current = supervisor.getRun(run.runId);
+      expect(current.state).toBe("CLARIFICATION_REQUIRED");
+      expect(supervisor.listOpenDecisions(run.runId)).toHaveLength(1);
+      current = supervisor.transition({
+        runId: current.runId,
+        expectedStateVersion: current.stateVersion,
+        nextState: "CANCELLATION_PENDING",
+        reasonCode: "USER_CANCELLATION_REQUESTED",
+        actorType: "HUMAN",
+        actorId: "user-1",
+        idempotencyKey: `${run.runId}:cancel-pending`,
+      }).run;
+      current = supervisor.transition({
+        runId: current.runId,
+        expectedStateVersion: current.stateVersion,
+        nextState: terminalState,
+        reasonCode: terminalState === "CANCELLED" ? "RUN_CLEANUP_COMPLETE" : "RUN_CLEANUP_FAILED",
+        idempotencyKey: `${run.runId}:cancel-terminal`,
+      }).run;
+      expect(current.state).toBe(terminalState);
+      expect(current.terminalAt).not.toBeNull();
+      supervisor.close();
+    }
+  });
+
   test("ASK_NOW pauses, persists the human resolution, then starts a fresh plan", () => {
     const supervisor = new EngineerSupervisor({ dbPath: ":memory:", now: () => new Date("2026-07-14T20:00:00.000Z") });
     const run = normalizedRun(supervisor, "ask-run");

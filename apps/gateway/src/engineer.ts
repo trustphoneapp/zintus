@@ -840,7 +840,9 @@ export class EngineerRunManager {
   async cancel(principal: EngineerPrincipal, runId: string, reason: string): Promise<void> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    // Cancellation is a fail-safe control, not a new execution admission.
+    // A run must remain stoppable after its base becomes stale or a connector
+    // grant is revoked; ownership and publication cleanup fences still apply.
     if (this.options.publication) return this.options.publication.cancel(runId, principal.ownerId, reason);
     return this.cancelWithoutPublication(runId, principal.ownerId, reason);
   }
@@ -866,23 +868,27 @@ export class EngineerRunManager {
     const run = this.options.supervisor.getRun(runId);
     if (actorId !== run.userId) throw new Error("cancellation actor does not own this run");
     if (run.terminalAt) throw new Error(`terminal run ${run.state} cannot be cancelled`);
-    if (!isCancellationAllowed(run.state)) {
+    const resumingPendingCleanup = run.state === "CANCELLATION_PENDING";
+    if (!resumingPendingCleanup && !isCancellationAllowed(run.state)) {
       throw new Error(`cancellation is fenced while publication state is ${run.state}; remote cleanup is not safely available`);
     }
     if (hasUnreconciledRemotePublication(this.options.supervisor.listGitOperations(runId))) {
       throw new Error("cancellation is fenced because remote publication was attempted and no durable remote cleanup is available");
     }
-    const artifact = this.options.supervisor.recordArtifact(artifactStore.put({
-      runId, type: "CANCELLATION_REQUEST",
-      bytes: JSON.stringify({ actorId, reason, requestedAt: new Date().toISOString() }),
-      producerType: "SYSTEM", producerId: "engineer-supervisor", trusted: true,
-    }));
-    let current = this.options.supervisor.transition({
-      runId, expectedStateVersion: run.stateVersion, nextState: "CANCELLATION_PENDING",
-      reasonCode: "USER_CANCELLATION_REQUESTED", actorType: "HUMAN", actorId,
-      evidenceIds: [artifact.artifactId], manifestHash: run.manifestHash,
-      idempotencyKey: `control:cancel:${run.stateVersion}`,
-    }).run;
+    let current = run;
+    if (!resumingPendingCleanup) {
+      const artifact = this.options.supervisor.recordArtifact(artifactStore.put({
+        runId, type: "CANCELLATION_REQUEST",
+        bytes: JSON.stringify({ actorId, reason, requestedAt: new Date().toISOString() }),
+        producerType: "SYSTEM", producerId: "engineer-supervisor", trusted: true,
+      }));
+      current = this.options.supervisor.transition({
+        runId, expectedStateVersion: run.stateVersion, nextState: "CANCELLATION_PENDING",
+        reasonCode: "USER_CANCELLATION_REQUESTED", actorType: "HUMAN", actorId,
+        evidenceIds: [artifact.artifactId], manifestHash: run.manifestHash,
+        idempotencyKey: `control:cancel:${run.stateVersion}`,
+      }).run;
+    }
     try {
       await this.options.cleanupRun?.(runId);
       current = this.options.supervisor.transition({

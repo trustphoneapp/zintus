@@ -1137,8 +1137,10 @@ export class EngineerSupervisor {
       }
     }
     const unresolved = this.ledger.listOpenDecisions(run.runId);
+    const unresolvedDecisionExit = input.nextState === "CLARIFICATION_REQUIRED" ||
+      input.nextState === "CANCELLATION_PENDING" || input.nextState === "CANCELLED" || input.nextState === "FAILED";
     if (unresolved.some((decision) => decision.classification === "ASK_NOW" || decision.classification === "AUTO") &&
-        input.nextState !== "CLARIFICATION_REQUIRED" && input.nextState !== "CANCELLATION_PENDING") {
+        !unresolvedDecisionExit) {
       throw new InvalidTransitionError("open ASK_NOW or AUTO decisions block workflow progression");
     }
     if (input.nextState === "COMPLETED" && unresolved.some((decision) => decision.classification === "DEFER")) {

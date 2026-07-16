@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EngineerPlanningTimeoutError, EngineerSupervisor } from "@zintus/engineer";
+import { EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
@@ -32,6 +32,43 @@ function preflight(customProbe = probe(), publicationEnabled = false): EngineerC
 }
 
 describe("Engineer trusted identity and admission", () => {
+  test("keeps owned cancellation available when repository admission becomes stale", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-stale-cancel-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    supervisor.receiveRequest({ runId: "stale-cancel", userId: principal.ownerId, repository, request: "Stop safely" });
+    const manager = new EngineerRunManager({
+      supervisor,
+      principal,
+      preflight: preflight(probe({ repository: async () => ({ readable: true, exactBaseCommit: false }) })),
+      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
+    });
+    await manager.cancel(principal, "stale-cancel", "User requested cancellation after the base advanced.");
+    expect(supervisor.getRun("stale-cancel").state).toBe("CANCELLED");
+    expect(supervisor.listEvents("stale-cancel").map((event) => event.nextState)).toEqual(["CANCELLATION_PENDING", "CANCELLED"]);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("resumes cleanup idempotently after restart strands cancellation pending", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-resume-cancel-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    let run = supervisor.receiveRequest({ runId: "pending-cancel", userId: principal.ownerId, repository, request: "Stop safely" });
+    run = supervisor.transition({
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "CANCELLATION_PENDING",
+      reasonCode: "USER_CANCELLATION_REQUESTED", idempotencyKey: "interrupted-cancel",
+    }).run;
+    expect(run.state).toBe("CANCELLATION_PENDING");
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
+    });
+    await manager.cancel(principal, run.runId, "Resume interrupted cleanup.");
+    expect(supervisor.getRun(run.runId).state).toBe("CANCELLED");
+    expect(supervisor.listEvents(run.runId).at(-1)).toMatchObject({ nextState: "CANCELLED", reasonCode: "RUN_CLEANUP_COMPLETE" });
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("durably enters planning and persists a retryable pipeline failure across manager restarts", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-durable-planning-error-"));
     const dbPath = join(root, "engineer.db");
