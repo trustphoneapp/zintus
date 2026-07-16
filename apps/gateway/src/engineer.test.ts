@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BudgetPausedError, EngineerPlanningCancelledError, EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore, type EngineerRun } from "@zintus/engineer";
-import { EngineerRunManager } from "./engineer.js";
+import { correctedRunRepository, EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
 
@@ -32,6 +32,13 @@ function preflight(customProbe = probe(), publicationEnabled = false): EngineerC
 }
 
 describe("Engineer trusted identity and admission", () => {
+  test("creates corrected work on the current admitted base without changing repository identity", () => {
+    const current = { ...repository, baseCommitSha: "2".repeat(40) };
+    expect(correctedRunRepository(repository, current)).toEqual(current);
+    expect(() => correctedRunRepository(repository, { ...current, name: "another-repository" }))
+      .toThrow("cannot change repository identity");
+  });
+
   test("keeps hash-bound human review available after canonical admission advances", async () => {
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
     const now = "2026-07-16T12:00:00.000Z";

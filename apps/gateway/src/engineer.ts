@@ -47,6 +47,15 @@ export interface EngineerRunManagerOptions {
   context?: EngineerContextManager;
 }
 
+export function correctedRunRepository(source: RepositoryReference, current: RepositoryReference): RepositoryReference {
+  const { baseCommitSha: _sourceBase, ...sourceIdentity } = source;
+  const { baseCommitSha: _currentBase, ...currentIdentity } = current;
+  if (sha256(sourceIdentity) !== sha256(currentIdentity)) {
+    throw new Error("corrected-run recovery cannot change repository identity, origin, or base branch");
+  }
+  return RepositoryReferenceSchema.parse(current);
+}
+
 /** Gateway facade. It exposes no generic state-transition endpoint. */
 export class EngineerRunManager {
   private readonly options: EngineerRunManagerOptions;
@@ -446,7 +455,8 @@ export class EngineerRunManager {
     }
     const sourceManifest = this.options.supervisor.getManifest(runId);
     if (!sourceManifest) throw new Error("corrected-run recovery requires the original frozen manifest");
-    await this.options.preflight.assertRunAdmission(sourceRun.repository);
+    const replacementRepository = correctedRunRepository(sourceRun.repository, this.options.preflight.repository());
+    await this.options.preflight.assertRunAdmission(replacementRepository);
 
     const actions = this.deriveSafeCorrections(runId, sourceManifest.allowedPaths);
     if (actions.length === 0) {
@@ -455,6 +465,7 @@ export class EngineerRunManager {
     const replacementRunId = `corrected-${sha256({
       sourceRunId: runId,
       sourceManifestHash: sourceManifest.manifestHash,
+      baseCommitSha: replacementRepository.baseCommitSha,
       actions,
     }).slice("sha256:".length, "sha256:".length + 32)}`;
     let replacement = this.options.supervisor.listRuns().find((candidate) => candidate.runId === replacementRunId);
@@ -462,11 +473,11 @@ export class EngineerRunManager {
       replacement = this.options.supervisor.receiveRequest({
         runId: replacementRunId,
         userId: principal.ownerId,
-        repository: sourceRun.repository,
+        repository: replacementRepository,
         request: sourceRun.requestOriginal,
       });
     }
-    if (replacement.requestOriginal !== sourceRun.requestOriginal || sha256(replacement.repository) !== sha256(sourceRun.repository)) {
+    if (replacement.requestOriginal !== sourceRun.requestOriginal || sha256(replacement.repository) !== sha256(replacementRepository)) {
       throw new Error("existing corrected run does not match its immutable source identity");
     }
 
