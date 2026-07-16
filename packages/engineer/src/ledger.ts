@@ -255,6 +255,15 @@ export interface ReviewerPersistenceRecoveryCandidate {
   outputArtifactId: string;
 }
 
+export interface RecordedReviewerOutput {
+  reviewerSessionId: string;
+  attempt: number;
+  decision: "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "HUMAN_REVIEW_REQUIRED";
+  diffHash: string;
+  evidenceBundleHash: string;
+  outputArtifactId: string;
+}
+
 const RUN_SELECT = `
   SELECT r.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
   FROM engineer_runs r
@@ -1796,6 +1805,37 @@ export class EngineerLedger {
       completedAt: row.completed_at,
       outputArtifactId: row.output_artifact_id,
     };
+  }
+
+  recordedReviewerOutput(runId: string, outputArtifactId: string): RecordedReviewerOutput | null {
+    this.getRun(runId);
+    const row = this.db.query(`
+      SELECT s.id AS reviewer_session_id, s.attempt, s.decision, s.diff_hash,
+        s.evidence_bundle_hash, a.output_artifact_id
+      FROM agent_executions a
+      JOIN reviewer_sessions s ON s.run_id = a.run_id AND s.input_hash = a.input_hash
+      JOIN artifacts ar ON ar.id = a.output_artifact_id
+      WHERE a.run_id = ? AND a.role = 'REVIEWER' AND a.status = 'SUCCEEDED'
+        AND a.output_artifact_id = ? AND ar.type = 'REVIEWER_OUTPUT'
+        AND ar.producer_id = a.id
+      ORDER BY s.rowid DESC
+      LIMIT 1
+    `).get(runId, outputArtifactId) as {
+      reviewer_session_id: string;
+      attempt: number;
+      decision: RecordedReviewerOutput["decision"];
+      diff_hash: string;
+      evidence_bundle_hash: string;
+      output_artifact_id: string;
+    } | null;
+    return row ? {
+      reviewerSessionId: row.reviewer_session_id,
+      attempt: row.attempt,
+      decision: row.decision,
+      diffHash: row.diff_hash,
+      evidenceBundleHash: row.evidence_bundle_hash,
+      outputArtifactId: row.output_artifact_id,
+    } : null;
   }
 
   recordClaimEvidence(record: ClaimEvidenceRecord): ClaimEvidenceRecord {

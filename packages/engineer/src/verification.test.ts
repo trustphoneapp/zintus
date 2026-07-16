@@ -1048,6 +1048,102 @@ describe("Phase 3 authoritative verification manager", () => {
     setup.supervisor.close();
   });
 
+  test("resumes an interrupted Reviewer repair instead of skipping to verification", async () => {
+    const path = root();
+    const setup = setupFastChecks(path, "UNIT", { tokenBudget: 25_000 }, true, { builderModelCallLimit: 6 });
+    const digest = `sha256:${"a".repeat(64)}`;
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(path, "managed-workspaces"), gitSpawn: testGitSpawn });
+    const sandboxManager = new DockerSandboxManager({ workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest });
+    const provisioned: ProvisionedSandbox = {
+      record: setup.sandbox,
+      workspace: setup.workspace,
+      commandRunner: () => ({ status: 0, stdout: "1 pass", stderr: "" }),
+    };
+    const executionManager = {
+      getSandbox: () => provisioned,
+      recoverSandbox: async () => provisioned,
+    } as unknown as EngineerExecutionManager;
+    let reviewerAttempt = 0;
+    let builderCall = 0;
+    const transportForRole = (_runId: string, role: "BUILDER" | "TESTER" | "SECURITY" | "REVIEWER"): ResponsesTransport => ({
+      async create(request) {
+        if (role === "TESTER") return { id: `tester-${reviewerAttempt}`, output: [{
+          type: "function_call", call_id: "tester", name: "submit_test_advisory",
+          arguments: JSON.stringify({ uncoveredCriterionIds: [], warnings: [] }),
+        }], usage: { input_tokens: 100, output_tokens: 100 } };
+        if (role === "SECURITY") return { id: `security-${reviewerAttempt}`, output: [{
+          type: "function_call", call_id: "security", name: "submit_security_advisory",
+          arguments: JSON.stringify({ findings: [] }),
+        }], usage: { input_tokens: 100, output_tokens: 100 } };
+        if (role === "BUILDER") {
+          builderCall += 1;
+          if (builderCall <= 2) return { id: `repair-${builderCall}`, output: [{
+            type: "function_call", call_id: `repair-write-${builderCall}`, name: "write_file",
+            arguments: JSON.stringify({
+              path: "src/value.ts",
+              content: `// recovered repair ${builderCall}\nexport const value = 2;\n`,
+            }),
+          }], usage: builderCall === 1
+            ? { input_tokens: 1_000, output_tokens: 8_000 }
+            : { input_tokens: 100, output_tokens: 100 } };
+          return { id: "repair-handoff", output: [], output_text: "Reviewer repair is complete.", usage: { input_tokens: 100, output_tokens: 100 } };
+        }
+        reviewerAttempt += 1;
+        const requestInput = request.input as Array<{ content: Array<{ text: string }> }>;
+        const input = JSON.parse(requestInput[0]!.content[0]!.text) as {
+          diffHash: string; evidenceBundleHash: string; trustedEvidence: Array<{ evidenceId: string; eventType: string }>;
+        };
+        const evidenceId = input.trustedEvidence.find((item) => item.eventType === "INDEPENDENT_VERIFICATION")!.evidenceId;
+        const requestChanges = reviewerAttempt === 1;
+        return { id: `review-${reviewerAttempt}`, output: [{
+          type: "function_call", call_id: `review-call-${reviewerAttempt}`, name: "submit_review",
+          arguments: JSON.stringify({
+            decision: requestChanges ? "REQUEST_CHANGES" : "APPROVE",
+            requirementCoverage: [{ criterionId: "criterion-1", status: "SATISFIED", evidenceIds: [evidenceId], explanation: "Independent test passed." }],
+            findings: requestChanges ? [{
+              findingId: "F-1", severity: "MEDIUM", category: "CORRECTNESS", file: "src/value.ts",
+              lineStart: 1, lineEnd: 1, criterionIds: ["criterion-1"], description: "Repair the value module.",
+              requiredChange: "Add the scoped recovery note.", evidenceIds: [],
+            }] : [],
+            unsupportedClaims: [], residualRisks: [], reviewedDiffHash: input.diffHash,
+            reviewedEvidenceBundleHash: input.evidenceBundleHash, reviewPolicyVersion: REVIEWER_POLICY_VERSION,
+          }),
+        }], usage: { input_tokens: 100, output_tokens: 100 } };
+      },
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    recordTestBaseline(setup, artifactStore);
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor, executionManager, sandboxManager, artifactStore, transportForRole,
+    });
+
+    await expect(manager.verify(setup.manifest.runId)).rejects.toThrow("paused safely");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("PAUSED_BUDGET");
+    expect(builderCall).toBe(1);
+    expect(readFileSync(join(setup.workspace.workspaceRoot, "src", "value.ts"), "utf8")).toContain("recovered repair 1");
+
+    const paused = setup.supervisor.getRun(setup.manifest.runId);
+    const budget = setup.supervisor.getBudget(setup.manifest.runId);
+    const topped = setup.supervisor.topUpBudget({
+      runId: setup.manifest.runId, expectedRevision: budget.revision,
+      topUp: { addTokenBudget: 50_000, addCostBudgetUsd: 0, addTimeBudgetSeconds: 0 },
+      actorId: "user-1", idempotencyKey: "resume-review-repair-budget",
+    });
+    setup.supervisor.resumeBudget({
+      runId: setup.manifest.runId, expectedStateVersion: paused.stateVersion, expectedBudgetRevision: topped.revision,
+      actorId: "user-1", idempotencyKey: "resume-review-repair",
+    });
+    await manager.resumeBudgetCheckpoint(setup.manifest.runId);
+
+    expect(builderCall).toBe(3);
+    expect(reviewerAttempt).toBe(2);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
+    expect(setup.supervisor.listEvents(setup.manifest.runId)).not.toContainEqual(expect.objectContaining({
+      reasonCode: "PHASE3_RECOVERY_RESTARTED",
+    }));
+    setup.supervisor.close();
+  });
+
   test("honors a Sol Reviewer change request, runs a bounded repair, then fully reverifies in a fresh session", async () => {
     const path = root();
     const setup = setupFastChecks(path, "UNIT", {}, true, { builderModelCallLimit: 2 });

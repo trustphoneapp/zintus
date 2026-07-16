@@ -55,6 +55,7 @@ import {
   type RunExportTable,
   type RunObservabilityProjection,
   type ReviewerPersistenceRecoveryCandidate,
+  type RecordedReviewerOutput,
 } from "./ledger.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
 import { evaluateRetry, type RetryDecision } from "./retry.js";
@@ -847,7 +848,10 @@ export class EngineerSupervisor {
         }
       }
       this.ledger.recordModelCall(record, reservationId);
-      if (record.status === "SUCCEEDED") this.assertRuntimeBudget(record.runId);
+      // A successful call was admitted against a worst-case reservation and
+      // has already incurred its cost. Do not interrupt consumption of that
+      // paid response here. The next model reservation remains the hard
+      // budget boundary and will pause before any additional provider spend.
     });
   }
 
@@ -985,6 +989,10 @@ export class EngineerSupervisor {
       throw new InvalidTransitionError("Reviewer persistence recovery evidence does not match the failed isolated review");
     }
     return this.ledger.recordReviewerSession(record, findings);
+  }
+
+  recordedReviewerOutput(runId: string, outputArtifactId: string): RecordedReviewerOutput | null {
+    return this.ledger.recordedReviewerOutput(runId, outputArtifactId);
   }
 
   nextReviewerAttempt(runId: string): number {

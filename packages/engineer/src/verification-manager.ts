@@ -8,6 +8,7 @@ import {
   reviewerEvidenceBundleHash,
   type ModelRole,
   type ReviewerOutput,
+  type RunStateEvent,
   type TaskManifest,
   type TrustedEvidence,
 } from "./contracts.js";
@@ -19,7 +20,12 @@ import type { EngineerExecutionManager } from "./execution-manager.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import { sha256 } from "./hash.js";
 import { IndependentVerifier, IndependentVerificationFailure, StableRequiredTestFailure } from "./independent-verifier.js";
-import { IsolatedReviewer, REVIEWER_POLICY_VERSION, reviewerFindingRecords } from "./isolated-reviewer.js";
+import {
+  IsolatedReviewer,
+  REVIEWER_POLICY_VERSION,
+  reviewerFindingFingerprint,
+  reviewerFindingRecords,
+} from "./isolated-reviewer.js";
 import { LUNA_FAILURE_ADVISOR_POLICY_VERSION, LunaFailureAdvisor } from "./luna-failure-advisor.js";
 import { resolveEngineerModel, type EngineerModelConfiguration } from "./model-routing.js";
 import type { EngineerSupervisor } from "./supervisor.js";
@@ -84,12 +90,7 @@ export class EngineerVerificationManager {
   isActive(runId: string): boolean { return this.active.has(runId); }
 
   ownsBudgetCheckpoint(runId: string): boolean {
-    const sequence = this.options.supervisor.latestEventSequence(runId);
-    if (sequence === 0) return false;
-    const events = this.options.supervisor.listEvents(runId, Math.max(0, sequence - 20), 20).reverse();
-    const latestWorkTransition = events.find((event) =>
-      event.nextState !== "PAUSED_BUDGET" && event.reasonCode !== "BUDGET_RESUMED",
-    );
+    const latestWorkTransition = this.latestRepairCheckpoint(runId);
     return latestWorkTransition?.nextState === "IMPLEMENTING"
       && ["REVIEW_REPAIR_STARTED", "STABLE_REQUIRED_TEST_REPAIR_STARTED"].includes(latestWorkTransition.reasonCode);
   }
@@ -722,6 +723,11 @@ export class EngineerVerificationManager {
   private async recoverInterruptedVerification(runId: string): Promise<VerificationResult> {
     const initial = this.options.supervisor.getRun(runId);
     const sandbox = await this.options.executionManager.recoverSandbox(runId, true);
+    const repairCheckpoint = this.latestRepairCheckpoint(runId);
+    if (repairCheckpoint?.reasonCode === "REVIEW_REPAIR_STARTED" ||
+        repairCheckpoint?.reasonCode === "REVIEW_REPAIR_CONTEXT_PREPARING") {
+      return this.recoverInterruptedReviewRepair(runId, sandbox, repairCheckpoint);
+    }
     if (initial.state !== "VERIFICATION_RECOVERY") {
       this.transition(runId, "VERIFICATION_RECOVERY", "PHASE3_PROCESS_INTERRUPTED", [sandbox.record.sandboxId]);
     }
@@ -729,10 +735,79 @@ export class EngineerVerificationManager {
     return this.verifyPass(runId);
   }
 
-  private isInterruptedPhase3Repair(runId: string): boolean {
+  private latestRepairCheckpoint(runId: string): RunStateEvent | undefined {
     const sequence = this.options.supervisor.latestEventSequence(runId);
-    if (sequence === 0) return false;
-    const latest = this.options.supervisor.listEvents(runId, sequence - 1, 1)[0];
+    if (sequence === 0) return undefined;
+    const events = this.options.supervisor.listEvents(runId, Math.max(0, sequence - 100), 100).reverse();
+    return events.find((event) =>
+      event.nextState !== "PAUSED_BUDGET" && event.reasonCode !== "BUDGET_RESUMED",
+    );
+  }
+
+  private async recoverInterruptedReviewRepair(
+    runId: string,
+    sandbox: ProvisionedSandbox,
+    checkpoint: RunStateEvent,
+  ): Promise<VerificationResult> {
+    const supervisor = this.options.supervisor;
+    const manifest = supervisor.getManifest(runId);
+    if (!manifest) throw new Error("frozen manifest is unavailable for Reviewer repair recovery");
+    const artifacts = supervisor.listArtifacts(runId);
+    const artifact = checkpoint.evidenceIds
+      .map((artifactId) => artifacts.find((item) => item.artifactId === artifactId))
+      .find((item) => item?.type === "REVIEWER_OUTPUT");
+    if (!artifact || artifact.trusted) {
+      throw new Error("Reviewer repair recovery requires its recorded isolated output artifact");
+    }
+    const recorded = supervisor.recordedReviewerOutput(runId, artifact.artifactId);
+    const output = ReviewerOutputSchema.parse(JSON.parse(this.options.artifactStore.read(artifact).toString("utf8")));
+    if (!recorded || recorded.decision !== "REQUEST_CHANGES" || output.decision !== "REQUEST_CHANGES" ||
+        recorded.diffHash !== output.reviewedDiffHash ||
+        recorded.evidenceBundleHash !== output.reviewedEvidenceBundleHash ||
+        output.reviewPolicyVersion !== REVIEWER_POLICY_VERSION || output.findings.length === 0) {
+      throw new Error("Reviewer repair recovery evidence is stale or invalid");
+    }
+    const reviewFindings = [...output.findings];
+    const findingFingerprints = new Set(reviewFindings.map(reviewerFindingFingerprint));
+    for (const laterArtifact of artifacts) {
+      if (laterArtifact.type !== "REVIEWER_OUTPUT" || laterArtifact.artifactId === artifact.artifactId) continue;
+      const laterRecord = supervisor.recordedReviewerOutput(runId, laterArtifact.artifactId);
+      if (!laterRecord || laterRecord.attempt <= recorded.attempt || laterRecord.decision !== "REQUEST_CHANGES" ||
+          laterRecord.diffHash !== recorded.diffHash) continue;
+      const laterOutput = ReviewerOutputSchema.parse(JSON.parse(this.options.artifactStore.read(laterArtifact).toString("utf8")));
+      if (laterOutput.decision !== "REQUEST_CHANGES" || laterOutput.reviewedDiffHash !== laterRecord.diffHash ||
+          laterOutput.reviewedEvidenceBundleHash !== laterRecord.evidenceBundleHash ||
+          laterOutput.reviewPolicyVersion !== REVIEWER_POLICY_VERSION) continue;
+      for (const finding of laterOutput.findings) {
+        const fingerprint = reviewerFindingFingerprint(finding);
+        if (findingFingerprints.has(fingerprint)) continue;
+        findingFingerprints.add(fingerprint);
+        reviewFindings.push(finding);
+      }
+    }
+    const currentCommitSha = await this.options.sandboxManager.workspaceManager().currentCommitAsync(sandbox.workspace);
+    const repairContext = RepairContextSchema.parse({
+      runId,
+      manifestHash: manifest.manifestHash,
+      manifest,
+      reviewFindings,
+      reviewFindingsHash: sha256(reviewFindings),
+      currentCommitSha,
+      allowedPaths: manifest.allowedPaths,
+      remainingReviewFixAttempts: 0,
+    });
+    const current = supervisor.getRun(runId);
+    if (current.state === "REVIEW_FIX_PREPARING") {
+      this.transition(runId, "IMPLEMENTING", "REVIEW_REPAIR_RESUMED", [artifact.artifactId], { scopeWithinManifest: true });
+    } else if (current.state !== "IMPLEMENTING") {
+      throw new Error(`Reviewer repair recovery requires IMPLEMENTING, not ${current.state}`);
+    }
+    await this.repair(manifest, sandbox, repairContext, "REVIEW_REPAIR_IMPLEMENTED");
+    return this.verifyPass(runId);
+  }
+
+  private isInterruptedPhase3Repair(runId: string): boolean {
+    const latest = this.latestRepairCheckpoint(runId);
     return latest?.nextState === "IMPLEMENTING"
       && ["REVIEW_REPAIR_STARTED", "STABLE_REQUIRED_TEST_REPAIR_STARTED"].includes(latest.reasonCode);
   }
