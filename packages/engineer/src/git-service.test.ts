@@ -115,4 +115,51 @@ describe("Phase 4 credentialed Git publication", () => {
       { method: "POST", body: { title: "Verified change", body: "trusted body", head: "zintus/engineer/run-1", base: "main", draft: true } },
     ]);
   });
+
+  test("reconciles an interrupted push with a read-only credentialed lookup", async () => {
+    const resultCommitSha = "b".repeat(40);
+    const calls: string[][] = [];
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      spawn: ((_command, args) => {
+        calls.push([...((args ?? []) as readonly string[])]);
+        return {
+          status: 0,
+          stdout: `${resultCommitSha}\trefs/heads/zintus/engineer/run-1-${resultCommitSha.slice(0, 12)}\n`,
+          stderr: "", pid: 1, output: [], signal: null,
+        } as unknown as SpawnSyncReturns<string>;
+      }) as typeof import("node:child_process").spawnSync,
+    });
+    expect(await service.reconcilePublicationOperation({
+      runId: "run-1", repository, operationType: "PUSH_COMMIT", resultCommitSha,
+      baseBranch: "main", idempotencyKey: "git:push:run-1",
+    })).toEqual({
+      status: "SUCCEEDED",
+      remoteReference: `refs/heads/zintus/engineer/run-1-${resultCommitSha.slice(0, 12)}`,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("ls-remote");
+    expect(calls[0]).not.toContain("push");
+  });
+
+  test("reconciles an interrupted PR only when branch, commit, and base all match", async () => {
+    const resultCommitSha = "b".repeat(40);
+    const methods: string[] = [];
+    const branchName = `zintus/engineer/run-1-${resultCommitSha.slice(0, 12)}`;
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
+        methods.push(init?.method ?? "GET");
+        return new Response(JSON.stringify([{
+          id: 91, number: 12, html_url: "https://github.test/pull/12",
+          head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
+        }]), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    expect(await service.reconcilePublicationOperation({
+      runId: "run-1", repository, operationType: "CREATE_PR", resultCommitSha,
+      baseBranch: "main", idempotencyKey: "pr:create:run-1",
+    })).toEqual({ status: "SUCCEEDED", remoteReference: "https://github.test/pull/12" });
+    expect(methods).toEqual(["GET"]);
+  });
 });

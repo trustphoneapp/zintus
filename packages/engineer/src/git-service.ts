@@ -42,11 +42,26 @@ export interface BaseBranchStatus {
   protection?: BranchProtectionEvidence;
 }
 
+export interface ReconcilePublicationOperationInput {
+  runId: string;
+  repository: RepositoryReference;
+  operationType: "CREATE_BRANCH" | "PUSH_COMMIT" | "CREATE_PR";
+  resultCommitSha: string;
+  baseBranch: string;
+  idempotencyKey: string;
+}
+
+export type PublicationOperationReconciliation =
+  | { status: "SUCCEEDED"; remoteReference: string }
+  | { status: "NOT_FOUND" | "CONFLICT" | "INDETERMINATE"; detail: string };
+
 export interface GitService {
   createRunBranch(input: CreateRunBranchInput): Promise<BranchResult>;
   pushVerifiedCommit(input: PushVerifiedCommitInput): Promise<PushResult>;
   createPullRequest(input: CreatePullRequestInput): Promise<PullRequestResult>;
   inspectBaseBranch(input: InspectBaseBranchInput): Promise<BaseBranchStatus>;
+  /** Read-only, credentialed recovery check. It must never create, update, or delete a remote ref or PR. */
+  reconcilePublicationOperation?(input: ReconcilePublicationOperationInput): Promise<PublicationOperationReconciliation>;
   /** Fetches the inspected base commit into the local object store without changing a working tree. */
   synchronizeBaseBranch?(input: { repository: RepositoryReference; expectedCommitSha: string }): Promise<void>;
 }
@@ -65,9 +80,39 @@ export class GitHubGitService implements GitService {
 
   async createRunBranch(input: CreateRunBranchInput): Promise<BranchResult> {
     this.git(["cat-file", "-e", `${input.resultCommitSha}^{commit}`]);
-    const segment = input.runId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 60);
-    const branchName = `zintus/engineer/${segment}-${input.resultCommitSha.slice(0, 12)}`;
+    const branchName = this.branchName(input.runId, input.resultCommitSha);
     return { branchName, remoteReference: `refs/heads/${branchName}` };
+  }
+
+  async reconcilePublicationOperation(input: ReconcilePublicationOperationInput): Promise<PublicationOperationReconciliation> {
+    const branchName = this.branchName(input.runId, input.resultCommitSha);
+    const remoteReference = `refs/heads/${branchName}`;
+    if (input.operationType === "CREATE_BRANCH") {
+      // CREATE_BRANCH only validates the local commit and derives this deterministic name.
+      // Recomputing that value is read-only and cannot duplicate a remote mutation.
+      this.git(["cat-file", "-e", `${input.resultCommitSha}^{commit}`]);
+      return { status: "SUCCEEDED", remoteReference };
+    }
+    if (input.operationType === "PUSH_COMMIT") {
+      const token = await this.requireToken();
+      const result = this.authenticatedGit(input.repository, token, ["ls-remote", this.remoteUrl(input.repository), remoteReference]);
+      const remoteCommitSha = result.trim().split(/\s+/)[0] ?? "";
+      if (!remoteCommitSha) return { status: "NOT_FOUND", detail: "publication branch is not present on the remote" };
+      if (remoteCommitSha.toLowerCase() !== input.resultCommitSha.toLowerCase()) {
+        return { status: "CONFLICT", detail: "publication branch points to a different commit" };
+      }
+      return { status: "SUCCEEDED", remoteReference };
+    }
+    const query = new URLSearchParams({ state: "all", head: `${input.repository.owner}:${branchName}`, base: input.baseBranch });
+    const matches = await this.github(input.repository, `/pulls?${query.toString()}`, { method: "GET" }) as Array<{
+      id?: number; number?: number; html_url?: string; head?: { sha?: string; ref?: string }; base?: { ref?: string };
+    }>;
+    const exact = matches.find((candidate) => candidate.head?.ref === branchName &&
+      candidate.head?.sha?.toLowerCase() === input.resultCommitSha.toLowerCase() && candidate.base?.ref === input.baseBranch);
+    if (!exact?.id || !exact.number || !exact.html_url) {
+      return { status: "NOT_FOUND", detail: "no exact pull request matches the verified branch, commit, and base" };
+    }
+    return { status: "SUCCEEDED", remoteReference: exact.html_url };
   }
 
   async pushVerifiedCommit(input: PushVerifiedCommitInput): Promise<PushResult> {
@@ -161,6 +206,11 @@ export class GitHubGitService implements GitService {
   private remoteUrl(repository: RepositoryReference): string {
     if (repository.provider !== "github") throw new Error("credentialed Git transport requires a GitHub repository");
     return `https://github.com/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}.git`;
+  }
+
+  private branchName(runId: string, resultCommitSha: string): string {
+    const segment = runId.replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 60);
+    return `zintus/engineer/${segment}-${resultCommitSha.slice(0, 12)}`;
   }
 
   private async requireToken(): Promise<string> {

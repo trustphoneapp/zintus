@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import type { Engine } from "@zintus/engine";
 import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
@@ -123,7 +124,8 @@ describe("gateway handler", () => {
       },
     });
     await preflight.assertStartup();
-    const engineerRuns = new EngineerRunManager({ supervisor, principal, preflight, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => "diff --git a/a b/a" });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const engineerRuns = new EngineerRunManager({ supervisor, principal, preflight, artifactStore, diffForRun: () => "diff --git a/a b/a" });
     const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
     const repository = await handler(new Request("http://x/v1/engineer/repository", {
       headers: { Authorization: "Bearer secret" },
@@ -133,6 +135,14 @@ describe("gateway handler", () => {
       repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture",
       baseBranch: "main", baseCommitSha: "1".repeat(40), url: "file:///fixture",
     } });
+    const repositories = await handler(new Request("http://x/v1/engineer/repositories", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(repositories.status).toBe(200);
+    expect((await repositories.json()) as { repositories: unknown[] }).toEqual({ repositories: [{
+      repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture",
+      baseBranch: "main", baseCommitSha: "1".repeat(40), url: "file:///fixture",
+    }] });
     const body = JSON.stringify({
       runId: "gateway-run-1",
       userId: "user-1",
@@ -156,6 +166,12 @@ describe("gateway handler", () => {
     const readBody = (await read.json()) as { run: { state: string }; budget: { limits: { tokens: number } } };
     expect(readBody.run.state).toBe("REQUEST_RECEIVED");
     expect(readBody.budget.limits.tokens).toBe(0);
+    const snapshot = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/snapshot", { headers: { Authorization: "Bearer secret" } }));
+    expect(snapshot.status).toBe(200);
+    const snapshotBody = (await snapshot.json()) as { status: { run: { runId: string } }; data: { artifacts: unknown[]; errors: unknown[] } };
+    expect(snapshotBody.status.run.runId).toBe("gateway-run-1");
+    expect(snapshotBody.data.artifacts).toEqual([]);
+    expect(snapshotBody.data.errors).toEqual([]);
     const paused = engineerRuns.get("gateway-run-1");
     const topUp = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/budget/top-up", {
       method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
@@ -180,6 +196,50 @@ describe("gateway handler", () => {
     }));
     expect(artifacts.status).toBe(200);
     expect((await artifacts.json()) as unknown).toEqual({ artifacts: [] });
+    const storedArtifact = supervisor.recordArtifact(artifactStore.put({
+      runId: "gateway-run-1", type: "COMMAND_STDOUT", bytes: "safe output", producerType: "EXECUTOR", producerId: "test-executor", trusted: true,
+    }));
+    const preview = await handler(new Request(`http://x/v1/engineer/runs/gateway-run-1/artifacts/${storedArtifact.artifactId}`, {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(preview.status).toBe(200);
+    const previewBody = (await preview.json()) as { content: string; artifact: Record<string, unknown> };
+    expect(previewBody.content).toBe("safe output");
+    expect(previewBody.artifact).not.toHaveProperty("storageReference");
+    const largeBytes = Buffer.alloc((1024 * 1024) + 2);
+    for (let index = 0; index < largeBytes.byteLength; index += 1) largeBytes[index] = index % 251;
+    const largeArtifact = supervisor.recordArtifact(artifactStore.put({
+      runId: "gateway-run-1", type: "COMMAND_STDOUT", bytes: largeBytes, producerType: "EXECUTOR", producerId: "test-executor", trusted: true,
+    }));
+    const wholeFileRead = artifactStore.read.bind(artifactStore);
+    artifactStore.read = () => { throw new Error("evidence stream must not use the whole-file reader"); };
+    const evidenceStream = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/evidence-stream", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(evidenceStream.status).toBe(200);
+    const streamReader = evidenceStream.body!.getReader();
+    const streamChunks: Buffer[] = [];
+    let largestStreamChunk = 0;
+    while (true) {
+      const next = await streamReader.read();
+      if (next.done) break;
+      largestStreamChunk = Math.max(largestStreamChunk, next.value.byteLength);
+      streamChunks.push(Buffer.from(next.value));
+    }
+    const streamedEvidence = Buffer.concat(streamChunks).toString("utf8");
+    artifactStore.read = wholeFileRead;
+    expect(largestStreamChunk).toBeLessThan(largeBytes.byteLength);
+    expect(streamedEvidence).toContain('"type":"artifactPayload"');
+    expect(streamedEvidence).toContain('"type":"checksum"');
+    expect(streamedEvidence).not.toContain("storageReference");
+    expect(streamedEvidence).not.toContain("storage_reference");
+    const evidenceLines = streamedEvidence.trimEnd().split("\n");
+    const checksum = JSON.parse(evidenceLines.at(-1)!) as { type: string; algorithm: string; value: string };
+    expect(checksum).toEqual({ type: "checksum", algorithm: "sha256", value: `sha256:${createHash("sha256").update(`${evidenceLines.slice(0, -1).join("\n")}\n`).digest("hex")}` });
+    const payload = evidenceLines.map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((line) => line.type === "artifactPayload" && line.artifactId === largeArtifact.artifactId) as { content: string } | undefined;
+    expect(payload).toBeDefined();
+    expect(Buffer.from(payload!.content, "base64")).toEqual(largeBytes);
     const claims = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/claims", {
       headers: { Authorization: "Bearer secret" },
     }));

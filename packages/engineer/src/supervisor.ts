@@ -48,7 +48,13 @@ import type {
 } from "./control-contracts.js";
 import { BudgetPausedError, IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
 import { canonicalJson, sha256 } from "./hash.js";
-import { EngineerLedger, type LedgerTransitionResult } from "./ledger.js";
+import {
+  EngineerLedger,
+  type FailureClassProjection,
+  type LedgerTransitionResult,
+  type RunExportTable,
+  type RunObservabilityProjection,
+} from "./ledger.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
 import { evaluateRetry, type RetryDecision } from "./retry.js";
 import { canTransition, isTerminalState } from "./state-machine.js";
@@ -78,6 +84,7 @@ import {
   type EngineerBudgetSelection,
   type EngineerBudgetSnapshot,
 } from "./budget-contracts.js";
+import type { RepositoryAdmission, RepositoryAdmissionSource } from "./repository-admission.js";
 
 export interface SupervisorOptions {
   dbPath?: string;
@@ -188,6 +195,83 @@ export class EngineerSupervisor {
     this.ledger = new EngineerLedger(options.dbPath ?? join(homedir(), ".zintus", "engineer.db"));
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
+  }
+
+  /**
+   * Server-only trust boundary. Callers must derive evidence from authenticated
+   * configuration or a connector grant; a browser-supplied repository object is
+   * not authorization to invoke this method.
+   */
+  registerRepositoryAdmission(input: {
+    admissionId: string;
+    ownerUserId: string;
+    repository: RepositoryReference;
+    source: RepositoryAdmissionSource;
+    authorizationSubject: string;
+    authorizationEvidenceHash: string;
+    authorizationExpiresAt?: string | null;
+    authorizationGeneration?: number;
+    existingBasePolicy?: "REQUIRE_EXACT" | "PRESERVE_EXISTING";
+  }): RepositoryAdmission {
+    return this.ledger.registerRepositoryAdmission({
+      ...input,
+      repository: RepositoryReferenceSchema.parse(input.repository),
+      now: this.timestamp(),
+    });
+  }
+
+  repositoryAdmission(ownerUserId: string, repositoryId: string): RepositoryAdmission | null {
+    return this.ledger.getRepositoryAdmission(ownerUserId, repositoryId);
+  }
+
+  migrateLegacyConfiguredRepositoryAdmissionEvidence(input: {
+    ownerUserId: string; repositoryId: string; nextEvidenceHash: string;
+  }): RepositoryAdmission {
+    if (!/^sha256:[a-f0-9]{64}$/i.test(input.nextEvidenceHash)) {
+      throw new Error("repository admission evidence must be canonical SHA-256");
+    }
+    return this.ledger.migrateLegacyConfiguredRepositoryAdmissionEvidence(
+      input.ownerUserId, input.repositoryId, input.nextEvidenceHash, this.timestamp(),
+    );
+  }
+
+  reauthorizeConnectorRepositoryAdmission(input: {
+    ownerUserId: string; repositoryId: string; previousGeneration: number; nextGeneration: number;
+    authorizationSubject: string; authorizationEvidenceHash: string; authorizationExpiresAt: string;
+  }): RepositoryAdmission {
+    if (!Number.isInteger(input.previousGeneration) || !Number.isInteger(input.nextGeneration) || input.previousGeneration < 1) {
+      throw new Error("connector repository reauthorization generation is invalid");
+    }
+    if (input.nextGeneration <= input.previousGeneration) {
+      throw new Error("connector repository reauthorization generation must advance");
+    }
+    const now = this.timestamp();
+    const expiresAt = new Date(input.authorizationExpiresAt).getTime();
+    if (!/^sha256:[a-f0-9]{64}$/i.test(input.authorizationEvidenceHash) ||
+        !Number.isFinite(expiresAt) || expiresAt <= new Date(now).getTime()) {
+      throw new Error("connector repository reauthorization is invalid");
+    }
+    return this.ledger.reauthorizeConnectorRepositoryAdmission({ ...input, now });
+  }
+
+  listRepositoryAdmissions(ownerUserId: string): RepositoryAdmission[] {
+    return this.ledger.listRepositoryAdmissions(ownerUserId);
+  }
+
+  advanceRepositoryAdmissionBase(input: {
+    ownerUserId: string; repositoryId: string; previousBaseCommitSha: string; nextBaseCommitSha: string;
+  }): RepositoryAdmission {
+    if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(input.previousBaseCommitSha) ||
+        !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(input.nextBaseCommitSha)) {
+      throw new Error("repository admission base SHAs must be exact Git object identifiers");
+    }
+    return this.ledger.advanceRepositoryAdmissionBase(
+      input.ownerUserId, input.repositoryId, input.previousBaseCommitSha, input.nextBaseCommitSha, this.timestamp(),
+    );
+  }
+
+  revokeRepositoryAdmission(ownerUserId: string, repositoryId: string): RepositoryAdmission {
+    return this.ledger.revokeRepositoryAdmission(ownerUserId, repositoryId, this.timestamp());
   }
 
   receiveRequest(input: ReceiveRequestInput): EngineerRun {
@@ -544,6 +628,18 @@ export class EngineerSupervisor {
     return this.ledger.listRuns(states);
   }
 
+  listRunsForUser(userId: string, limit = 50, before?: { createdAt: string; runId: string }): EngineerRun[] {
+    return this.ledger.listRunsForUser(userId, limit, before);
+  }
+
+  listRunObservability(ownerId?: string): RunObservabilityProjection[] {
+    return this.ledger.listRunObservability(ownerId);
+  }
+
+  listFailureClassObservability(ownerId?: string): FailureClassProjection[] {
+    return this.ledger.listFailureClassObservability(ownerId);
+  }
+
   getManifest(runId: string, version?: number): TaskManifest | null {
     return this.ledger.getManifest(runId, version);
   }
@@ -594,6 +690,33 @@ export class EngineerSupervisor {
 
   exportRunRecords(runId: string): Record<string, Array<Record<string, unknown>>> {
     return this.ledger.exportRunRecords(runId);
+  }
+
+  exportRunRecordTables(runId: string): RunExportTable[] {
+    return this.ledger.exportRunRecordTables(runId);
+  }
+
+  exportRunRecordPage(runId: string, table: RunExportTable, offset: number, limit = 500): Array<Record<string, unknown>> {
+    return this.ledger.exportRunRecordPage(runId, table, offset, limit);
+  }
+
+  evidenceExportSummary(runId: string) {
+    return this.ledger.atomic(() => ({
+      run: this.ledger.getRun(runId),
+      manifest: this.ledger.getManifest(runId),
+      riskAssessment: this.ledger.latestRiskAssessment(runId),
+      latestEventSequence: this.ledger.latestEventSequence(runId),
+      artifacts: this.ledger.listArtifacts(runId),
+      claims: this.ledger.listClaimEvidence(runId),
+      evidenceBundles: this.ledger.listEvidenceBundles(runId),
+      tests: this.ledger.listTestExecutions(runId),
+      securityFindings: this.ledger.listSecurityFindings(runId),
+      failures: this.ledger.listFailures(runId),
+      decisions: this.ledger.listDecisions(runId).map((decision) => ({
+        decision,
+        resolution: this.ledger.getDecisionResolution(runId, decision.decisionId),
+      })),
+    }));
   }
 
   evidenceExportSnapshot(runId: string) {
@@ -1136,6 +1259,7 @@ export class EngineerSupervisor {
   private pauseForBudget(runId: string, reason: BudgetPauseReason): void {
     const run = this.ledger.getRun(runId);
     if (run.state === "PAUSED_BUDGET" || isTerminalState(run.state)) return;
+    if (!canTransition(run.state, "PAUSED_BUDGET")) return;
     const timestamp = this.timestamp();
     this.ledger.pauseForBudget({
       runId, expectedStateVersion: run.stateVersion, previousState: run.state, nextState: "PAUSED_BUDGET",

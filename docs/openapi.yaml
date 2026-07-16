@@ -248,6 +248,28 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "503": { description: Engineer preflight is not ready. }
 
+  /v1/engineer/repositories:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerRepositories
+      summary: List repositories admitted for the authenticated Engineer owner
+      description: Returns only canonical or connector-authorized repository snapshots bound to the authenticated gateway principal.
+      responses:
+        "200":
+          description: Owner-scoped repositories with exact accepted base commits.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [repositories]
+                additionalProperties: false
+                properties:
+                  repositories:
+                    type: array
+                    items: { $ref: "#/components/schemas/EngineerRepositoryReference" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Engineer is not configured or repository admission is unavailable. }
+
   /v1/engineer/runs:
     get:
       tags: [Engineer]

@@ -26,7 +26,26 @@ export interface EngineerBudgetSnapshot {
   revision: number;
   updatedAt: string;
 }
+export interface EngineerArtifact {
+  artifactId: string;
+  runId: string;
+  type: string;
+  sha256: string;
+  producerType: "EXECUTOR" | "SYSTEM";
+  producerId: string;
+  sizeBytes: number;
+  trusted: boolean;
+  createdAt: string;
+}
+export interface EngineerArtifactPreview {
+  artifact: EngineerArtifact;
+  encoding: "utf8" | "unavailable";
+  content: string | null;
+  truncated: boolean;
+  previewBytes: number;
+}
 export interface EngineerData {
+  artifacts: EngineerArtifact[];
   claims: unknown[];
   evidenceBundles: unknown[];
   tests: unknown[];
@@ -80,6 +99,17 @@ export async function createCorrectedEngineerRun(runId: string): Promise<{ repla
   return request<{ replacementRun: EngineerRun; plan: PlanProposal }>(`/v1/engineer/runs/${runId}/corrected-run`, { method: "POST" });
 }
 export async function getEngineerRunStatus(runId: string): Promise<EngineerRunStatus> { return request<EngineerRunStatus>(`/v1/engineer/runs/${runId}`); }
+/** Lightweight live projection used between durable SSE events. */
+export async function getEngineerLiveSummary(runId: string): Promise<{ status: EngineerRunStatus; budget: EngineerBudgetSnapshot | null }> {
+  const [status, budget] = await Promise.all([
+    getEngineerRunStatus(runId),
+    getEngineerBudget(runId).catch(() => null),
+  ]);
+  return { status, budget };
+}
+export async function getEngineerSnapshot(runId: string): Promise<{ status: EngineerRunStatus & { budget: EngineerBudgetSnapshot }; data: EngineerData; events: RunEvent[]; latestEventSequence: number; snapshotFence: { stateVersion: number; eventSequence: number } }> {
+  return request(`/v1/engineer/runs/${runId}/snapshot`);
+}
 export async function getEngineerBudget(runId: string): Promise<EngineerBudgetSnapshot> { return (await request<{ budget: EngineerBudgetSnapshot }>(`/v1/engineer/runs/${runId}/budget`)).budget; }
 export async function topUpEngineerBudget(runId: string, input: { expectedRevision: number; addCostBudgetUsd: number; addTokenBudget: number; addTimeBudgetSeconds: number }): Promise<EngineerBudgetSnapshot> {
   const idempotencyKey = `ui:budget-top-up:${runId}:${input.expectedRevision}:${input.addCostBudgetUsd}:${input.addTokenBudget}:${input.addTimeBudgetSeconds}`;
@@ -90,14 +120,30 @@ export async function resumeEngineerBudget(runId: string, input: { expectedState
   return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/resume-budget`, { method: "POST", body: JSON.stringify({ ...input, idempotencyKey }) })).run;
 }
 export async function getEngineerRun(runId: string): Promise<EngineerRun> { return (await getEngineerRunStatus(runId)).run; }
+export async function listEngineerRunsPage(limit = 20, cursor?: string): Promise<{ runs: EngineerRun[]; nextCursor: string | null }> {
+  return request(`/v1/engineer/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+}
+/** Compatibility helper: returns the complete owner-scoped run history. */
 export async function listEngineerRuns(): Promise<EngineerRun[]> { return (await request<{ runs: EngineerRun[] }>("/v1/engineer/runs")).runs; }
 export async function getEngineerEvidenceExport(runId: string): Promise<Record<string, unknown>> { return request<Record<string, unknown>>(`/v1/engineer/runs/${runId}/evidence-export`); }
+export async function getEngineerEvidenceStream(runId: string): Promise<Response> {
+  const response = await fetch(`${GATEWAY_URL}/v1/engineer/runs/${runId}/evidence-stream`, { cache: "no-store", headers: gatewayAuthHeaders() });
+  if (!response.ok || !response.body) {
+    const body = await response.json().catch(() => ({})) as { error?: string | { message?: string } };
+    throw new Error(typeof body.error === "string" ? body.error : body.error?.message ?? `Evidence stream failed (${response.status})`);
+  }
+  return response;
+}
+export async function getEngineerArtifactPreview(runId: string, artifactId: string): Promise<EngineerArtifactPreview> {
+  return request<EngineerArtifactPreview>(`/v1/engineer/runs/${runId}/artifacts/${encodeURIComponent(artifactId)}`);
+}
 export async function getEngineerData(runId: string): Promise<EngineerData> {
   const load = async <T>(section: string, promise: Promise<T>, fallback: T) => {
     try { return { data: await promise, error: null }; }
     catch (error) { return { data: fallback, error: { section, message: error instanceof Error ? error.message : String(error) } }; }
   };
   const results = await Promise.all([
+    load("artifacts", request<{ artifacts: EngineerArtifact[] }>(`/v1/engineer/runs/${runId}/artifacts`), { artifacts: [] }),
     load("claims", request<{ claims: unknown[] }>(`/v1/engineer/runs/${runId}/claims`), { claims: [] }),
     load("evidence", request<{ evidenceBundles: unknown[] }>(`/v1/engineer/runs/${runId}/evidence`), { evidenceBundles: [] }),
     load("tests", request<{ tests: unknown[] }>(`/v1/engineer/runs/${runId}/tests`), { tests: [] }),
@@ -109,8 +155,8 @@ export async function getEngineerData(runId: string): Promise<EngineerData> {
     load("decisions", request<{ decisions: EngineerDecisionItem[] }>(`/v1/engineer/runs/${runId}/decisions`), { decisions: [] }),
   ]);
   return {
-    ...results[0].data, ...results[1].data, ...results[2].data, ...results[3].data,
-    ...results[4].data, ...results[5].data, ...results[6].data, ...results[7].data, ...results[8].data,
+    ...results[0].data, ...results[1].data, ...results[2].data, ...results[3].data, ...results[4].data,
+    ...results[5].data, ...results[6].data, ...results[7].data, ...results[8].data, ...results[9].data,
     errors: results.flatMap((result) => result.error ? [result.error] : []),
   };
 }

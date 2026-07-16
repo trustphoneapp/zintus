@@ -8,6 +8,7 @@ import {
   STATE_RUNTIME_POLICIES,
   STATE_TRANSITIONS,
   canTransition,
+  isCancellationAllowed,
   isTerminalState,
 } from "./state-machine.js";
 
@@ -41,6 +42,16 @@ describe("Engineer state machine", () => {
       expect(STATE_TRANSITIONS[state]).toEqual([]);
       expect(STATE_RUNTIME_POLICIES[state].cancellationState).toBeNull();
     }
+  });
+
+  test("publication states are fenced from cancellation until durable remote cleanup exists", () => {
+    for (const state of ["PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "PR_CREATION_FAILED", "BASE_BRANCH_STALE"] as const) {
+      expect(canTransition(state, "CANCELLATION_PENDING")).toBe(false);
+      expect(canTransition(state, "PAUSED_BUDGET")).toBe(false);
+      expect(isCancellationAllowed(state)).toBe(false);
+      expect(STATE_RUNTIME_POLICIES[state].cancellationState).toBeNull();
+    }
+    expect(isCancellationAllowed("HUMAN_APPROVED")).toBe(true);
   });
 
   test("every non-terminal state has a path to a terminal state and a timeout policy", () => {

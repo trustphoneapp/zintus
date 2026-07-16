@@ -829,14 +829,27 @@ describe("Phase 3 authoritative verification manager", () => {
     let pullRequestCalls = 0;
     let failPublicationOnce = true;
     let cleanupCalls = 0;
+    let releaseBranch!: () => void;
+    let signalBranchStarted!: () => void;
+    const branchStarted = new Promise<void>((resolve) => { signalBranchStarted = resolve; });
+    const branchRelease = new Promise<void>((resolve) => { releaseBranch = resolve; });
+    let holdFirstBranch = true;
     const gitService: GitService = {
       async inspectBaseBranch(input) {
         return { currentCommitSha: input.expectedBaseCommitSha, matchesExpected: true, protectionEnforced: true };
       },
       async createRunBranch(input) {
+        if (holdFirstBranch) {
+          signalBranchStarted();
+          await branchRelease;
+        }
         return { branchName: `zintus/engineer/${input.runId}`, remoteReference: `refs/heads/zintus/engineer/${input.runId}` };
       },
       async pushVerifiedCommit(input) { return { remoteReference: `refs/heads/${input.branchName}` }; },
+      async reconcilePublicationOperation(input) {
+        if (input.operationType !== "CREATE_PR") return { status: "INDETERMINATE", detail: "unexpected reconciliation" };
+        return { status: "SUCCEEDED", remoteReference: "https://github.test/pull/17" };
+      },
       async createPullRequest() {
         pullRequestCalls += 1;
         if (failPublicationOnce) { failPublicationOnce = false; throw new Error("simulated transport interruption"); }
@@ -854,15 +867,21 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(pullRequestCalls).toBe(0);
     await expect(publication.approve(setup.manifest.runId, "unassigned-reviewer", "Attempt to impersonate the reviewer."))
       .rejects.toThrow("not the assigned reviewer");
-    await expect(publication.approve(setup.manifest.runId, "reviewer@example.test", "Evidence is sufficient."))
-      .rejects.toThrow("simulated transport interruption");
-    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("PR_CREATION_FAILED");
-    const published = await publication.resume(setup.manifest.runId);
+    const firstPublication = publication.approve(setup.manifest.runId, "reviewer@example.test", "Evidence is sufficient.");
+    await branchStarted;
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("PR_CREATING");
+    await expect(publication.cancel(setup.manifest.runId, "user-1", "Cancel during remote branch creation."))
+      .rejects.toThrow("cancellation is fenced");
+    await expect(publication.resume(setup.manifest.runId)).rejects.toThrow("already in progress");
+    expect(setup.supervisor.listArtifacts(setup.manifest.runId).filter((artifact) => artifact.type === "CANCELLATION_REQUEST")).toEqual([]);
+    holdFirstBranch = false;
+    releaseBranch();
+    const published = await firstPublication;
     expect(published.status).toBe("PUBLISHED");
     expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("COMPLETED");
     const replay = await publication.resume(setup.manifest.runId);
     expect(replay.status).toBe("PUBLISHED");
-    expect(pullRequestCalls).toBe(2);
+    expect(pullRequestCalls).toBe(1);
     expect(cleanupCalls).toBe(1);
     const db = new Database(setup.dbPath, { readonly: true });
     expect((db.query("SELECT COUNT(*) AS count FROM reviewer_sessions").get() as { count: number }).count).toBe(1);

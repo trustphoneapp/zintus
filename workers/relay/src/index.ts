@@ -63,7 +63,7 @@ import { enforceQuota, recordUsage, getQuotaUsed, resetQuota } from "./middlewar
 import { createErrorSink } from "./observability.js";
 import { getOrCreateReferralCode, resolveReferralCode } from "./referral.js";
 import { validateGoogleClaims, type GoogleClaims } from "./google-auth.js";
-import { completeGithubAuthorization, disconnectGithub, githubConfigured, githubToken, startGithubAuthorization } from "./github-connector.js";
+import { completeGithubAuthorization, disconnectGithub, githubApiRequest, githubConfigured, githubToken, startGithubAuthorization } from "./github-connector.js";
 import {
   kvRateLimitOk,
   magicLinkEmailKey,
@@ -86,6 +86,7 @@ import {
 // Re-export the Durable Object classes for wrangler to find.
 export { GatewaySession } from "./GatewaySession.js";
 export { QuotaCounter } from "./QuotaCounter.js";
+export { GithubCredentialBroker } from "./GithubCredentialBroker.js";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -777,13 +778,8 @@ app.get("/api/connectors/github/callback", async (c) => {
 app.get("/api/connectors/github/repos", async (c) => {
   const session = await requireSession(c);
   if (!session) return c.json({ error: "Unauthorized" }, 401);
-  const token = await githubToken(c.env, session.user_id);
-  if (!token) return c.json({ error: "GitHub is not connected" }, 409);
-  // Keep this pinned to a GitHub API version that is widely deployed.  A
-  // future/unsupported version header can make an otherwise valid connector
-  // fail with a 400/415 response, which is especially confusing during local
-  // development and after GitHub App setup.
-  const response = await fetch("https://api.github.com/user/repos?per_page=100&sort=updated", { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Zintus-Engineer" } });
+  const response = await githubApiRequest(c.env, session.user_id, "https://api.github.com/user/repos?per_page=100&sort=updated");
+  if (!response) return c.json({ error: "GitHub is not connected" }, 409);
   if (response.status === 401) return c.json({ error: "GitHub authorization expired; reconnect GitHub" }, 401);
   if (!response.ok) return c.json({ error: "Unable to read GitHub repositories" }, 502);
   const repos = await response.json() as Array<{ id: number; full_name: string; default_branch: string; private: boolean; clone_url: string }>;
@@ -795,9 +791,8 @@ app.get("/api/connectors/github/commit", async (c) => {
   if (!session) return c.json({ error: "Unauthorized" }, 401);
   const owner = c.req.query("owner"); const repo = c.req.query("repo"); const branch = c.req.query("branch");
   if (!owner || !repo || !branch) return c.json({ error: "owner, repo, and branch are required" }, 400);
-  const token = await githubToken(c.env, session.user_id);
-  if (!token) return c.json({ error: "GitHub is not connected" }, 409);
-  const response = await fetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(branch)}`, { headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Zintus-Engineer" } });
+  const response = await githubApiRequest(c.env, session.user_id, `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(branch)}`);
+  if (!response) return c.json({ error: "GitHub is not connected" }, 409);
   if (response.status === 401) return c.json({ error: "GitHub authorization expired; reconnect GitHub" }, 401);
   if (!response.ok) return c.json({ error: "Unable to inspect the selected branch" }, 502);
   const commit = await response.json() as { sha?: string };

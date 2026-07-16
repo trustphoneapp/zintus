@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { basename, extname } from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { z } from "zod";
 import {
   CONTEXT_CONTRACT_VERSION,
@@ -67,26 +67,34 @@ interface Candidate {
   signals: ContextSource["signals"];
 }
 
-export interface ContextEngineOptions { maxGitOutputBytes?: number }
+export interface ContextEngineOptions { maxGitOutputBytes?: number; totalTimeoutMs?: number }
 
-function runGit(cwd: string, args: string[], maxOutputBytes = 8 * 1024 * 1024): Buffer {
-  const result = spawnSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", cwd, ...args], {
-    shell: false,
-    timeout: 120_000,
-    encoding: "buffer",
-    maxBuffer: maxOutputBytes,
-    stdio: ["ignore", "pipe", "pipe"],
+function runGit(cwd: string, args: string[], maxOutputBytes = 8 * 1024 * 1024, signal?: AbortSignal): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    execFile("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-C", cwd, ...args], {
+      timeout: 120_000,
+      encoding: "buffer",
+      maxBuffer: maxOutputBytes,
+      windowsHide: true,
+      ...(signal ? { signal } : {}),
+    }, (error, stdout, stderr) => {
+      const output = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout ?? "");
+      const errorText = Buffer.isBuffer(stderr) ? stderr.toString("utf8").trim() : String(stderr ?? "").trim();
+      if ((error as NodeJS.ErrnoException | null)?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || (error as NodeJS.ErrnoException | null)?.code === "ENOBUFS") {
+        reject(new Error(`git output exceeded ${maxOutputBytes} byte context limit`));
+        return;
+      }
+      if (error) {
+        reject(new Error(`git ${args[0] ?? "command"} failed: ${errorText || error.message || "unknown error"}`));
+        return;
+      }
+      if (output.byteLength > maxOutputBytes) {
+        reject(new Error(`git output exceeded ${maxOutputBytes} byte context limit`));
+        return;
+      }
+      resolve(output);
+    });
   });
-  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout ?? "");
-  const stderr = Buffer.isBuffer(result.stderr) ? result.stderr.toString("utf8").trim() : String(result.stderr ?? "").trim();
-  if (result.error && (result.error as NodeJS.ErrnoException).code === "ENOBUFS") {
-    throw new Error(`git output exceeded ${maxOutputBytes} byte context limit`);
-  }
-  if (result.status !== 0) {
-    throw new Error(`git ${args[0] ?? "command"} failed (status=${String(result.status)}): ${stderr || result.error?.message || "unknown error"}`);
-  }
-  if (stdout.byteLength > maxOutputBytes) throw new Error(`git output exceeded ${maxOutputBytes} byte context limit`);
-  return stdout;
 }
 
 function parseTree(buffer: Buffer): TreeEntry[] {
@@ -208,16 +216,19 @@ function addCiCommands(path: string, content: string, commands: ContextManifestC
 export class ContextEngine {
   constructor(private readonly options: ContextEngineOptions) {}
 
-  build(rawInput: z.input<typeof INPUT_SCHEMA>): ContextManifest {
+  async build(rawInput: z.input<typeof INPUT_SCHEMA>): Promise<ContextManifest> {
     const input = INPUT_SCHEMA.parse(rawInput);
     const repositoryRoot = realpathSync(input.repositoryRoot);
-    const resolved = runGit(repositoryRoot, ["rev-parse", "--verify", `${input.baseCommitSha}^{commit}`], 1_024).toString("utf8").trim();
+    const totalTimeoutMs = this.options.totalTimeoutMs ?? 120_000;
+    if (!Number.isSafeInteger(totalTimeoutMs) || totalTimeoutMs < 1_000 || totalTimeoutMs > 300_000) throw new Error("context total timeout must be between 1 and 300 seconds");
+    const signal = AbortSignal.timeout(totalTimeoutMs);
+    const resolved = (await runGit(repositoryRoot, ["rev-parse", "--verify", `${input.baseCommitSha}^{commit}`], 1_024, signal)).toString("utf8").trim();
     if (resolved.toLowerCase() !== input.baseCommitSha.toLowerCase()) throw new Error("context base did not resolve exactly");
-    return this.scan(repositoryRoot, input);
+    return this.scan(repositoryRoot, input, signal);
   }
 
-  private scan(workspaceRoot: string, input: z.output<typeof INPUT_SCHEMA>): ContextManifest {
-    const entries = parseTree(runGit(workspaceRoot, ["ls-tree", "-rz", "-l", "--full-tree", input.baseCommitSha], this.options.maxGitOutputBytes));
+  private async scan(workspaceRoot: string, input: z.output<typeof INPUT_SCHEMA>, signal: AbortSignal): Promise<ContextManifest> {
+    const entries = parseTree(await runGit(workspaceRoot, ["ls-tree", "-rz", "-l", "--full-tree", input.baseCommitSha], this.options.maxGitOutputBytes, signal));
     const considered = entries.slice(0, CONTEXT_MAX_SOURCE_FILES);
     const warnings: ContextWarning[] = [];
     const candidates: Candidate[] = [];
@@ -258,7 +269,7 @@ export class ContextEngine {
         warnings.push(warning({ runId: input.runId, code: "OVERSIZED_FILE_SKIPPED", path, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: `File exceeds the ${CONTEXT_MAX_FILE_BYTES}-byte context limit.` }));
         continue;
       }
-      const bytes = runGit(workspaceRoot, ["cat-file", "blob", entry.objectId]);
+      const bytes = await runGit(workspaceRoot, ["cat-file", "blob", entry.objectId], 8 * 1024 * 1024, signal);
       if (bytes.byteLength !== entry.size || bytes.includes(0)) {
         binaryFilesSkipped += 1;
         warnings.push(warning({ runId: input.runId, code: "BINARY_FILE_SKIPPED", path, sourceId: null, trust: "TRUSTED_GIT_METADATA", message: "Binary or size-mismatched content was excluded from context." }));

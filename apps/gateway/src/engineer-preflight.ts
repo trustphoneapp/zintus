@@ -1,6 +1,10 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { realpathSync } from "node:fs";
 import type { RepositoryReference, ResponsesTransport } from "@zintus/engineer";
+import {
+  StaticEngineerRepositoryAdmissionRegistry,
+  type EngineerRepositoryAdmissionRegistry,
+} from "./engineer-repository-registry.js";
 
 export interface EngineerModelCapability {
   available: boolean;
@@ -35,8 +39,11 @@ export interface EngineerCapabilityPreflightOptions {
   execution?: { imageReference: string; imageDigest: string };
   publicationEnabled: boolean;
   repository: EngineerCanonicalRepository;
+  admissionRegistry?: EngineerRepositoryAdmissionRegistry;
   probe: EngineerCapabilityProbe;
   unavailableReason?: string;
+  successTtlMs?: number;
+  now?: () => number;
 }
 
 /** A cached, fail-closed admission gate. Failed checks are deliberately not cached. */
@@ -45,11 +52,12 @@ export class EngineerCapabilityPreflight {
   private readonly verifiedModels = new Set<string>();
   private readinessState: EngineerReadiness;
   private readonly options: EngineerCapabilityPreflightOptions;
-  private acceptedBaseCommitSha: string;
+  private readonly admissionRegistry: EngineerRepositoryAdmissionRegistry;
+  private startupVerifiedAt = 0;
 
   constructor(options: EngineerCapabilityPreflightOptions) {
     this.options = options;
-    this.acceptedBaseCommitSha = options.repository.baseCommitSha;
+    this.admissionRegistry = options.admissionRegistry ?? new StaticEngineerRepositoryAdmissionRegistry(options.repository);
     this.readinessState = options.unavailableReason
       ? { state: "DISABLED", error: null }
       : { state: "NOT_STARTED", error: null };
@@ -57,25 +65,21 @@ export class EngineerCapabilityPreflight {
 
   readiness(): EngineerReadiness { return { ...this.readinessState }; }
 
-  /** Returns the only repository identity accepted by this gateway. */
+  /** Returns the primary configured repository for backwards-compatible clients. */
   repository(): RepositoryReference {
-    const repository = this.options.repository;
-    return {
-      repositoryId: repository.repositoryId,
-      provider: repository.provider,
-      owner: repository.owner,
-      name: repository.name,
-      baseBranch: repository.baseBranch,
-      baseCommitSha: this.acceptedBaseCommitSha,
-      url: repository.originUrl,
-    };
+    return this.admissionRegistry.primary();
   }
 
+  repositories(): RepositoryReference[] { return this.admissionRegistry.list(); }
+
   assertStartup(): Promise<void> {
+    const now = (this.options.now ?? Date.now)();
+    const ttl = this.successTtlMs();
+    if (this.readinessState.state === "READY" && now - this.startupVerifiedAt < ttl) return Promise.resolve();
     if (!this.startupPromise) {
       this.readinessState = { state: "PENDING", error: null };
       this.startupPromise = this.runStartup()
-        .then(() => { this.readinessState = { state: "READY", error: null }; })
+        .then(() => { this.startupVerifiedAt = (this.options.now ?? Date.now)(); this.readinessState = { state: "READY", error: null }; })
         .catch((error) => {
           this.readinessState = { state: "FAILED", error: error instanceof Error ? error.message : String(error) };
           throw error;
@@ -87,34 +91,38 @@ export class EngineerCapabilityPreflight {
 
   async assertRunAdmission(repository: RepositoryReference): Promise<void> {
     await this.assertStartup();
-    const expected = this.options.repository;
-    if (repository.repositoryId !== expected.repositoryId || repository.provider !== expected.provider ||
-        repository.owner !== expected.owner || repository.name !== expected.name ||
-        repository.baseBranch !== expected.baseBranch ||
-        repository.baseCommitSha.toLowerCase() !== this.acceptedBaseCommitSha.toLowerCase()) {
-      throw new Error("Engineer preflight failed: repository does not match the frozen canonical fixture");
+    const admitted = this.admissionRegistry.require(repository);
+    try {
+      const access = await this.options.probe.repository(admitted);
+      if (!access.readable || !access.exactBaseCommit) {
+        throw new Error("Engineer preflight failed: admitted repository, origin, branch, or exact base commit is unavailable");
+      }
+    } catch (error) {
+      this.startupVerifiedAt = 0;
+      this.readinessState = { state: "FAILED", error: error instanceof Error ? error.message : String(error) };
+      throw error;
     }
   }
 
-  /** Advances only the base SHA of the canonical repository after credentialed Git inspection. */
+  /** Advances only the base SHA of an admitted repository after credentialed Git inspection. */
   acceptAdvancedBase(previousBaseCommitSha: string, repository: RepositoryReference): void {
-    const expected = this.options.repository;
-    const identityMatches = repository.repositoryId === expected.repositoryId && repository.provider === expected.provider &&
-      repository.owner === expected.owner && repository.name === expected.name && repository.baseBranch === expected.baseBranch;
-    if (!identityMatches || !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(repository.baseCommitSha)) {
-      throw new Error("Engineer preflight failed: stale-base recovery attempted to change canonical repository identity");
+    if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(repository.baseCommitSha)) {
+      throw new Error("Engineer preflight failed: stale-base recovery requires an exact Git object identifier");
     }
-    if (this.acceptedBaseCommitSha.toLowerCase() === repository.baseCommitSha.toLowerCase()) return;
-    if (this.acceptedBaseCommitSha.toLowerCase() !== previousBaseCommitSha.toLowerCase()) {
-      throw new Error("Engineer preflight failed: canonical base advanced concurrently");
-    }
-    this.acceptedBaseCommitSha = repository.baseCommitSha;
+    this.admissionRegistry.advanceBase(previousBaseCommitSha, repository);
+    this.startupVerifiedAt = 0;
+  }
+
+  private successTtlMs(): number {
+    const value = this.options.successTtlMs ?? 60_000;
+    if (!Number.isSafeInteger(value) || value < 1_000 || value > 300_000) throw new Error("Engineer preflight success TTL must be between 1 and 300 seconds");
+    return value;
   }
 
   private async runStartup(): Promise<void> {
     if (this.options.unavailableReason) throw new Error(`Engineer preflight failed: ${this.options.unavailableReason}`);
-    const canonical = this.options.repository;
-    if (!canonical.repositoryId.trim() || !canonical.owner.trim() || !canonical.name.trim() || !canonical.baseBranch.trim() || !canonical.originUrl.trim() ||
+    const canonical = this.admissionRegistry.primary();
+    if (!canonical.repositoryId.trim() || !canonical.owner.trim() || !canonical.name.trim() || !canonical.baseBranch.trim() || !(canonical.url ?? "").trim() ||
         !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(canonical.baseCommitSha)) {
       throw new Error("Engineer preflight failed: canonical repository identity and exact base SHA are invalid");
     }
@@ -146,15 +154,7 @@ export class EngineerCapabilityPreflight {
       );
       if (!image.exactDigest) throw new Error("Engineer preflight failed: configured image digest is unavailable");
     }
-    const trustedRepository: RepositoryReference = {
-      repositoryId: canonical.repositoryId,
-      provider: canonical.provider,
-      owner: canonical.owner,
-      name: canonical.name,
-      baseBranch: canonical.baseBranch,
-      baseCommitSha: canonical.baseCommitSha,
-      url: canonical.originUrl,
-    };
+    const trustedRepository = canonical;
     const access = await this.options.probe.repository(trustedRepository);
     if (!access.readable || !access.exactBaseCommit) {
       throw new Error("Engineer preflight failed: canonical repository, origin, branch, or exact base commit is unavailable");
@@ -173,8 +173,14 @@ export function createLocalEngineerCapabilityProbe(options: {
   repositoryId: string;
   repositoryRoot: string;
   expectedOriginUrl: string;
+  repositoryRootFor?: (repositoryId: string) => string;
   githubToken?: string;
 }): EngineerCapabilityProbe {
+  const command = (executable: string, args: string[], timeout = 30_000): Promise<{ status: number; stdout: string; stderr: string }> => new Promise((resolve) => {
+    execFile(executable, args, { timeout, encoding: "utf8", maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
+      resolve({ status: error ? typeof error.code === "number" ? error.code : 1 : 0, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
   const normalizeOrigin = (value: string): string => {
     const trimmed = value.trim().replace(/\.git$/i, "").replace(/\/$/, "");
     const ssh = /^git@([^:]+):(.+)$/i.exec(trimmed);
@@ -184,9 +190,7 @@ export function createLocalEngineerCapabilityProbe(options: {
       return `${url.hostname.toLowerCase()}${url.pathname.toLowerCase()}`;
     } catch { return trimmed; }
   };
-  const git = (args: string[]) => spawnSync("git", ["-C", realpathSync(options.repositoryRoot), ...args], {
-    shell: false, encoding: "utf8", timeout: 30_000,
-  });
+  const git = (repositoryRoot: string, args: string[]) => command("git", ["-C", realpathSync(repositoryRoot), ...args]);
   return {
     async model(model) {
       try {
@@ -220,9 +224,7 @@ export function createLocalEngineerCapabilityProbe(options: {
       }
     },
     async docker() {
-      const result = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
-        shell: false, encoding: "utf8", timeout: 30_000,
-      });
+      const result = await command("docker", ["version", "--format", "{{.Server.Version}}"]);
       return { available: result.status === 0 && Boolean(result.stdout.trim()) };
     },
     async image(imageReference, imageDigest) {
@@ -231,9 +233,7 @@ export function createLocalEngineerCapabilityProbe(options: {
       const lastColon = withoutDigest.lastIndexOf(":");
       const repositoryName = lastColon > lastSlash ? withoutDigest.slice(0, lastColon) : withoutDigest;
       const canonicalReference = `${repositoryName}@${imageDigest}`;
-      const result = spawnSync("docker", ["image", "inspect", "--format", "{{json .RepoDigests}}", canonicalReference], {
-        shell: false, encoding: "utf8", timeout: 30_000,
-      });
+      const result = await command("docker", ["image", "inspect", "--format", "{{json .RepoDigests}}", canonicalReference]);
       if (result.status !== 0) return { exactDigest: false };
       try {
         const digests = JSON.parse(result.stdout.trim()) as unknown;
@@ -241,12 +241,18 @@ export function createLocalEngineerCapabilityProbe(options: {
       } catch { return { exactDigest: false }; }
     },
     async repository(repository) {
-      if (repository.repositoryId !== options.repositoryId) return { readable: false, exactBaseCommit: false };
-      const resolved = git(["rev-parse", "--verify", `${repository.baseCommitSha}^{commit}`]);
-      const baseRef = git(["rev-parse", "--verify", `${repository.baseBranch}^{commit}`]);
-      const origin = git(["remote", "get-url", "origin"]);
+      if (!options.repositoryRootFor && repository.repositoryId !== options.repositoryId) return { readable: false, exactBaseCommit: false };
+      let repositoryRoot: string;
+      try { repositoryRoot = options.repositoryRootFor?.(repository.repositoryId) ?? options.repositoryRoot; }
+      catch { return { readable: false, exactBaseCommit: false }; }
+      const [resolved, baseRef, origin] = await Promise.all([
+        git(repositoryRoot, ["rev-parse", "--verify", `${repository.baseCommitSha}^{commit}`]),
+        git(repositoryRoot, ["rev-parse", "--verify", `${repository.baseBranch}^{commit}`]),
+        git(repositoryRoot, ["remote", "get-url", "origin"]),
+      ]);
+      const expectedOrigin = repository.url ?? (repository.repositoryId === options.repositoryId ? options.expectedOriginUrl : "");
       return {
-        readable: resolved.status === 0 && origin.status === 0 && normalizeOrigin(origin.stdout) === normalizeOrigin(options.expectedOriginUrl),
+        readable: Boolean(expectedOrigin) && resolved.status === 0 && origin.status === 0 && normalizeOrigin(origin.stdout) === normalizeOrigin(expectedOrigin),
         exactBaseCommit: resolved.status === 0 && baseRef.status === 0 &&
           resolved.stdout.trim().toLowerCase() === repository.baseCommitSha.toLowerCase() &&
           baseRef.stdout.trim().toLowerCase() === repository.baseCommitSha.toLowerCase(),

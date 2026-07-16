@@ -32,6 +32,60 @@ function preflight(customProbe = probe(), publicationEnabled = false): EngineerC
 }
 
 describe("Engineer trusted identity and admission", () => {
+  test("keeps the legacy run list complete while exposing explicit bounded pages", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-run-list-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    for (let index = 0; index < 105; index += 1) {
+      supervisor.receiveRequest({
+        runId: `run-${String(index).padStart(3, "0")}`, userId: principal.ownerId,
+        repository, request: `work ${index}`,
+      });
+    }
+    supervisor.receiveRequest({
+      runId: "other-owner-run", userId: "other-owner",
+      repository: { ...repository, repositoryId: "repo-other", name: "other-fixture" }, request: "other",
+    });
+    const manager = new EngineerRunManager({ supervisor, principal, preflight: preflight() });
+    const legacy = manager.list(principal);
+    expect(legacy).toHaveLength(105);
+    expect(legacy[0]?.runId).toBe("run-104");
+    const page = manager.listPage(principal, { limit: 20 });
+    expect(page.runs).toHaveLength(20);
+    expect(page.nextCursor).not.toBeNull();
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("retries a mixed read and returns status, events, and fence from one run version", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-snapshot-fence-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    supervisor.receiveRequest({ runId: "snapshot-run", userId: principal.ownerId, repository, request: "work" });
+    const manager = new EngineerRunManager({ supervisor, principal, preflight: preflight() });
+    const listEvents = supervisor.listEvents.bind(supervisor);
+    let injected = false;
+    let eventReads = 0;
+    supervisor.listEvents = ((runId, afterSequence, limit) => {
+      eventReads += 1;
+      if (!injected) {
+        injected = true;
+        supervisor.transition({
+          runId, expectedStateVersion: 0, nextState: "REQUEST_NORMALIZED",
+          reasonCode: "REQUEST_NORMALIZED", idempotencyKey: "snapshot-race",
+        });
+      }
+      return listEvents(runId, afterSequence, limit);
+    }) as typeof supervisor.listEvents;
+    const snapshot = manager.snapshot(principal, "snapshot-run");
+    expect(eventReads).toBe(2);
+    expect(snapshot.status.run).toMatchObject({ state: "REQUEST_NORMALIZED", stateVersion: 1 });
+    expect(snapshot.latestEventSequence).toBe(1);
+    expect(snapshot.events.at(-1)).toMatchObject({ sequence: 1, nextState: "REQUEST_NORMALIZED", stateVersion: 1 });
+    expect(snapshot.snapshotFence).toEqual({ stateVersion: 1, eventSequence: 1 });
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+
   test("derives stable pseudonymous authority without exposing the subject", () => {
     const first = deriveEngineerPrincipal({ gatewayIdentitySecret: "server-secret", authenticatedSubject: "person@example.com" });
     const replay = deriveEngineerPrincipal({ gatewayIdentitySecret: "server-secret", authenticatedSubject: "person@example.com" });
@@ -81,7 +135,7 @@ describe("Engineer trusted identity and admission", () => {
     await expect(mutable.assertStartup()).rejects.toThrow("immutable sha256");
   });
 
-  test("caches successful model readiness while revalidating local execution boundaries", async () => {
+  test("caches successful readiness briefly and revalidates local execution boundaries after TTL", async () => {
     let modelReady = true;
     const gate = preflight(probe({
       model: async () => ({ available: modelReady, responsesApi: modelReady, strictStructuredOutputs: modelReady }),
@@ -97,13 +151,17 @@ describe("Engineer trusted identity and admission", () => {
       .rejects.toThrow("canonical fixture");
 
     let exactImage = true;
+    let nowMs = 10_000;
     const runtimeGate = new EngineerCapabilityPreflight({
       models: ["exact-model"], publicationEnabled: false, repository: canonicalRepository,
       execution: { imageReference: `registry.example/zintus/engineer@sha256:${"a".repeat(64)}`, imageDigest: `sha256:${"a".repeat(64)}` },
       probe: probe({ image: async () => ({ exactDigest: exactImage }) }),
+      successTtlMs: 1_000, now: () => nowMs,
     });
     await runtimeGate.assertRunAdmission(repository);
     exactImage = false;
+    await expect(runtimeGate.assertRunAdmission(repository)).resolves.toBeUndefined();
+    nowMs += 1_001;
     await expect(runtimeGate.assertRunAdmission(repository)).rejects.toThrow("image digest");
     await expect(canonical.assertRunAdmission({ ...repository, baseCommitSha: "2".repeat(40) }))
       .rejects.toThrow("canonical fixture");
@@ -157,9 +215,17 @@ describe("Engineer trusted identity and admission", () => {
     expect(supervisor.listRuns()).toEqual([]);
 
     let publicationReady = true;
-    const changingPublication = preflight(probe({ publication: async () => ({ available: publicationReady, pullRequestsWritable: publicationReady }) }), true);
+    let nowMs = 20_000;
+    const changingPublication = new EngineerCapabilityPreflight({
+      models: ["gpt-sol", "gpt-terra", "gpt-luna"], publicationEnabled: true,
+      repository: canonicalRepository,
+      probe: probe({ publication: async () => ({ available: publicationReady, pullRequestsWritable: publicationReady }) }),
+      successTtlMs: 1_000, now: () => nowMs,
+    });
     await changingPublication.assertStartup();
     publicationReady = false;
+    await expect(changingPublication.assertStartup()).resolves.toBeUndefined();
+    nowMs += 1_001;
     await expect(changingPublication.assertStartup()).rejects.toThrow("publication capability");
     expect(changingPublication.readiness().state).toBe("FAILED");
 

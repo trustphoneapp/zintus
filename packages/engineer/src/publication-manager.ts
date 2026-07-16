@@ -5,6 +5,7 @@ import {
   ApprovalRequestRecordSchema,
   FailureRecordSchema,
   GitOperationRecordSchema,
+  hasUnreconciledRemotePublication,
   SignedSupervisorPrCommandSchema,
   type FailureRecord,
   type ApprovalRequestRecord,
@@ -15,6 +16,21 @@ import type { GitService, PullRequestResult } from "./git-service.js";
 import { sha256 } from "./hash.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import { operationalFailurePolicy } from "./failure-policy.js";
+import { isCancellationAllowed } from "./state-machine.js";
+
+class PublicationOperationInProgressError extends Error {
+  constructor(runId: string) {
+    super(`publication operation is already in progress for run ${runId}`);
+    this.name = "PublicationOperationInProgressError";
+  }
+}
+
+class PublicationOperationRecoveryRequiredError extends Error {
+  constructor(runId: string, operationType: GitOperationRecord["operationType"]) {
+    super(`publication operation ${operationType} for run ${runId} requires human recovery review`);
+    this.name = "PublicationOperationRecoveryRequiredError";
+  }
+}
 
 export interface EngineerPublicationManagerOptions {
   supervisor: EngineerSupervisor;
@@ -26,6 +42,8 @@ export interface EngineerPublicationManagerOptions {
   now?: () => Date;
   idFactory?: () => string;
   cleanupRun?: (runId: string) => void | Promise<void>;
+  /** Time after which a durable STARTED claim must be reconciled instead of treated as live. */
+  operationLeaseMs?: number;
 }
 
 export type PublicationStartResult =
@@ -36,8 +54,12 @@ export type PublicationStartResult =
 /** Phase-4 authority for human decisions and credentialed publication. */
 export class EngineerPublicationManager {
   private readonly options: EngineerPublicationManagerOptions;
+  private readonly activePublicationRuns = new Set<string>();
   constructor(options: EngineerPublicationManagerOptions) {
     if (options.commandSigningSecret.length < 32) throw new Error("publication command signing secret must be at least 32 characters");
+    if (options.operationLeaseMs !== undefined && (!Number.isInteger(options.operationLeaseMs) || options.operationLeaseMs < 5_000 || options.operationLeaseMs > 15 * 60_000)) {
+      throw new Error("publication operation lease must be between 5 seconds and 15 minutes");
+    }
     this.options = options;
   }
 
@@ -165,6 +187,12 @@ export class EngineerPublicationManager {
     const run = this.options.supervisor.getRun(runId);
     if (actorId !== run.userId) throw new Error("cancellation actor does not own this run");
     if (run.terminalAt) throw new Error(`terminal run ${run.state} cannot be cancelled`);
+    if (!isCancellationAllowed(run.state)) {
+      throw new Error(`cancellation is fenced while publication state is ${run.state}; remote cleanup is not safely available`);
+    }
+    if (hasUnreconciledRemotePublication(this.options.supervisor.listGitOperations(runId))) {
+      throw new Error("cancellation is fenced because remote publication was attempted and no durable remote cleanup is available");
+    }
     const artifact = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
       runId, type: "CANCELLATION_REQUEST", bytes: JSON.stringify({ actorId, reason, requestedAt: this.timestamp() }),
       producerType: "SYSTEM", producerId: "engineer-supervisor", trusted: true,
@@ -203,6 +231,16 @@ export class EngineerPublicationManager {
   }
 
   private async publish(runId: string): Promise<PublicationStartResult> {
+    if (this.activePublicationRuns.has(runId)) throw new PublicationOperationInProgressError(runId);
+    this.activePublicationRuns.add(runId);
+    try {
+      return await this.publishFenced(runId);
+    } finally {
+      this.activePublicationRuns.delete(runId);
+    }
+  }
+
+  private async publishFenced(runId: string): Promise<PublicationStartResult> {
     const supervisor = this.options.supervisor;
     let run = supervisor.getRun(runId);
     const evidence = this.currentEvidence(runId);
@@ -220,7 +258,9 @@ export class EngineerPublicationManager {
     if (!["REVIEW_APPROVED", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATION_FAILED"].includes(run.state)) {
       throw new Error(`publication resume is not valid from ${run.state}`);
     }
-    const inspect = await this.operation(run, "INSPECT_BASE", `git:inspect:${runId}:${run.repository.baseCommitSha}`, evidence, approval?.approvalRequestId ?? null,
+    // Inspection is read-only and intentionally gets a fresh attempt identity;
+    // a crashed completed inspection must not strand publication recovery.
+    const inspect = await this.operation(run, "INSPECT_BASE", `git:inspect:${runId}:${run.repository.baseCommitSha}:${this.id()}`, evidence, approval?.approvalRequestId ?? null,
       async () => {
         const status = await this.options.gitService.inspectBaseBranch({ repository: run.repository, expectedBaseCommitSha: run.repository.baseCommitSha });
         return { reference: status.currentCommitSha, value: status };
@@ -292,6 +332,7 @@ export class EngineerPublicationManager {
       await this.options.cleanupRun?.(runId);
       return { status: "PUBLISHED", pullRequest: created.value as PullRequestResult };
     } catch (error) {
+      if (error instanceof PublicationOperationInProgressError || error instanceof PublicationOperationRecoveryRequiredError) throw error;
       this.recordFailure(runId, "GIT_FAILURE", "PR_PUBLICATION_FAILED", error, true, [commandArtifact.artifactId]);
       const current = supervisor.getRun(runId);
       if (current.state === "PR_CREATING") this.transition(runId, "PR_CREATION_FAILED", "PR_PUBLICATION_FAILED", [commandArtifact.artifactId]);
@@ -347,15 +388,24 @@ export class EngineerPublicationManager {
     execute: () => Promise<{ reference: string; value: unknown }>,
   ): Promise<{ record: GitOperationRecord; value: unknown }> {
     const existing = this.options.supervisor.findGitOperation(run.runId, idempotencyKey);
-    if (operationType !== "INSPECT_BASE" && operationType !== "PUSH_COMMIT" && existing?.status === "SUCCEEDED" && existing.remoteReference) {
+    if (existing?.status === "STARTED") {
+      return this.reconcileExpiredOperation(run, existing, evidence);
+    }
+    if (existing?.status === "STALE") throw new PublicationOperationRecoveryRequiredError(run.runId, operationType);
+    if (operationType !== "INSPECT_BASE" && existing?.status === "SUCCEEDED" && existing.remoteReference) {
       const value = operationType === "CREATE_BRANCH"
         ? { branchName: existing.remoteReference.replace(/^refs\/heads\//, ""), remoteReference: existing.remoteReference }
+        : operationType === "PUSH_COMMIT"
+          ? { remoteReference: existing.remoteReference }
         : { url: existing.remoteReference, remoteReference: existing.remoteReference };
       return { record: existing, value };
     }
+    if (operationType !== "INSPECT_BASE" && this.options.supervisor.getRun(run.runId).state !== "PR_CREATING") {
+      throw new Error(`remote publication operation ${operationType} requires the PR_CREATING fence`);
+    }
     const id = existing?.gitOperationId ?? this.id();
     const startedAt = existing?.startedAt ?? this.timestamp();
-    this.options.supervisor.recordGitOperation(GitOperationRecordSchema.parse({
+    const started = this.options.supervisor.recordGitOperation(GitOperationRecordSchema.parse({
       gitOperationId: id, runId: run.runId, operationType, requestedBy: "SUPERVISOR", idempotencyKey,
       expectedBaseCommitSha: run.repository.baseCommitSha, resultCommitSha: evidence.resultCommitSha,
       approvalId, evidenceBundleHash: evidence.evidenceBundleHash, status: "STARTED",
@@ -371,6 +421,9 @@ export class EngineerPublicationManager {
       }));
       return { record, value: result.value };
     } catch (error) {
+      if (operationType !== "INSPECT_BASE" && operationType !== "REBASE_CANDIDATE") {
+        return this.reconcileUncertainOperation(run, started, evidence, "EXECUTION_RESULT_UNKNOWN");
+      }
       this.options.supervisor.recordGitOperation(GitOperationRecordSchema.parse({
         gitOperationId: id, runId: run.runId, operationType, requestedBy: "SUPERVISOR", idempotencyKey,
         expectedBaseCommitSha: run.repository.baseCommitSha, resultCommitSha: evidence.resultCommitSha,
@@ -379,6 +432,102 @@ export class EngineerPublicationManager {
       }));
       throw error;
     }
+  }
+
+  private async reconcileExpiredOperation(
+    run: EngineerRun,
+    operation: GitOperationRecord,
+    evidence: ReturnType<EngineerSupervisor["getPublicationEvidence"]>,
+  ): Promise<{ record: GitOperationRecord; value: unknown }> {
+    const ageMs = new Date(this.timestamp()).getTime() - new Date(operation.startedAt).getTime();
+    const leaseMs = this.options.operationLeaseMs ?? 2 * 60_000;
+    if (!Number.isFinite(ageMs) || ageMs < leaseMs) throw new PublicationOperationInProgressError(run.runId);
+
+    return this.reconcileUncertainOperation(run, operation, evidence, "LEASE_EXPIRED", leaseMs);
+  }
+
+  private async reconcileUncertainOperation(
+    run: EngineerRun,
+    operation: GitOperationRecord,
+    evidence: ReturnType<EngineerSupervisor["getPublicationEvidence"]>,
+    recoveryReason: "LEASE_EXPIRED" | "EXECUTION_RESULT_UNKNOWN",
+    leaseMs = this.options.operationLeaseMs ?? 2 * 60_000,
+  ): Promise<{ record: GitOperationRecord; value: unknown }> {
+
+    let reconciliation: Awaited<ReturnType<NonNullable<typeof this.options.gitService.reconcilePublicationOperation>>>;
+    if (operation.operationType === "INSPECT_BASE" || operation.operationType === "REBASE_CANDIDATE") {
+      reconciliation = { status: "INDETERMINATE", detail: "operation does not have a remote publication reconciliation contract" };
+    } else if (!this.options.gitService.reconcilePublicationOperation) {
+      reconciliation = { status: "INDETERMINATE", detail: "Git provider does not support credentialed publication reconciliation" };
+    } else {
+      try {
+        reconciliation = await this.options.gitService.reconcilePublicationOperation({
+          runId: run.runId,
+          repository: run.repository,
+          operationType: operation.operationType,
+          resultCommitSha: evidence.resultCommitSha,
+          baseBranch: run.repository.baseBranch,
+          idempotencyKey: operation.idempotencyKey,
+        });
+      } catch {
+        reconciliation = { status: "INDETERMINATE", detail: "credentialed reconciliation failed without a trustworthy remote result" };
+      }
+    }
+    if (reconciliation.status === "SUCCEEDED" && reconciliation.remoteReference.trim()) {
+      const record = this.options.supervisor.recordGitOperation(GitOperationRecordSchema.parse({
+        ...operation,
+        status: "SUCCEEDED",
+        remoteReference: reconciliation.remoteReference,
+        completedAt: this.timestamp(),
+        errorCode: null,
+      }));
+      return { record, value: this.recoveredOperationValue(operation.operationType, reconciliation.remoteReference) };
+    }
+    if (reconciliation.status === "SUCCEEDED") {
+      reconciliation = { status: "INDETERMINATE", detail: "credentialed reconciliation returned an empty remote reference" };
+    }
+
+    const stale = this.options.supervisor.recordGitOperation(GitOperationRecordSchema.parse({
+      ...operation,
+      status: "STALE",
+      remoteReference: null,
+      completedAt: this.timestamp(),
+      errorCode: `RECONCILIATION_${reconciliation.status}`,
+    }));
+    const recovery = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+      runId: run.runId,
+      type: "PUBLICATION_RECOVERY_EVIDENCE",
+      bytes: JSON.stringify({
+        gitOperationId: operation.gitOperationId,
+        operationType: operation.operationType,
+        idempotencyKey: operation.idempotencyKey,
+        startedAt: operation.startedAt,
+        claimExpiresAt: new Date(new Date(operation.startedAt).getTime() + leaseMs).toISOString(),
+        reconciledAt: this.timestamp(),
+        recoveryReason,
+        result: reconciliation.status,
+        detail: reconciliation.detail,
+        action: "No remote mutation was retried. Human reconciliation is required.",
+      }),
+      producerType: "SYSTEM",
+      producerId: "engineer-supervisor",
+      trusted: true,
+    }));
+    this.recordFailure(run.runId, "GIT_FAILURE", "PUBLICATION_OPERATION_RECOVERY_REQUIRED",
+      new Error(reconciliation.detail), false, [stale.gitOperationId, recovery.artifactId]);
+    const current = this.options.supervisor.getRun(run.runId);
+    if (current.state !== "HUMAN_REVIEW_REQUIRED") {
+      this.transition(run.runId, "HUMAN_REVIEW_REQUIRED", "PUBLICATION_OPERATION_RECOVERY_REQUIRED", [stale.gitOperationId, recovery.artifactId]);
+    }
+    throw new PublicationOperationRecoveryRequiredError(run.runId, operation.operationType);
+  }
+
+  private recoveredOperationValue(operationType: GitOperationRecord["operationType"], remoteReference: string): unknown {
+    if (operationType === "CREATE_BRANCH") {
+      return { branchName: remoteReference.replace(/^refs\/heads\//, ""), remoteReference };
+    }
+    if (operationType === "PUSH_COMMIT") return { remoteReference };
+    return { id: "reconciled", number: 0, url: remoteReference, remoteReference };
   }
 
   private prBody(run: EngineerRun, evidenceBundleHash: string): string {

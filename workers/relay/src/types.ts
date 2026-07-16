@@ -2,6 +2,8 @@ export interface Env {
   GATEWAY_SESSION: DurableObjectNamespace;
   /** Strongly-consistent per-user/period token-usage counter (see QuotaCounter.ts). */
   QUOTA_COUNTER: DurableObjectNamespace;
+  /** Cross-isolate authority for encrypted GitHub credentials and refresh rotation. */
+  GITHUB_CREDENTIALS: DurableObjectNamespace;
   DB: D1Database;
   KV: KVNamespace;
   RELAY_BASE_URL: string;

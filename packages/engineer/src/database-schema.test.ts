@@ -31,10 +31,14 @@ describe("Engineer database schema", () => {
       "audit_events",
       "run_budgets",
       "budget_events",
+      "repository_admissions",
     ]) {
       expect(tables.has(table)).toBe(true);
     }
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(9);
+    const admissionColumns = new Set((db.query("PRAGMA table_info(repository_admissions)").all() as Array<{ name: string }>).map((row) => row.name));
+    expect(admissionColumns.has("authorization_expires_at")).toBe(true);
+    expect(admissionColumns.has("authorization_generation")).toBe(true);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(11);
     db.close();
   });
 });

@@ -22,6 +22,12 @@ class_name = "GatewaySession"
 name = "QUOTA_COUNTER"
 class_name = "QuotaCounter"
 
+# One instance per Zintus user serializes GitHub credential replacement,
+# refresh-token rotation, and revocation across every Worker isolate.
+[[durable_objects.bindings]]
+name = "GITHUB_CREDENTIALS"
+class_name = "GithubCredentialBroker"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GatewaySession"]
@@ -32,6 +38,12 @@ new_sqlite_classes = ["GatewaySession"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["QuotaCounter"]
+
+# v3: move GitHub credential authority out of isolate-local memory/KV and into
+# a per-user Durable Object. Legacy encrypted KV records migrate on first use.
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["GithubCredentialBroker"]
 
 [[d1_databases]]
 binding = "DB"

@@ -5,6 +5,9 @@ import {
 } from "./contracts.js";
 
 const terminalSet = new Set<RunState>(TERMINAL_STATES);
+const publicationFencedSet = new Set<RunState>([
+  "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "PR_CREATION_FAILED", "BASE_BRANCH_STALE",
+]);
 
 export const STATE_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> = {
   REQUEST_RECEIVED: ["REQUEST_NORMALIZED", "CLARIFICATION_REQUIRED", "RETRY_BUDGET_EXHAUSTED", "REJECTED", "CANCELLATION_PENDING"],
@@ -45,11 +48,11 @@ export const STATE_TRANSITIONS: Readonly<Record<RunState, readonly RunState[]>> 
   HUMAN_APPROVED: ["PR_PREFLIGHT", "BASE_BRANCH_STALE", "CANCELLATION_PENDING"],
   FIX_REQUESTED: ["REVIEW_FIX_PREPARING", "REPLANNING", "REJECTED", "CANCELLATION_PENDING"],
   REPLANNING: ["PLAN_READY", "CLARIFICATION_REQUIRED", "RETRY_BUDGET_EXHAUSTED", "REJECTED", "FAILED", "CANCELLATION_PENDING"],
-  PR_PREFLIGHT: ["PR_CREATING", "BASE_BRANCH_STALE", "PR_CREATION_FAILED", "SECURITY_ESCALATION", "CANCELLATION_PENDING"],
-  PR_CREATING: ["PR_CREATED", "PR_CREATION_FAILED", "BASE_BRANCH_STALE", "CANCELLATION_PENDING"],
-  PR_CREATED: ["COMPLETED", "FAILED", "CANCELLATION_PENDING"],
-  PR_CREATION_FAILED: ["PR_PREFLIGHT", "BASE_BRANCH_STALE", "HUMAN_REVIEW_REQUIRED", "FAILED", "CANCELLATION_PENDING"],
-  BASE_BRANCH_STALE: ["REVERIFYING", "REPLANNING", "HUMAN_REVIEW_REQUIRED", "CANCELLATION_PENDING"],
+  PR_PREFLIGHT: ["PR_CREATING", "BASE_BRANCH_STALE", "PR_CREATION_FAILED", "SECURITY_ESCALATION"],
+  PR_CREATING: ["PR_CREATED", "PR_CREATION_FAILED", "BASE_BRANCH_STALE", "HUMAN_REVIEW_REQUIRED"],
+  PR_CREATED: ["COMPLETED", "FAILED"],
+  PR_CREATION_FAILED: ["PR_PREFLIGHT", "BASE_BRANCH_STALE", "HUMAN_REVIEW_REQUIRED", "FAILED"],
+  BASE_BRANCH_STALE: ["REVERIFYING", "REPLANNING", "HUMAN_REVIEW_REQUIRED"],
   ROLLBACK_IN_PROGRESS: ["ROLLED_BACK", "FAILED"],
   CANCELLATION_PENDING: ["CANCELLED", "ROLLBACK_IN_PROGRESS", "FAILED"],
   EVIDENCE_PACKAGING: ["COMPLETED", "VERIFICATION_INCOMPLETE", "FAILED", "CANCELLATION_PENDING"],
@@ -92,7 +95,10 @@ function runtimePolicy(state: RunState): StateRuntimePolicy {
     return { maxDurationSeconds: 86_400, heartbeatExpected: false, retryClass: "HUMAN", cancellationState: "CANCELLATION_PENDING" };
   }
   if (state.startsWith("PR_") || state === "BASE_BRANCH_STALE") {
-    return { maxDurationSeconds: 600, heartbeatExpected: true, retryClass: "GIT", cancellationState: "CANCELLATION_PENDING" };
+    // Publication may already have created or pushed a remote branch. Until a
+    // credentialed, durable remote cleanup protocol exists, cancellation must
+    // fail closed rather than orphan remote state.
+    return { maxDurationSeconds: 600, heartbeatExpected: true, retryClass: "GIT", cancellationState: null };
   }
   if (state === "PLANNING" || state === "REPLANNING") {
     return { maxDurationSeconds: 900, heartbeatExpected: true, retryClass: "MODEL", cancellationState: "CANCELLATION_PENDING" };
@@ -108,6 +114,13 @@ export function isTerminalState(state: RunState): boolean {
 }
 
 export function canTransition(previousState: RunState, nextState: RunState): boolean {
-  if (nextState === "PAUSED_BUDGET") return previousState !== "PAUSED_BUDGET" && !terminalSet.has(previousState);
+  if (nextState === "PAUSED_BUDGET") {
+    return previousState !== "PAUSED_BUDGET" && !terminalSet.has(previousState) && !publicationFencedSet.has(previousState);
+  }
   return STATE_TRANSITIONS[previousState]?.includes(nextState) ?? false;
+}
+
+export function isCancellationAllowed(state: RunState): boolean {
+  return STATE_RUNTIME_POLICIES[state].cancellationState === "CANCELLATION_PENDING"
+    && canTransition(state, "CANCELLATION_PENDING");
 }

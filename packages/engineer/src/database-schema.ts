@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 9;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 11;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -29,6 +29,28 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     updated_at TEXT NOT NULL,
     UNIQUE(user_id, provider, owner, name)
   );
+
+  -- A connection row can be created while receiving a run and is therefore
+  -- never an authorization fact. Only server-authenticated connector/config
+  -- code may create an ACTIVE admission in this separate registry.
+  CREATE TABLE IF NOT EXISTS repository_admissions (
+    admission_id TEXT PRIMARY KEY,
+    repository_id TEXT NOT NULL REFERENCES repository_connections(id) ON DELETE RESTRICT,
+    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    base_branch TEXT NOT NULL,
+    base_commit_sha TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('CONFIGURED_CANONICAL', 'CONNECTOR_AUTHORIZED')),
+    authorization_subject TEXT NOT NULL,
+    authorization_evidence_hash TEXT NOT NULL,
+    authorization_expires_at TEXT,
+    authorization_generation INTEGER NOT NULL DEFAULT 1 CHECK(authorization_generation > 0),
+    status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'REVOKED')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(owner_user_id, repository_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_repository_admissions_owner_status
+    ON repository_admissions(owner_user_id, status);
 
   CREATE TABLE IF NOT EXISTS engineer_runs (
     id TEXT PRIMARY KEY,
@@ -541,8 +563,14 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
   );
 
   CREATE INDEX IF NOT EXISTS idx_engineer_runs_user_updated ON engineer_runs(user_id, updated_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_engineer_runs_user_created ON engineer_runs(user_id, created_at DESC, id DESC);
   CREATE INDEX IF NOT EXISTS idx_run_state_events_run_sequence ON run_state_events(run_id, sequence);
   CREATE INDEX IF NOT EXISTS idx_artifacts_run_created ON artifacts(run_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_evidence_bundles_run_created ON evidence_bundles(run_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_model_calls_run_created ON model_calls(run_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_cost_records_run_created ON cost_records(run_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_approval_requests_run_requested ON approval_requests(run_id, requested_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_approval_decisions_request_decided ON approval_decisions(approval_request_id, decided_at);
   CREATE INDEX IF NOT EXISTS idx_retry_attempts_run_created ON retry_attempts(run_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_failures_run_fingerprint ON failure_records(run_id, fingerprint);
   CREATE INDEX IF NOT EXISTS idx_audit_run_created ON audit_events(run_id, created_at);

@@ -16,6 +16,7 @@ export { MCPRegistry, type MCPRegistryOptions } from "./mcp-registry.js";
 export { EngineerRunManager, type EngineerRunManagerOptions } from "./engineer.js";
 export { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal, loadOrCreateEngineerWorkerLeaseSecret, type EngineerPrincipal } from "./engineer-identity.js";
 export { EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
+export { DurableEngineerRepositoryAdmissionRegistry } from "./engineer-repository-registry.js";
 // Re-exported so integration tests (and @zintus/test-utils) can build a handler
 // against a custom engine without reaching into ./handler.js internals.
 export {
@@ -60,6 +61,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { EngineerRunManager } from "./engineer.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight } from "./engineer-preflight.js";
+import { DurableEngineerRepositoryAdmissionRegistry, resolveLocalRepositoryHead } from "./engineer-repository-registry.js";
 import { canEnableEngineerPublication, loadOrCreateEngineerPrincipal, loadOrCreateEngineerWorkerLeaseSecret } from "./engineer-identity.js";
 
 export interface StartGatewayOptions {
@@ -135,9 +137,9 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const mcpRegistry = new MCPRegistry();
 
   // Zintus Engineer is always available for durable intake/plan records. The
-  // execution worker is enabled only when the single connected repository and
-  // immutable Docker image are explicitly configured; otherwise /start fails
-  // closed while read/intake routes remain usable.
+  // execution worker is enabled only when an initial canonical repository and
+  // immutable Docker image are explicitly configured. Additional repositories
+  // require a server-verified connector admission and trusted local checkout.
   const engineerRoot = join(homedir(), ".zintus", "engineer");
   const engineerSupervisor = new EngineerSupervisor({ dbPath: join(engineerRoot, "engineer.db") });
   const engineerRepositoryRoot = process.env.ZINTUS_ENGINEER_REPOSITORY_ROOT;
@@ -148,7 +150,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const engineerRepositoryOwner = process.env.ZINTUS_ENGINEER_REPOSITORY_OWNER;
   const engineerRepositoryName = process.env.ZINTUS_ENGINEER_REPOSITORY_NAME;
   const engineerBaseBranch = process.env.ZINTUS_ENGINEER_BASE_BRANCH;
-  const engineerBaseCommitSha = process.env.ZINTUS_ENGINEER_BASE_COMMIT_SHA;
+  const engineerBaseCommitSha = process.env.ZINTUS_ENGINEER_BASE_COMMIT_SHA ??
+    (engineerRepositoryProvider === "local" && engineerRepositoryRoot && engineerBaseBranch
+      ? resolveLocalRepositoryHead(engineerRepositoryRoot, engineerBaseBranch) ?? undefined
+      : undefined);
   const engineerOriginUrl = process.env.ZINTUS_ENGINEER_REPOSITORY_ORIGIN_URL;
   const engineerDependencyBundleRoot = process.env.ZINTUS_ENGINEER_DEPENDENCY_BUNDLE_ROOT;
   const engineerToolchainHash = process.env.ZINTUS_ENGINEER_TOOLCHAIN_HASH;
@@ -210,6 +215,16 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest && engineerDependenciesReady &&
       (engineerRepositoryProvider === "local" || engineerRepositoryProvider === "github") &&
       engineerRepositoryOwner && engineerRepositoryName && engineerBaseBranch && engineerBaseCommitSha && engineerOriginUrl) {
+    const engineerRepositoryRegistry = new DurableEngineerRepositoryAdmissionRegistry({
+      supervisor: engineerSupervisor,
+      ownerUserId: engineerPrincipal.ownerId,
+      canonical: {
+        repositoryId: engineerRepositoryId, provider: engineerRepositoryProvider,
+        owner: engineerRepositoryOwner, name: engineerRepositoryName,
+        baseBranch: engineerBaseBranch, baseCommitSha: engineerBaseCommitSha, originUrl: engineerOriginUrl,
+      },
+      canonicalRepositoryRoot: engineerRepositoryRoot,
+    });
     const engineerPreflight = new EngineerCapabilityPreflight({
       models: [
         resolveEngineerModel("BUILDER", engineerModelConfiguration).model,
@@ -223,11 +238,13 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         owner: engineerRepositoryOwner, name: engineerRepositoryName,
         baseBranch: engineerBaseBranch, baseCommitSha: engineerBaseCommitSha, originUrl: engineerOriginUrl,
       },
+      admissionRegistry: engineerRepositoryRegistry,
       probe: createLocalEngineerCapabilityProbe({
         transport: transportForRole,
         repositoryId: engineerRepositoryId,
         repositoryRoot: engineerRepositoryRoot,
         expectedOriginUrl: engineerOriginUrl,
+        repositoryRootFor: (repositoryId) => engineerRepositoryRegistry.repositoryRoot(repositoryId),
         ...(githubToken ? { githubToken } : {}),
       }),
     });
@@ -242,8 +259,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       contextEngine: new ContextEngine({}),
       artifactStore: engineerArtifactStore,
       repositoryRootFor: (repositoryId) => {
-        if (repositoryId !== engineerRepositoryId) throw new Error("run repository is not the configured Engineer repository");
-        return engineerRepositoryRoot;
+        return engineerRepositoryRegistry.repositoryRoot(repositoryId);
       },
     });
     const warmLockfileHash = process.env.ZINTUS_ENGINEER_LOCKFILE_HASH;
@@ -312,8 +328,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       sandboxManager,
       artifactStore: engineerArtifactStore,
       repositoryRootFor: (repositoryId) => {
-        if (repositoryId !== engineerRepositoryId) throw new Error("run repository is not the configured Engineer repository");
-        return engineerRepositoryRoot;
+        return engineerRepositoryRegistry.repositoryRoot(repositoryId);
       },
       transportForRun: transportForRole,
       leaseManager: engineerWorkerLeases,

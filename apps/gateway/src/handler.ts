@@ -2778,6 +2778,11 @@ export function createGatewayHandler(
       return json(request, { repository: engineerRuns.repository(engineerPrincipal!) });
     }
 
+    if (url.pathname === "/v1/engineer/repositories" && request.method === "GET") {
+      if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
+      return json(request, { repositories: engineerRuns.repositories(engineerPrincipal!) });
+    }
+
     if (url.pathname === "/v1/engineer/observability" && request.method === "GET") {
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
       return json(request, { snapshot: engineerRuns.observability() });
@@ -2807,7 +2812,22 @@ export function createGatewayHandler(
 
     if (url.pathname === "/v1/engineer/runs" && request.method === "GET") {
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
-      return json(request, { runs: engineerRuns.list(engineerPrincipal!) });
+      const requestedLimit = url.searchParams.get("limit");
+      const cursor = url.searchParams.get("cursor");
+      if (requestedLimit === null && cursor === null) {
+        return json(request, { runs: engineerRuns.list(engineerPrincipal!), nextCursor: null });
+      }
+      const rawLimit = requestedLimit ?? "20";
+      if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 100) return json(request, { error: { message: "run page limit must be between 1 and 100" } }, 400);
+      let before: { createdAt: string; runId: string } | undefined;
+      if (cursor) {
+        try {
+          const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+          if (!Array.isArray(parsed) || parsed.length !== 2 || typeof parsed[0] !== "string" || typeof parsed[1] !== "string" || !Number.isFinite(new Date(parsed[0]).getTime()) || !parsed[1]) throw new Error("invalid");
+          before = { createdAt: parsed[0], runId: parsed[1] };
+        } catch { return json(request, { error: { message: "invalid run page cursor" } }, 400); }
+      }
+      return json(request, engineerRuns.listPage(engineerPrincipal!, { limit: Number(rawLimit), ...(before ? { before } : {}) }));
     }
 
     if (url.pathname.startsWith("/v1/engineer/runs/") && engineerRuns) {
@@ -2875,6 +2895,9 @@ export function createGatewayHandler(
         if (action === "approval" && request.method === "GET") {
           return json(request, { approval: engineerRuns.approval(runId) });
         }
+        if (action === "snapshot" && request.method === "GET") {
+          return json(request, engineerRuns.snapshot(engineerPrincipal!, runId));
+        }
         if (action === "human-review" && request.method === "POST") {
           const body = await request.json() as { decision?: string; reason?: string };
           if (body.decision !== "approve" && body.decision !== "reject") throw new Error("decision must be approve or reject");
@@ -2914,7 +2937,10 @@ export function createGatewayHandler(
             },
           });
         }
-        if (action === "artifacts" && request.method === "GET") {
+        if (action === "artifacts" && decisionId && request.method === "GET") {
+          return json(request, engineerRuns.artifactPreview(engineerPrincipal!, runId, decodeURIComponent(decisionId)));
+        }
+        if (action === "artifacts" && !decisionId && request.method === "GET") {
           return json(request, { artifacts: engineerRuns.artifacts(runId) });
         }
         if (action === "claims" && request.method === "GET") {
@@ -2928,6 +2954,16 @@ export function createGatewayHandler(
             headers: {
               "Content-Type": "application/json; charset=utf-8",
               "Content-Disposition": `attachment; filename="zintus-engineer-${runId}-evidence.json"`,
+              "Cache-Control": "no-store",
+              ...corsHeaders(request),
+            },
+          });
+        }
+        if (action === "evidence-stream" && request.method === "GET") {
+          return new Response(engineerRuns.evidenceExportStream(engineerPrincipal!, runId), {
+            headers: {
+              "Content-Type": "application/x-ndjson; charset=utf-8",
+              "Content-Disposition": `attachment; filename="zintus-engineer-${runId}-evidence.ndjson"`,
               "Cache-Control": "no-store",
               ...corsHeaders(request),
             },

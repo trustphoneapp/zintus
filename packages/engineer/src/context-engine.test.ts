@@ -49,15 +49,15 @@ function fixture(): { root: string; repositoryRoot: string; baseCommitSha: strin
 }
 
 describe("Context Engine Lite contracts and scanner", () => {
-  test("builds deterministic bounded untrusted context from the requested exact base", () => {
+  test("builds deterministic bounded untrusted context from the requested exact base", async () => {
     const item = fixture();
     const engine = new ContextEngine({});
     const input = {
       runId: "context-run", repositoryId: "fixture-repo", repositoryRoot: item.repositoryRoot,
       baseCommitSha: item.baseCommitSha, request: "Update authentication and its integration test",
     };
-    const first = engine.build(input);
-    const replay = engine.build(input);
+    const first = await engine.build(input);
+    const replay = await engine.build(input);
     expect(replay).toEqual(first);
     expect(first.manifestHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(first.baseCommitSha).toBe(item.baseCommitSha);
@@ -84,10 +84,10 @@ describe("Context Engine Lite contracts and scanner", () => {
     rmSync(item.root, { recursive: true, force: true });
   });
 
-  test("rejects unsafe paths, cross-run sources, and tampered hashes", () => {
+  test("rejects unsafe paths, cross-run sources, and tampered hashes", async () => {
     const item = fixture();
     const engine = new ContextEngine({});
-    const manifest = engine.build({
+    const manifest = await engine.build({
       runId: "contract-run", repositoryId: "fixture-repo", repositoryRoot: item.repositoryRoot,
       baseCommitSha: item.baseCommitSha, request: "authentication",
     });

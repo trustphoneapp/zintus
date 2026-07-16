@@ -8,18 +8,19 @@ import {
   resolveHumanEngineerReview,
   extendEngineerApproval,
   freezeEngineerPlan,
-  getEngineerEvidenceExport,
+  getEngineerEvidenceStream,
+  getEngineerArtifactPreview,
   getEngineerData,
   getEngineerBudget,
+  getEngineerLiveSummary,
   getEngineerPlan,
   getEngineerRepository,
   getGithubConnector,
-  getGithubBranchCommit,
-  listGithubConnectorRepositories,
   startGithubConnector,
   disconnectGithubConnector,
   getEngineerRunStatus,
-  listEngineerRuns,
+  getEngineerSnapshot,
+  listEngineerRunsPage,
   planEngineerRun,
   recoverEngineerStaleBase,
   resumeEngineerBudget,
@@ -29,22 +30,31 @@ import {
   topUpEngineerBudget,
   type EngineerBudgetLimits,
   type EngineerBudgetSnapshot,
+  type EngineerArtifact,
   type EngineerRepository,
   type EngineerRun,
   type PlanProposal,
   type RunEvent,
-  type GithubConnectorRepository,
 } from "@/lib/engineer";
 import type { EngineerDecisionItem } from "@/lib/engineer-decisions";
 import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresentation";
 import { clearEphemeralGatewayToken, fetchGatewayConnection, setEphemeralGatewayToken } from "@/lib/gateway";
 import { estimateEngineerCost, formatUsd } from "@/lib/engineer-cost";
+import { downloadBlob } from "@/lib/download";
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
 const RUN_STORAGE_KEY = "zintus-engineer-active-run";
-const cursorKey = (runId: string) => `zintus-engineer-event-cursor:${runId}`;
-const STATE_PROGRESS: Record<string, number> = { REQUEST_RECEIVED: 2, REQUEST_NORMALIZED: 5, PLANNING: 7, PLAN_READY: 10, PLAN_FROZEN: 12, QUEUED: 15, SANDBOX_WARM_CLAIMING: 18, SANDBOX_COLD_PROVISIONING: 18, SANDBOX_PREFLIGHT: 22, SANDBOX_READY: 25, CONTEXT_BUILDING: 30, IMPLEMENTING: 42, FAST_CHECKS: 50, UNIT_TESTING: 58, INTEGRATION_TESTING: 66, E2E_TESTING: 72, SECURITY_REVIEW: 78, REVIEWING: 86, REVIEW_APPROVED: 90, HUMAN_APPROVAL_PENDING: 94, HUMAN_APPROVED: 96, PR_PREFLIGHT: 97, PR_CREATING: 98, PR_CREATED: 99 };
+const NON_CANCELLABLE_PUBLICATION_STATES = new Set(["PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "PR_CREATION_FAILED", "BASE_BRANCH_STALE"]);
+const WORKFLOW_STAGES = [
+  { label: "Request", states: /^(REQUEST_|CLARIFICATION)/ },
+  { label: "Plan", states: /^(PLANNING|PLAN_|REPLANNING)/ },
+  { label: "Sandbox", states: /^(QUEUED|SANDBOX_|CONTEXT_)/ },
+  { label: "Build", states: /^(IMPLEMENTING|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|FLAKE_|VERIFICATION_|REVERIFYING)/ },
+  { label: "Review", states: /^(SECURITY_|CODE_REVIEW|EVIDENCE_|REVIEW)/ },
+  { label: "Human decision", states: /^(HUMAN_|FIX_REQUESTED|PAUSED_BUDGET)/ },
+  { label: "Publication", states: /^(PR_|BASE_BRANCH|COMPLETED)/ },
+] as const;
 const DEFAULT_BUDGET: EngineerBudgetLimits = { costBudgetUsd: 5, tokenBudget: 100_000, timeBudgetSeconds: 3_600 };
 const TOP_UP_DEFAULTS = { addCostBudgetUsd: 2, addTokenBudget: 50_000, addTimeBudgetSeconds: 900 };
 const CORRECTABLE_TERMINAL_STATES = new Set(["SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "REJECTED", "FAILED"]);
@@ -80,6 +90,77 @@ function BudgetTopUp({ value, onChange, disabled }: { value: typeof TOP_UP_DEFAU
   </div>;
 }
 
+function workflowStage(state: string) {
+  if (TERMINAL.has(state) && state !== "COMPLETED") return { index: 0, total: WORKFLOW_STAGES.length, label: "Stopped safely", complete: false };
+  const matched = WORKFLOW_STAGES.findIndex((stage) => stage.states.test(state));
+  const index = matched >= 0 ? matched : 0;
+  return { index: index + 1, total: WORKFLOW_STAGES.length, label: WORKFLOW_STAGES[index]?.label ?? "Request", complete: state === "COMPLETED" };
+}
+
+function formatDuration(milliseconds: number) {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function Timeline({ events }: { events: RunEvent[] }) {
+  const [now, setNow] = useState(() => Date.now());
+  const timelineActive = events.length > 0 && !TERMINAL.has(events.at(-1)!.nextState) && events.at(-1)!.nextState !== "PAUSED_BUDGET";
+  useEffect(() => {
+    if (!timelineActive) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [timelineActive]);
+  return <div className="engineer-timeline">{events.length ? events.map((event, index) => {
+    const next = events[index + 1];
+    const duration = (next ? new Date(next.timestamp).getTime() : now) - new Date(event.timestamp).getTime();
+    const active = index === events.length - 1 && timelineActive;
+    return <div key={event.eventId} className={`engineer-event${active ? " is-active" : ""}`}><span /><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div><strong>{event.nextState.replaceAll("_", " ")}</strong><small>{event.reasonCode.replaceAll("_", " ")}</small><small>{active ? "Current activity" : "Duration"}: {formatDuration(duration)}</small></div></div>;
+  }) : <p className="engineer-muted">Waiting for the first durable event…</p>}</div>;
+}
+
+function DiffViewer({ diff }: { diff: string }) {
+  const files = useMemo(() => {
+    if (!diff.trim()) return [];
+    const chunks = diff.split(/(?=^diff --git )/m).filter(Boolean);
+    return chunks.map((content, index) => {
+      const header = /^diff --git a\/(.+?) b\/(.+)$/m.exec(content);
+      return { id: `${index}:${header?.[2] ?? "diff"}`, path: header?.[2] ?? `Changed file ${index + 1}`, content };
+    });
+  }, [diff]);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  if (!files.length) return <p className="engineer-muted">The exact diff appears after implementation begins.</p>;
+  return <div className="engineer-diff-viewer"><div className="engineer-diff-summary"><strong>{files.length} changed {files.length === 1 ? "file" : "files"}</strong><button onClick={() => setCollapsed(collapsed.size ? new Set() : new Set(files.map((file) => file.id)))}>{collapsed.size ? "Expand all" : "Collapse all"}</button></div>{files.map((file) => {
+    const isCollapsed = collapsed.has(file.id);
+    return <section key={file.id} className="engineer-diff-file"><button className="engineer-diff-file-header" onClick={() => setCollapsed((current) => { const next = new Set(current); if (next.has(file.id)) next.delete(file.id); else next.add(file.id); return next; })}><span>{isCollapsed ? "›" : "⌄"}</span><code>{file.path}</code></button>{!isCollapsed ? <div className="engineer-diff-lines">{file.content.split("\n").map((line, index) => <div key={`${file.id}:${index}`} className={line.startsWith("+") && !line.startsWith("+++") ? "addition" : line.startsWith("-") && !line.startsWith("---") ? "deletion" : line.startsWith("@@") ? "hunk" : "context"}><span>{index + 1}</span><code>{line || " "}</code></div>)}</div> : null}</section>;
+  })}</div>;
+}
+
+function ArtifactViewer({ runId, artifacts }: { runId: string; artifacts: EngineerArtifact[] }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Awaited<ReturnType<typeof getEngineerArtifactPreview>> | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const requestGeneration = useRef(0);
+  useEffect(() => {
+    // A late preview from run A must never appear after navigation to run B.
+    requestGeneration.current += 1;
+    setSelected(null);
+    setPreview(null);
+    setLoading(false);
+    setPreviewError(null);
+  }, [runId]);
+  const openArtifact = async (artifactId: string) => {
+    const generation = ++requestGeneration.current;
+    setSelected(artifactId); setLoading(true); setPreviewError(null); setPreview(null);
+    try { const result = await getEngineerArtifactPreview(runId, artifactId); if (requestGeneration.current === generation) setPreview(result); }
+    catch (cause) { if (requestGeneration.current === generation) setPreviewError(cause instanceof Error ? cause.message : "Artifact preview is unavailable"); }
+    finally { if (requestGeneration.current === generation) setLoading(false); }
+  };
+  return <div className="engineer-card engineer-artifacts"><div className="engineer-card-heading"><div><h2>Run artifacts</h2><p>Inspect trusted command logs, reports, plans, and checkpoints without leaving Zintus.</p></div><span className="engineer-chip">{artifacts.length}</span></div>{artifacts.length ? <div className="engineer-artifact-layout"><div className="engineer-artifact-list">{artifacts.map((artifact) => <button key={artifact.artifactId} className={selected === artifact.artifactId ? "selected" : ""} onClick={() => void openArtifact(artifact.artifactId)}><span><strong>{artifact.type.replaceAll("_", " ")}</strong><small>{(artifact.sizeBytes / 1_024).toFixed(1)} KB · {artifact.trusted ? "trusted" : "untrusted data"}</small></span><code>{artifact.sha256.slice(0, 20)}…</code></button>)}</div><div className="engineer-artifact-preview" aria-live="polite">{loading ? <p className="engineer-muted">Loading verified artifact…</p> : previewError ? <p className="engineer-error">{previewError}</p> : preview?.encoding === "utf8" && preview.content !== null ? <><div><strong>{preview.artifact.type.replaceAll("_", " ")}</strong><small>{preview.truncated ? `First ${preview.previewBytes.toLocaleString()} verified bytes` : `${preview.previewBytes.toLocaleString()} verified bytes`}</small></div><pre>{preview.content}</pre></> : preview ? <p className="engineer-muted">This artifact is binary or is not safe to preview as text. Its hash and metadata remain available in the evidence export.</p> : <p className="engineer-muted">Choose an artifact to inspect its hash-verified content.</p>}</div></div> : <p className="engineer-muted">Artifacts appear as planning, execution, and verification progress.</p>}</div>;
+}
+
 function isGatewayAuthorizationError(reason: unknown): boolean {
   return reason instanceof Error && /unauthorized|forbidden/i.test(reason.message);
 }
@@ -102,10 +183,10 @@ export default function EngineerPage() {
   const [showAdvancedGateway, setShowAdvancedGateway] = useState(false);
   const [githubConnected, setGithubConnected] = useState(false);
   const [githubConfigured, setGithubConfigured] = useState(false);
-  const [githubRepos, setGithubRepos] = useState<GithubConnectorRepository[]>([]);
   const [recentRuns, setRecentRuns] = useState<EngineerRun[]>([]);
+  const [recentRunsCursor, setRecentRunsCursor] = useState<string | null>(null);
   const [showAllRuns, setShowAllRuns] = useState(false);
-  const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number; readOnly: boolean } | null>(null);
+  const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   const [budget, setBudget] = useState<EngineerBudgetSnapshot | null>(null);
   const [budgetMode, setBudgetMode] = useState<"recommended" | "custom">("recommended");
@@ -113,41 +194,57 @@ export default function EngineerPage() {
   const [topUp, setTopUp] = useState(TOP_UP_DEFAULTS);
   const abortRef = useRef<AbortController | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async (runId: string) => {
-    const [status, nextData, nextBudget] = await Promise.all([getEngineerRunStatus(runId), getEngineerData(runId), getEngineerBudget(runId).catch(() => null)]);
+    const snapshot = await getEngineerSnapshot(runId);
+    if (activeRunIdRef.current !== runId) return;
+    const status = snapshot.status; const nextData = snapshot.data; const nextBudget = snapshot.status.budget;
     setRun((current) => !current || status.run.runId !== current.runId || status.run.stateVersion >= current.stateVersion ? status.run : current);
     setManagerError(status.lastError);
     setData(nextData);
     setBudget(nextBudget);
+    setEvents(snapshot.events);
+  }, []);
+
+  const refreshLiveSummary = useCallback(async (runId: string) => {
+    const { status, budget: nextBudget } = await getEngineerLiveSummary(runId);
+    if (activeRunIdRef.current !== runId) return;
+    setRun((current) => current?.runId === runId && status.run.stateVersion >= current.stateVersion ? status.run : current);
+    setManagerError(status.lastError);
+    if (nextBudget) setBudget((current) => !current || current.runId !== runId || nextBudget.revision >= current.revision ? nextBudget : current);
   }, []);
 
   useEffect(() => () => { abortRef.current?.abort(); if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); }, []);
 
-  const watch = useCallback((runId: string) => {
+  const watch = useCallback((runId: string, afterSequence = 0) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     void streamEngineerEvents(runId, (event) => {
       setEvents((current) => current.some((item) => item.eventId === event.eventId) ? current : [...current, event]);
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => { refreshTimerRef.current = null; void refresh(runId); }, 100);
+      refreshTimerRef.current = setTimeout(() => { refreshTimerRef.current = null; void refreshLiveSummary(runId); }, 100);
     }, controller.signal, {
-      // Rebuild the visible timeline after reload; reconnects within the stream still resume from its live cursor.
-      afterSequence: 0,
-      onCursor: (sequence) => window.localStorage.setItem(cursorKey(runId), String(sequence)),
-    }).then(() => refresh(runId)).catch((cause) => {
+      afterSequence,
+    }).then(() => {
+      if (controller.signal.aborted) return;
+      if (refreshTimerRef.current) { clearTimeout(refreshTimerRef.current); refreshTimerRef.current = null; }
+      // Streams end only at a paused/terminal boundary (or the configured
+      // review boundary), so reconcile heavy sections exactly once there.
+      return refresh(runId);
+    }).catch((cause) => {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Timeline disconnected");
     });
-  }, [refresh]);
+  }, [refresh, refreshLiveSummary]);
 
   const loadDashboard = useCallback(async (reportAuthorizationError = false) => {
     const connection = await fetchGatewayConnection();
     setGatewayState(connection.state);
     if (connection.state === "connected") setGatewayAuthenticated(true);
-    const [canonical, history, connector] = await Promise.allSettled([getEngineerRepository(), listEngineerRuns(), getGithubConnector()]);
+    const [canonical, history, connector] = await Promise.allSettled([getEngineerRepository(), listEngineerRunsPage(), getGithubConnector()]);
     if (canonical.status === "fulfilled") setRepository(canonical.value);
-    if (history.status === "fulfilled") setRecentRuns(history.value);
+    if (history.status === "fulfilled") { setRecentRuns(history.value.runs); setRecentRunsCursor(history.value.nextCursor); }
     if (connector.status === "fulfilled") { setGithubConfigured(connector.value.configured); setGithubConnected(connector.value.connected); }
     if (canonical.status === "fulfilled" || history.status === "fulfilled") setError(null);
     if (canonical.status === "rejected" && history.status === "rejected") {
@@ -164,18 +261,23 @@ export default function EngineerPage() {
     }
   }, []);
 
+  const loadOlderRuns = async () => {
+    if (!recentRunsCursor) return;
+    setBusy(true); setError(null);
+    try {
+      const page = await listEngineerRunsPage(20, recentRunsCursor);
+      setRecentRuns((current) => [...current, ...page.runs.filter((run) => !current.some((item) => item.runId === run.runId))]);
+      setRecentRunsCursor(page.nextCursor);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load older runs"); }
+    finally { setBusy(false); }
+  };
+
   const connectGithub = async () => {
     setBusy(true); setError(null);
     try { window.location.href = await startGithubConnector(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to connect GitHub"); setBusy(false); }
   };
-  const loadGithubRepos = async () => {
-    setBusy(true); setError(null);
-    try { setGithubRepos(await listGithubConnectorRepositories()); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load GitHub repositories"); }
-    finally { setBusy(false); }
-  };
-  const disconnectGithub = async () => { setBusy(true); try { await disconnectGithubConnector(); setGithubConnected(false); setGithubRepos([]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to disconnect GitHub"); } finally { setBusy(false); } };
+  const disconnectGithub = async () => { setBusy(true); try { await disconnectGithubConnector(); setGithubConnected(false); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to disconnect GitHub"); } finally { setBusy(false); } };
 
   // Browser-only inspection is intentionally read-only. The selected directory
   // never leaves this tab; the local gateway remains the execution/editing
@@ -196,39 +298,29 @@ export default function EngineerPage() {
         }
       };
       await visit(root);
-      setFolderSnapshot({ name: root.name, files, bytes, readOnly: true });
+      setFolderSnapshot({ name: root.name, files, bytes });
     } catch (cause) {
       if ((cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to read the selected folder");
     } finally { setFolderBusy(false); }
   };
-  const requestFolderWriteAccess = async () => {
-    const picker = (window as Window & { showDirectoryPicker?: (options?: { mode?: "read" | "readwrite" }) => Promise<unknown> }).showDirectoryPicker;
-    if (!picker) return;
-    setFolderBusy(true); setError(null);
-    try {
-      const root = await picker({ mode: "readwrite" }) as { name: string; requestPermission?: (options: { mode: "readwrite" }) => Promise<string> };
-      const permission = root.requestPermission ? await root.requestPermission({ mode: "readwrite" }) : "granted";
-      if (permission !== "granted") throw new Error("Write access was not granted");
-      setFolderSnapshot((current) => current ? { ...current, name: root.name, readOnly: false } : current);
-    } catch (cause) {
-      if ((cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to grant folder write access");
-    } finally { setFolderBusy(false); }
-  };
-
   const openRun = useCallback(async (runId: string) => {
     setError(null);
-    const [status, storedPlan, storedData, storedBudget] = await Promise.all([
-      getEngineerRunStatus(runId), getEngineerPlan(runId).catch(() => null), getEngineerData(runId), getEngineerBudget(runId).catch(() => null),
+    abortRef.current?.abort();
+    if (refreshTimerRef.current) { clearTimeout(refreshTimerRef.current); refreshTimerRef.current = null; }
+    activeRunIdRef.current = runId;
+    const [snapshot, storedPlan] = await Promise.all([
+      getEngineerSnapshot(runId), getEngineerPlan(runId).catch(() => null),
     ]);
-    setRun(status.run); setPlan(storedPlan); setData(storedData); setBudget(storedBudget); setEvents([]); setManagerError(status.lastError);
+    if (activeRunIdRef.current !== runId) return;
+    setRun(snapshot.status.run); setPlan(storedPlan); setData(snapshot.data); setBudget(snapshot.status.budget); setEvents(snapshot.events); setManagerError(snapshot.status.lastError);
     window.localStorage.setItem(RUN_STORAGE_KEY, runId);
-    // The stream replays durable history from sequence zero and closes after a
-    // terminal ledger is drained, so reopened completed runs get a full timeline.
-    if (status.run.state !== "PAUSED_BUDGET") watch(runId);
+    if (snapshot.status.run.state !== "PAUSED_BUDGET" && !TERMINAL.has(snapshot.status.run.state)) watch(runId, snapshot.latestEventSequence);
   }, [watch]);
 
   const returnToRuns = useCallback(() => {
     abortRef.current?.abort();
+    activeRunIdRef.current = null;
+    if (refreshTimerRef.current) { clearTimeout(refreshTimerRef.current); refreshTimerRef.current = null; }
     window.localStorage.removeItem(RUN_STORAGE_KEY);
     setRun(null); setPlan(null); setData(null); setBudget(null); setEvents([]); setManagerError(null); setError(null);
     void loadDashboard();
@@ -252,6 +344,7 @@ export default function EngineerPage() {
     try {
       const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
       const created = await createEngineerRun({ repository, request: request.trim(), budget: selectedBudget });
+      activeRunIdRef.current = created.runId;
       setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
       const proposal = await planEngineerRun(created.runId);
       setPlan(proposal);
@@ -272,10 +365,14 @@ export default function EngineerPage() {
     if (!run) return;
     setBusy(true); setError(null);
     try {
-      const aggregate = await getEngineerEvidenceExport(run.runId);
-      const url = URL.createObjectURL(new Blob([JSON.stringify(aggregate, null, 2)], { type: "application/json" }));
-      const link = document.createElement("a"); link.href = url; link.download = `zintus-engineer-${run.runId}-evidence.json`; link.click();
-      URL.revokeObjectURL(url);
+      const response = await getEngineerEvidenceStream(run.runId);
+      const savePicker = (window as Window & { showSaveFilePicker?: (options: unknown) => Promise<{ createWritable: () => Promise<WritableStream<Uint8Array>> }> }).showSaveFilePicker;
+      if (savePicker && response.body) {
+        const handle = await savePicker({ suggestedName: `zintus-engineer-${run.runId}-evidence.ndjson`, types: [{ description: "Checksummed Zintus evidence", accept: { "application/x-ndjson": [".ndjson"] } }] });
+        await response.body.pipeTo(await handle.createWritable());
+      } else {
+        downloadBlob(`zintus-engineer-${run.runId}-evidence.ndjson`, await response.blob());
+      }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to export evidence"); }
     finally { setBusy(false); }
   };
@@ -370,13 +467,15 @@ export default function EngineerPage() {
       setBudget(updated);
       if (resume) {
         const resumed = await resumeEngineerBudget(run.runId, { expectedStateVersion: run.stateVersion, expectedBudgetRevision: updated.revision });
-        setRun(resumed); setEvents([]); watch(resumed.runId);
+        const latestSequence = events.at(-1)?.sequence ?? 0;
+        setRun(resumed); watch(resumed.runId, latestSequence);
       }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to update the run budget"); }
     finally { setBusy(false); }
   };
 
   const latestState = run?.state ?? "NEW";
+  const artifacts = data?.artifacts ?? [];
   const claims = (data?.claims ?? []) as Array<{ claimId?: string; claim?: string; status?: string; notes?: string }>;
   const tests = (data?.tests ?? []) as Array<{ testExecutionId?: string; type?: string; status?: string }>;
   const findings = (data?.securityFindings ?? []) as Array<{ securityFindingId?: string; severity?: string; category?: string; description?: string }>;
@@ -384,7 +483,7 @@ export default function EngineerPage() {
   const gitOperations = (data?.gitOperations ?? []) as Array<{ gitOperationId?: string; operationType?: string; status?: string; remoteReference?: string | null; errorCode?: string | null }>;
   const decisions = (data?.decisions ?? []) as EngineerDecisionItem[];
   const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; manifestHash?: string; diffHash?: string; evidenceBundleHash?: string } | null | undefined;
-  const progress = useMemo(() => TERMINAL.has(latestState) ? 100 : STATE_PROGRESS[latestState] ?? 35, [latestState]);
+  const stage = useMemo(() => workflowStage(latestState), [latestState]);
   const costEstimate = useMemo(() => estimateEngineerCost(request, repository.name), [request, repository.name]);
   const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
   const budgetUsage = budget ? Math.max(
@@ -404,13 +503,13 @@ export default function EngineerPage() {
       </section>
       <section className="engineer-card" id="repository-connector">
         <div className="engineer-section-title"><span>01</span><div><h2>Repository connector</h2><p>Local is the default. GitHub access is scoped to repositories you authorize.</p></div></div>
-        <div className="engineer-actions"><span className="engineer-chip">{githubConnected ? "GitHub connected" : "Local repository"}</span>{githubConfigured && !githubConnected ? <button onClick={() => void connectGithub()} disabled={busy}>Connect GitHub</button> : null}{githubConnected ? <><button onClick={() => void loadGithubRepos()} disabled={busy}>Choose GitHub repository</button><button onClick={() => void disconnectGithub()} disabled={busy}>Disconnect</button></> : null}</div>
-        {githubRepos.length ? <div className="engineer-list">{githubRepos.map((repo) => <button key={repo.id} onClick={() => void (async () => { const [owner, name] = repo.fullName.split("/"); try { setBusy(true); const sha = await getGithubBranchCommit(owner ?? "", name ?? "", repo.defaultBranch); setRepository({ repositoryId: repo.id, provider: "github", owner: owner ?? "", name: name ?? "", baseBranch: repo.defaultBranch, baseCommitSha: sha }); setGithubRepos([]); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to inspect GitHub branch"); } finally { setBusy(false); } })()}><strong>{repo.fullName}</strong><span>{repo.private ? "Private" : "Public"} · {repo.defaultBranch}</span></button>)}</div> : null}
+        <div className="engineer-actions"><span className="engineer-chip">{githubConnected ? "GitHub publication connected" : "Verified local repository"}</span>{githubConfigured && !githubConnected ? <button onClick={() => void connectGithub()} disabled={busy}>Connect GitHub</button> : null}{githubConnected ? <button onClick={() => void disconnectGithub()} disabled={busy}>Disconnect</button> : null}</div>
+        {githubConnected ? <p className="engineer-muted">GitHub credentials are available for approved publication. Runs remain bound to the repository admitted by this local gateway.</p> : null}
         {!githubConfigured ? <p className="engineer-muted">GitHub is not configured on this gateway. Local repositories remain available.</p> : null}
         <div className="engineer-folder-picker">
-          <div><strong>Inspect a local folder in this browser</strong><p className="engineer-muted">Read-only by default. The folder stays in this tab; no files are uploaded or changed.</p></div>
-          <div className="engineer-actions"><button onClick={() => void chooseLocalFolder()} disabled={folderBusy}>{folderBusy ? "Reading folder…" : "Add folder"}</button>{folderSnapshot ? <button onClick={() => void requestFolderWriteAccess()} disabled={folderBusy || !folderSnapshot.readOnly}>Allow changes to this folder</button> : null}</div>
-          {folderSnapshot ? <p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · {folderSnapshot.readOnly ? "read-only inspection" : "write access granted"}</p> : null}
+          <div><strong>Inspect a local folder in this browser</strong><p className="engineer-muted">Read-only inventory only. This does not change the repository used by Engineer; execution remains bound to the verified gateway repository.</p></div>
+          <div className="engineer-actions"><button onClick={() => void chooseLocalFolder()} disabled={folderBusy}>{folderBusy ? "Reading folder…" : "Inspect folder"}</button></div>
+          {folderSnapshot ? <p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · browser-only inspection</p> : null}
         </div>
       </section>
       {recentRuns.length ? <section className="engineer-card" id="recent-runs">
@@ -420,17 +519,18 @@ export default function EngineerPage() {
           <div><strong>{item.requestNormalized || item.requestOriginal}</strong><code>{item.runId}</code></div>
         </button>)}</div>
         {recentRuns.length > 2 ? <button className="engineer-secondary" onClick={() => setShowAllRuns((value) => !value)}>{showAllRuns ? "Show fewer runs" : `Show ${recentRuns.length - 2} more runs`}</button> : null}
+        {showAllRuns && recentRunsCursor ? <button className="engineer-secondary" disabled={busy} onClick={() => void loadOlderRuns()}>{busy ? "Loading…" : "Load older runs"}</button> : null}
       </section> : null}
       <section className="engineer-card engineer-new-run">
-        <div className="engineer-section-title"><span>01</span><div><h2>New engineering run</h2><p>No chat transcript. One evidence-driven workflow.</p></div></div>
+        <div className="engineer-section-title"><span>03</span><div><h2>New engineering run</h2><p>No chat transcript. One evidence-driven workflow.</p></div></div>
         <label>Feature or bug<textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={5} placeholder="Add a bounded feature with measurable acceptance criteria…" /></label>
         <div className="engineer-form-grid">
-          <label>Provider<select value={repository.provider} onChange={(event) => setRepository({ ...repository, provider: event.target.value as "github" | "local" })}><option value="local">Local repository</option><option value="github">GitHub</option></select></label>
-          <label>Repository ID<input value={repository.repositoryId} onChange={(event) => setRepository({ ...repository, repositoryId: event.target.value })} /></label>
-          <label>Owner<input value={repository.owner} onChange={(event) => setRepository({ ...repository, owner: event.target.value })} /></label>
-          <label>Name<input value={repository.name} onChange={(event) => setRepository({ ...repository, name: event.target.value })} /></label>
-          <label>Base branch<input value={repository.baseBranch} onChange={(event) => setRepository({ ...repository, baseBranch: event.target.value })} /></label>
-          <label>Exact base commit SHA<input className="engineer-mono" value={repository.baseCommitSha} onChange={(event) => setRepository({ ...repository, baseCommitSha: event.target.value.trim() })} placeholder="40 or 64 hexadecimal characters" /></label>
+          <label>Provider<input value={repository.provider === "github" ? "GitHub" : "Local repository"} readOnly /></label>
+          <label>Repository ID<input value={repository.repositoryId} readOnly /></label>
+          <label>Owner<input value={repository.owner} readOnly /></label>
+          <label>Name<input value={repository.name} readOnly /></label>
+          <label>Base branch<input value={repository.baseBranch} readOnly /></label>
+          <label>Verified base commit<input className="engineer-mono" value={repository.baseCommitSha} readOnly /></label>
         </div>
         <aside className="engineer-cost-card" aria-live="polite">
           <div><span className="engineer-kicker">Preflight cost estimate</span><strong>{formatUsd(costEstimate.lowerUsd)}–{formatUsd(costEstimate.upperUsd)}</strong></div>
@@ -439,7 +539,7 @@ export default function EngineerPage() {
           <ul>{costEstimate.checks.map((check) => <li key={check}>{check}</li>)}</ul>
         </aside>
         <section className="engineer-budget-picker" aria-labelledby="engineer-budget-title">
-          <div className="engineer-card-heading"><div><h3 id="engineer-budget-title">Run budget</h3><p>Choose a hard ceiling before planning makes its first model call.</p></div><span className="engineer-chip">No overages</span></div>
+          <div className="engineer-card-heading"><div><h3 id="engineer-budget-title">Run budget</h3><p>Choose a hard ceiling before planning makes its first model call.</p></div><span className="engineer-chip" tabIndex={0} title="Budgets are reserved server-side. If a model would exceed the ceiling, execution pauses safely at the last durable checkpoint.">No overages</span></div>
           <div className="engineer-budget-options">
             <button type="button" className={budgetMode === "recommended" ? "selected" : ""} onClick={() => setBudgetMode("recommended")} aria-pressed={budgetMode === "recommended"}>
               <span><strong>Recommended</strong><small>Adjusted locally from task size and risk signals</small></span>
@@ -465,7 +565,7 @@ export default function EngineerPage() {
 
   if (plan && run.state === "PLAN_READY") return (
     <main className="engineer-screen">
-      <RunHeader run={run} progress={10} onBack={returnToRuns} />
+      <RunHeader run={run} stage={stage} onBack={returnToRuns} />
       <section className="engineer-plan-grid">
         <div className="engineer-card">
           <div className="engineer-section-title"><span>02</span><div><h2>Review the frozen contract</h2><p>This scope controls every file, command, test, and retry.</p></div></div>
@@ -494,7 +594,7 @@ export default function EngineerPage() {
 
   return (
     <main className="engineer-screen">
-      <RunHeader run={run} progress={TERMINAL.has(latestState) ? 100 : progress} onBack={returnToRuns} />
+      <RunHeader run={run} stage={stage} onBack={returnToRuns} />
       <BudgetHud budget={budget} manifest={plan?.manifest ?? null} />
       {approachingBudget && latestState !== "PAUSED_BUDGET" ? <section className="engineer-budget-warning" role="status">
         <div><strong>Approaching the run budget</strong><p>Zintus has reserved or used {Math.min(100, Math.round(budgetUsage * 100))}% of at least one limit. It will pause safely before spending beyond your ceiling.</p></div>
@@ -512,24 +612,24 @@ export default function EngineerPage() {
       {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recreate and verify on the current base</h2><p>The reviewed candidate will not be published. A new immutable run will plan, execute, test, and obtain fresh review and approval.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void recoverStaleBase()}>{busy ? "Recovering…" : "Start controlled recovery"}</button></section> : null}
       <DecisionPresentation decisions={decisions} onResolve={busy ? undefined : resolveDecision} />
       {tab === "timeline" ? <section className="engineer-run-grid">
-        <div className="engineer-card"><h2>Live timeline</h2><div className="engineer-timeline">{events.length ? events.map((event) => <div key={event.eventId} className="engineer-event"><span /><time>{new Date(event.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><div><strong>{event.nextState.replaceAll("_", " ")}</strong><small>{event.reasonCode.replaceAll("_", " ")}</small></div></div>) : <p className="engineer-muted">Waiting for the first durable event…</p>}</div></div>
+        <div className="engineer-card"><h2>Live timeline</h2><Timeline events={events} /></div>
         <aside className="engineer-card engineer-verification"><h2>Verification</h2><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={findings.length ? `${findings.length} findings` : "No findings"} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /><Metric label="Failures" value={String(failures.length)} /></aside>
       </section> : null}
-      {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><div><h2>{latestState === "PAUSED_BUDGET" ? "Partial diff" : "Reviewed diff"}</h2>{latestState === "PAUSED_BUDGET" ? <p>This checkpoint has not completed verification and cannot be published.</p> : null}</div><span className={latestState === "PAUSED_BUDGET" ? "engineer-unverified" : "engineer-chip"}>{latestState === "PAUSED_BUDGET" ? "Unverified partial work" : "hash-bound"}</span></div><pre className="engineer-diff">{data?.diff || "The exact diff appears after implementation begins."}</pre></section> : null}
-      {tab === "evidence" ? <section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed JSON</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div><PublicationOperations operations={gitOperations} /></section> : null}
+      {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><div><h2>{latestState === "PAUSED_BUDGET" ? "Partial diff" : "Reviewed diff"}</h2>{latestState === "PAUSED_BUDGET" ? <p>This checkpoint has not completed verification and cannot be published.</p> : null}</div><span className={latestState === "PAUSED_BUDGET" ? "engineer-unverified" : "engineer-chip"}>{latestState === "PAUSED_BUDGET" ? "Unverified partial work" : "hash-bound"}</span></div><DiffViewer diff={data?.diff ?? ""} /></section> : null}
+      {tab === "evidence" ? <><ArtifactViewer key={run.runId} runId={run.runId} artifacts={artifacts} /><section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed stream</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">No recorded findings.</p>}</div><PublicationOperations operations={gitOperations} /></section></> : null}
       {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>Approve and publish</button><button disabled={busy} onClick={() => void decide("request-changes")}>Request changes</button><button disabled={busy} onClick={() => void extendApproval()}>Give me 24 hours</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>Reject</button></div></section> : null}
       {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Review the verified candidate</h2><p>The isolated Reviewer escalated this result for a human decision. Inspect the Diff and Evidence tabs, then either continue to the approval gate or reject the candidate.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("approve")}>Continue to approval</button><button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>Reject candidate</button></div></section> : null}
       {latestState === "REVIEW_APPROVED" && !approval ? <section className="engineer-card engineer-gate"><span className="engineer-kicker">Review approved</span><h2>Publication is not configured locally</h2><p>The candidate passed human review and is safe to inspect locally. Configure the GitHub publication credentials before enabling merge or pull-request creation.</p></section> : null}
       {CORRECTABLE_TERMINAL_STATES.has(latestState) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{busy ? "Creating…" : "Create corrected run"}</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
-      {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
+      {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" && !NON_CANCELLABLE_PUBLICATION_STATES.has(latestState) ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
       {error ? <p className="engineer-error">{error}</p> : null}
       {managerError ? <p className="engineer-error">{managerError}</p> : null}
     </main>
   );
 }
 
-function RunHeader({ run, progress, onBack }: { run: EngineerRun; progress: number; onBack: () => void }) { return <header className="engineer-run-header"><div><button className="engineer-kicker" onClick={onBack}>← All runs</button><span className="engineer-kicker">Zintus Engineer · {run.repository.name}</span><h1>{run.requestNormalized || run.requestOriginal}</h1><div className="engineer-run-meta"><span className={`engineer-risk engineer-risk--${run.riskTier.toLowerCase()}`}>{run.riskTier}</span><code>{run.runId}</code></div></div><div className="engineer-progress"><div><span>{run.state.replaceAll("_", " ")}</span><strong>{progress}%</strong></div><progress max="100" value={progress} /></div></header>; }
+function RunHeader({ run, stage, onBack }: { run: EngineerRun; stage: ReturnType<typeof workflowStage>; onBack: () => void }) { return <header className="engineer-run-header"><div><button className="engineer-kicker" onClick={onBack}>← All runs</button><span className="engineer-kicker">Zintus Engineer · {run.repository.name}</span><h1>{run.requestNormalized || run.requestOriginal}</h1><div className="engineer-run-meta"><span className={`engineer-risk engineer-risk--${run.riskTier.toLowerCase()}`}>{run.riskTier}</span><code>{run.runId}</code></div></div><div className="engineer-progress"><div><span>{run.state.replaceAll("_", " ")}</span><strong>{stage.complete ? "Complete" : stage.index === 0 ? stage.label : `Stage ${stage.index} of ${stage.total} · ${stage.label}`}</strong></div><progress max={stage.total} value={stage.complete ? stage.total : stage.index} /></div></header>; }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="engineer-metric"><span>{label}</span><strong>{value}</strong></div>; }
 function PublicationOperations({ operations }: { operations: Array<{ gitOperationId?: string; operationType?: string; status?: string; remoteReference?: string | null; errorCode?: string | null }> }) { return <div className="engineer-card"><h2>Publication operations</h2>{operations.length ? operations.map((operation) => <article className="engineer-claim" key={operation.gitOperationId}><span className={`engineer-status engineer-status--${(operation.status ?? "").toLowerCase()}`}>{operation.status}</span><strong>{operation.operationType?.replaceAll("_", " ")}</strong>{operation.remoteReference?.startsWith("https://") ? <a href={operation.remoteReference} target="_blank" rel="noreferrer">Open published result</a> : <code>{operation.remoteReference ?? operation.errorCode ?? operation.gitOperationId}</code>}</article>) : <p className="engineer-muted">No credentialed Git operation has started.</p>}</div>; }

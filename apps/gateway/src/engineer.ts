@@ -18,11 +18,15 @@ import {
   createCorrectedRunDirective,
   manifestPatternMatchesPath,
   type SafeCorrectionCode,
+  isCancellationAllowed,
+  hasUnreconciledRemotePublication,
   sha256,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
+import { previewEngineerArtifact } from "./engineer-artifact-preview.js";
 import type { EngineerCapabilityPreflight, EngineerReadiness } from "./engineer-preflight.js";
 import { redactSecrets } from "@zintus/router";
+import { createHash } from "node:crypto";
 
 export interface EngineerRunManagerOptions {
   supervisor: EngineerSupervisor;
@@ -59,6 +63,11 @@ export class EngineerRunManager {
     return this.options.preflight.repository();
   }
 
+  repositories(principal: EngineerPrincipal): RepositoryReference[] {
+    this.assertPrincipal(principal);
+    return this.options.preflight.repositories();
+  }
+
   async create(principal: EngineerPrincipal, input: {
     runId?: string;
     repository: RepositoryReference;
@@ -78,6 +87,58 @@ export class EngineerRunManager {
   get(runId: string): { run: EngineerRun; budget: EngineerBudgetSnapshot; lastError: string | null } {
     this.assertOwner(runId, this.options.principal);
     return { run: this.options.supervisor.getRun(runId), budget: this.options.supervisor.reconcileBudget(runId), lastError: this.errors.get(runId) ?? null };
+  }
+
+  /** One ownership-checked projection for the active UI; individual routes remain for compatibility. */
+  snapshot(principal: EngineerPrincipal, runId: string) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const beforeRun = this.options.supervisor.getRun(runId);
+      const beforeSequence = this.options.supervisor.latestEventSequence(runId);
+      const errors: Array<{ section: string; message: string }> = [];
+      const section = <T>(name: string, read: () => T, fallback: T): T => {
+        try { return read(); }
+        catch (error) {
+          errors.push({ section: name, message: redactSecrets(error instanceof Error ? error.message : String(error)) });
+          return fallback;
+        }
+      };
+      const events = this.options.supervisor.listEvents(runId, Math.max(0, beforeSequence - 500), 500);
+      const status = this.get(runId);
+      const data = {
+        artifacts: section("artifacts", () => this.artifacts(runId), []),
+        claims: section("claims", () => this.claims(runId), []),
+        evidenceBundles: section("evidence", () => this.evidenceBundles(runId), []),
+        tests: section("tests", () => this.tests(runId), []),
+        securityFindings: section("security", () => this.security(runId), []),
+        failures: section("failures", () => this.failures(runId), []),
+        gitOperations: section("publication", () => this.gitOperations(runId), []),
+        diff: section("diff", () => this.diff(runId), ""),
+        approval: section("approval", () => this.approval(runId), null),
+        decisions: section("decisions", () => this.decisions(principal, runId), []),
+        errors,
+      };
+      const afterSequence = this.options.supervisor.latestEventSequence(runId);
+      const afterRun = this.options.supervisor.getRun(runId);
+      const lastEvent = events.at(-1);
+      const coherent = beforeSequence === afterSequence &&
+        beforeRun.stateVersion === afterRun.stateVersion &&
+        status.run.stateVersion === afterRun.stateVersion && status.run.state === afterRun.state &&
+        (afterSequence === 0
+          ? events.length === 0 && afterRun.stateVersion === 0
+          : lastEvent?.sequence === afterSequence && lastEvent.stateVersion === afterRun.stateVersion && lastEvent.nextState === afterRun.state);
+      if (coherent) {
+        return {
+          status,
+          events,
+          latestEventSequence: afterSequence,
+          snapshotFence: { stateVersion: afterRun.stateVersion, eventSequence: afterSequence },
+          data,
+        };
+      }
+    }
+    throw new Error("Engineer run changed repeatedly while building a consistent snapshot; retry the read");
   }
 
   budget(principal: EngineerPrincipal, runId: string): EngineerBudgetSnapshot {
@@ -103,7 +164,18 @@ export class EngineerRunManager {
 
   list(principal: EngineerPrincipal): EngineerRun[] {
     this.assertPrincipal(principal);
+    // Compatibility path: callers of the original list API receive the full
+    // owner-scoped history. New UIs should use listPage for bounded reads.
     return this.options.supervisor.listRuns().filter((run) => run.userId === principal.ownerId).reverse();
+  }
+
+  listPage(principal: EngineerPrincipal, input: { limit: number; before?: { createdAt: string; runId: string } }) {
+    this.assertPrincipal(principal);
+    const rows = this.options.supervisor.listRunsForUser(principal.ownerId, Math.min(100, input.limit + 1), input.before);
+    const hasMore = rows.length > input.limit;
+    const runs = rows.slice(0, input.limit);
+    const last = runs.at(-1);
+    return { runs, nextCursor: hasMore && last ? Buffer.from(JSON.stringify([last.createdAt, last.runId])).toString("base64url") : null };
   }
 
   observability() { return engineerObservabilitySnapshot(this.options.supervisor, new Date(), this.options.principal.ownerId); }
@@ -133,7 +205,7 @@ export class EngineerRunManager {
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.context) throw new Error("Engineer context is not configured on this gateway");
     if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
-    this.options.context.build(runId);
+    await this.options.context.build(runId);
     const plan = await this.options.planning.plan(runId);
     this.errors.delete(runId);
     return plan;
@@ -302,7 +374,7 @@ export class EngineerRunManager {
       }));
     }
 
-    if (replacement.state === "REQUEST_RECEIVED") this.options.context.build(replacementRunId);
+    if (replacement.state === "REQUEST_RECEIVED") await this.options.context.build(replacementRunId);
     let plan = this.options.supervisor.latestPlanProposal(replacementRunId);
     if (["REQUEST_RECEIVED", "PLANNING", "REPLANNING"].includes(replacement.state)) {
       plan = await this.options.planning.plan(replacementRunId);
@@ -387,7 +459,16 @@ export class EngineerRunManager {
 
   artifacts(runId: string) {
     this.assertOwner(runId, this.options.principal);
-    return this.options.supervisor.listArtifacts(runId);
+    return this.options.supervisor.listArtifacts(runId).map(({ storageReference: _privateStorageReference, ...artifact }) => artifact);
+  }
+
+  artifactPreview(principal: EngineerPrincipal, runId: string, artifactId: string) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    if (!this.options.artifactStore) throw new Error("Engineer artifact store is not configured");
+    const artifact = this.options.supervisor.listArtifacts(runId).find((item) => item.artifactId === artifactId);
+    if (!artifact) throw new Error("Engineer artifact not found");
+    return previewEngineerArtifact(this.options.artifactStore, artifact);
   }
 
   claims(runId: string) {
@@ -430,6 +511,113 @@ export class EngineerRunManager {
       decisions: snapshot.decisions,
     };
     return { ...content, exportHash: sha256(content) };
+  }
+
+  evidenceExportStream(principal: EngineerPrincipal, runId: string): ReadableStream<Uint8Array> {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    if (!this.options.artifactStore) throw new Error("Engineer artifact store is required for a complete evidence export");
+    const snapshot = this.options.supervisor.evidenceExportSummary(runId);
+    const supervisor = this.options.supervisor;
+    const artifactStore = this.options.artifactStore;
+    const hash = createHash("sha256");
+    const encoder = new TextEncoder();
+    const encoded = (value: string, checksum = true): Uint8Array => {
+      if (checksum) hash.update(value, "utf8");
+      return encoder.encode(value);
+    };
+    const record = (value: Record<string, unknown>): Uint8Array => encoded(`${JSON.stringify(value)}\n`);
+    const stripStorageReferences = (value: unknown): string => JSON.stringify(value, (key, item) =>
+      key === "storage_reference" || key === "storageReference" ? undefined : item);
+
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      const artifacts = snapshot.artifacts.map(({ storageReference: _privateStorageReference, ...artifact }) => artifact);
+      yield record({ type: "header", exportVersion: 3, runId, generatedAt: new Date().toISOString(), format: "application/x-ndjson" });
+      yield record({ type: "run", value: snapshot.run });
+      yield record({ type: "manifest", value: snapshot.manifest });
+      yield record({ type: "riskAssessment", value: snapshot.riskAssessment });
+
+      yield encoded('{"type":"events","value":[');
+      let eventCursor = 0;
+      let eventCount = 0;
+      let firstEvent = true;
+      while (eventCursor < snapshot.latestEventSequence) {
+        const page = supervisor.listEvents(runId, eventCursor, 1_000)
+          .filter((event) => event.sequence <= snapshot.latestEventSequence);
+        if (page.length === 0) break;
+        for (const event of page) {
+          yield encoded(`${firstEvent ? "" : ","}${JSON.stringify(event)}`);
+          firstEvent = false;
+          eventCount += 1;
+        }
+        const nextCursor = page.at(-1)!.sequence;
+        if (nextCursor <= eventCursor) throw new Error("Engineer event export cursor did not advance");
+        eventCursor = nextCursor;
+      }
+      yield encoded(`],"complete":${eventCount === snapshot.latestEventSequence}}\n`);
+      yield record({ type: "artifacts", value: artifacts });
+
+      yield encoded('{"type":"durableRecords","value":{');
+      let firstTable = true;
+      for (const table of supervisor.exportRunRecordTables(runId)) {
+        yield encoded(`${firstTable ? "" : ","}${JSON.stringify(table)}:[`);
+        firstTable = false;
+        let firstRow = true;
+        for (let offset = 0; ; offset += 500) {
+          const page = supervisor.exportRunRecordPage(runId, table, offset, 500);
+          for (const row of page) {
+            yield encoded(`${firstRow ? "" : ","}${stripStorageReferences(row)}`);
+            firstRow = false;
+          }
+          if (page.length < 500) break;
+        }
+        yield encoded("]");
+      }
+      yield encoded("}}\n");
+
+      yield record({ type: "claims", value: snapshot.claims });
+      yield record({ type: "evidenceBundles", value: snapshot.evidenceBundles });
+      yield record({ type: "tests", value: snapshot.tests });
+      yield record({ type: "securityFindings", value: snapshot.securityFindings });
+      yield record({ type: "failures", value: snapshot.failures });
+      yield record({ type: "decisions", value: snapshot.decisions });
+
+      for (const artifact of snapshot.artifacts) {
+        const prefix = JSON.stringify({
+          type: "artifactPayload",
+          artifactId: artifact.artifactId,
+          sha256: artifact.sha256,
+          sizeBytes: artifact.sizeBytes,
+          encoding: "base64",
+        });
+        yield encoded(`${prefix.slice(0, -1)},"content":"`);
+        let carry = Buffer.alloc(0);
+        for await (const bytes of artifactStore.verifiedChunks(artifact)) {
+          const combined = carry.byteLength === 0 ? bytes : Buffer.concat([carry, bytes]);
+          const completeBytes = combined.byteLength - (combined.byteLength % 3);
+          if (completeBytes > 0) yield encoded(combined.subarray(0, completeBytes).toString("base64"));
+          carry = completeBytes === combined.byteLength ? Buffer.alloc(0) : Buffer.from(combined.subarray(completeBytes));
+        }
+        if (carry.byteLength > 0) yield encoded(carry.toString("base64"));
+        yield encoded('"}\n');
+      }
+
+      yield encoded(`${JSON.stringify({ type: "checksum", algorithm: "sha256", value: `sha256:${hash.digest("hex")}` })}\n`, false);
+    }
+
+    const iterator = chunks();
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const next = await iterator.next();
+          if (next.done) controller.close();
+          else controller.enqueue(next.value);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      async cancel() { await iterator.return?.(undefined); },
+    });
   }
 
   tests(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listTestExecutions(runId); }
@@ -603,6 +791,12 @@ export class EngineerRunManager {
     const run = this.options.supervisor.getRun(runId);
     if (actorId !== run.userId) throw new Error("cancellation actor does not own this run");
     if (run.terminalAt) throw new Error(`terminal run ${run.state} cannot be cancelled`);
+    if (!isCancellationAllowed(run.state)) {
+      throw new Error(`cancellation is fenced while publication state is ${run.state}; remote cleanup is not safely available`);
+    }
+    if (hasUnreconciledRemotePublication(this.options.supervisor.listGitOperations(runId))) {
+      throw new Error("cancellation is fenced because remote publication was attempted and no durable remote cleanup is available");
+    }
     const artifact = this.options.supervisor.recordArtifact(artifactStore.put({
       runId, type: "CANCELLATION_REQUEST",
       bytes: JSON.stringify({ actorId, reason, requestedAt: new Date().toISOString() }),
@@ -674,7 +868,10 @@ export class EngineerRunManager {
         controller.enqueue(encoder.encode("retry: 1000\n\n"));
         pump(controller);
         if (!closed) {
-          timer = setInterval(() => pump(controller), 250);
+          // Durable events are low-frequency relative to model/command work;
+          // a one-second cadence keeps the UI live without four synchronous
+          // SQLite polls per subscriber every second.
+          timer = setInterval(() => pump(controller), 1_000);
           timer.unref?.();
           heartbeatTimer = setInterval(() => {
             if (!closed && (controller.desiredSize === null || controller.desiredSize > 0)) {

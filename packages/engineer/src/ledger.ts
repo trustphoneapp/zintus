@@ -48,6 +48,7 @@ import {
   ApprovalRequestRecordSchema,
   FailureRecordSchema,
   GitOperationRecordSchema,
+  canTransitionGitOperationStatus,
   PublicationEvidenceSchema,
   TestExecutionViewSchema,
   type ApprovalDecisionRecord,
@@ -85,6 +86,11 @@ import {
   type EngineerBudgetSelection,
   type EngineerBudgetSnapshot,
 } from "./budget-contracts.js";
+import {
+  RepositoryAdmissionSchema,
+  type RegisterRepositoryAdmissionInput,
+  type RepositoryAdmission,
+} from "./repository-admission.js";
 
 interface RunRow {
   id: string;
@@ -145,6 +151,46 @@ interface BudgetRow {
   revision: number; active_since: string | null; updated_at: string;
 }
 
+interface RepositoryAdmissionRow {
+  admission_id: string; repository_id: string; owner_user_id: string;
+  provider: "github" | "local"; owner: string; repository_name: string; repository_url: string | null;
+  base_branch: string; base_commit_sha: string;
+  source: "CONFIGURED_CANONICAL" | "CONNECTOR_AUTHORIZED";
+  authorization_subject: string; authorization_evidence_hash: string;
+  authorization_expires_at: string | null; authorization_generation: number;
+  status: "ACTIVE" | "REVOKED"; created_at: string; updated_at: string;
+}
+
+function rowToRepositoryAdmission(row: RepositoryAdmissionRow): RepositoryAdmission {
+  return RepositoryAdmissionSchema.parse({
+    admissionId: row.admission_id,
+    ownerUserId: row.owner_user_id,
+    repository: {
+      repositoryId: row.repository_id,
+      provider: row.provider,
+      owner: row.owner,
+      name: row.repository_name,
+      ...(row.repository_url ? { url: row.repository_url } : {}),
+      baseBranch: row.base_branch,
+      baseCommitSha: row.base_commit_sha,
+    },
+    source: row.source,
+    authorizationSubject: row.authorization_subject,
+    authorizationEvidenceHash: row.authorization_evidence_hash,
+    authorizationExpiresAt: row.authorization_expires_at,
+    authorizationGeneration: row.authorization_generation,
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+}
+
+const REPOSITORY_ADMISSION_SELECT = `
+  SELECT a.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
+  FROM repository_admissions a
+  JOIN repository_connections rc ON rc.id = a.repository_id
+`;
+
 export interface LedgerTransitionCommand {
   runId: string;
   expectedStateVersion: number;
@@ -176,11 +222,44 @@ export interface StoredRetryAttempt {
   allowed: boolean;
 }
 
+export interface RunObservabilityProjection {
+  run: EngineerRun;
+  pendingApprovals: number;
+  retryAttempts: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteInputTokens: number;
+  estimatedCostUsd: number;
+  approvalLatencySecondsTotal: number;
+  approvalLatencyCount: number;
+  evidenceComplete: boolean;
+  failureCount: number;
+}
+
+export interface FailureClassProjection {
+  failureClass: string;
+  count: number;
+}
+
 const RUN_SELECT = `
   SELECT r.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
   FROM engineer_runs r
   JOIN repository_connections rc ON rc.id = r.repository_id
 `;
+
+const DIRECT_RUN_EXPORT_TABLES = [
+  "task_manifest_versions", "plan_proposals", "context_manifests", "context_sources",
+  "context_warnings", "decisions", "decision_evidence", "decision_resolutions",
+  "run_state_events", "acceptance_criteria", "agent_executions", "model_calls",
+  "sandboxes", "command_executions", "artifacts", "evidence_bundles",
+  "claim_evidence", "test_executions", "security_findings", "reviewer_sessions",
+  "risk_assessments", "approval_requests", "retry_attempts", "failure_records",
+  "cost_records", "audit_events", "git_operations", "model_routing_decisions",
+] as const;
+const JOINED_RUN_EXPORT_TABLES = ["sandbox_heartbeats", "test_results", "review_findings", "approval_decisions"] as const;
+export type RunExportTable = typeof DIRECT_RUN_EXPORT_TABLES[number] | typeof JOINED_RUN_EXPORT_TABLES[number];
+const RUN_EXPORT_TABLES = [...DIRECT_RUN_EXPORT_TABLES, ...JOINED_RUN_EXPORT_TABLES] as const;
 
 function rowToRun(row: RunRow): EngineerRun {
   return EngineerRunSchema.parse({
@@ -285,6 +364,9 @@ export class EngineerLedger {
     if (!proposalColumns.some((column) => column.name === "planning_analysis_json")) {
       this.db.exec("ALTER TABLE plan_proposals ADD COLUMN planning_analysis_json TEXT");
     }
+    const admissionColumns = new Set((this.db.query("PRAGMA table_info(repository_admissions)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!admissionColumns.has("authorization_expires_at")) this.db.exec("ALTER TABLE repository_admissions ADD COLUMN authorization_expires_at TEXT");
+    if (!admissionColumns.has("authorization_generation")) this.db.exec("ALTER TABLE repository_admissions ADD COLUMN authorization_generation INTEGER NOT NULL DEFAULT 1 CHECK(authorization_generation > 0)");
     this.db
       .query("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)")
       .run(ENGINEER_DATABASE_SCHEMA_VERSION, new Date().toISOString());
@@ -292,6 +374,133 @@ export class EngineerLedger {
 
   atomic<T>(operation: () => T): T {
     return this.db.transaction(operation)();
+  }
+
+  registerRepositoryAdmission(input: RegisterRepositoryAdmissionInput): RepositoryAdmission {
+    const parsed = RepositoryAdmissionSchema.pick({
+      admissionId: true, ownerUserId: true, repository: true, source: true,
+      authorizationSubject: true, authorizationEvidenceHash: true,
+      authorizationExpiresAt: true, authorizationGeneration: true,
+    }).parse({
+      ...input,
+      authorizationExpiresAt: input.authorizationExpiresAt ?? null,
+      authorizationGeneration: input.authorizationGeneration ?? 1,
+    });
+    if (parsed.source === "CONNECTOR_AUTHORIZED" && (!parsed.authorizationExpiresAt || new Date(parsed.authorizationExpiresAt).getTime() <= new Date(input.now).getTime())) {
+      throw new Error("connector repository admission requires a future authorization expiry");
+    }
+    if (parsed.source === "CONFIGURED_CANONICAL" && (parsed.authorizationExpiresAt !== null || parsed.authorizationGeneration !== 1)) {
+      throw new Error("configured repository admission cannot carry connector expiry or generation");
+    }
+    this.db.transaction(() => {
+      this.db.query(`INSERT INTO users(id, created_at, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`)
+        .run(parsed.ownerUserId, input.now, input.now);
+      const existingConnection = this.db.query(`SELECT user_id, provider, owner, name, url
+        FROM repository_connections WHERE id = ?`).get(parsed.repository.repositoryId) as {
+          user_id: string; provider: string; owner: string; name: string; url: string | null;
+        } | null;
+      if (existingConnection) {
+        if (existingConnection.user_id !== parsed.ownerUserId || existingConnection.provider !== parsed.repository.provider ||
+            existingConnection.owner !== parsed.repository.owner || existingConnection.name !== parsed.repository.name ||
+            (existingConnection.url ?? null) !== (parsed.repository.url ?? null)) {
+          throw new Error("repository connection identity conflicts with trusted admission");
+        }
+      } else {
+        this.db.query(`INSERT INTO repository_connections
+          (id, user_id, provider, owner, name, url, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            parsed.repository.repositoryId, parsed.ownerUserId, parsed.repository.provider,
+            parsed.repository.owner, parsed.repository.name, parsed.repository.url ?? null,
+            input.now, input.now,
+          );
+      }
+      const existing = this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? AND a.repository_id = ?`)
+        .get(parsed.ownerUserId, parsed.repository.repositoryId) as RepositoryAdmissionRow | null;
+      if (existing) {
+        const record = rowToRepositoryAdmission(existing);
+        if (record.status !== "ACTIVE") throw new Error("revoked repository admission cannot be reactivated implicitly");
+        if (record.admissionId !== parsed.admissionId || record.source !== parsed.source ||
+            record.authorizationSubject !== parsed.authorizationSubject ||
+            record.authorizationEvidenceHash.toLowerCase() !== parsed.authorizationEvidenceHash.toLowerCase() ||
+            record.authorizationExpiresAt !== parsed.authorizationExpiresAt ||
+            record.authorizationGeneration !== parsed.authorizationGeneration ||
+            record.repository.baseBranch !== parsed.repository.baseBranch ||
+            ((input.existingBasePolicy ?? "REQUIRE_EXACT") === "REQUIRE_EXACT" &&
+              record.repository.baseCommitSha.toLowerCase() !== parsed.repository.baseCommitSha.toLowerCase())) {
+          throw new Error("repository admission conflicts with existing trusted record");
+        }
+        return;
+      }
+      this.db.query(`INSERT INTO repository_admissions
+        (admission_id, repository_id, owner_user_id, base_branch, base_commit_sha, source,
+         authorization_subject, authorization_evidence_hash, authorization_expires_at,
+         authorization_generation, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`).run(
+          parsed.admissionId, parsed.repository.repositoryId, parsed.ownerUserId,
+          parsed.repository.baseBranch, parsed.repository.baseCommitSha, parsed.source,
+          parsed.authorizationSubject, parsed.authorizationEvidenceHash.toLowerCase(), parsed.authorizationExpiresAt,
+          parsed.authorizationGeneration, input.now, input.now,
+        );
+    })();
+    return this.getRepositoryAdmission(parsed.ownerUserId, parsed.repository.repositoryId)!;
+  }
+
+  getRepositoryAdmission(ownerUserId: string, repositoryId: string): RepositoryAdmission | null {
+    const row = this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? AND a.repository_id = ?`)
+      .get(ownerUserId, repositoryId) as RepositoryAdmissionRow | null;
+    return row ? rowToRepositoryAdmission(row) : null;
+  }
+
+  migrateLegacyConfiguredRepositoryAdmissionEvidence(ownerUserId: string, repositoryId: string, nextHash: string, now: string): RepositoryAdmission {
+    const admission = this.getRepositoryAdmission(ownerUserId, repositoryId);
+    if (!admission || admission.source !== "CONFIGURED_CANONICAL" || admission.status !== "ACTIVE") {
+      throw new Error("active configured repository admission not found");
+    }
+    const exactLegacyHash = sha256({ source: "gateway-environment", repository: admission.repository });
+    const result = this.db.query(`UPDATE repository_admissions SET authorization_evidence_hash = lower(?), updated_at = ?
+      WHERE owner_user_id = ? AND repository_id = ? AND source = 'CONFIGURED_CANONICAL' AND status = 'ACTIVE'
+        AND lower(authorization_evidence_hash) = lower(?)`)
+      .run(nextHash, now, ownerUserId, repositoryId, exactLegacyHash);
+    if (result.changes !== 1) throw new Error("configured repository admission evidence changed concurrently or is inactive");
+    return this.getRepositoryAdmission(ownerUserId, repositoryId)!;
+  }
+
+  reauthorizeConnectorRepositoryAdmission(input: {
+    ownerUserId: string; repositoryId: string; previousGeneration: number; nextGeneration: number;
+    authorizationSubject: string; authorizationEvidenceHash: string; authorizationExpiresAt: string; now: string;
+  }): RepositoryAdmission {
+    const result = this.db.query(`UPDATE repository_admissions SET authorization_subject = ?,
+      authorization_evidence_hash = lower(?), authorization_expires_at = ?, authorization_generation = ?,
+      status = 'ACTIVE', updated_at = ?
+      WHERE owner_user_id = ? AND repository_id = ? AND source = 'CONNECTOR_AUTHORIZED'
+        AND authorization_generation = ? AND ? > authorization_generation`).run(
+          input.authorizationSubject, input.authorizationEvidenceHash, input.authorizationExpiresAt,
+          input.nextGeneration, input.now, input.ownerUserId, input.repositoryId,
+          input.previousGeneration, input.nextGeneration,
+        );
+    if (result.changes !== 1) throw new Error("connector repository reauthorization generation is stale or admission is unavailable");
+    return this.getRepositoryAdmission(input.ownerUserId, input.repositoryId)!;
+  }
+
+  listRepositoryAdmissions(ownerUserId: string): RepositoryAdmission[] {
+    return (this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? ORDER BY a.created_at, a.repository_id`)
+      .all(ownerUserId) as RepositoryAdmissionRow[]).map(rowToRepositoryAdmission);
+  }
+
+  advanceRepositoryAdmissionBase(ownerUserId: string, repositoryId: string, previousSha: string, nextSha: string, now: string): RepositoryAdmission {
+    const result = this.db.query(`UPDATE repository_admissions SET base_commit_sha = ?, updated_at = ?
+      WHERE owner_user_id = ? AND repository_id = ? AND status = 'ACTIVE' AND lower(base_commit_sha) = lower(?)`)
+      .run(nextSha, now, ownerUserId, repositoryId, previousSha);
+    if (result.changes !== 1) throw new Error("repository admission base advanced concurrently or is inactive");
+    return this.getRepositoryAdmission(ownerUserId, repositoryId)!;
+  }
+
+  revokeRepositoryAdmission(ownerUserId: string, repositoryId: string, now: string): RepositoryAdmission {
+    const result = this.db.query(`UPDATE repository_admissions SET status = 'REVOKED', updated_at = ?
+      WHERE owner_user_id = ? AND repository_id = ? AND status = 'ACTIVE'`).run(now, ownerUserId, repositoryId);
+    if (result.changes !== 1) throw new Error("active repository admission not found");
+    return this.getRepositoryAdmission(ownerUserId, repositoryId)!;
   }
 
   createRun(input: LedgerCreateRunInput): EngineerRun {
@@ -314,11 +523,16 @@ export class EngineerLedger {
           input.now,
           input.now,
         );
-      const repositoryOwner = this.db
-        .query("SELECT user_id FROM repository_connections WHERE id = ?")
-        .get(input.repository.repositoryId) as { user_id: string } | null;
-      if (!repositoryOwner || repositoryOwner.user_id !== input.userId) {
+      const repositoryConnection = this.db
+        .query("SELECT user_id, provider, owner, name, url FROM repository_connections WHERE id = ?")
+        .get(input.repository.repositoryId) as { user_id: string; provider: string; owner: string; name: string; url: string | null } | null;
+      if (!repositoryConnection || repositoryConnection.user_id !== input.userId) {
         throw new Error("repository connection is not owned by the run user");
+      }
+      if (repositoryConnection.provider !== input.repository.provider || repositoryConnection.owner !== input.repository.owner ||
+          repositoryConnection.name !== input.repository.name ||
+          (repositoryConnection.url ?? null) !== (input.repository.url ?? null)) {
+        throw new Error("repository connection identity does not match the run repository");
       }
       this.db
         .query(`INSERT INTO engineer_runs
@@ -441,6 +655,130 @@ export class EngineerLedger {
     return (rows as RunRow[]).map(rowToRun);
   }
 
+  listRunsForUser(userId: string, limit = 50, before?: { createdAt: string; runId: string }): EngineerRun[] {
+    if (!userId.trim()) throw new TypeError("run owner is required");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError("run page limit must be between 1 and 100");
+    const rows = before
+      ? this.db.query(`${RUN_SELECT} WHERE r.user_id = ? AND (r.created_at < ? OR (r.created_at = ? AND r.id < ?)) ORDER BY r.created_at DESC, r.id DESC LIMIT ?`)
+        .all(userId, before.createdAt, before.createdAt, before.runId, limit)
+      : this.db.query(`${RUN_SELECT} WHERE r.user_id = ? ORDER BY r.created_at DESC, r.id DESC LIMIT ?`).all(userId, limit);
+    return (rows as RunRow[]).map(rowToRun);
+  }
+
+  /**
+   * Reads dashboard metrics with one pre-aggregated SQL statement instead of
+   * exporting every durable record once per run.
+   */
+  listRunObservability(ownerId?: string): RunObservabilityProjection[] {
+    const sql = `
+      WITH
+      selected_runs AS (
+        SELECT id FROM engineer_runs ${ownerId === undefined ? "" : "WHERE user_id = ?"}
+      ),
+      pending AS (
+        SELECT run_id, 1 AS pending_approvals
+        FROM (
+          SELECT request.run_id, request.status,
+            ROW_NUMBER() OVER (PARTITION BY request.run_id ORDER BY request.requested_at DESC, request.rowid DESC) AS position
+          FROM approval_requests request
+          JOIN selected_runs selected ON selected.id = request.run_id
+        ) WHERE position = 1 AND status = 'PENDING'
+      ),
+      failures AS (
+        SELECT failure.run_id, COUNT(*) AS failure_count
+        FROM failure_records failure JOIN selected_runs selected ON selected.id = failure.run_id
+        GROUP BY failure.run_id
+      ),
+      retries AS (
+        SELECT retry.run_id, COUNT(*) AS retry_attempts
+        FROM retry_attempts retry JOIN selected_runs selected ON selected.id = retry.run_id
+        GROUP BY retry.run_id
+      ),
+      tokens AS (
+        SELECT call.run_id,
+          COALESCE(SUM(call.input_tokens), 0) AS total_input_tokens,
+          COALESCE(SUM(call.output_tokens), 0) AS total_output_tokens,
+          COALESCE(SUM(call.cached_input_tokens), 0) AS cached_input_tokens,
+          COALESCE(SUM(call.cache_write_input_tokens), 0) AS cache_write_input_tokens
+        FROM model_calls call JOIN selected_runs selected ON selected.id = call.run_id
+        GROUP BY call.run_id
+      ),
+      costs AS (
+        SELECT cost.run_id, COALESCE(SUM(cost.estimated_cost_usd), 0) AS estimated_cost_usd
+        FROM cost_records cost JOIN selected_runs selected ON selected.id = cost.run_id
+        WHERE cost.source_type = 'MODEL_CALL' GROUP BY cost.run_id
+      ),
+      approval_latency AS (
+        SELECT request.run_id,
+          COALESCE(SUM(ROUND((julianday(decision.decided_at) - julianday(request.requested_at)) * 86400000.0) / 1000.0), 0) AS latency_total,
+          COUNT(*) AS latency_count
+        FROM approval_decisions decision
+        JOIN approval_requests request ON request.id = decision.approval_request_id
+        JOIN selected_runs selected ON selected.id = request.run_id
+        WHERE decision.decided_at >= request.requested_at
+        GROUP BY request.run_id
+      ),
+      evidence AS (
+        SELECT bundle.run_id, 1 AS evidence_complete
+        FROM evidence_bundles bundle JOIN selected_runs selected ON selected.id = bundle.run_id
+        GROUP BY bundle.run_id
+      )
+      SELECT r.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url,
+        COALESCE(pending.pending_approvals, 0) AS pending_approvals,
+        COALESCE(failures.failure_count, 0) AS failure_count,
+        COALESCE(retries.retry_attempts, 0) AS retry_attempts,
+        COALESCE(tokens.total_input_tokens, 0) AS total_input_tokens,
+        COALESCE(tokens.total_output_tokens, 0) AS total_output_tokens,
+        COALESCE(tokens.cached_input_tokens, 0) AS cached_input_tokens,
+        COALESCE(tokens.cache_write_input_tokens, 0) AS cache_write_input_tokens,
+        COALESCE(costs.estimated_cost_usd, 0) AS estimated_cost_usd,
+        COALESCE(approval_latency.latency_total, 0) AS approval_latency_total,
+        COALESCE(approval_latency.latency_count, 0) AS approval_latency_count,
+        COALESCE(evidence.evidence_complete, 0) AS evidence_complete
+      FROM engineer_runs r
+      JOIN selected_runs selected ON selected.id = r.id
+      JOIN repository_connections rc ON rc.id = r.repository_id
+      LEFT JOIN pending ON pending.run_id = r.id
+      LEFT JOIN failures ON failures.run_id = r.id
+      LEFT JOIN retries ON retries.run_id = r.id
+      LEFT JOIN tokens ON tokens.run_id = r.id
+      LEFT JOIN costs ON costs.run_id = r.id
+      LEFT JOIN approval_latency ON approval_latency.run_id = r.id
+      LEFT JOIN evidence ON evidence.run_id = r.id
+      ORDER BY r.created_at, r.id`;
+    type ProjectionRow = RunRow & {
+      pending_approvals: number; failure_count: number; retry_attempts: number;
+      total_input_tokens: number; total_output_tokens: number; cached_input_tokens: number;
+      cache_write_input_tokens: number; estimated_cost_usd: number;
+      approval_latency_total: number; approval_latency_count: number; evidence_complete: number;
+    };
+    const rows = (ownerId === undefined ? this.db.query(sql).all() : this.db.query(sql).all(ownerId)) as ProjectionRow[];
+    return rows.map((row) => ({
+      run: rowToRun(row),
+      pendingApprovals: Number(row.pending_approvals),
+      retryAttempts: Number(row.retry_attempts),
+      totalInputTokens: Number(row.total_input_tokens),
+      totalOutputTokens: Number(row.total_output_tokens),
+      cachedInputTokens: Number(row.cached_input_tokens),
+      cacheWriteInputTokens: Number(row.cache_write_input_tokens),
+      estimatedCostUsd: Number(row.estimated_cost_usd),
+      approvalLatencySecondsTotal: Number(row.approval_latency_total),
+      approvalLatencyCount: Number(row.approval_latency_count),
+      evidenceComplete: Number(row.evidence_complete) === 1,
+      failureCount: Number(row.failure_count),
+    }));
+  }
+
+  listFailureClassObservability(ownerId?: string): FailureClassProjection[] {
+    const sql = `SELECT failure.failure_class, COUNT(*) AS count
+      FROM failure_records failure
+      JOIN engineer_runs run ON run.id = failure.run_id
+      ${ownerId === undefined ? "" : "WHERE run.user_id = ?"}
+      GROUP BY failure.failure_class ORDER BY failure.failure_class`;
+    const rows = (ownerId === undefined ? this.db.query(sql).all() : this.db.query(sql).all(ownerId)) as Array<{ failure_class: string; count: number }>;
+    return rows.map((row) => ({ failureClass: row.failure_class, count: Number(row.count) }));
+  }
+
   listEvents(runId: string, afterSequence = 0, limit = 1_000): RunStateEvent[] {
     this.getRun(runId);
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new TypeError("event cursor must be a non-negative safe integer");
@@ -453,24 +791,47 @@ export class EngineerLedger {
 
   exportRunRecords(runId: string): Record<string, Array<Record<string, unknown>>> {
     this.getRun(runId);
-    const directTables = [
-      "task_manifest_versions", "plan_proposals", "context_manifests", "context_sources",
-      "context_warnings", "decisions", "decision_evidence", "decision_resolutions",
-      "run_state_events", "acceptance_criteria", "agent_executions", "model_calls",
-      "sandboxes", "command_executions", "artifacts", "evidence_bundles",
-      "claim_evidence", "test_executions", "security_findings", "reviewer_sessions",
-      "risk_assessments", "approval_requests", "retry_attempts", "failure_records",
-      "cost_records", "audit_events", "git_operations", "model_routing_decisions",
-    ] as const;
     const records: Record<string, Array<Record<string, unknown>>> = {};
-    for (const table of directTables) {
-      records[table] = this.db.query(`SELECT * FROM ${table} WHERE run_id = ? ORDER BY rowid`).all(runId) as Array<Record<string, unknown>>;
+    for (const table of RUN_EXPORT_TABLES) {
+      const rows: Array<Record<string, unknown>> = [];
+      for (let offset = 0; ; offset += 1_000) {
+        const page = this.exportRunRecordPage(runId, table, offset, 1_000);
+        rows.push(...page);
+        if (page.length < 1_000) break;
+      }
+      records[table] = rows;
     }
-    records.sandbox_heartbeats = this.db.query(`SELECT h.* FROM sandbox_heartbeats h JOIN sandboxes s ON s.id = h.sandbox_id WHERE s.run_id = ? ORDER BY h.rowid`).all(runId) as Array<Record<string, unknown>>;
-    records.test_results = this.db.query(`SELECT r.* FROM test_results r JOIN test_executions e ON e.id = r.test_execution_id WHERE e.run_id = ? ORDER BY r.rowid`).all(runId) as Array<Record<string, unknown>>;
-    records.review_findings = this.db.query(`SELECT f.* FROM review_findings f JOIN reviewer_sessions s ON s.id = f.reviewer_session_id WHERE s.run_id = ? ORDER BY f.rowid`).all(runId) as Array<Record<string, unknown>>;
-    records.approval_decisions = this.db.query(`SELECT d.* FROM approval_decisions d JOIN approval_requests r ON r.id = d.approval_request_id WHERE r.run_id = ? ORDER BY d.rowid`).all(runId) as Array<Record<string, unknown>>;
     return records;
+  }
+
+  exportRunRecordTables(runId: string): RunExportTable[] {
+    this.getRun(runId);
+    return [...RUN_EXPORT_TABLES];
+  }
+
+  exportRunRecordPage(runId: string, table: RunExportTable, offset: number, limit = 500): Array<Record<string, unknown>> {
+    this.getRun(runId);
+    if (!RUN_EXPORT_TABLES.includes(table)) throw new TypeError("unknown run export table");
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new TypeError("run export offset must be a non-negative safe integer");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new TypeError("run export page limit must be between 1 and 1000");
+    if ((DIRECT_RUN_EXPORT_TABLES as readonly string[]).includes(table)) {
+      return this.db.query(`SELECT * FROM ${table} WHERE run_id = ? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+    }
+    if (table === "sandbox_heartbeats") {
+      return this.db.query(`SELECT h.* FROM sandbox_heartbeats h JOIN sandboxes s ON s.id = h.sandbox_id WHERE s.run_id = ? ORDER BY h.rowid LIMIT ? OFFSET ?`)
+        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+    }
+    if (table === "test_results") {
+      return this.db.query(`SELECT r.* FROM test_results r JOIN test_executions e ON e.id = r.test_execution_id WHERE e.run_id = ? ORDER BY r.rowid LIMIT ? OFFSET ?`)
+        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+    }
+    if (table === "review_findings") {
+      return this.db.query(`SELECT f.* FROM review_findings f JOIN reviewer_sessions s ON s.id = f.reviewer_session_id WHERE s.run_id = ? ORDER BY f.rowid LIMIT ? OFFSET ?`)
+        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+    }
+    return this.db.query(`SELECT d.* FROM approval_decisions d JOIN approval_requests r ON r.id = d.approval_request_id WHERE r.run_id = ? ORDER BY d.rowid LIMIT ? OFFSET ?`)
+      .all(runId, limit, offset) as Array<Record<string, unknown>>;
   }
 
   latestEventSequence(runId: string): number {
@@ -608,8 +969,23 @@ export class EngineerLedger {
           warning.code, warning.path, warning.sourceId, warning.trust, canonicalJson(warning));
       }
     });
-    transaction();
-    return parsed;
+    try {
+      transaction();
+      return parsed;
+    } catch (error) {
+      // A separate Supervisor/process may have committed the same immutable
+      // snapshot after our pre-check. Converge only on byte-identical identity.
+      const winner = this.db.query("SELECT manifest_json, artifact_id, created_at FROM context_manifests WHERE run_id = ?")
+        .get(parsed.manifest.runId) as { manifest_json: string; artifact_id: string; created_at: string } | null;
+      if (winner) {
+        const replay = StoredContextSnapshotSchema.parse({
+          manifest: JSON.parse(winner.manifest_json), artifactId: winner.artifact_id, createdAt: winner.created_at,
+        });
+        if (replay.manifest.manifestHash === parsed.manifest.manifestHash && replay.artifactId === parsed.artifactId) return replay;
+        throw new IdempotencyConflictError(parsed.manifest.runId, "context-manifest-already-frozen");
+      }
+      throw error;
+    }
   }
 
   latestContextSnapshot(runId: string): StoredContextSnapshot | null {
@@ -985,13 +1361,20 @@ export class EngineerLedger {
     const existing = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ? AND type = ?")
       .get(parsed.runId, parsed.sha256, parsed.type) as Record<string, unknown> | null;
     if (existing) return this.artifactFromRow(existing);
-    this.db.query(`INSERT INTO artifacts
-      (id, run_id, type, sha256, producer_type, producer_id, storage_reference, size_bytes, trusted, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      parsed.artifactId, parsed.runId, parsed.type, parsed.sha256, parsed.producerType,
-      parsed.producerId, parsed.storageReference, parsed.sizeBytes, parsed.trusted ? 1 : 0, parsed.createdAt,
-    );
-    return parsed;
+    try {
+      this.db.query(`INSERT INTO artifacts
+        (id, run_id, type, sha256, producer_type, producer_id, storage_reference, size_bytes, trusted, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        parsed.artifactId, parsed.runId, parsed.type, parsed.sha256, parsed.producerType,
+        parsed.producerId, parsed.storageReference, parsed.sizeBytes, parsed.trusted ? 1 : 0, parsed.createdAt,
+      );
+      return parsed;
+    } catch (error) {
+      const winner = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ? AND type = ?")
+        .get(parsed.runId, parsed.sha256, parsed.type) as Record<string, unknown> | null;
+      if (winner) return this.artifactFromRow(winner);
+      throw error;
+    }
   }
 
   listArtifacts(runId: string): ArtifactRecord[] {
@@ -1499,8 +1882,26 @@ export class EngineerLedger {
       .get(parsed.runId, parsed.idempotencyKey) as Record<string, unknown> | null;
     if (existing) {
       const current = this.gitOperationFromRow(existing);
-      if (current.gitOperationId !== parsed.gitOperationId || current.operationType !== parsed.operationType) {
+      const immutable = (operation: GitOperationRecord) => ({
+        gitOperationId: operation.gitOperationId,
+        runId: operation.runId,
+        operationType: operation.operationType,
+        requestedBy: operation.requestedBy,
+        idempotencyKey: operation.idempotencyKey,
+        expectedBaseCommitSha: operation.expectedBaseCommitSha,
+        resultCommitSha: operation.resultCommitSha,
+        approvalId: operation.approvalId,
+        evidenceBundleHash: operation.evidenceBundleHash,
+        startedAt: operation.startedAt,
+      });
+      if (sha256(immutable(current)) !== sha256(immutable(parsed))) {
         throw new IdempotencyConflictError(parsed.runId, parsed.idempotencyKey);
+      }
+      if (!canTransitionGitOperationStatus(current.status, parsed.status)) {
+        throw new IdempotencyConflictError(parsed.runId, `${parsed.idempotencyKey}:${current.status}->${parsed.status}`);
+      }
+      if (current.status === parsed.status && sha256(current) !== sha256(parsed)) {
+        throw new IdempotencyConflictError(parsed.runId, `${parsed.idempotencyKey}:${parsed.status}`);
       }
       this.db.query(`UPDATE git_operations SET status = ?, remote_reference = ?, completed_at = ?, error_code = ?
         WHERE id = ?`).run(parsed.status, parsed.remoteReference, parsed.completedAt, parsed.errorCode, parsed.gitOperationId);

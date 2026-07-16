@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, openSync, closeSync, readFileSync, readdirSync, statSync, lstatSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { chmodSync, mkdirSync, openSync, closeSync, readFileSync, readSync, readdirSync, statSync, fstatSync, lstatSync, unlinkSync, writeFileSync, createReadStream } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { ArtifactRecordSchema, type ArtifactRecord } from "./execution-contracts.js";
 import { matchesSha256Bytes, sha256Bytes } from "./hash.js";
@@ -111,10 +111,7 @@ export class LocalArtifactStore {
   }
 
   read(record: ArtifactRecord): Buffer {
-    const parsed = ArtifactRecordSchema.parse(record);
-    const expectedRoot = join(this.root, safeIdentifier(parsed.runId, "runId"));
-    const path = resolve(parsed.storageReference);
-    if (!path.startsWith(`${expectedRoot}${sep}`)) throw new Error("artifact reference escaped its run root");
+    const { parsed, path } = this.resolveRecord(record);
     const stat = lstatSync(path);
     if (!stat.isFile() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) {
       throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
@@ -124,5 +121,87 @@ export class LocalArtifactStore {
       throw new Error(`artifact integrity check failed: ${parsed.artifactId}`);
     }
     return bytes;
+  }
+
+  /** Verifies the complete artifact while retaining only a bounded prefix. */
+  readVerifiedPrefix(record: ArtifactRecord, maximumBytes: number): { bytes: Buffer; totalBytes: number } {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 0 || maximumBytes > DEFAULT_MAX_ARTIFACT_BYTES) {
+      throw new TypeError("artifact prefix limit is invalid");
+    }
+    const { parsed, path } = this.resolveRecord(record);
+    const fd = openSync(path, "r");
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile() || (process.getuid && stat.uid !== process.getuid())) {
+        throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
+      }
+      const hash = createHash("sha256");
+      const prefix = Buffer.allocUnsafe(Math.min(maximumBytes, parsed.sizeBytes));
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      let offset = 0;
+      let prefixOffset = 0;
+      while (true) {
+        const read = readSync(fd, chunk, 0, chunk.byteLength, offset);
+        if (read === 0) break;
+        hash.update(chunk.subarray(0, read));
+        if (prefixOffset < prefix.byteLength) {
+          const copied = Math.min(read, prefix.byteLength - prefixOffset);
+          chunk.copy(prefix, prefixOffset, 0, copied);
+          prefixOffset += copied;
+        }
+        offset += read;
+      }
+      const digest = `sha256:${hash.digest("hex")}`;
+      if (offset !== parsed.sizeBytes || digest !== parsed.sha256) {
+        throw new Error(`artifact integrity check failed: ${parsed.artifactId}`);
+      }
+      return { bytes: prefix.subarray(0, prefixOffset), totalBytes: offset };
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  /**
+   * Two-pass bounded-memory reader. The first pass verifies immutable bytes;
+   * the second yields small chunks so HTTP backpressure controls allocation.
+   */
+  async *verifiedChunks(record: ArtifactRecord, chunkBytes = 48 * 1024): AsyncGenerator<Buffer> {
+    if (!Number.isSafeInteger(chunkBytes) || chunkBytes < 3 || chunkBytes > 1024 * 1024 || chunkBytes % 3 !== 0) {
+      throw new TypeError("artifact stream chunk size must be a multiple of three between 3 bytes and 1 MiB");
+    }
+    const { parsed, path } = this.resolveRecord(record);
+    const verifyHash = createHash("sha256");
+    let verifiedBytes = 0;
+    for await (const value of createReadStream(path, { highWaterMark: chunkBytes })) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      verifyHash.update(chunk);
+      verifiedBytes += chunk.byteLength;
+    }
+    if (verifiedBytes !== parsed.sizeBytes || `sha256:${verifyHash.digest("hex")}` !== parsed.sha256) {
+      throw new Error(`artifact integrity check failed: ${parsed.artifactId}`);
+    }
+    const emittedHash = createHash("sha256");
+    let emittedBytes = 0;
+    for await (const value of createReadStream(path, { highWaterMark: chunkBytes })) {
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      emittedHash.update(chunk);
+      emittedBytes += chunk.byteLength;
+      yield chunk;
+    }
+    if (emittedBytes !== parsed.sizeBytes || `sha256:${emittedHash.digest("hex")}` !== parsed.sha256) {
+      throw new Error(`artifact changed while streaming: ${parsed.artifactId}`);
+    }
+  }
+
+  private resolveRecord(record: ArtifactRecord): { parsed: ArtifactRecord; path: string } {
+    const parsed = ArtifactRecordSchema.parse(record);
+    const expectedRoot = join(this.root, safeIdentifier(parsed.runId, "runId"));
+    const path = resolve(parsed.storageReference);
+    if (!path.startsWith(`${expectedRoot}${sep}`)) throw new Error("artifact reference escaped its run root");
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) {
+      throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
+    }
+    return { parsed, path };
   }
 }

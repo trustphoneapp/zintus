@@ -30,6 +30,18 @@ export const ApprovalDecisionRecordSchema = z.object({
   decidedAt: TimestampSchema,
 }).strict();
 
+export const GitOperationStatusSchema = z.enum(["STARTED", "SUCCEEDED", "FAILED", "STALE"]);
+
+export type GitOperationStatus = z.infer<typeof GitOperationStatusSchema>;
+
+/** Durable operation fencing: STARTED is an exclusive claim, not replayable. */
+export function canTransitionGitOperationStatus(current: GitOperationStatus, next: GitOperationStatus): boolean {
+  if (current === "STARTED") return next === "SUCCEEDED" || next === "FAILED" || next === "STALE";
+  if (current === "FAILED") return next === "STARTED" || next === "FAILED";
+  if (current === "STALE") return next === "STALE";
+  return current === "SUCCEEDED" && next === "SUCCEEDED";
+}
+
 export const GitOperationRecordSchema = z.object({
   gitOperationId: IdentifierSchema,
   runId: IdentifierSchema,
@@ -40,12 +52,19 @@ export const GitOperationRecordSchema = z.object({
   resultCommitSha: ShaSchema.nullable(),
   approvalId: IdentifierSchema.nullable(),
   evidenceBundleHash: HashSchema.nullable(),
-  status: z.enum(["STARTED", "SUCCEEDED", "FAILED", "STALE"]),
+  status: GitOperationStatusSchema,
   remoteReference: z.string().max(4_000).nullable(),
   startedAt: TimestampSchema,
   completedAt: TimestampSchema.nullable(),
   errorCode: z.string().max(200).nullable(),
 }).strict();
+
+export function hasUnreconciledRemotePublication(operations: readonly GitOperationRecord[]): boolean {
+  return operations.some((operation) =>
+    operation.operationType === "CREATE_BRANCH" ||
+    operation.operationType === "PUSH_COMMIT" ||
+    operation.operationType === "CREATE_PR");
+}
 
 export const FailureRecordSchema = z.object({
   failureId: IdentifierSchema,

@@ -453,6 +453,30 @@ describe("Engineer Supervisor foundation", () => {
     supervisor.close();
   });
 
+  test("durable Git operations reject duplicate active claims and terminal status regression", () => {
+    const supervisor = createSupervisor();
+    supervisor.receiveRequest({ runId: "run-git-fence", userId: "user-1", repository, request: "Publish safely" });
+    const started = {
+      gitOperationId: "git-op-1", runId: "run-git-fence", operationType: "CREATE_BRANCH" as const,
+      requestedBy: "SUPERVISOR" as const, idempotencyKey: "git:branch:run-git-fence",
+      expectedBaseCommitSha: repository.baseCommitSha, resultCommitSha: "b".repeat(40),
+      approvalId: null, evidenceBundleHash: `sha256:${"c".repeat(64)}`,
+      status: "STARTED" as const, remoteReference: null,
+      startedAt: "2026-07-15T12:00:00.000Z", completedAt: null, errorCode: null,
+    };
+    supervisor.recordGitOperation(started);
+    expect(() => supervisor.recordGitOperation(started)).toThrow(IdempotencyConflictError);
+    const succeeded = {
+      ...started, status: "SUCCEEDED" as const, remoteReference: "refs/heads/zintus/run-git-fence",
+      completedAt: "2026-07-15T12:00:01.000Z",
+    };
+    supervisor.recordGitOperation(succeeded);
+    expect(() => supervisor.recordGitOperation({ ...started, startedAt: "2026-07-15T12:00:02.000Z" }))
+      .toThrow(IdempotencyConflictError);
+    expect(supervisor.findGitOperation("run-git-fence", started.idempotencyKey)).toEqual(succeeded);
+    supervisor.close();
+  });
+
   test("agent and executor actor labels cannot directly mutate state at runtime", () => {
     const supervisor = createSupervisor();
     const run = supervisor.receiveRequest({

@@ -1,58 +1,133 @@
 import type { SessionPayload } from "./auth.js";
+import {
+  githubCredentialFromPayload,
+  sealGithubCredential,
+  type GithubTokenPayload,
+  type StoredGithubCredential,
+} from "./github-credential-codec.js";
 
-type GithubEnv = { KV: KVNamespace; GITHUB_CLIENT_ID?: string; GITHUB_CLIENT_SECRET?: string; GITHUB_CALLBACK_URL?: string; RELAY_ENCRYPTION_KEY?: string };
+export type GithubEnv = {
+  KV: KVNamespace;
+  GITHUB_CREDENTIALS: DurableObjectNamespace;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  GITHUB_CALLBACK_URL?: string;
+  RELAY_ENCRYPTION_KEY?: string;
+};
 
-const enc = new TextEncoder();
-async function keyFor(secret: string): Promise<CryptoKey> {
-  const digest = await crypto.subtle.digest("SHA-256", enc.encode(secret));
-  return crypto.subtle.importKey("raw", digest, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+export const GITHUB_REST_API_VERSION = "2026-03-10";
+
+const oauthKey = (state: string) => `github:oauth:${state}`;
+const oauthOwnerKey = (userId: string) => `github:oauth-user:${userId}`;
+
+function credentialStub(env: GithubEnv, userId: string): DurableObjectStub | null {
+  if (!env.GITHUB_CREDENTIALS) return null;
+  return env.GITHUB_CREDENTIALS.get(env.GITHUB_CREDENTIALS.idFromName(userId));
 }
 
-async function seal(value: string, secret: string): Promise<string> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await keyFor(secret), enc.encode(value));
-  const bytes = new Uint8Array(iv.length + ciphertext.byteLength);
-  bytes.set(iv); bytes.set(new Uint8Array(ciphertext), iv.length);
-  return btoa(String.fromCharCode(...bytes));
-}
-
-async function open(value: string, secret: string): Promise<string | null> {
+async function brokerRequest(env: GithubEnv, userId: string, path: string, init?: RequestInit): Promise<Response | null> {
+  const stub = credentialStub(env, userId);
+  if (!stub) return null;
   try {
-    const bytes = Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: bytes.slice(0, 12) }, await keyFor(secret), bytes.slice(12));
-    return new TextDecoder().decode(plaintext);
-  } catch { return null; }
+    return await stub.fetch(new Request(`https://github-credentials.internal${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Zintus-GitHub-User": userId,
+        ...init?.headers,
+      },
+    }));
+  } catch {
+    return null;
+  }
+}
+
+async function installCredential(env: GithubEnv, userId: string, credential: StoredGithubCredential, nowMs: number): Promise<boolean> {
+  if (!env.RELAY_ENCRYPTION_KEY) return false;
+  const sealedCredential = await sealGithubCredential(JSON.stringify(credential), env.RELAY_ENCRYPTION_KEY);
+  const result = await brokerRequest(env, userId, "/install", {
+    method: "POST",
+    body: JSON.stringify({ sealedCredential, nowMs }),
+  });
+  return result?.ok === true;
 }
 
 export function githubConfigured(env: GithubEnv): boolean {
-  return Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET && env.GITHUB_CALLBACK_URL && env.RELAY_ENCRYPTION_KEY);
+  return Boolean(env.GITHUB_CREDENTIALS && env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET && env.GITHUB_CALLBACK_URL && env.RELAY_ENCRYPTION_KEY);
+}
+
+export function githubApiHeaders(accessToken: string): Record<string, string> {
+  return {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${accessToken}`,
+    "X-GitHub-Api-Version": GITHUB_REST_API_VERSION,
+    "User-Agent": "Zintus-Engineer",
+  };
 }
 
 export async function startGithubAuthorization(env: GithubEnv, session: SessionPayload): Promise<string> {
   if (!githubConfigured(env)) throw new Error("GitHub connector is not configured");
   const state = crypto.randomUUID();
-  await env.KV.put(`github:oauth:${state}`, JSON.stringify({ userId: session.user_id, sessionId: session.session_id }), { expirationTtl: 600 });
+  const previousState = await env.KV.get(oauthOwnerKey(session.user_id));
+  if (previousState) await env.KV.delete(oauthKey(previousState));
+  await env.KV.put(oauthKey(state), JSON.stringify({ userId: session.user_id, sessionId: session.session_id }), { expirationTtl: 600 });
+  await env.KV.put(oauthOwnerKey(session.user_id), state, { expirationTtl: 600 });
   const params = new URLSearchParams({ client_id: env.GITHUB_CLIENT_ID!, redirect_uri: env.GITHUB_CALLBACK_URL!, state });
   return `https://github.com/login/oauth/authorize?${params}`;
 }
 
 export async function completeGithubAuthorization(env: GithubEnv, state: string, code: string, sessionId: string): Promise<string | null> {
-  const raw = await env.KV.get(`github:oauth:${state}`);
+  const raw = await env.KV.get(oauthKey(state));
   if (!raw || !githubConfigured(env)) return null;
-  await env.KV.delete(`github:oauth:${state}`);
-  const owner = JSON.parse(raw) as { userId?: string; sessionId?: string };
+  await env.KV.delete(oauthKey(state));
+  let owner: { userId?: string; sessionId?: string };
+  try { owner = JSON.parse(raw) as typeof owner; } catch { return null; }
   if (!owner.userId || !owner.sessionId || owner.sessionId !== sessionId) return null;
-  const response = await fetch("https://github.com/login/oauth/access_token", { method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" }, body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code, redirect_uri: env.GITHUB_CALLBACK_URL }) });
+  if (await env.KV.get(oauthOwnerKey(owner.userId)) === state) await env.KV.delete(oauthOwnerKey(owner.userId));
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code, redirect_uri: env.GITHUB_CALLBACK_URL }),
+  });
   if (!response.ok) return null;
-  const payload = await response.json() as { access_token?: string };
-  if (!payload.access_token) return null;
-  await env.KV.put(`github:token:${owner.userId}`, await seal(payload.access_token, env.RELAY_ENCRYPTION_KEY!), { expirationTtl: 60 * 60 * 24 * 30 });
+  const nowMs = Date.now();
+  const credential = githubCredentialFromPayload(await response.json() as GithubTokenPayload, nowMs);
+  if (!credential) return null;
+  if (!(await installCredential(env, owner.userId, credential, nowMs))) return null;
   return owner.userId;
 }
 
-export async function githubToken(env: GithubEnv, userId: string): Promise<string | null> {
-  const sealed = await env.KV.get(`github:token:${userId}`);
-  return sealed && env.RELAY_ENCRYPTION_KEY ? open(sealed, env.RELAY_ENCRYPTION_KEY) : null;
+export async function githubToken(env: GithubEnv, userId: string, options: { forceRefresh?: boolean; nowMs?: number } = {}): Promise<string | null> {
+  const nowMs = options.nowMs ?? Date.now();
+  const params = new URLSearchParams({ nowMs: String(nowMs) });
+  if (options.forceRefresh) params.set("forceRefresh", "1");
+  const result = await brokerRequest(env, userId, `/token?${params}`);
+  if (!result?.ok) return null;
+  let body: { accessToken?: unknown };
+  try { body = await result.json() as typeof body; } catch { return null; }
+  return typeof body.accessToken === "string" && body.accessToken.length > 0 && body.accessToken.length <= 4_096
+    ? body.accessToken
+    : null;
 }
 
-export async function disconnectGithub(env: GithubEnv, userId: string): Promise<void> { await env.KV.delete(`github:token:${userId}`); }
+export async function githubApiRequest(env: GithubEnv, userId: string, url: string): Promise<Response | null> {
+  const accessToken = await githubToken(env, userId);
+  if (!accessToken) return null;
+  let response = await fetch(url, { headers: githubApiHeaders(accessToken) });
+  if (response.status !== 401) return response;
+  const refreshedToken = await githubToken(env, userId, { forceRefresh: true });
+  if (!refreshedToken || refreshedToken === accessToken) return response;
+  response = await fetch(url, { headers: githubApiHeaders(refreshedToken) });
+  return response;
+}
+
+export async function disconnectGithub(env: GithubEnv, userId: string): Promise<void> {
+  const revoked = await brokerRequest(env, userId, "/disconnect", { method: "POST", body: "{}" });
+  if (!revoked?.ok) throw new Error("GitHub credential revocation failed");
+  const pendingState = await env.KV.get(oauthOwnerKey(userId));
+  await Promise.all([
+    env.KV.delete(`github:token:${userId}`),
+    env.KV.delete(oauthOwnerKey(userId)),
+    ...(pendingState ? [env.KV.delete(oauthKey(pendingState))] : []),
+  ]);
+}
