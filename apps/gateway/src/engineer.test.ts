@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EngineerPlanningCancelledError, EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
+import { BudgetPausedError, EngineerPlanningCancelledError, EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
@@ -167,6 +167,31 @@ describe("Engineer trusted identity and admission", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(planningCalls).toBe(1);
     expect(supervisor.listFailures(run.runId)).toEqual([]);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("does not persist a safe execution budget pause as a red run error", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-safe-budget-error-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const run = supervisor.receiveRequest({
+      runId: "safe-budget-pause", userId: principal.ownerId, repository, request: "Pause safely",
+      budget: { tokenBudget: 0, lifetimeTokenBudget: 1_000 },
+    });
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      execution: {
+        runQueued: async () => { throw new BudgetPausedError(run.runId, "TOKEN_LIMIT_REACHED"); },
+        isActive: () => false,
+        drain: async () => undefined,
+        destroyAll: () => undefined,
+      } as never,
+    });
+    (manager as unknown as { launchExecution(runId: string): void }).launchExecution(run.runId);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await manager.drain();
+    supervisor.setLastError(run.runId, new BudgetPausedError(run.runId, "TOKEN_LIMIT_REACHED").message);
+    expect(manager.get(run.runId).lastError).toBeNull();
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

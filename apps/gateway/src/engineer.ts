@@ -100,7 +100,10 @@ export class EngineerRunManager {
         : this.options.verification?.isActive(runId)
           ? { active: true, role: "VERIFIER" as const, detail: "Independent verification or review is active." }
           : { active: false, role: null, detail: run.state === "PAUSED_BUDGET" ? "Checkpoint retained; no worker is consuming model budget." : "No worker is currently active for this run." };
-    return { run, budget, lastError: this.options.supervisor.getLastError(runId), activity };
+    const durableLastError = this.options.supervisor.getLastError(runId);
+    const legacySafePauseError = run.state === "PAUSED_BUDGET" && durableLastError !== null &&
+      / paused safely: (?:TOKEN_LIMIT_REACHED|COST_LIMIT_REACHED|TIME_LIMIT_REACHED)$/.test(durableLastError);
+    return { run, budget, lastError: legacySafePauseError ? null : durableLastError, activity };
   }
 
   /** One ownership-checked projection for the active UI; individual routes remain for compatibility. */
@@ -357,7 +360,8 @@ export class EngineerRunManager {
         }
       });
     })().catch((error) => {
-      this.persistError(runId, error);
+      if (error instanceof BudgetPausedError) this.clearError(runId);
+      else this.persistError(runId, error);
     });
     this.background.add(job);
     void job.finally(() => this.background.delete(job));

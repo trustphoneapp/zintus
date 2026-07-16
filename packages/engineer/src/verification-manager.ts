@@ -27,7 +27,7 @@ import { TrustedCommandExecutor } from "./trusted-executor.js";
 import { canTransition, isTerminalState } from "./state-machine.js";
 import { derivePostVerificationRiskFeatures } from "./post-verification-risk.js";
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
-import { BudgetPausedError } from "./errors.js";
+import { BudgetPausedError, BuilderModelCallLimitError } from "./errors.js";
 import { TestIntegrityGuard, TestIntegrityViolationError, type TestIntegrityComparison } from "./test-integrity.js";
 import {
   ClaimEvidenceRecordSchema,
@@ -791,6 +791,18 @@ export class EngineerVerificationManager {
   private failClosed(runId: string, error: unknown): void {
     const run = this.options.supervisor.getRun(runId);
     if (isTerminalState(run.state) || run.state === "REVIEW_APPROVED") return;
+    if (error instanceof BuilderModelCallLimitError) {
+      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: this.id(), runId, failureClass: "WORKFLOW_FAILURE",
+        reasonCode: "BUILDER_MODEL_CALL_LIMIT_REACHED",
+        fingerprint: sha256({ reasonCode: "BUILDER_MODEL_CALL_LIMIT_REACHED", limit: error.limit }),
+        evidenceIds: [], retryable: false, createdAt: this.timestamp(),
+      }));
+      if (canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")) {
+        this.transition(runId, "RETRY_BUDGET_EXHAUSTED", "BUILDER_MODEL_CALL_LIMIT_REACHED");
+      }
+      return;
+    }
     if (error instanceof RuntimeBudgetExhaustedError) {
       this.options.supervisor.recordFailure(FailureRecordSchema.parse({
         failureId: this.id(), runId, failureClass: "WORKFLOW_FAILURE",

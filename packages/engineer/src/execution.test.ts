@@ -505,6 +505,48 @@ describe("Phase 2 Codex Builder", () => {
     workspaceManager.remove(workspace);
   });
 
+  test("hands off immediately after executor evidence succeeds for the latest mutation", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "evidence-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-evidence-handoff", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-evidence-handoff", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "evidence-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "pass", stderr: "" }),
+    });
+    let calls = 0;
+    const result = await new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: {
+        async create() {
+          calls += 1;
+          if (calls === 1) return {
+            id: "evidence-write", output: [{
+              type: "function_call", call_id: "evidence-write-call", name: "write_file",
+              arguments: JSON.stringify({ path: "src/value.ts", content: "export const value = 2;\n" }),
+            }],
+          };
+          if (calls === 2) return {
+            id: "evidence-command", output: [{
+              type: "function_call", call_id: "evidence-command-call", name: "run_command",
+              arguments: JSON.stringify({ command: "bun run test" }),
+            }],
+          };
+          throw new Error("a final narrative model call must not be made");
+        },
+      },
+    }).run();
+    expect(calls).toBe(2);
+    expect(result.responseIds).toEqual(["evidence-write", "evidence-command"]);
+    expect(result.implementationSummary).toContain("independent verification is pending");
+    expect(result.changedFiles).toEqual(["src/value.ts"]);
+    workspaceManager.remove(workspace);
+  });
+
   test("resolves every fixed role without cross-tier fallback", () => {
     expect(resolveEngineerModel("BUILDER").model).toBe("gpt-5.6-sol");
     expect(resolveEngineerModel("PLANNER").model).toBe("gpt-5.6-terra");
@@ -692,7 +734,6 @@ describe("Phase 2 authoritative execution worker", () => {
     expect(auditDb.query("SELECT status, retry_count, budget_reservation_id FROM model_calls ORDER BY rowid").all()).toEqual([
       { status: "FAILED", retry_count: 0, budget_reservation_id: expect.any(String) },
       { status: "SUCCEEDED", retry_count: 1, budget_reservation_id: expect.any(String) },
-      { status: "SUCCEEDED", retry_count: 0, budget_reservation_id: expect.any(String) },
       { status: "SUCCEEDED", retry_count: 0, budget_reservation_id: expect.any(String) },
     ]);
     expect((auditDb.query("SELECT COUNT(*) AS count FROM cost_records WHERE source_type = 'MODEL_RESERVATION'").get() as { count: number }).count).toBe(1);
