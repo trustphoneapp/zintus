@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 11;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 12;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -65,6 +65,7 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     manifest_hash TEXT,
     risk_tier TEXT NOT NULL,
     human_gate_required INTEGER NOT NULL CHECK(human_gate_required IN (0, 1)),
+    last_error TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     terminal_at TEXT

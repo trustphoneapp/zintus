@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EngineerPlanningManager, PlanProposalSchema } from "./planning.js";
+import { EngineerPlanningManager, EngineerPlanningTimeoutError, PlanProposalSchema } from "./planning.js";
 import { EngineerSupervisor } from "./supervisor.js";
 import { LocalArtifactStore } from "./artifact-store.js";
 import { ContextManifestContentSchema, contextSourceId } from "./context-contracts.js";
@@ -49,6 +49,32 @@ function seedContext(supervisor: EngineerSupervisor, artifactStore: LocalArtifac
 }
 
 describe("Phase 5 structured planning", () => {
+  test("aborts a stalled planning transport at the configured hard timeout", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-timeout-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const run = supervisor.receiveRequest({
+      runId: "timeout-run", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Plan bounded work.",
+    });
+    seedContext(supervisor, artifactStore, run);
+    let observedAbort = false;
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore, planningTimeoutMs: 5,
+      transportForRun: () => ({ create(_request, options) {
+        return new Promise((_resolve, reject) => options?.signal?.addEventListener("abort", () => {
+          observedAbort = true;
+          reject(options.signal?.reason);
+        }, { once: true }));
+      } }),
+    });
+    await expect(manager.plan(run.runId)).rejects.toBeInstanceOf(EngineerPlanningTimeoutError);
+    expect(observedAbort).toBe(true);
+    expect(supervisor.listFailures(run.runId)).toContainEqual(expect.objectContaining({ reasonCode: "PLANNER_MODEL_CALL_FAILED" }));
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("preserves the immutable source contract while applying only a trusted structured correction", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-corrected-plan-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });

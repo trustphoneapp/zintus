@@ -55,12 +55,25 @@ export type WarmClaimResult =
   | { status: "UNAVAILABLE" }
   | { status: "INVALID" };
 
+/** Execution-provider boundary shared by local Docker and future cloud micro-VM adapters. */
+export interface ISandbox {
+  warmEnabled(): boolean;
+  claimWarmAsync(input: { runId: string; repositoryId: string; repositoryRoot: string; baseCommitSha: string }): Promise<WarmClaimResult>;
+  provisionColdAsync(input: { runId: string; repositoryRoot: string; baseCommitSha: string }): Promise<ProvisionedSandbox>;
+  recoverAsync(input: { workspace: WorkspaceRecord; sandbox: SandboxRecord; resetToHead: boolean }): Promise<ProvisionedSandbox>;
+  destroy(sandbox: ProvisionedSandbox): SandboxRecord;
+  destroyAsync(sandbox: ProvisionedSandbox): Promise<SandboxRecord>;
+  currentCommit(workspace: WorkspaceRecord): string;
+  currentCommitAsync(workspace: WorkspaceRecord): Promise<string>;
+  workspaceManager(): GitWorkspaceManager;
+}
+
 function combined(result: SpawnSyncReturns<string>): string {
   return `${result.stdout ?? ""}${result.stderr ?? ""}`.trim();
 }
 
 /** Cold Docker sandbox provisioning with a run-specific exact-base Git worktree. */
-export class DockerSandboxManager {
+export class DockerSandboxManager implements ISandbox {
   private readonly options: DockerSandboxManagerOptions;
   private readonly dockerRunAsync: NonNullable<DockerSandboxManagerOptions["dockerRunAsync"]>;
 

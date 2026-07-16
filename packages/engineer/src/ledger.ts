@@ -109,6 +109,7 @@ interface RunRow {
   manifest_hash: string | null;
   risk_tier: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   human_gate_required: number;
+  last_error: string | null;
   created_at: string;
   updated_at: string;
   terminal_at: string | null;
@@ -364,6 +365,8 @@ export class EngineerLedger {
     if (!proposalColumns.some((column) => column.name === "planning_analysis_json")) {
       this.db.exec("ALTER TABLE plan_proposals ADD COLUMN planning_analysis_json TEXT");
     }
+    const runColumns = new Set((this.db.query("PRAGMA table_info(engineer_runs)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (!runColumns.has("last_error")) this.db.exec("ALTER TABLE engineer_runs ADD COLUMN last_error TEXT");
     const admissionColumns = new Set((this.db.query("PRAGMA table_info(repository_admissions)").all() as Array<{ name: string }>).map((column) => column.name));
     if (!admissionColumns.has("authorization_expires_at")) this.db.exec("ALTER TABLE repository_admissions ADD COLUMN authorization_expires_at TEXT");
     if (!admissionColumns.has("authorization_generation")) this.db.exec("ALTER TABLE repository_admissions ADD COLUMN authorization_generation INTEGER NOT NULL DEFAULT 1 CHECK(authorization_generation > 0)");
@@ -574,6 +577,17 @@ export class EngineerLedger {
     const row = this.db.query(`${RUN_SELECT} WHERE r.id = ?`).get(runId) as RunRow | null;
     if (!row) throw new EngineerNotFoundError("run", runId);
     return rowToRun(row);
+  }
+
+  getLastError(runId: string): string | null {
+    const row = this.db.query("SELECT last_error FROM engineer_runs WHERE id = ?").get(runId) as { last_error: string | null } | null;
+    if (!row) throw new EngineerNotFoundError("run", runId);
+    return row.last_error;
+  }
+
+  setLastError(runId: string, message: string | null, now: string): void {
+    const result = this.db.query("UPDATE engineer_runs SET last_error = ?, updated_at = ? WHERE id = ?").run(message, now, runId);
+    if (Number(result.changes) !== 1) throw new EngineerNotFoundError("run", runId);
   }
 
   getBudget(runId: string, now: string): EngineerBudgetSnapshot {

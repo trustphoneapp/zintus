@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EngineerSupervisor } from "@zintus/engineer";
+import { EngineerPlanningTimeoutError, EngineerSupervisor } from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
@@ -32,6 +32,45 @@ function preflight(customProbe = probe(), publicationEnabled = false): EngineerC
 }
 
 describe("Engineer trusted identity and admission", () => {
+  test("durably enters planning and persists a retryable pipeline failure across manager restarts", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-durable-planning-error-"));
+    const dbPath = join(root, "engineer.db");
+    const supervisor = new EngineerSupervisor({ dbPath });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    supervisor.receiveRequest({ runId: "durable-plan", userId: principal.ownerId, repository, request: "Plan work" });
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => ({}) } as never,
+      planning: { plan: async () => { throw new Error("planner response was malformed"); } } as never,
+    });
+    await expect(manager.plan(principal, "durable-plan")).rejects.toThrow("planner response was malformed");
+    expect(supervisor.getRun("durable-plan").state).toBe("REPLANNING");
+    expect(supervisor.listEvents("durable-plan").map((event) => event.nextState)).toEqual(["REQUEST_NORMALIZED", "PLANNING", "REPLANNING"]);
+    expect(manager.snapshot(principal, "durable-plan").data.errors).toEqual([]);
+    supervisor.close();
+
+    const reopened = new EngineerSupervisor({ dbPath });
+    const restarted = new EngineerRunManager({ supervisor: reopened, principal, preflight: preflight() });
+    expect(restarted.get("durable-plan").lastError).toBe("planner response was malformed");
+    reopened.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("terminates a timed-out planning attempt with an exact durable event", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-planning-timeout-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    supervisor.receiveRequest({ runId: "timed-plan", userId: principal.ownerId, repository, request: "Plan work" });
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => ({}) } as never,
+      planning: { plan: async () => { throw new EngineerPlanningTimeoutError(120_000); } } as never,
+    });
+    await expect(manager.plan(principal, "timed-plan")).rejects.toBeInstanceOf(EngineerPlanningTimeoutError);
+    expect(manager.get("timed-plan")).toMatchObject({ run: { state: "FAILED" }, lastError: "Evidence planning exceeded the 120000ms execution limit" });
+    expect(supervisor.listEvents("timed-plan").at(-1)).toMatchObject({ nextState: "FAILED", reasonCode: "PLANNING_STEP_TIMED_OUT" });
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("keeps the legacy run list complete while exposing explicit bounded pages", () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-run-list-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });

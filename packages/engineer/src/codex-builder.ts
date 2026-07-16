@@ -18,6 +18,14 @@ export const MAX_BUILDER_MUTATIONS = 50;
 export const MAX_BUILDER_ARGUMENT_BYTES_PER_ROUND = 128 * 1024;
 const BUILDER_TOOL_NAMES = new Set(["list_files", "read_file", "write_file", "run_command", "git_diff"]);
 
+function builderToolFailureFeedback(toolName: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (toolName === "run_command" && /(?:policy|not allowed|prohibited|allowlist|metacharacter|unsupported command)/i.test(message)) {
+    return `Security policy rejected this command: ${message}. Adapt without weakening the policy: use list_files/read_file for repository discovery, or choose an exact command already authorized by the frozen manifest.`;
+  }
+  return message;
+}
+
 const ResponsesFunctionCallSchema = z.object({
   type: z.literal("function_call"),
   call_id: z.string().min(1),
@@ -341,7 +349,7 @@ export class CodexBuilder {
           }
         } catch (error) {
           isError = true;
-          output = error instanceof Error ? error.message : String(error);
+          output = builderToolFailureFeedback(call.name, error);
         }
         input.push({
           type: "function_call_output",

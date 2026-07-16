@@ -21,12 +21,15 @@ import {
   isCancellationAllowed,
   hasUnreconciledRemotePublication,
   sha256,
+  canTransition,
+  EngineerPlanningTimeoutError,
+  FailureRecordSchema,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
 import { previewEngineerArtifact } from "./engineer-artifact-preview.js";
 import type { EngineerCapabilityPreflight, EngineerReadiness } from "./engineer-preflight.js";
 import { redactSecrets } from "@zintus/router";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 export interface EngineerRunManagerOptions {
   supervisor: EngineerSupervisor;
@@ -45,7 +48,6 @@ export interface EngineerRunManagerOptions {
 /** Gateway facade. It exposes no generic state-transition endpoint. */
 export class EngineerRunManager {
   private readonly options: EngineerRunManagerOptions;
-  private readonly errors = new Map<string, string>();
   private readonly background = new Set<Promise<void>>();
   private draining = false;
 
@@ -86,7 +88,7 @@ export class EngineerRunManager {
 
   get(runId: string): { run: EngineerRun; budget: EngineerBudgetSnapshot; lastError: string | null } {
     this.assertOwner(runId, this.options.principal);
-    return { run: this.options.supervisor.getRun(runId), budget: this.options.supervisor.reconcileBudget(runId), lastError: this.errors.get(runId) ?? null };
+    return { run: this.options.supervisor.getRun(runId), budget: this.options.supervisor.reconcileBudget(runId), lastError: this.options.supervisor.getLastError(runId) };
   }
 
   /** One ownership-checked projection for the active UI; individual routes remain for compatibility. */
@@ -105,17 +107,27 @@ export class EngineerRunManager {
         }
       };
       const events = this.options.supervisor.listEvents(runId, Math.max(0, beforeSequence - 500), 500);
+      const reachedImplementation = events.some((event) => [
+        "IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING",
+        "VERIFICATION_RECOVERY", "REVERIFYING",
+      ].includes(event.nextState));
+      const reachedVerification = events.some((event) => [
+        "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE",
+        "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING", "REVIEW_APPROVED",
+        "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING",
+        "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED",
+      ].includes(event.nextState));
       const status = this.get(runId);
       const data = {
         artifacts: section("artifacts", () => this.artifacts(runId), []),
-        claims: section("claims", () => this.claims(runId), []),
-        evidenceBundles: section("evidence", () => this.evidenceBundles(runId), []),
-        tests: section("tests", () => this.tests(runId), []),
-        securityFindings: section("security", () => this.security(runId), []),
+        claims: reachedVerification ? section("claims", () => this.claims(runId), []) : [],
+        evidenceBundles: reachedVerification ? section("evidence", () => this.evidenceBundles(runId), []) : [],
+        tests: reachedVerification ? section("tests", () => this.tests(runId), []) : [],
+        securityFindings: reachedVerification ? section("security", () => this.security(runId), []) : [],
         failures: section("failures", () => this.failures(runId), []),
-        gitOperations: section("publication", () => this.gitOperations(runId), []),
-        diff: section("diff", () => this.diff(runId), ""),
-        approval: section("approval", () => this.approval(runId), null),
+        gitOperations: reachedVerification ? section("publication", () => this.gitOperations(runId), []) : [],
+        diff: reachedImplementation ? section("diff", () => this.diff(runId), "") : "",
+        approval: reachedVerification ? section("approval", () => this.approval(runId), null) : null,
         decisions: section("decisions", () => this.decisions(principal, runId), []),
         errors,
       };
@@ -158,7 +170,7 @@ export class EngineerRunManager {
   }): EngineerRun {
     this.assertOwner(runId, principal);
     const result = this.options.supervisor.resumeBudget({ runId, ...input, actorId: principal.ownerId });
-    this.errors.delete(runId);
+    this.clearError(runId);
     return result.run;
   }
 
@@ -205,10 +217,45 @@ export class EngineerRunManager {
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.context) throw new Error("Engineer context is not configured on this gateway");
     if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
-    await this.options.context.build(runId);
-    const plan = await this.options.planning.plan(runId);
-    this.errors.delete(runId);
-    return plan;
+    this.beginPlanning(runId);
+    this.clearError(runId);
+    const failureCountBefore = this.options.supervisor.listFailures(runId).length;
+    try {
+      await this.options.context.build(runId);
+      const plan = await this.options.planning.plan(runId);
+      this.clearError(runId);
+      return plan;
+    } catch (error) {
+      const message = this.persistError(runId, error);
+      const failures = this.options.supervisor.listFailures(runId);
+      if (failures.length === failureCountBefore) {
+        this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+          failureId: randomUUID(),
+          runId,
+          failureClass: "WORKFLOW_FAILURE",
+          reasonCode: "PLANNING_PIPELINE_FAILED",
+          fingerprint: sha256({ reasonCode: "PLANNING_PIPELINE_FAILED", message }),
+          evidenceIds: [],
+          retryable: !(error instanceof EngineerPlanningTimeoutError),
+          createdAt: new Date().toISOString(),
+        }));
+      }
+      const latestFailure = this.options.supervisor.listFailures(runId).at(-1);
+      const current = this.options.supervisor.getRun(runId);
+      const timedOut = error instanceof EngineerPlanningTimeoutError;
+      const terminalFailure = timedOut || latestFailure?.retryable === false || current.state === "REPLANNING";
+      const nextState = terminalFailure ? "FAILED" : "REPLANNING";
+      if (canTransition(current.state, nextState)) {
+        this.options.supervisor.transition({
+          runId,
+          expectedStateVersion: current.stateVersion,
+          nextState,
+          reasonCode: timedOut ? "PLANNING_STEP_TIMED_OUT" : terminalFailure ? "PLANNING_FAILED" : "PLANNING_RETRY_REQUIRED",
+          idempotencyKey: `gateway:planning-error:${current.stateVersion}:${latestFailure?.fingerprint ?? sha256(message)}`,
+        });
+      }
+      throw error;
+    }
   }
 
   planProposal(runId: string) {
@@ -222,7 +269,7 @@ export class EngineerRunManager {
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
     const run = this.options.execution.enqueue(runId);
-    this.errors.delete(runId);
+    this.clearError(runId);
     const job = (async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       if (this.draining) throw new Error("Engineer gateway is draining");
@@ -234,7 +281,7 @@ export class EngineerRunManager {
         }
       });
     })().catch((error) => {
-      this.errors.set(runId, redactSecrets(error instanceof Error ? error.message : String(error)));
+      this.persistError(runId, error);
     });
     this.background.add(job);
     void job.finally(() => this.background.delete(job));
@@ -682,14 +729,42 @@ export class EngineerRunManager {
       } else {
         try {
           plan = await this.options.planning.plan(runId);
-          this.errors.delete(runId);
+          this.clearError(runId);
         } catch (error) {
           planningError = redactSecrets(error instanceof Error ? error.message : String(error));
-          this.errors.set(runId, planningError);
+          this.options.supervisor.setLastError(runId, planningError);
         }
       }
     }
     return { resolution, plan, planningError };
+  }
+
+  private beginPlanning(runId: string): void {
+    let run = this.options.supervisor.getRun(runId);
+    if (run.state !== "REQUEST_RECEIVED") return;
+    run = this.options.supervisor.normalizeRequest({
+      runId,
+      expectedStateVersion: run.stateVersion,
+      normalizedRequest: run.requestOriginal,
+      idempotencyKey: `gateway:planning-normalize:${sha256(run.requestOriginal)}`,
+    }).run;
+    this.options.supervisor.transition({
+      runId,
+      expectedStateVersion: run.stateVersion,
+      nextState: "PLANNING",
+      reasonCode: "EVIDENCE_PLANNING_STARTED",
+      idempotencyKey: `gateway:planning-start:${run.stateVersion}`,
+    });
+  }
+
+  private persistError(runId: string, error: unknown): string {
+    const message = redactSecrets(error instanceof Error ? error.message : String(error));
+    this.options.supervisor.setLastError(runId, message);
+    return message;
+  }
+
+  private clearError(runId: string): void {
+    this.options.supervisor.setLastError(runId, null);
   }
 
   diff(runId: string) {

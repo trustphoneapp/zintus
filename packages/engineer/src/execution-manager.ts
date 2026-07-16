@@ -7,7 +7,7 @@ import {
 import type { LocalArtifactStore } from "./artifact-store.js";
 import type { CodexBuilderOptions, ResponsesTransport } from "./codex-builder.js";
 import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder } from "./codex-builder.js";
-import type { DockerSandboxManager, ProvisionedSandbox } from "./sandbox-manager.js";
+import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import { TrustedCommandExecutor } from "./trusted-executor.js";
 import { resolveEngineerModel } from "./model-routing.js";
@@ -27,7 +27,7 @@ const PHASE2_RECOVERABLE_STATES = new Set([
 
 export interface EngineerExecutionManagerOptions {
   supervisor: EngineerSupervisor;
-  sandboxManager: DockerSandboxManager;
+  sandboxManager: ISandbox;
   artifactStore: LocalArtifactStore;
   repositoryRootFor: (repositoryId: string) => string;
   transportForRun: (runId: string) => ResponsesTransport | Promise<ResponsesTransport>;

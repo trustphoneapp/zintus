@@ -38,7 +38,9 @@ describe("Engineer database schema", () => {
     const admissionColumns = new Set((db.query("PRAGMA table_info(repository_admissions)").all() as Array<{ name: string }>).map((row) => row.name));
     expect(admissionColumns.has("authorization_expires_at")).toBe(true);
     expect(admissionColumns.has("authorization_generation")).toBe(true);
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(11);
+    const runColumns = new Set((db.query("PRAGMA table_info(engineer_runs)").all() as Array<{ name: string }>).map((row) => row.name));
+    expect(runColumns.has("last_error")).toBe(true);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(12);
     db.close();
   });
 });

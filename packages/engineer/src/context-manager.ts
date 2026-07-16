@@ -32,7 +32,9 @@ export class EngineerContextManager {
     const replay = this.options.supervisor.latestContextSnapshot(runId);
     if (replay) return replay;
     const run = this.options.supervisor.getRun(runId);
-    if (run.state !== "REQUEST_RECEIVED") throw new Error(`context build requires REQUEST_RECEIVED, not ${run.state}`);
+    if (run.state !== "REQUEST_RECEIVED" && run.state !== "PLANNING") {
+      throw new Error(`context build requires REQUEST_RECEIVED or PLANNING, not ${run.state}`);
+    }
     const manifest = await this.options.contextEngine.build({
       runId,
       repositoryId: run.repository.repositoryId,

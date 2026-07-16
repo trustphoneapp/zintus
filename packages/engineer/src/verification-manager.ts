@@ -15,7 +15,7 @@ import type { LocalArtifactStore } from "./artifact-store.js";
 import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, type ResponsesTransport } from "./codex-builder.js";
 import type { AgentExecutionRecord, ArtifactRecord, SandboxRecord } from "./execution-contracts.js";
 import type { EngineerExecutionManager } from "./execution-manager.js";
-import type { DockerSandboxManager, ProvisionedSandbox } from "./sandbox-manager.js";
+import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import { sha256 } from "./hash.js";
 import { IndependentVerifier, IndependentVerificationFailure, StableRequiredTestFailure } from "./independent-verifier.js";
 import { IsolatedReviewer, REVIEWER_POLICY_VERSION } from "./isolated-reviewer.js";
@@ -50,7 +50,7 @@ export function reviewerClaimEvidenceId(input: {
 export interface EngineerVerificationManagerOptions {
   supervisor: EngineerSupervisor;
   executionManager: EngineerExecutionManager;
-  sandboxManager: DockerSandboxManager;
+  sandboxManager: ISandbox;
   artifactStore: LocalArtifactStore;
   transportForRole: (runId: string, role: "BUILDER" | "TESTER" | "SECURITY" | "REVIEWER") =>
     ResponsesTransport | Promise<ResponsesTransport>;

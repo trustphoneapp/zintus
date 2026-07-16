@@ -667,7 +667,9 @@ export class EngineerSupervisor {
   recordContextSnapshot(snapshot: StoredContextSnapshot): StoredContextSnapshot {
     const parsed = StoredContextSnapshotSchema.parse(snapshot);
     const run = this.ledger.getRun(parsed.manifest.runId);
-    if (run.state !== "REQUEST_RECEIVED") throw new InvalidTransitionError("context may only be recorded before planning");
+    if (run.state !== "REQUEST_RECEIVED" && run.state !== "PLANNING") {
+      throw new InvalidTransitionError("context may only be recorded before or during planning");
+    }
     if (parsed.manifest.repositoryId !== run.repository.repositoryId ||
         parsed.manifest.baseCommitSha.toLowerCase() !== run.repository.baseCommitSha.toLowerCase() ||
         parsed.manifest.requestHash !== sha256(run.requestOriginal)) {
@@ -1013,6 +1015,14 @@ export class EngineerSupervisor {
 
   listFailures(runId: string): FailureRecord[] {
     return this.ledger.listFailures(runId);
+  }
+
+  getLastError(runId: string): string | null {
+    return this.ledger.getLastError(runId);
+  }
+
+  setLastError(runId: string, message: string | null): void {
+    this.ledger.setLastError(runId, message, this.timestamp());
   }
 
   close(): void {
