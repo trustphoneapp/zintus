@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BudgetPausedError, EngineerPlanningCancelledError, EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
+import { BudgetPausedError, EngineerPlanningCancelledError, EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore, type EngineerRun } from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
@@ -32,6 +32,38 @@ function preflight(customProbe = probe(), publicationEnabled = false): EngineerC
 }
 
 describe("Engineer trusted identity and admission", () => {
+  test("keeps hash-bound human review available after canonical admission advances", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const now = "2026-07-16T12:00:00.000Z";
+    let run: EngineerRun = {
+      runId: "stale-human-review", userId: principal.ownerId, repository,
+      requestOriginal: "Review verified work", requestNormalized: "Review verified work",
+      state: "HUMAN_REVIEW_REQUIRED", stateVersion: 7, manifestHash: `sha256:${"a".repeat(64)}`,
+      riskTier: "MEDIUM", humanGateRequired: true, createdAt: now, updatedAt: now, terminalAt: null,
+    };
+    let admissionChecks = 0;
+    const supervisor = {
+      getRun: () => run,
+      listEvidenceBundles: () => [{ evidenceBundleId: "bundle-1" }],
+      transition: (input: { nextState: "REVIEW_APPROVED" }) => {
+        run = { ...run, state: input.nextState, stateVersion: run.stateVersion + 1 };
+        return { run };
+      },
+    } as never;
+    const manager = new EngineerRunManager({
+      supervisor,
+      principal,
+      preflight: {
+        assertRunAdmission: async () => { admissionChecks += 1; throw new Error("stale canonical admission"); },
+      } as never,
+    });
+
+    const result = await manager.resolveHumanReview(principal, run.runId, "approve", "Verified evidence reviewed.");
+
+    expect(result).toMatchObject({ run: { state: "REVIEW_APPROVED", stateVersion: 8 }, publication: null });
+    expect(admissionChecks).toBe(0);
+  });
+
   test("keeps owned cancellation available when repository admission becomes stale", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-stale-cancel-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });

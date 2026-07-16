@@ -888,7 +888,10 @@ export class EngineerRunManager {
   async resolveHumanReview(principal: EngineerPrincipal, runId: string, decision: "approve" | "reject", reason: string) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    // This is a control-plane decision over the immutable, hash-bound review
+    // evidence already produced for the run. It must remain available when the
+    // canonical branch advances after verification. Any configured publication
+    // path performs its own current-base checks before a remote mutation.
     const run = this.options.supervisor.getRun(runId);
     if (run.state !== "HUMAN_REVIEW_REQUIRED") throw new Error(`human review requires HUMAN_REVIEW_REQUIRED, not ${run.state}`);
     const bundle = this.options.supervisor.listEvidenceBundles(runId).at(-1);
