@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EngineerPlanningManager, EngineerPlanningTimeoutError, PlanProposalSchema } from "./planning.js";
+import { EngineerPlanningCancelledError, EngineerPlanningManager, EngineerPlanningTimeoutError, PlanProposalSchema } from "./planning.js";
 import { EngineerSupervisor } from "./supervisor.js";
 import { LocalArtifactStore } from "./artifact-store.js";
 import { ContextManifestContentSchema, contextSourceId } from "./context-contracts.js";
@@ -72,6 +72,35 @@ describe("Phase 5 structured planning", () => {
     await expect(manager.plan(run.runId)).rejects.toBeInstanceOf(EngineerPlanningTimeoutError);
     expect(observedAbort).toBe(true);
     expect(supervisor.listFailures(run.runId)).toContainEqual(expect.objectContaining({ reasonCode: "PLANNER_MODEL_CALL_FAILED" }));
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("aborts an active planner on user cancellation without recording a workflow failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-cancel-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const run = supervisor.receiveRequest({
+      runId: "cancel-plan", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Plan bounded work.",
+    });
+    seedContext(supervisor, artifactStore, run);
+    let signalReady!: () => void;
+    const ready = new Promise<void>((resolve) => { signalReady = resolve; });
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ create(_request, options) {
+        signalReady();
+        return new Promise((_resolve, reject) => options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true }));
+      } }),
+    });
+    const cancellation = new AbortController();
+    const planning = manager.plan(run.runId, cancellation.signal);
+    await ready;
+    cancellation.abort();
+    await expect(planning).rejects.toBeInstanceOf(EngineerPlanningCancelledError);
+    expect(supervisor.listFailures(run.runId)).toEqual([]);
+    expect(supervisor.getBudget(run.runId).reserved).toEqual({ costUsd: 0, tokens: 0 });
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

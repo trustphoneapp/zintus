@@ -72,6 +72,8 @@
 .engineer-tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: .5px solid var(--c-border); }
 .engineer-tabs button { border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--color-text-muted); padding: 10px 14px; text-transform: capitalize; cursor: pointer; }
 .engineer-tabs button.active { color: var(--color-text); border-bottom-color: var(--engineer-ink); }
+.engineer-stage-availability { margin: -4px 0 16px; color: var(--color-text-muted); font-size: 13px; line-height: 1.5; }
+.engineer-stage-availability strong { color: var(--color-text); }
 .engineer-timeline { display: grid; margin-top: 18px; }
 .engineer-event { display: grid; grid-template-columns: 12px 72px 1fr; gap: 10px; min-height: 52px; position: relative; }
 .engineer-event > span { width: 8px; height: 8px; margin-top: 5px; border-radius: 50%; background: var(--engineer-ink); box-shadow: 0 0 0 4px var(--engineer-soft); }

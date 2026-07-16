@@ -22,6 +22,7 @@ import {
   hasUnreconciledRemotePublication,
   sha256,
   canTransition,
+  EngineerPlanningCancelledError,
   EngineerPlanningTimeoutError,
   FailureRecordSchema,
 } from "@zintus/engineer";
@@ -49,6 +50,7 @@ export interface EngineerRunManagerOptions {
 export class EngineerRunManager {
   private readonly options: EngineerRunManagerOptions;
   private readonly background = new Set<Promise<void>>();
+  private readonly activePlanning = new Map<string, AbortController>();
   private draining = false;
 
   constructor(options: EngineerRunManagerOptions) {
@@ -217,15 +219,23 @@ export class EngineerRunManager {
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.context) throw new Error("Engineer context is not configured on this gateway");
     if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
+    if (this.activePlanning.has(runId)) throw new Error("Evidence planning is already active for this run");
+    const cancellation = new AbortController();
+    this.activePlanning.set(runId, cancellation);
     this.beginPlanning(runId);
     this.clearError(runId);
     const failureCountBefore = this.options.supervisor.listFailures(runId).length;
     try {
       await this.options.context.build(runId);
-      const plan = await this.options.planning.plan(runId);
+      if (cancellation.signal.aborted) throw new EngineerPlanningCancelledError();
+      const plan = await this.options.planning.plan(runId, cancellation.signal);
       this.clearError(runId);
       return plan;
     } catch (error) {
+      if (cancellation.signal.aborted || error instanceof EngineerPlanningCancelledError) {
+        this.clearError(runId);
+        throw error instanceof EngineerPlanningCancelledError ? error : new EngineerPlanningCancelledError();
+      }
       const message = this.persistError(runId, error);
       const failures = this.options.supervisor.listFailures(runId);
       if (failures.length === failureCountBefore) {
@@ -255,6 +265,8 @@ export class EngineerRunManager {
         });
       }
       throw error;
+    } finally {
+      if (this.activePlanning.get(runId) === cancellation) this.activePlanning.delete(runId);
     }
   }
 
@@ -840,6 +852,7 @@ export class EngineerRunManager {
   async cancel(principal: EngineerPrincipal, runId: string, reason: string): Promise<void> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.activePlanning.get(runId)?.abort(new EngineerPlanningCancelledError());
     // Cancellation is a fail-safe control, not a new execution admission.
     // A run must remain stoppable after its base becomes stale or a connector
     // grant is revoked; ownership and publication cleanup fences still apply.

@@ -173,6 +173,7 @@ export default function EngineerPage() {
   const [tab, setTab] = useState<"timeline" | "diff" | "evidence">("timeline");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [managerError, setManagerError] = useState<string | null>(null);
   const [gatewayToken, setGatewayToken] = useState("");
@@ -191,6 +192,8 @@ export default function EngineerPage() {
   const [customBudget, setCustomBudget] = useState<EngineerBudgetLimits>(DEFAULT_BUDGET);
   const [topUp, setTopUp] = useState(TOP_UP_DEFAULTS);
   const abortRef = useRef<AbortController | null>(null);
+  const planningRequestRef = useRef<AbortController | null>(null);
+  const cancellationRequestedRef = useRef(false);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRunIdRef = useRef<string | null>(null);
 
@@ -213,7 +216,7 @@ export default function EngineerPage() {
     if (nextBudget) setBudget((current) => !current || current.runId !== runId || nextBudget.revision >= current.revision ? nextBudget : current);
   }, []);
 
-  useEffect(() => () => { abortRef.current?.abort(); if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); }, []);
+  useEffect(() => () => { abortRef.current?.abort(); planningRequestRef.current?.abort(); if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); }, []);
 
   const watch = useCallback((runId: string, afterSequence = 0) => {
     abortRef.current?.abort();
@@ -339,29 +342,37 @@ export default function EngineerPage() {
   const submit = async () => {
     if (!request.trim() || !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(repository.baseCommitSha)) return;
     setBusy(true); setError(null);
+    cancellationRequestedRef.current = false;
     try {
       const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
       const created = await createEngineerRun({ repository, request: request.trim(), budget: selectedBudget });
       activeRunIdRef.current = created.runId;
       setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
       watch(created.runId);
-      const proposal = await planEngineerRun(created.runId);
+      const planningRequest = new AbortController();
+      planningRequestRef.current = planningRequest;
+      const proposal = await planEngineerRun(created.runId, planningRequest.signal);
       setPlan(proposal);
       await refresh(created.runId);
     } catch (cause) {
       if (activeRunIdRef.current) await refresh(activeRunIdRef.current).catch(() => undefined);
-      setError(cause instanceof Error ? cause.message : "Unable to create Engineer run");
+      if (!cancellationRequestedRef.current && (cause as { name?: string })?.name !== "AbortError") {
+        setError(cause instanceof Error ? cause.message : "Unable to create Engineer run");
+      }
     }
-    finally { setBusy(false); }
+    finally { planningRequestRef.current = null; setBusy(false); }
   };
 
   const retryPlanning = async () => {
     if (!run) return;
     setBusy(true); setError(null); setManagerError(null);
+    cancellationRequestedRef.current = false;
     watch(run.runId, events.at(-1)?.sequence ?? 0);
-    try { const proposal = await planEngineerRun(run.runId); setPlan(proposal); await refresh(run.runId); }
-    catch (cause) { await refresh(run.runId).catch(() => undefined); setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
-    finally { setBusy(false); }
+    const planningRequest = new AbortController();
+    planningRequestRef.current = planningRequest;
+    try { const proposal = await planEngineerRun(run.runId, planningRequest.signal); setPlan(proposal); await refresh(run.runId); }
+    catch (cause) { await refresh(run.runId).catch(() => undefined); if (!cancellationRequestedRef.current && (cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
+    finally { planningRequestRef.current = null; setBusy(false); }
   };
 
   const downloadEvidence = async () => {
@@ -438,10 +449,15 @@ export default function EngineerPage() {
 
   const decide = async (action: "approve" | "request-changes" | "reject" | "cancel") => {
     if (!run) return;
+    if (action === "cancel") {
+      cancellationRequestedRef.current = true;
+      planningRequestRef.current?.abort();
+      setCancelling(true);
+    }
     setBusy(true); setError(null);
     try { await engineerDecision(run.runId, action, reason.trim() || `${action} from Zintus Engineer`); setReason(""); await refresh(run.runId); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Decision failed"); }
-    finally { setBusy(false); }
+    finally { setBusy(false); setCancelling(false); }
   };
 
   const extendApproval = async () => {
@@ -616,6 +632,7 @@ export default function EngineerPage() {
       </section> : null}
       {data?.errors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {data.errors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
       <nav className="engineer-tabs" aria-label="Engineer run views">{visibleTabs.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
+      {!reachedImplementation ? <p className="engineer-stage-availability"><strong>Nothing is missing.</strong> Diff appears after implementation changes a file. Evidence appears after tests and independent verification. No implementation change has been recorded for this run yet.</p> : !reachedVerification ? <p className="engineer-stage-availability">Evidence appears after tests and independent verification begin.</p> : null}
       {busy && ["REQUEST_RECEIVED", "REQUEST_NORMALIZED", "PLANNING", "REPLANNING"].includes(latestState) ? <section className="engineer-card engineer-gate" role="status"><div><span className="engineer-kicker">Planning in progress</span><h2>Creating the evidence plan</h2><p>The durable timeline records this step. Planning is automatically aborted if it exceeds two minutes.</p></div><button className="engineer-primary" disabled>Planning…</button></section> : null}
       {!busy && ["PLANNING", "REPLANNING"].includes(latestState) && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The exact failure is recorded below. The durable run and prior human answers remain intact.</p></div><button className="engineer-primary" onClick={() => void retryPlanning()}>Retry planning</button></section> : null}
       {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{busy ? "Starting…" : "Start frozen plan"}</button></section> : null}
@@ -633,9 +650,9 @@ export default function EngineerPage() {
       {CORRECTABLE_TERMINAL_STATES.has(latestState) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{busy ? "Creating…" : "Create corrected run"}</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
-      {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" && !NON_CANCELLABLE_PUBLICATION_STATES.has(latestState) ? <button className="engineer-cancel" disabled={busy} onClick={() => void decide("cancel")}>Cancel run</button> : null}
+      {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" && !NON_CANCELLABLE_PUBLICATION_STATES.has(latestState) ? <button className="engineer-cancel" disabled={cancelling} onClick={() => void decide("cancel")}>{cancelling ? "Cancelling…" : "Cancel run"}</button> : null}
       {error ? <p className="engineer-error">{error}</p> : null}
-      {managerError ? <p className="engineer-error">{managerError}</p> : null}
+      {managerError && managerError !== error ? <p className="engineer-error">{managerError}</p> : null}
     </main>
   );
 }

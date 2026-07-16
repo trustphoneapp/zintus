@@ -39,6 +39,13 @@ export class EngineerPlanningTimeoutError extends Error {
   }
 }
 
+export class EngineerPlanningCancelledError extends Error {
+  constructor() {
+    super("Evidence planning was cancelled by the user");
+    this.name = "EngineerPlanningCancelledError";
+  }
+}
+
 export function planProposalContentHash(input: {
   manifest: z.infer<typeof TaskManifestContentSchema>;
   planningAnalysis: z.infer<typeof PlanningAnalysisSchema>;
@@ -213,7 +220,8 @@ export class EngineerPlanningManager {
   private readonly options: EngineerPlanningManagerOptions;
   constructor(options: EngineerPlanningManagerOptions) { this.options = options; }
 
-  async plan(runId: string): Promise<PlanProposal> {
+  async plan(runId: string, cancellationSignal?: AbortSignal): Promise<PlanProposal> {
+    if (cancellationSignal?.aborted) throw new EngineerPlanningCancelledError();
     const run = this.options.supervisor.getRun(runId);
     if (!["REQUEST_RECEIVED", "PLANNING", "REPLANNING"].includes(run.state)) {
       throw new Error(`planning requires REQUEST_RECEIVED, PLANNING, or REPLANNING, not ${run.state}`);
@@ -365,6 +373,9 @@ export class EngineerPlanningManager {
     });
     const timeoutMs = this.options.planningTimeoutMs ?? DEFAULT_PLANNING_TIMEOUT_MS;
     const abortController = new AbortController();
+    const cancelPlanning = () => abortController.abort(new EngineerPlanningCancelledError());
+    if (cancellationSignal?.aborted) cancelPlanning();
+    else cancellationSignal?.addEventListener("abort", cancelPlanning, { once: true });
     const timeout = setTimeout(() => abortController.abort(new EngineerPlanningTimeoutError(timeoutMs)), timeoutMs);
     let response;
     try {
@@ -372,12 +383,15 @@ export class EngineerPlanningManager {
     } catch (error) {
       if (abortController.signal.aborted) {
         const reason = abortController.signal.reason;
+        if (reason instanceof EngineerPlanningCancelledError) throw reason;
         throw reason instanceof EngineerPlanningTimeoutError ? reason : new EngineerPlanningTimeoutError(timeoutMs);
       }
       throw error;
     } finally {
       clearTimeout(timeout);
+      cancellationSignal?.removeEventListener("abort", cancelPlanning);
     }
+    if (cancellationSignal?.aborted) throw new EngineerPlanningCancelledError();
     this.options.supervisor.recordModelCall({ modelCallId: this.id(), runId, agentExecutionId: agentId, logicalTier: route.logicalTier, resolvedModel: route.model, promptTemplateVersion: PLANNER_POLICY_VERSION, inputContextRefs: [inputHash, response.id], outputSchemaVersion: "plan-proposal-v2", cacheKey, cacheHit: (response.usage?.input_tokens_details?.cached_tokens ?? 0) > 0, latencyMs: Math.max(0, Date.now() - callStarted), inputTokens: response.usage?.input_tokens ?? null, outputTokens: response.usage?.output_tokens ?? null, cachedInputTokens: response.usage?.input_tokens_details?.cached_tokens ?? 0, cacheWriteInputTokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0, retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp() }, reservationId);
     modelCallRecorded = true;
     failureStage = "STRUCTURED_OUTPUT";
@@ -500,18 +514,21 @@ export class EngineerPlanningManager {
     return proposal;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const cancelled = error instanceof EngineerPlanningCancelledError;
       const failure = error instanceof RuntimeBudgetExhaustedError
         ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }
         : this.classifyFailure(failureStage);
-      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
-        failureId: this.id(), runId,
-        failureClass: failure.failureClass,
-        reasonCode: failure.reasonCode,
-        fingerprint: sha256({ failureClass: failure.failureClass, reasonCode: failure.reasonCode, message }),
-        evidenceIds: [], retryable: failure.retryable, createdAt: this.timestamp(),
-      }));
+      if (!cancelled) {
+        this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+          failureId: this.id(), runId,
+          failureClass: failure.failureClass,
+          reasonCode: failure.reasonCode,
+          fingerprint: sha256({ failureClass: failure.failureClass, reasonCode: failure.reasonCode, message }),
+          evidenceIds: [], retryable: failure.retryable, createdAt: this.timestamp(),
+        }));
+      }
       if (!modelCallRecorded && reservationId) {
-        this.options.supervisor.recordModelCall({ modelCallId: this.id(), runId, agentExecutionId: agentId, logicalTier: route.logicalTier, resolvedModel: route.model, promptTemplateVersion: PLANNER_POLICY_VERSION, inputContextRefs: [inputHash], outputSchemaVersion: "plan-proposal-v2", cacheKey, cacheHit: null, latencyMs: Math.max(0, Date.now() - callStarted), inputTokens: null, outputTokens: null, retryCount: 0, status: "FAILED", createdAt: this.timestamp() }, reservationId);
+        this.options.supervisor.recordModelCall({ modelCallId: this.id(), runId, agentExecutionId: agentId, logicalTier: route.logicalTier, resolvedModel: route.model, promptTemplateVersion: PLANNER_POLICY_VERSION, inputContextRefs: [inputHash], outputSchemaVersion: "plan-proposal-v2", cacheKey, cacheHit: null, latencyMs: Math.max(0, Date.now() - callStarted), inputTokens: cancelled ? 0 : null, outputTokens: cancelled ? 0 : null, retryCount: 0, status: "FAILED", createdAt: this.timestamp() }, reservationId);
       }
       this.options.supervisor.recordAgentExecution({ agentExecutionId: agentId, runId, role: "PLANNER", modelTier: route.logicalTier, status: "FAILED", inputHash, outputArtifactId: null, startedAt, completedAt: this.timestamp() });
       if (error instanceof RuntimeBudgetExhaustedError) {

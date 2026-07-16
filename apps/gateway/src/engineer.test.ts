@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
+import { EngineerPlanningCancelledError, EngineerPlanningTimeoutError, EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
@@ -66,6 +66,31 @@ describe("Engineer trusted identity and admission", () => {
     await manager.cancel(principal, run.runId, "Resume interrupted cleanup.");
     expect(supervisor.getRun(run.runId).state).toBe("CANCELLED");
     expect(supervisor.listEvents(run.runId).at(-1)).toMatchObject({ nextState: "CANCELLED", reasonCode: "RUN_CLEANUP_COMPLETE" });
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("cancels an active planning request instead of disabling the stop path", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-active-plan-cancel-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    supervisor.receiveRequest({ runId: "active-plan-cancel", userId: principal.ownerId, repository, request: "Plan then stop" });
+    let signalReady!: () => void;
+    const ready = new Promise<void>((resolve) => { signalReady = resolve; });
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
+      context: { build: async () => ({}) } as never,
+      planning: { plan: (_runId: string, signal?: AbortSignal) => {
+        signalReady();
+        return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      } } as never,
+    });
+    const planning = manager.plan(principal, "active-plan-cancel");
+    await ready;
+    await manager.cancel(principal, "active-plan-cancel", "Stop during planning");
+    await expect(planning).rejects.toBeInstanceOf(EngineerPlanningCancelledError);
+    expect(manager.get("active-plan-cancel")).toMatchObject({ run: { state: "CANCELLED" }, lastError: null });
+    expect(supervisor.listFailures("active-plan-cancel")).toEqual([]);
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

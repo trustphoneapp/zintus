@@ -90,7 +90,7 @@ export async function createEngineerRun(input: { repository: EngineerRepository;
 }
 export async function getEngineerRepository(): Promise<EngineerRepository> { return (await request<{ repository: EngineerRepository }>("/v1/engineer/repository")).repository; }
 export async function getEngineerObservability(): Promise<EngineerObservability> { return (await request<{ snapshot: EngineerObservability }>("/v1/engineer/observability")).snapshot; }
-export async function planEngineerRun(runId: string): Promise<PlanProposal> { return (await request<{ plan: PlanProposal }>(`/v1/engineer/runs/${runId}/plan`, { method: "POST" })).plan; }
+export async function planEngineerRun(runId: string, signal?: AbortSignal): Promise<PlanProposal> { return (await request<{ plan: PlanProposal }>(`/v1/engineer/runs/${runId}/plan`, { method: "POST", signal })).plan; }
 export async function getEngineerPlan(runId: string): Promise<PlanProposal | null> { return (await request<{ plan: PlanProposal | null }>(`/v1/engineer/runs/${runId}/plan`)).plan; }
 export async function freezeEngineerPlan(run: EngineerRun, manifest: EngineerManifest): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${run.runId}/freeze-plan`, { method: "POST", body: JSON.stringify({ expectedStateVersion: run.stateVersion, manifest, idempotencyKey: `ui:freeze:${run.runId}:${manifest.manifestVersion}` }) })).run; }
 export async function startEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST" })).run; }
