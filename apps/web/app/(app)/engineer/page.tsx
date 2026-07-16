@@ -10,8 +10,6 @@ import {
   freezeEngineerPlan,
   getEngineerEvidenceStream,
   getEngineerArtifactPreview,
-  getEngineerData,
-  getEngineerBudget,
   getEngineerLiveSummary,
   getEngineerPlan,
   getEngineerRepository,
@@ -42,7 +40,7 @@ import { clearEphemeralGatewayToken, fetchGatewayConnection, setEphemeralGateway
 import { estimateEngineerCost, formatUsd } from "@/lib/engineer-cost";
 import { downloadBlob } from "@/lib/download";
 
-type EvidenceData = Awaited<ReturnType<typeof getEngineerData>>;
+type EvidenceData = Awaited<ReturnType<typeof getEngineerSnapshot>>["data"];
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
 const RUN_STORAGE_KEY = "zintus-engineer-active-run";
 const NON_CANCELLABLE_PUBLICATION_STATES = new Set(["PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "PR_CREATION_FAILED", "BASE_BRANCH_STALE"]);
@@ -346,18 +344,23 @@ export default function EngineerPage() {
       const created = await createEngineerRun({ repository, request: request.trim(), budget: selectedBudget });
       activeRunIdRef.current = created.runId;
       setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
+      watch(created.runId);
       const proposal = await planEngineerRun(created.runId);
       setPlan(proposal);
-      const [status, nextData, createdBudget] = await Promise.all([getEngineerRunStatus(created.runId), getEngineerData(created.runId), getEngineerBudget(created.runId).catch(() => null)]); setRun(status.run); setData(nextData); setBudget(createdBudget); setManagerError(status.lastError);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create Engineer run"); }
+      await refresh(created.runId);
+    } catch (cause) {
+      if (activeRunIdRef.current) await refresh(activeRunIdRef.current).catch(() => undefined);
+      setError(cause instanceof Error ? cause.message : "Unable to create Engineer run");
+    }
     finally { setBusy(false); }
   };
 
   const retryPlanning = async () => {
     if (!run) return;
     setBusy(true); setError(null); setManagerError(null);
-    try { const proposal = await planEngineerRun(run.runId); setPlan(proposal); const [status, nextData] = await Promise.all([getEngineerRunStatus(run.runId), getEngineerData(run.runId)]); setRun(status.run); setData(nextData); setManagerError(status.lastError); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
+    watch(run.runId, events.at(-1)?.sequence ?? 0);
+    try { const proposal = await planEngineerRun(run.runId); setPlan(proposal); await refresh(run.runId); }
+    catch (cause) { await refresh(run.runId).catch(() => undefined); setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
     finally { setBusy(false); }
   };
 
