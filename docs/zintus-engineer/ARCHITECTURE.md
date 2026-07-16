@@ -71,6 +71,15 @@ then gives Codex only strict manifest-scoped file and command-request functions.
 No shell, Git mutation, PR, merge, deployment, secret, or generic state-transition
 capability is exposed to the model.
 
+Reasoning-heavy Builder transport uses the official SDK's ten-minute request
+bound while the outer workflow remains subject to Zintus stage, run, cost, token,
+and cancellation limits. A provider timeout is not replayed automatically because
+the remote request may still be running. The run enters
+`MODEL_PROVIDER_RETRY_PENDING`, retains its frozen manifest, original trusted test
+baseline, and workspace checkpoint, and exposes a bounded human-authorized retry.
+Other transient provider failures use capped exponential backoff with full jitter
+under the durable retry policy.
+
 The command executor independently checks the frozen command allowlist and a narrow
 package-runner policy, spawns argv with `shell:false`, executes inside a pinned
 offline Docker image, and stores stdout/stderr as immutable trusted artifacts. A
@@ -137,6 +146,9 @@ only durable run, approval, retry, token, cost, risk, evidence, and failure reco
 - Every transition compares the caller's expected state version.
 - Every post-freeze event is bound to the current manifest hash.
 - Terminal states reject all later execution transitions.
+- Provider-timeout recovery is non-terminal, bounded, and reuses the original
+  test-integrity baseline; it cannot silently create a fresh baseline over
+  partially modified files.
 - Risk tier and retry permission are deterministic rule results.
 - Reviewer approval, human approval, and PR creation require evidence IDs and
   role-specific guards.

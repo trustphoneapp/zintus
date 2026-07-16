@@ -56,6 +56,11 @@
   tokens, cost, command duration, diff size, artifact bytes, and concurrent agents.
   Every SOL/TERRA/LUNA call reserves its conservative worst case before transport
   and atomically reconciles the durable reservation to actual reported usage.
+  A client-side provider timeout is inherently ambiguous: the remote request may
+  still complete after the client disconnects. Zintus reports that amount as an
+  unsettled reservation, never labels it settled spend, and never automatically
+  replays the identical request. A human may retry twice from the retained
+  workspace checkpoint without rerunning planning.
   Responses cached-read/cache-write details are persisted separately and priced
   through the dated model catalog. Providers that omit these fields remain an
   honest zero rather than an inferred cache hit.
@@ -65,3 +70,7 @@
 - Flake confirmation runs after an initial failed non-security check and blocks
   mixed outcomes. It is intentionally not a broad statistical flake service and
   does not make a failing security check retryable.
+- Provider-side final usage reconciliation for a request that completed after a
+  client timeout requires provider request-status or billing-export integration.
+  Until that exists, the conservative reservation remains visible and continues
+  to reduce the run's available allowance.

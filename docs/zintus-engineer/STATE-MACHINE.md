@@ -43,6 +43,17 @@ the state graph and a policy record containing maximum duration, heartbeat
 expectation, and retry class. `CANCELLATION_PENDING` ends in `CANCELLED` or a bounded
 rollback. Infrastructure failures are distinct from code verification failures.
 
+An ambiguous Builder transport timeout follows this recoverable path:
+
+```text
+IMPLEMENTING -> MODEL_PROVIDER_RETRY_PENDING
+  -> QUEUED -> SANDBOX_READY -> IMPLEMENTING
+```
+
+The transition back to `QUEUED` requires an authenticated human action, is capped
+at two retries, preserves the original test baseline and workspace, and does not
+repeat planning. Automatic replay of the same timed-out request is prohibited.
+
 Terminal states are:
 
 - `COMPLETED`

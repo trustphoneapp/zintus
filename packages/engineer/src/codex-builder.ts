@@ -16,6 +16,8 @@ export const MAX_BUILDER_TOOL_ROUNDS = 20;
 export const MAX_BUILDER_FILE_BYTES = 1024 * 1024;
 export const MAX_BUILDER_MUTATIONS = 50;
 export const MAX_BUILDER_ARGUMENT_BYTES_PER_ROUND = 128 * 1024;
+/** Reasoning-heavy coding calls may take several minutes; the SDK default is ten minutes. */
+export const DEFAULT_BUILDER_MODEL_TIMEOUT_MS = 600_000;
 const BUILDER_TOOL_NAMES = new Set(["list_files", "read_file", "write_file", "run_command", "git_diff"]);
 
 function builderToolFailureFeedback(toolName: string, error: unknown): string {
@@ -60,6 +62,30 @@ export interface OpenAIResponsesTransportOptions {
   timeoutMs?: number;
 }
 
+/** Stable classification used by orchestration and UI recovery policy. */
+export function isProviderModelTimeout(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "APIConnectionTimeoutError" ||
+    /(?:request|connection|model).*(?:timed out|timeout)|(?:timed out|timeout).*(?:request|connection|model)/i.test(error.message);
+}
+
+export function modelRetryBackoffMs(attempt: number, random = Math.random): number {
+  if (!Number.isSafeInteger(attempt) || attempt < 1) throw new TypeError("retry attempt must be a positive integer");
+  const ceiling = Math.min(4_000, 250 * (2 ** (attempt - 1)));
+  return Math.floor(Math.max(0, Math.min(0.999999999, random())) * ceiling);
+}
+
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  if (milliseconds <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, milliseconds);
+    function done() { signal?.removeEventListener("abort", aborted); resolve(); }
+    function aborted() { clearTimeout(timer); reject(signal?.reason ?? new Error("model retry aborted")); }
+    signal?.addEventListener("abort", aborted, { once: true });
+  });
+}
+
 /** Minimal, typed transport for the official Responses API; credentials never enter model input. */
 export class OpenAIResponsesTransport implements ResponsesTransport {
   private readonly client: OpenAI;
@@ -71,7 +97,7 @@ export class OpenAIResponsesTransport implements ResponsesTransport {
       baseURL: options.baseUrl,
       fetch: options.fetch,
       maxRetries: 0,
-      timeout: options.timeoutMs ?? 120_000,
+      timeout: options.timeoutMs ?? DEFAULT_BUILDER_MODEL_TIMEOUT_MS,
     });
   }
 
@@ -190,6 +216,7 @@ export interface CodexBuilderOptions {
   }) => boolean;
   signal?: AbortSignal;
   safetyIdentifier?: string;
+  retryDelayMs?: (attempt: number) => number;
 }
 
 export class CodexBuilder {
@@ -269,6 +296,10 @@ export class CodexBuilder {
             latencyMs: Math.max(0, Date.now() - attemptStarted),
           })) throw error;
           attempt += 1;
+          await abortableDelay(
+            this.options.retryDelayMs?.(attempt) ?? modelRetryBackoffMs(attempt),
+            this.options.signal,
+          );
         }
       }
       this.options.onModelCall?.({

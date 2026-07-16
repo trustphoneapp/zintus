@@ -94,6 +94,7 @@ export async function planEngineerRun(runId: string, signal?: AbortSignal): Prom
 export async function getEngineerPlan(runId: string): Promise<PlanProposal | null> { return (await request<{ plan: PlanProposal | null }>(`/v1/engineer/runs/${runId}/plan`)).plan; }
 export async function freezeEngineerPlan(run: EngineerRun, manifest: EngineerManifest): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${run.runId}/freeze-plan`, { method: "POST", body: JSON.stringify({ expectedStateVersion: run.stateVersion, manifest, idempotencyKey: `ui:freeze:${run.runId}:${manifest.manifestVersion}` }) })).run; }
 export async function startEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST" })).run; }
+export async function retryEngineerProviderTimeout(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/retry-provider-timeout`, { method: "POST" })).run; }
 export async function recoverEngineerStaleBase(runId: string): Promise<EngineerRun> { return (await request<{ replacementRun: EngineerRun }>(`/v1/engineer/runs/${runId}/recover-stale-base`, { method: "POST" })).replacementRun; }
 export async function createCorrectedEngineerRun(runId: string): Promise<{ replacementRun: EngineerRun; plan: PlanProposal }> {
   return request<{ replacementRun: EngineerRun; plan: PlanProposal }>(`/v1/engineer/runs/${runId}/corrected-run`, { method: "POST" });

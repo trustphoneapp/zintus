@@ -592,8 +592,16 @@ export class EngineerLedger {
 
   getBudget(runId: string, now: string): EngineerBudgetSnapshot {
     const usage = this.runtimeBudgetUsage(runId, new Date(now));
-    this.db.query(`UPDATE run_budgets SET used_cost_usd = ?, used_tokens = ?, used_time_seconds = ?, updated_at = ? WHERE run_id = ?`)
-      .run(usage.estimatedCostUsd, usage.inputTokens + usage.outputTokens, Math.floor(usage.elapsedSeconds), now, runId);
+    const reservations = this.db.query(`SELECT COALESCE(SUM(estimated_cost_usd), 0) AS cost,
+      COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens
+      FROM cost_records WHERE run_id = ? AND source_type = 'MODEL_RESERVATION'`).get(runId) as { cost: number; tokens: number };
+    const reservedCost = Number(reservations.cost);
+    const reservedTokens = Number(reservations.tokens);
+    const settledCost = Math.max(0, usage.estimatedCostUsd - reservedCost);
+    const settledTokens = Math.max(0, usage.inputTokens + usage.outputTokens - reservedTokens);
+    this.db.query(`UPDATE run_budgets SET used_cost_usd = ?, used_tokens = ?, used_time_seconds = ?,
+      reserved_cost_usd = ?, reserved_tokens = ?, updated_at = ? WHERE run_id = ?`)
+      .run(settledCost, settledTokens, Math.floor(usage.elapsedSeconds), reservedCost, reservedTokens, now, runId);
     const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(runId) as BudgetRow | null;
     if (!row) throw new EngineerNotFoundError("run budget", runId);
     return this.budgetSnapshot(row);

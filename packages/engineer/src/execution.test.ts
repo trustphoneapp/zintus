@@ -13,6 +13,8 @@ import {
   GitWorkspaceManager,
   LocalArtifactStore,
   OpenAIResponsesTransport,
+  isProviderModelTimeout,
+  modelRetryBackoffMs,
   OfflineDependencyBundle,
   OFFLINE_DEPENDENCY_MANIFEST,
   TaskManifestSchema,
@@ -401,6 +403,22 @@ describe("Phase 2 offline dependency bundle", () => {
 });
 
 describe("Phase 2 Codex Builder", () => {
+  test("classifies provider timeouts without treating unrelated failures as timeouts", () => {
+    const timeout = new Error("Request timed out.");
+    timeout.name = "APIConnectionTimeoutError";
+    expect(isProviderModelTimeout(timeout)).toBe(true);
+    expect(isProviderModelTimeout(new Error("dependency timed out while installing"))).toBe(false);
+    expect(isProviderModelTimeout(new Error("rate limit"))).toBe(false);
+  });
+
+  test("backs retryable model failures off with bounded full jitter", () => {
+    expect(modelRetryBackoffMs(1, () => 0)).toBe(0);
+    expect(modelRetryBackoffMs(1, () => 0.999999)).toBe(249);
+    expect(modelRetryBackoffMs(5, () => 0.999999)).toBe(3_999);
+    expect(modelRetryBackoffMs(20, () => 0.999999)).toBe(3_999);
+    expect(() => modelRetryBackoffMs(0)).toThrow("positive integer");
+  });
+
   test("keeps the OpenAI credential in the transport header and requests no provider storage", async () => {
     let observedBody = "";
     const transport = new OpenAIResponsesTransport({
@@ -571,8 +589,26 @@ describe("Phase 2 authoritative execution worker", () => {
       workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest, dockerSpawn,
     });
     let response = 0;
+    let transportMode: "normal" | "partial-timeout" | "recovered" = "normal";
+    let timeoutResponse = 0;
     const transport: ResponsesTransport = {
       async create() {
+        if (transportMode === "partial-timeout") {
+          timeoutResponse += 1;
+          if (timeoutResponse === 1) return {
+            id: "worker-timeout-partial", usage: { input_tokens: 50, output_tokens: 25 },
+            output: [{ type: "function_call", call_id: "timeout-write", name: "write_file", arguments: JSON.stringify({
+              path: "src/value.ts", content: "export const value = 3;\n",
+            }) }],
+          };
+          const error = new Error("Request timed out.");
+          error.name = "APIConnectionTimeoutError";
+          throw error;
+        }
+        if (transportMode === "recovered") return {
+          id: "worker-recovered", usage: { input_tokens: 50, output_tokens: 10 }, output: [],
+          output_text: "Recovered from the retained workspace checkpoint.",
+        };
         response += 1;
         if (response === 1) throw new Error("transient provider failure");
         if (response === 2) return {
@@ -660,6 +696,47 @@ describe("Phase 2 authoritative execution worker", () => {
     expect(supervisor.getRun(budgetFrozen.runId).state).toBe("PAUSED_BUDGET");
     expect(supervisor.listEvents(budgetFrozen.runId)).toContainEqual(expect.objectContaining({
       nextState: "PAUSED_BUDGET", reasonCode: "TOKEN_LIMIT_REACHED",
+    }));
+
+    const timeoutReceived = supervisor.receiveRequest({
+      runId: "run-worker-provider-timeout", userId: "user-1",
+      repository: {
+        repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture",
+        baseBranch: "main", baseCommitSha: repository.sha,
+      },
+      request: "Change value",
+    });
+    const timeoutTask = manifest(timeoutReceived.runId, repository.sha);
+    const { manifestHash: _timeoutHash, ...timeoutContent } = timeoutTask;
+    const timeoutPlanReady = transitionToPlanReadyForTest({
+      supervisor, received: timeoutReceived, normalizedRequest: timeoutContent.request.normalized,
+      manifest: timeoutContent, key: "worker-provider-timeout", artifactRoot: join(root, "planning-timeout-artifacts"),
+    });
+    const timeoutFrozen = supervisor.freezePlan({
+      runId: timeoutPlanReady.runId, expectedStateVersion: timeoutPlanReady.stateVersion,
+      manifest: timeoutContent, actorId: "test-planner", idempotencyKey: "freeze-worker-provider-timeout",
+    }).run;
+    transportMode = "partial-timeout";
+    await expect(manager.execute(timeoutFrozen.runId)).rejects.toThrow("Request timed out");
+    expect(supervisor.getRun(timeoutFrozen.runId).state).toBe("MODEL_PROVIDER_RETRY_PENDING");
+    expect(await workspaceManager.diffAsync(manager.getSandbox(timeoutFrozen.runId)!.workspace)).toContain("value = 3");
+    expect(supervisor.listFailures(timeoutFrozen.runId)).toContainEqual(expect.objectContaining({
+      failureClass: "MODEL_FAILURE", reasonCode: "MODEL_PROVIDER_TIMEOUT", retryable: true,
+    }));
+    const timeoutBudget = supervisor.getBudget(timeoutFrozen.runId);
+    expect(timeoutBudget.used.costUsd).toBeGreaterThan(0);
+    expect(timeoutBudget.reserved.costUsd).toBeGreaterThan(0);
+    const timeoutAudit = new Database(join(root, "engineer.db"), { readonly: true });
+    expect((timeoutAudit.query("SELECT COUNT(*) AS count FROM model_calls WHERE run_id = ? AND status = 'FAILED'")
+      .get(timeoutFrozen.runId) as { count: number }).count).toBe(1);
+    timeoutAudit.close();
+
+    transportMode = "recovered";
+    expect((await manager.retryProviderTimeout(timeoutFrozen.runId)).state).toBe("QUEUED");
+    await manager.runQueued(timeoutFrozen.runId);
+    expect(supervisor.getRun(timeoutFrozen.runId).state).toBe("FAST_CHECKS");
+    expect(supervisor.listEvents(timeoutFrozen.runId)).toContainEqual(expect.objectContaining({
+      nextState: "SANDBOX_READY", reasonCode: "RETAINED_WORKSPACE_CHECKPOINT_REUSED",
     }));
 
     expect(manager.destroy(run.runId)?.status).toBe("DESTROYED");

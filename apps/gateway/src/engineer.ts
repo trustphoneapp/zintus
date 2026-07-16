@@ -282,6 +282,22 @@ export class EngineerRunManager {
     if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
     const run = this.options.execution.enqueue(runId);
     this.clearError(runId);
+    this.launchExecution(runId);
+    return run;
+  }
+
+  async retryProviderTimeout(principal: EngineerPrincipal, runId: string): Promise<EngineerRun> {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
+    const run = await this.options.execution.retryProviderTimeout(runId);
+    this.clearError(runId);
+    this.launchExecution(runId);
+    return run;
+  }
+
+  private launchExecution(runId: string): void {
     const job = (async () => {
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
       if (this.draining) throw new Error("Engineer gateway is draining");
@@ -297,7 +313,6 @@ export class EngineerRunManager {
     });
     this.background.add(job);
     void job.finally(() => this.background.delete(job));
-    return run;
   }
 
   /** Recreates stale work as a new immutable run on the credentialed current base. */
@@ -930,6 +945,13 @@ export class EngineerRunManager {
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let closed = false;
     let pendingEvents: ReturnType<EngineerSupervisor["listEvents"]> = [];
+    const close = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+      if (closed) return;
+      closed = true;
+      if (timer) clearInterval(timer);
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      try { controller.close(); } catch { /* Client cancellation may close the controller first. */ }
+    };
     const pump = (controller: ReadableStreamDefaultController<Uint8Array>) => {
       if (closed) return;
       if (controller.desiredSize !== null && controller.desiredSize <= 0) return;
@@ -951,10 +973,7 @@ export class EngineerRunManager {
         "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION",
         "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED",
       ].includes(state) && ledgerIsDrained) {
-        if (timer) clearInterval(timer);
-        if (heartbeatTimer) clearInterval(heartbeatTimer);
-        closed = true;
-        controller.close();
+        close(controller);
       }
     };
     return new ReadableStream<Uint8Array>({
@@ -976,7 +995,11 @@ export class EngineerRunManager {
         }
       },
       pull: (controller) => pump(controller),
-      cancel: () => { if (timer) clearInterval(timer); if (heartbeatTimer) clearInterval(heartbeatTimer); },
+      cancel: () => {
+        closed = true;
+        if (timer) clearInterval(timer);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+      },
     });
   }
 }

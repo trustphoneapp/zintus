@@ -21,6 +21,7 @@ import {
   listEngineerRunsPage,
   planEngineerRun,
   recoverEngineerStaleBase,
+  retryEngineerProviderTimeout,
   resumeEngineerBudget,
   resolveEngineerDecision,
   startEngineerRun,
@@ -48,7 +49,7 @@ const WORKFLOW_STAGES = [
   { label: "Request", states: /^(REQUEST_|CLARIFICATION)/ },
   { label: "Plan", states: /^(PLANNING|PLAN_|REPLANNING)/ },
   { label: "Sandbox", states: /^(QUEUED|SANDBOX_|CONTEXT_)/ },
-  { label: "Build", states: /^(IMPLEMENTING|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|FLAKE_|VERIFICATION_|REVERIFYING)/ },
+  { label: "Build", states: /^(IMPLEMENTING|MODEL_PROVIDER_|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|FLAKE_|VERIFICATION_|REVERIFYING)/ },
   { label: "Review", states: /^(SECURITY_|CODE_REVIEW|EVIDENCE_|REVIEW)/ },
   { label: "Human decision", states: /^(HUMAN_|FIX_REQUESTED|PAUSED_BUDGET)/ },
   { label: "Publication", states: /^(PR_|BASE_BRANCH|COMPLETED)/ },
@@ -70,12 +71,12 @@ function BudgetHud({ budget, manifest }: { budget: EngineerBudgetSnapshot | null
   if (!limits) return null;
   if (!budget) return <section className="engineer-budget-hud engineer-budget-hud--pending"><div><span className="engineer-kicker">Run budget</span><strong>${limits.costUsd} · {limits.tokens.toLocaleString()} tokens · {Math.round(limits.timeSeconds / 60)} min</strong></div><small>Live spend appears when execution begins.</small></section>;
   const rows = [
-    { label: "Cost", value: budget.used.costUsd + budget.reserved.costUsd, max: limits.costUsd, display: `$${budget.used.costUsd.toFixed(2)} used + $${budget.reserved.costUsd.toFixed(2)} reserved` },
-    { label: "Tokens", value: budget.used.tokens + budget.reserved.tokens, max: limits.tokens, display: `${budget.used.tokens.toLocaleString()} used + ${budget.reserved.tokens.toLocaleString()} reserved` },
+    { label: "Cost", value: budget.used.costUsd + budget.reserved.costUsd, max: limits.costUsd, display: `$${budget.used.costUsd.toFixed(2)} settled + $${budget.reserved.costUsd.toFixed(2)} reserved/unsettled` },
+    { label: "Tokens", value: budget.used.tokens + budget.reserved.tokens, max: limits.tokens, display: `${budget.used.tokens.toLocaleString()} settled + ${budget.reserved.tokens.toLocaleString()} reserved/unsettled` },
     { label: "Time", value: budget.used.timeSeconds, max: limits.timeSeconds, display: `${Math.round(budget.used.timeSeconds / 60)} min elapsed` },
   ];
   return <section className={`engineer-budget-hud engineer-budget-hud--${budget.status.toLowerCase()}`} aria-label="Live run budget">
-    <div className="engineer-budget-hud-title"><div><span className="engineer-kicker">Live autonomy budget</span><strong>{budget.status === "PAUSED" ? "Paused at the hard ceiling" : budget.status === "WARNING" ? "Approaching a limit" : "Within limits"}</strong></div><small>Actual + reserved · updated {new Date(budget.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></div>
+    <div className="engineer-budget-hud-title"><div><span className="engineer-kicker">Live autonomy budget</span><strong>{budget.status === "PAUSED" ? "Paused at the hard ceiling" : budget.status === "WARNING" ? "Approaching a limit" : "Within limits"}</strong></div><small>Settled + conservative reservation · updated {new Date(budget.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></div>
     <div className="engineer-budget-bars">{rows.map((row) => { const percent = row.max > 0 ? Math.min(100, (row.value / row.max) * 100) : 100; return <div key={row.label} className="engineer-budget-row"><div><span>{row.label}</span><strong>{row.display}</strong><small>{Math.max(0, 100 - percent).toFixed(0)}% remaining</small></div><progress max="100" value={percent} /></div>; })}</div>
   </section>;
 }
@@ -493,6 +494,17 @@ export default function EngineerPage() {
     finally { setBusy(false); }
   };
 
+  const retryProviderTimeout = async () => {
+    if (!run || run.state !== "MODEL_PROVIDER_RETRY_PENDING") return;
+    setBusy(true); setError(null);
+    try {
+      const resumed = await retryEngineerProviderTimeout(run.runId);
+      const latestSequence = events.at(-1)?.sequence ?? 0;
+      setRun(resumed); setManagerError(null); watch(resumed.runId, latestSequence);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to retry from the workspace checkpoint"); }
+    finally { setBusy(false); }
+  };
+
   const latestState = run?.state ?? "NEW";
   const artifacts = data?.artifacts ?? [];
   const claims = (data?.claims ?? []) as Array<{ claimId?: string; claim?: string; status?: string; notes?: string }>;
@@ -630,6 +642,10 @@ export default function EngineerPage() {
         <BudgetTopUp value={topUp} onChange={setTopUp} disabled={busy} />
         <div className="engineer-actions"><button className="engineer-primary" disabled={busy || !budget} onClick={() => void applyTopUp(true)}>{busy ? "Resuming…" : "Top up and resume checkpoint"}</button><button disabled={busy} onClick={() => setTab("diff")}>View partial diff</button></div>
       </section> : null}
+      {latestState === "MODEL_PROVIDER_RETRY_PENDING" ? <section className="engineer-card engineer-budget-paused" role="alert">
+        <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Provider timeout · balance is not the issue</span><h2>Your workspace checkpoint is retained</h2><p>The model request exceeded its execution timeout. Zintus stopped automatic replay to prevent duplicate charges. Planning, the frozen manifest, and current workspace are preserved.</p>{managerError ? <p className="engineer-error">{managerError}</p> : null}</div><span className="engineer-unverified">Unverified partial work</span></div>
+        <div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void retryProviderTimeout()}>{busy ? "Retrying…" : "Retry from workspace checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>Inspect partial diff</button></div>
+      </section> : null}
       {data?.errors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {data.errors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
       <nav className="engineer-tabs" aria-label="Engineer run views">{visibleTabs.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
       {!reachedImplementation ? <p className="engineer-stage-availability"><strong>Nothing is missing.</strong> Diff appears after implementation changes a file. Evidence appears after tests and independent verification. No implementation change has been recorded for this run yet.</p> : !reachedVerification ? <p className="engineer-stage-availability">Evidence appears after tests and independent verification begin.</p> : null}
@@ -652,7 +668,7 @@ export default function EngineerPage() {
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
       {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" && !NON_CANCELLABLE_PUBLICATION_STATES.has(latestState) ? <button className="engineer-cancel" disabled={cancelling} onClick={() => void decide("cancel")}>{cancelling ? "Cancelling…" : "Cancel run"}</button> : null}
       {error ? <p className="engineer-error">{error}</p> : null}
-      {managerError && managerError !== error ? <p className="engineer-error">{managerError}</p> : null}
+      {managerError && managerError !== error && latestState !== "MODEL_PROVIDER_RETRY_PENDING" ? <p className="engineer-error">{managerError}</p> : null}
     </main>
   );
 }

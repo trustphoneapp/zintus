@@ -6,7 +6,7 @@ import {
 } from "./execution-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import type { CodexBuilderOptions, ResponsesTransport } from "./codex-builder.js";
-import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder } from "./codex-builder.js";
+import { CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, isProviderModelTimeout } from "./codex-builder.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import { TrustedCommandExecutor } from "./trusted-executor.js";
@@ -33,7 +33,7 @@ export interface EngineerExecutionManagerOptions {
   transportForRun: (runId: string) => ResponsesTransport | Promise<ResponsesTransport>;
   now?: () => Date;
   idFactory?: () => string;
-  builderOptions?: Pick<CodexBuilderOptions, "modelConfiguration" | "maxRounds">;
+  builderOptions?: Pick<CodexBuilderOptions, "modelConfiguration" | "maxRounds" | "retryDelayMs">;
   leaseManager?: EngineerWorkerLeaseManager;
   workerOwnerId?: string;
   leaseTtlMs?: number;
@@ -84,6 +84,26 @@ export class EngineerExecutionManager {
     });
     this.active.set(runId, promise);
     return promise;
+  }
+
+  /** Human-authorized retry after an ambiguous provider timeout. */
+  async retryProviderTimeout(runId: string): Promise<ReturnType<EngineerSupervisor["getRun"]>> {
+    const run = this.options.supervisor.getRun(runId);
+    if (run.state !== "MODEL_PROVIDER_RETRY_PENDING" || !run.manifestHash) {
+      throw new Error(`provider retry requires MODEL_PROVIDER_RETRY_PENDING, not ${run.state}`);
+    }
+    const timeouts = this.options.supervisor.listFailures(runId)
+      .filter((failure) => failure.reasonCode === "MODEL_PROVIDER_TIMEOUT").length;
+    if (timeouts > 2) throw new Error("provider timeout retry limit reached; create a new bounded run instead");
+    await this.recoverSandbox(runId, false);
+    return this.options.supervisor.transition({
+      runId,
+      expectedStateVersion: run.stateVersion,
+      nextState: "QUEUED",
+      reasonCode: "HUMAN_RETRY_FROM_WORKSPACE_CHECKPOINT",
+      manifestHash: run.manifestHash,
+      idempotencyKey: `provider-retry:${run.stateVersion}:${timeouts}`,
+    }).run;
   }
 
   /** Abort detached model work and await cleanup before gateway-owned stores close. */
@@ -248,7 +268,8 @@ export class EngineerExecutionManager {
       }).run;
     };
 
-    let provisioned: ProvisionedSandbox | null = null;
+    let provisioned: ProvisionedSandbox | null = this.sandboxes.get(runId) ?? null;
+    const retainedWorkspace = provisioned !== null;
     let agentExecutionId: string | null = null;
     let agentStartedAt: string | null = null;
     let lease: WorkerLeaseGrant | null = null;
@@ -293,13 +314,15 @@ export class EngineerExecutionManager {
         heartbeatTimer.unref?.();
       }
       assertLease();
-      if (this.options.sandboxManager.warmEnabled()) {
+      if (provisioned) {
+        transition("SANDBOX_READY", "RETAINED_WORKSPACE_CHECKPOINT_REUSED", [provisioned.record.sandboxId]);
+      } else if (this.options.sandboxManager.warmEnabled()) {
         transition("SANDBOX_WARM_CLAIMING", "WARM_SANDBOX_CLAIM_STARTED");
       } else {
         transition("SANDBOX_COLD_PROVISIONING", "COLD_SANDBOX_SELECTED");
       }
       const repositoryRoot = this.options.repositoryRootFor(initial.repository.repositoryId);
-      if (this.options.sandboxManager.warmEnabled()) {
+      if (!provisioned && this.options.sandboxManager.warmEnabled()) {
         const warmClaim = await this.options.sandboxManager.claimWarmAsync({
           runId,
           repositoryId: initial.repository.repositoryId,
@@ -346,13 +369,16 @@ export class EngineerExecutionManager {
       transition("CONTEXT_BUILDING", "BUILDER_CONTEXT_BUILDING");
       const manifest = supervisor.getManifest(runId);
       if (!manifest) throw new Error("frozen manifest is unavailable");
-      testIntegrity = TestIntegrityGuard.createAndRecord({
+      const integrityOptions = {
         supervisor,
         artifactStore: this.options.artifactStore,
         manifest,
         workspace: provisioned.workspace,
         now: this.options.now,
-      });
+      };
+      testIntegrity = retainedWorkspace
+        ? TestIntegrityGuard.load(integrityOptions)
+        : TestIntegrityGuard.createAndRecord(integrityOptions);
       const route = resolveEngineerModel("BUILDER", this.options.builderOptions?.modelConfiguration);
       agentExecutionId = (this.options.idFactory ?? randomUUID)();
       agentStartedAt = (this.options.now ?? (() => new Date()))().toISOString();
@@ -419,6 +445,9 @@ export class EngineerExecutionManager {
             inputTokens: null, outputTokens: null, retryCount: failedAttempt, status: "FAILED",
             createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
           }, reservationId);
+          // A client timeout is ambiguous: the provider may still finish and
+          // bill it. Never replay the identical request automatically.
+          if (isProviderModelTimeout(error)) return false;
           const retry = supervisor.authorizeRetry({
             runId, expectedStateVersion: current.stateVersion, kind: "TRANSIENT_MODEL",
             failureFingerprint: sha256({ role: "BUILDER", message }), patchHash: null, progressMetric: attempt,
@@ -479,12 +508,15 @@ export class EngineerExecutionManager {
     } catch (error) {
       const run = supervisor.getRun(runId);
       const budgetExhausted = error instanceof RuntimeBudgetExhaustedError;
+      const providerTimedOut = isProviderModelTimeout(error);
       const testIntegrityFailure = error instanceof TestIntegrityViolationError;
       const domain = executionFailureDomain(run.state, error);
       const policy = testIntegrityFailure
         ? { failureClass: "SECURITY_FAILURE" as const, reasonCode: error.reasonCode, retryable: false }
         : budgetExhausted
         ? { failureClass: "WORKFLOW_FAILURE" as const, reasonCode: "RUNTIME_BUDGET_EXHAUSTED", retryable: false }
+        : providerTimedOut
+        ? { failureClass: "MODEL_FAILURE" as const, reasonCode: "MODEL_PROVIDER_TIMEOUT", retryable: true }
         : operationalFailurePolicy(domain);
       const message = error instanceof Error ? error.message : String(error);
       supervisor.recordFailure(FailureRecordSchema.parse({
@@ -519,6 +551,8 @@ export class EngineerExecutionManager {
         ? "SECURITY_ESCALATION"
         : budgetExhausted && canTransition(run.state, "RETRY_BUDGET_EXHAUSTED")
         ? "RETRY_BUDGET_EXHAUSTED"
+        : providerTimedOut && canTransition(run.state, "MODEL_PROVIDER_RETRY_PENDING")
+        ? "MODEL_PROVIDER_RETRY_PENDING"
         : sandboxStates.has(run.state) || run.state === "CONTEXT_BUILDING"
         ? "BLOCKED_BY_ENVIRONMENT"
         : run.state === "IMPLEMENTING"
@@ -533,6 +567,8 @@ export class EngineerExecutionManager {
             ? error.reasonCode
             : next === "RETRY_BUDGET_EXHAUSTED"
             ? "RUNTIME_BUDGET_EXHAUSTED"
+            : next === "MODEL_PROVIDER_RETRY_PENDING"
+            ? "MODEL_PROVIDER_TIMEOUT"
             : next === "FAILED" ? "CODEX_BUILDER_FAILED" : "SANDBOX_OR_CONTEXT_FAILED",
           manifestHash: run.manifestHash,
           idempotencyKey: `phase2:failure:${run.stateVersion + 1}`,

@@ -2886,6 +2886,9 @@ export function createGatewayHandler(
         if (action === "start" && request.method === "POST") {
           return json(request, { run: await engineerRuns.start(engineerPrincipal!, runId), accepted: true }, 202);
         }
+        if (action === "retry-provider-timeout" && request.method === "POST") {
+          return json(request, { run: await engineerRuns.retryProviderTimeout(engineerPrincipal!, runId), accepted: true }, 202);
+        }
         if (action === "recover-stale-base" && request.method === "POST") {
           return json(request, await engineerRuns.recoverStaleBase(engineerPrincipal!, runId), 202);
         }
