@@ -28,5 +28,6 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("topUpPendingRef.current = true");
     expect(source).toContain('"Applying one top-up…"');
     expect(source).toContain("Allowance added once. New ceiling:");
+    expect(source).toContain('topUpNotice ? "Prepare another top-up"');
   });
 });
