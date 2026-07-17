@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ENGINEER_DATABASE_SCHEMA_SQL, ENGINEER_DATABASE_SCHEMA_VERSION } from "./database-schema.js";
+import { EngineerLedger } from "./ledger.js";
 
 describe("Engineer database schema", () => {
   test("creates phase-1 and mandatory-correction records", () => {
@@ -45,7 +49,34 @@ describe("Engineer database schema", () => {
     const budgetColumns = new Set((db.query("PRAGMA table_info(run_budgets)").all() as Array<{ name: string }>).map((row) => row.name));
     expect(budgetColumns.has("ambiguous_cost_usd")).toBe(true);
     expect(budgetColumns.has("ambiguous_tokens")).toBe(true);
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(13);
+    const sandboxIndexes = db.query("PRAGMA index_list(sandboxes)").all() as Array<{ name: string; unique: number }>;
+    expect(sandboxIndexes.find((index) => index.name === "idx_sandboxes_run")?.unique).toBe(0);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(14);
     db.close();
+  });
+
+  test("migrates the legacy one-sandbox-per-run constraint to replacement sandbox history", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-schema-v14-"));
+    const dbPath = join(root, "engineer.db");
+    const legacy = new Database(dbPath, { create: true });
+    legacy.exec(ENGINEER_DATABASE_SCHEMA_SQL
+      .replace(
+        "run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,\n    workspace_identity TEXT NOT NULL UNIQUE,",
+        "run_id TEXT NOT NULL UNIQUE REFERENCES engineer_runs(id) ON DELETE RESTRICT,\n    workspace_identity TEXT NOT NULL UNIQUE,",
+      )
+      .replace("  CREATE INDEX IF NOT EXISTS idx_sandboxes_run ON sandboxes(run_id, created_at);\n", ""));
+    legacy.close();
+
+    const ledger = new EngineerLedger(dbPath);
+    ledger.close();
+    const migrated = new Database(dbPath);
+    const table = migrated.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sandboxes'")
+      .get() as { sql: string };
+    expect(table.sql).not.toMatch(/run_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i);
+    const indexes = migrated.query("PRAGMA index_list(sandboxes)").all() as Array<{ name: string; unique: number }>;
+    expect(indexes.find((index) => index.name === "idx_sandboxes_run")?.unique).toBe(0);
+    expect(migrated.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    migrated.close();
+    rmSync(root, { recursive: true, force: true });
   });
 });

@@ -806,6 +806,20 @@ app.delete("/api/connectors/github", async (c) => {
   return c.json({ ok: true, connected: false });
 });
 
+// The local gateway may publish only for the owner of its own registered
+// session. It receives a short-lived access token from the Durable Object
+// broker on demand; refresh credentials never leave the relay.
+app.get("/api/sessions/:id/connectors/github/token", async (c) => {
+  const sessionId = c.req.param("id");
+  const authorization = await authorizeSessionScoped(c as Context<{ Bindings: Env }>, sessionId, true);
+  if (!authorization.ok) return c.json(authorization.body, authorization.status);
+  const accessToken = await githubToken(c.env, authorization.user_id, {
+    forceRefresh: c.req.query("forceRefresh") === "1",
+  });
+  if (!accessToken) return c.json({ error: "GitHub authorization is unavailable; reconnect GitHub" }, 409);
+  return c.json({ accessToken }, 200, { "Cache-Control": "no-store" });
+});
+
 // ── ACCOUNT — self-service deletion (Google Play / store requirement) ────────
 //
 // DELETE /api/account — a signed-in user deletes THEIR OWN account and all data.

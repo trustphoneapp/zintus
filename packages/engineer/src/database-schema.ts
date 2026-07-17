@@ -1,4 +1,4 @@
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 13;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 14;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -251,7 +251,7 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
 
   CREATE TABLE IF NOT EXISTS sandboxes (
     id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL UNIQUE REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
     workspace_identity TEXT NOT NULL UNIQUE,
     image_digest TEXT NOT NULL,
     environment_digest TEXT,
@@ -259,6 +259,7 @@ export const ENGINEER_DATABASE_SCHEMA_SQL = `
     created_at TEXT NOT NULL,
     destroyed_at TEXT
   );
+  CREATE INDEX IF NOT EXISTS idx_sandboxes_run ON sandboxes(run_id, created_at);
 
   CREATE TABLE IF NOT EXISTS sandbox_heartbeats (
     id TEXT PRIMARY KEY,

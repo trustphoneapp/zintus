@@ -71,6 +71,35 @@ describe("Engineer trusted identity and admission", () => {
     expect(admissionChecks).toBe(0);
   });
 
+  test("resolves flake quarantine without requiring a not-yet-created evidence bundle", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const now = "2026-07-16T12:00:00.000Z";
+    let run: EngineerRun = {
+      runId: "flake-human-review", userId: principal.ownerId, repository,
+      requestOriginal: "Verify a flaky candidate", requestNormalized: "Verify a flaky candidate",
+      state: "HUMAN_REVIEW_REQUIRED", stateVersion: 7, manifestHash: `sha256:${"a".repeat(64)}`,
+      riskTier: "MEDIUM", humanGateRequired: true, createdAt: now, updatedAt: now, terminalAt: null,
+    };
+    let resumed = 0;
+    const manager = new EngineerRunManager({
+      supervisor: {
+        getRun: () => run,
+        listFailures: () => [{ reasonCode: "FLAKY_TEST_QUARANTINED", evidenceIds: ["flake-evidence"] }],
+        listEvidenceBundles: () => { throw new Error("flake retry must not require an evidence bundle"); },
+        transition: (input: { nextState: EngineerRun["state"] }) => {
+          run = { ...run, state: input.nextState, stateVersion: run.stateVersion + 1 };
+          return { run };
+        },
+      } as never,
+      verification: { resumeRecovered: () => { resumed += 1; } } as never,
+      principal, preflight: preflight(),
+    });
+
+    await expect(manager.resolveHumanReview(principal, run.runId, "approve", "Retry the quarantined check once."))
+      .resolves.toEqual({ run: expect.objectContaining({ state: "VERIFICATION_RECOVERY" }), publication: null });
+    expect(resumed).toBe(1);
+  });
+
   test("surfaces deferred publication decisions without treating the safe fence as an error", async () => {
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
     const now = "2026-07-16T12:00:00.000Z";
@@ -243,6 +272,109 @@ describe("Engineer trusted identity and admission", () => {
     reopened.close(); rmSync(root, { recursive: true, force: true });
   });
 
+  test("boot recovery resumes a planning run that has no in-memory owner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-recover-planning-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    let run = supervisor.receiveRequest({
+      runId: "recover-planning", userId: principal.ownerId, repository, request: "Recover planning after restart",
+    });
+    run = supervisor.normalizeRequest({
+      runId: run.runId, expectedStateVersion: run.stateVersion,
+      normalizedRequest: run.requestOriginal, idempotencyKey: "recover-planning-normalize",
+    }).run;
+    supervisor.transition({
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING",
+      reasonCode: "EVIDENCE_PLANNING_STARTED", idempotencyKey: "recover-planning-start",
+    });
+    let contextBuilds = 0;
+    let planningCalls = 0;
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => { contextBuilds += 1; return {}; } } as never,
+      planning: { plan: async () => { planningCalls += 1; return null; } } as never,
+    });
+
+    const recoveries = manager.recoverPlanning();
+    expect(recoveries.map((recovery) => recovery.runId)).toEqual([run.runId]);
+    await Promise.all(recoveries.map((recovery) => recovery.promise));
+    expect(contextBuilds).toBe(1);
+    expect(planningCalls).toBe(1);
+    expect(manager.get(run.runId).activity.active).toBe(false);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("boot recovery requires a human retry when a planner provider outcome is ambiguous", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-ambiguous-planning-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    let run = supervisor.receiveRequest({
+      runId: "ambiguous-planning", userId: principal.ownerId, repository, request: "Do not repay an unknown provider call",
+    });
+    run = supervisor.normalizeRequest({
+      runId: run.runId, expectedStateVersion: run.stateVersion,
+      normalizedRequest: run.requestOriginal, idempotencyKey: "ambiguous-planning-normalize",
+    }).run;
+    run = supervisor.transition({
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING",
+      reasonCode: "EVIDENCE_PLANNING_STARTED", idempotencyKey: "ambiguous-planning-start",
+    }).run;
+    supervisor.recordAgentExecution({
+      agentExecutionId: "planner-ambiguous", runId: run.runId, role: "PLANNER", modelTier: "GPT-5.6_TERRA",
+      status: "RUNNING", inputHash: `sha256:${"a".repeat(64)}`, outputArtifactId: null,
+      startedAt: run.updatedAt, completedAt: null,
+    });
+    let planningCalls = 0;
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => ({}) } as never,
+      planning: { plan: async () => { planningCalls += 1; return null; } } as never,
+    });
+
+    expect(manager.recoverPlanning()).toEqual([]);
+    expect(planningCalls).toBe(0);
+    expect(supervisor.getRun(run.runId).state).toBe("MODEL_PROVIDER_RETRY_PENDING");
+    expect(supervisor.listFailures(run.runId)).toContainEqual(expect.objectContaining({
+      reasonCode: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS", retryable: true,
+    }));
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("lease recovery waits for an active planner to abort, then starts one replacement", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-replace-planning-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    supervisor.receiveRequest({
+      runId: "replace-planning", userId: principal.ownerId, repository, request: "Replace the stale planning owner",
+    });
+    let calls = 0;
+    let firstStarted!: () => void;
+    let replacementStarted!: () => void;
+    const first = new Promise<void>((resolve) => { firstStarted = resolve; });
+    const replacement = new Promise<void>((resolve) => { replacementStarted = resolve; });
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => ({}) } as never,
+      planning: {
+        plan: async (_runId: string, signal?: AbortSignal) => {
+          calls += 1;
+          if (calls === 2) { replacementStarted(); return null; }
+          firstStarted();
+          return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        },
+      } as never,
+    });
+
+    const stale = manager.plan(principal, "replace-planning");
+    await first;
+    manager.resumePlanning("replace-planning");
+    await expect(stale).rejects.toBeInstanceOf(EngineerPlanningCancelledError);
+    await replacement;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(2);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("automatically restarts planning after a budget pause resumes to PLANNING", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-budget-resume-plan-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
@@ -334,7 +466,7 @@ describe("Engineer trusted identity and admission", () => {
     expect(cleanupOptions).toEqual({ preserveResumable: true });
   });
 
-  test("terminates a timed-out planning attempt with an exact durable event", async () => {
+  test("pauses a timed-out planning attempt for an explicit human retry", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-planning-timeout-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
@@ -345,8 +477,12 @@ describe("Engineer trusted identity and admission", () => {
       planning: { plan: async () => { throw new EngineerPlanningTimeoutError(120_000); } } as never,
     });
     await expect(manager.plan(principal, "timed-plan")).rejects.toBeInstanceOf(EngineerPlanningTimeoutError);
-    expect(manager.get("timed-plan")).toMatchObject({ run: { state: "FAILED" }, lastError: "Evidence planning exceeded the 120000ms execution limit" });
-    expect(supervisor.listEvents("timed-plan").at(-1)).toMatchObject({ nextState: "FAILED", reasonCode: "PLANNING_STEP_TIMED_OUT" });
+    expect(manager.get("timed-plan")).toMatchObject({
+      run: { state: "MODEL_PROVIDER_RETRY_PENDING" }, lastError: "Evidence planning exceeded the 120000ms execution limit",
+    });
+    expect(supervisor.listEvents("timed-plan").at(-1)).toMatchObject({
+      nextState: "MODEL_PROVIDER_RETRY_PENDING", reasonCode: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS",
+    });
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 

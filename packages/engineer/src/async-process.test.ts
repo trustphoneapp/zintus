@@ -23,11 +23,29 @@ describe("Phase 2 non-blocking process boundary", () => {
   });
 
   test("terminates and classifies bounded-time overruns", async () => {
-    const result = await runProcessAsync(process.execPath, ["-e", "setTimeout(() => {}, 10_000)"], {
+    const startedAt = Date.now();
+    const result = await runProcessAsync(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 10_000)"], {
       timeoutMs: 25,
       maxOutputBytes: 1024,
+      killGraceMs: 25,
     });
     expect(result.status).toBeNull();
     expect((result.error as NodeJS.ErrnoException | undefined)?.code).toBe("ETIMEDOUT");
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
+  test("cancellation aborts a running child without waiting for its timeout", async () => {
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const child = runProcessAsync(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 10_000)"], {
+      timeoutMs: 10_000,
+      maxOutputBytes: 1024,
+      killGraceMs: 25,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 20);
+    const result = await child;
+    expect((result.error as NodeJS.ErrnoException | undefined)?.code).toBe("ABORT_ERR");
+    expect(Date.now() - startedAt).toBeLessThan(500);
   });
 });

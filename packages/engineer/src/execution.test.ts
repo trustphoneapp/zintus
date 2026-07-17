@@ -403,10 +403,12 @@ describe("Phase 2 offline dependency bundle", () => {
     const digest = `sha256:${"d".repeat(64)}`;
     const imageReference = `oven/bun@${digest}`;
     const dockerCalls: string[][] = [];
-    const dockerRunAsync = async (args: string[]) => {
+    let observedCommandSignal: AbortSignal | undefined;
+    const dockerRunAsync = async (args: string[], options?: { signal?: AbortSignal }) => {
       dockerCalls.push(args);
       if (args[0] === "info") return { status: 0, signal: null, stdout: "27.0", stderr: "" };
       if (args[0] === "image") return { status: 0, signal: null, stdout: JSON.stringify([`oven/bun@${digest}`]), stderr: "" };
+      observedCommandSignal = options?.signal;
       return { status: 0, signal: null, stdout: "ok", stderr: "" };
     };
     const withoutBundle = new DockerSandboxManager({ workspaceManager, imageReference, imageDigest: digest, dockerRunAsync });
@@ -425,7 +427,11 @@ describe("Phase 2 offline dependency bundle", () => {
     const offlineDependencies = new OfflineDependencyBundle({ root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash });
     const manager = new DockerSandboxManager({ workspaceManager, imageReference, imageDigest: digest, dockerRunAsync, offlineDependencies });
     const sandbox = await manager.provisionColdAsync({ runId: "run-with-deps", repositoryRoot: repository.path, baseCommitSha: repository.sha });
-    await sandbox.commandRunnerAsync!("bun", ["test"], { cwd: sandbox.workspace.workspaceRoot, timeoutMs: 1_000, maxOutputBytes: 1024, env: {} });
+    const cancellation = new AbortController();
+    await sandbox.commandRunnerAsync!("bun", ["test"], {
+      cwd: sandbox.workspace.workspaceRoot, timeoutMs: 1_000, maxOutputBytes: 1024, env: {}, signal: cancellation.signal,
+    });
+    expect(observedCommandSignal).toBe(cancellation.signal);
     const runArgs = dockerCalls.find((args) => args[0] === "run") ?? [];
     expect(runArgs).toContain("--network=none");
     expect(runArgs).toContain(`type=bind,src=${sandbox.workspace.workspaceRoot},dst=/workspace`);
@@ -906,14 +912,44 @@ describe("Phase 2 authoritative execution worker", () => {
       environmentDigest: `sha256:${"b".repeat(64)}`, networkPolicyVersion: "network-v1", sandboxPolicyVersion: "sandbox-v1",
       status: "READY", source: "COLD", createdAt: "2026-07-14T12:00:00.000Z", destroyedAt: null,
     });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "recovery-artifacts") });
+    const imageDigest = `sha256:${"a".repeat(64)}`;
     const sandboxManager = new DockerSandboxManager({
       workspaceManager, imageReference: `oven/bun@sha256:${"a".repeat(64)}`, imageDigest: `sha256:${"a".repeat(64)}`,
-      dockerRunAsync: async () => ({ status: 0, signal: null, stdout: "", stderr: "" }),
+      dockerRunAsync: async (args) => ({
+        status: 0, signal: null,
+        stdout: args[0] === "image" ? JSON.stringify([`oven/bun@${imageDigest}`]) : "",
+        stderr: "",
+      }),
     });
+    writeFileSync(join(workspace.workspaceRoot, "src/value.ts"), "export const value = 99;\n");
+    const staleContinuation: BuilderContinuation = {
+      version: 1, runId: run.runId, manifestHash: taskForRun.manifestHash,
+      workspaceIdentity: workspace.workspaceIdentity,
+      inputContextHash: sha256(taskForRun.request.normalized), nextRound: 1,
+      input: [{ type: "stale" }], responseIds: ["stale-response"], requestedCommands: [], commandExecutionIds: [],
+      mutations: 1, successfulEvidenceMutation: -1, successfulEvidenceCommand: null, toolCallCount: 1,
+      // The stale checkpoint deliberately matches the fresh workspace's empty
+      // diff; workspace identity, not diff equality, must reject it.
+      consecutiveNoProgressRounds: 0, candidateDiffHash: sha256(""), seenSemanticEvidence: [], failedCommands: [],
+    };
+    supervisor.recordArtifact(artifactStore.put({
+      runId: run.runId, type: "BUILDER_CONTINUATION", bytes: JSON.stringify(staleContinuation),
+      producerType: "SYSTEM", producerId: "engineer-builder-checkpoint", trusted: true,
+    }));
+    let modelRound = 0;
     const manager = new EngineerExecutionManager({
-      supervisor, sandboxManager, artifactStore: new LocalArtifactStore({ root: join(root, "recovery-artifacts") }),
+      supervisor, sandboxManager, artifactStore,
       repositoryRootFor: () => repository.path,
-      transportForRun: async () => ({ create: async () => ({ id: "unused", output: [] }) }),
+      transportForRun: async () => ({
+        countInputTokens: async () => 10,
+        create: async () => {
+          modelRound += 1;
+          return modelRound === 1
+            ? { id: "fresh-write", output: [{ type: "function_call", call_id: "fresh-write-call", name: "write_file", arguments: JSON.stringify({ path: "src/value.ts", content: "export const value = 2;\n" }) }] }
+            : { id: "fresh-test", output: [{ type: "function_call", call_id: "fresh-test-call", name: "run_command", arguments: JSON.stringify({ command: "bun run test" }) }] };
+        },
+      }),
     });
     expect(await manager.recoverInterrupted(run.runId, "expired-lease-1")).toBe("REQUEUED");
     expect(existsSync(workspace.workspaceRoot)).toBe(false);
@@ -924,6 +960,11 @@ describe("Phase 2 authoritative execution worker", () => {
     const audit = new Database(join(root, "recovery.db"), { readonly: true });
     expect(audit.query("SELECT status FROM sandboxes WHERE run_id = ?").get(run.runId)).toEqual({ status: "DESTROYED" });
     audit.close();
+    const recoveredResult = await manager.runQueued(run.runId);
+    expect(recoveredResult.changedFiles).toEqual(["src/value.ts"]);
+    expect(recoveredResult.responseIds).toEqual(["fresh-write", "fresh-test"]);
+    expect(supervisor.getRun(run.runId).state).toBe("FAST_CHECKS");
+    expect(supervisor.listEvents(run.runId)).not.toContainEqual(expect.objectContaining({ reasonCode: "BUILDER_EXECUTION_FAILED" }));
     expect(await manager.recoverInterrupted(run.runId, "expired-lease-1")).toBe("IGNORED");
     supervisor.close();
   });

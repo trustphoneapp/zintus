@@ -5,6 +5,8 @@ export interface AsyncProcessOptions {
   env?: NodeJS.ProcessEnv;
   timeoutMs: number;
   maxOutputBytes: number;
+  signal?: AbortSignal;
+  killGraceMs?: number;
 }
 
 export interface AsyncProcessResult {
@@ -34,32 +36,74 @@ export function runProcessAsync(
   options: AsyncProcessOptions,
 ): Promise<AsyncProcessResult> {
   return new Promise((resolve) => {
-    execFile(executable, args, {
+    let settled = false;
+    let terminationReason: "TIMEOUT" | "ABORTED" | null = null;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let hardStopTimer: ReturnType<typeof setTimeout> | null = null;
+    const graceMs = options.killGraceMs ?? 250;
+    const finish = (result: AsyncProcessResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      if (hardStopTimer) clearTimeout(hardStopTimer);
+      options.signal?.removeEventListener("abort", abort);
+      resolve(result);
+    };
+    const child = execFile(executable, args, {
       cwd: options.cwd,
       env: options.env,
-      timeout: options.timeoutMs,
       maxBuffer: options.maxOutputBytes,
       encoding: "utf8",
       windowsHide: true,
     }, (failure, stdout, stderr) => {
+      if (terminationReason) {
+        const processError = new Error(terminationReason === "TIMEOUT"
+          ? `process exceeded ${options.timeoutMs}ms`
+          : "process was cancelled") as NodeJS.ErrnoException;
+        processError.code = terminationReason === "TIMEOUT" ? "ETIMEDOUT" : "ABORT_ERR";
+        finish({ status: null, signal: (failure as ExecFailure | null)?.signal ?? null, stdout, stderr, error: processError });
+        return;
+      }
       if (!failure) {
-        resolve({ status: 0, signal: null, stdout, stderr });
+        finish({ status: 0, signal: null, stdout, stderr });
         return;
       }
       const error = failure as ExecFailure;
       const capturedStdout = typeof error.stdout === "string" ? error.stdout : error.stdout?.toString("utf8") ?? stdout;
       const capturedStderr = typeof error.stderr === "string" ? error.stderr : error.stderr?.toString("utf8") ?? stderr;
       if (typeof error.code === "number") {
-        resolve({ status: error.code, signal: error.signal ?? null, stdout: capturedStdout, stderr: capturedStderr });
+        finish({ status: error.code, signal: error.signal ?? null, stdout: capturedStdout, stderr: capturedStderr });
         return;
       }
       if (error.killed || error.signal) {
         const timeoutError = new Error(`process exceeded ${options.timeoutMs}ms`) as NodeJS.ErrnoException;
         timeoutError.code = "ETIMEDOUT";
-        resolve({ status: null, signal: error.signal ?? null, stdout: capturedStdout, stderr: capturedStderr, error: timeoutError });
+        finish({ status: null, signal: error.signal ?? null, stdout: capturedStdout, stderr: capturedStderr, error: timeoutError });
         return;
       }
-      resolve({ status: null, signal: error.signal ?? null, stdout: capturedStdout, stderr: capturedStderr, error });
+      finish({ status: null, signal: error.signal ?? null, stdout: capturedStdout, stderr: capturedStderr, error });
     });
+    const terminate = (reason: "TIMEOUT" | "ABORTED") => {
+      if (settled || terminationReason) return;
+      terminationReason = reason;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), graceMs);
+      killTimer.unref?.();
+      // Resolve even if an unhealthy process/runtime never reports its exit.
+      hardStopTimer = setTimeout(() => {
+        const processError = new Error(reason === "TIMEOUT"
+          ? `process exceeded ${options.timeoutMs}ms`
+          : "process was cancelled") as NodeJS.ErrnoException;
+        processError.code = reason === "TIMEOUT" ? "ETIMEDOUT" : "ABORT_ERR";
+        finish({ status: null, signal: "SIGKILL", stdout: "", stderr: "", error: processError });
+      }, graceMs * 2);
+      hardStopTimer.unref?.();
+    };
+    const abort = () => terminate("ABORTED");
+    const timeoutTimer = setTimeout(() => terminate("TIMEOUT"), options.timeoutMs);
+    timeoutTimer.unref?.();
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener("abort", abort, { once: true });
   });
 }

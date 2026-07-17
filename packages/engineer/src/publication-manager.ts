@@ -121,6 +121,12 @@ export class EngineerPublicationManager {
     const resumedRunIds: string[] = [];
     const failedRunIds: string[] = [];
     for (const run of this.options.supervisor.listRuns(states)) {
+      const permanentlyFailed = this.options.supervisor.listFailures(run.runId).some((failure) =>
+        failure.reasonCode === "PUBLICATION_ARTIFACT_LIMIT_EXCEEDED" && failure.retryable === false);
+      if (permanentlyFailed) {
+        failedRunIds.push(run.runId);
+        continue;
+      }
       try {
         await this.resume(run.runId);
         resumedRunIds.push(run.runId);
@@ -241,7 +247,16 @@ export class EngineerPublicationManager {
     if (this.activePublicationRuns.has(runId)) throw new PublicationOperationInProgressError(runId);
     this.activePublicationRuns.add(runId);
     try {
-      return await this.publishFenced(runId);
+      const result = await this.publishFenced(runId);
+      this.options.supervisor.setLastError?.(runId, null);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (error instanceof RangeError && /artifact.*(?:byte|limit)|run artifacts exceed/i.test(message)) {
+        this.options.supervisor.setLastError?.(runId, message);
+        this.recordFailure(runId, "WORKFLOW_FAILURE", "PUBLICATION_ARTIFACT_LIMIT_EXCEEDED", error, false);
+      }
+      throw error;
     } finally {
       this.activePublicationRuns.delete(runId);
     }
@@ -323,6 +338,17 @@ export class EngineerPublicationManager {
           const value = await this.options.gitService.pushVerifiedCommit({ runId, repository: run.repository, resultCommitSha: evidence.resultCommitSha, branchName: branchValue.branchName });
           return { reference: value.remoteReference, value };
         });
+      const preCreateBase = await this.operation(run, "INSPECT_BASE", `git:inspect-before-pr:${runId}:${this.id()}`, evidence, approval?.approvalRequestId ?? null,
+        async () => {
+          const value = await this.options.gitService.inspectBaseBranch({ repository: run.repository, expectedBaseCommitSha: run.repository.baseCommitSha });
+          return { reference: value.currentCommitSha, value };
+        });
+      const preCreateStatus = preCreateBase.value as { currentCommitSha: string; matchesExpected: boolean };
+      if (!preCreateStatus.matchesExpected) {
+        this.transition(runId, "BASE_BRANCH_STALE", "BASE_BRANCH_CHANGED_BEFORE_PR", [preCreateBase.record.gitOperationId]);
+        this.recordFailure(runId, "GIT_FAILURE", "BASE_BRANCH_CHANGED_BEFORE_PR", new Error(preCreateStatus.currentCommitSha), true, [preCreateBase.record.gitOperationId]);
+        return { status: "BASE_STALE", currentBaseCommitSha: preCreateStatus.currentCommitSha };
+      }
       if (replay?.status === "SUCCEEDED" && replay.remoteReference) {
         this.transition(runId, "PR_CREATED", "PULL_REQUEST_RECOVERED", [replay.gitOperationId]);
         this.transition(runId, "COMPLETED", "ENGINEER_RUN_COMPLETED", [replay.gitOperationId, evidence.evidenceBundleId]);
@@ -336,6 +362,18 @@ export class EngineerPublicationManager {
             baseBranch: run.repository.baseBranch, title: run.requestNormalized || run.requestOriginal, body, idempotencyKey: prIdempotencyKey });
           return { reference: value.url, value };
         });
+      const postCreateBase = await this.operation(run, "INSPECT_BASE", `git:inspect-after-pr:${runId}:${this.id()}`, evidence, approval?.approvalRequestId ?? null,
+        async () => {
+          const value = await this.options.gitService.inspectBaseBranch({ repository: run.repository, expectedBaseCommitSha: run.repository.baseCommitSha });
+          return { reference: value.currentCommitSha, value };
+        });
+      const postCreateStatus = postCreateBase.value as { currentCommitSha: string; matchesExpected: boolean };
+      if (!postCreateStatus.matchesExpected) {
+        this.transition(runId, "BASE_BRANCH_STALE", "BASE_BRANCH_CHANGED_DURING_PR", [created.record.gitOperationId, postCreateBase.record.gitOperationId]);
+        this.recordFailure(runId, "GIT_FAILURE", "BASE_BRANCH_CHANGED_DURING_PR", new Error(postCreateStatus.currentCommitSha), true,
+          [created.record.gitOperationId, postCreateBase.record.gitOperationId]);
+        return { status: "BASE_STALE", currentBaseCommitSha: postCreateStatus.currentCommitSha };
+      }
       this.transition(runId, "PR_CREATED", "PULL_REQUEST_CREATED", [created.record.gitOperationId], "SUPERVISOR", "engineer-supervisor", { prCreated: true });
       this.transition(runId, "COMPLETED", "ENGINEER_RUN_COMPLETED", [created.record.gitOperationId, evidence.evidenceBundleId]);
       await this.options.cleanupRun?.(runId);

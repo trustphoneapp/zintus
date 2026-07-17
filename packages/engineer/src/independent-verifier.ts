@@ -228,7 +228,7 @@ export class IndependentVerifier {
             testId: item.testId, type: item.type, statuses,
             classification: flake.classification, quarantineRequired: flake.quarantineRequired,
           });
-          this.transition("VERIFICATION_INCOMPLETE", reasonCode, evidenceIds);
+          this.transition(flake.quarantineRequired ? "FLAKE_QUARANTINE" : "VERIFICATION_INCOMPLETE", reasonCode, evidenceIds);
           throw new IndependentVerificationFailure({
             failureClass,
             reasonCode: failureReason,

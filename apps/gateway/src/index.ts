@@ -70,6 +70,10 @@ export interface StartGatewayOptions {
   host?: string;
   /** Override GATEWAY_PORT (e.g. from a CLI flag). */
   port?: number;
+  /** Fetches a current connector credential without persisting it locally. */
+  githubTokenProvider?: (options?: { forceRefresh?: boolean }) => Promise<string | undefined>;
+  /** Result of an authenticated connector readiness probe performed before startup. */
+  githubCredentialAvailable?: boolean;
 }
 
 export interface RunningGateway {
@@ -179,7 +183,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const githubToken = process.env.ZINTUS_ENGINEER_GITHUB_TOKEN;
   // Publication is a privileged mutation boundary. Credentials alone are not
   // sufficient: the gateway itself must require an authenticated bearer.
-  const publicationAuthorityReady = canEnableEngineerPublication({ publicationSecret, githubToken, gatewayToken: config.token });
+  const publicationAuthorityReady = canEnableEngineerPublication({
+    publicationSecret,
+    githubToken,
+    githubCredentialProvider: Boolean(options.githubTokenProvider && options.githubCredentialAvailable),
+    gatewayToken: config.token,
+  });
+  const currentGithubToken = async (forceRefresh = false): Promise<string> => {
+    const token = await options.githubTokenProvider?.({ forceRefresh }) ?? process.env.ZINTUS_ENGINEER_GITHUB_TOKEN;
+    if (!token?.trim()) throw new Error("GitHub publication credential is unavailable or expired; reconnect GitHub");
+    return token;
+  };
   const engineerPlanning = new EngineerPlanningManager({
     supervisor: engineerSupervisor,
     artifactStore: engineerArtifactStore,
@@ -246,7 +260,9 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         repositoryRoot: engineerRepositoryRoot,
         expectedOriginUrl: engineerOriginUrl,
         repositoryRootFor: (repositoryId) => engineerRepositoryRegistry.repositoryRoot(repositoryId),
-        ...(githubToken ? { githubToken } : {}),
+        ...(githubToken || (options.githubTokenProvider && options.githubCredentialAvailable)
+          ? { githubToken: () => currentGithubToken(false) }
+          : {}),
       }),
     });
     // Warm the cached gate at process startup. Admission retries a failed probe
@@ -317,12 +333,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         if (!runId) return;
         const run = engineerSupervisor.getRun(runId);
         if (run.terminalAt) return;
+        if (run.state === "PLANNING" || run.state === "REPLANNING") {
+          engineerRuns.resumePlanning(runId);
+          return;
+        }
         if (run.state === "QUEUED") {
           engineerExecution?.resumeRecovered(runId);
           return;
         }
         const outcome = await engineerExecution?.recoverInterrupted(runId, lease.leaseId);
         if (outcome === "REQUEUED") engineerExecution?.resumeRecovered(runId);
+        else if (outcome === "IGNORED") engineerVerification?.resumeRecovered(runId);
       },
     });
     engineerExecution = new EngineerExecutionManager({
@@ -351,17 +372,20 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       transportForRole: async () => transportForRole(),
       transportForFailureClassifier: async () => transportForRole(),
       modelConfiguration: engineerModelConfiguration,
+      leaseManager: engineerWorkerLeases,
+      workerOwnerId: `gateway:${process.pid}:verification`,
       safetyIdentifierForUser: (userId) => {
         if (userId !== engineerPrincipal.ownerId) throw new Error("unknown Engineer safety subject");
         return engineerPrincipal.safetyIdentifier;
       },
     });
-    engineerPublication = publicationAuthorityReady && publicationSecret && githubToken
+    engineerPublication = publicationAuthorityReady && publicationSecret
       ? new EngineerPublicationManager({
           supervisor: engineerSupervisor,
           gitService: new GitHubGitService({
             repositoryRoot: engineerRepositoryRoot,
-            token: () => githubToken,
+            token: () => currentGithubToken(false),
+            refreshToken: () => currentGithubToken(true),
           }),
           artifactStore: engineerArtifactStore,
           diffForRun: (runId) => {
@@ -387,6 +411,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       artifactStore: engineerArtifactStore,
       preflight: engineerPreflight,
       principal: engineerPrincipal,
+      leaseManager: engineerWorkerLeases,
+      workerOwnerId: `gateway:${process.pid}:planning`,
       cleanupRun: (runId) => { engineerExecution?.destroy(runId); },
       ...(engineerPublication ? { publication: engineerPublication } : {}),
       diffForRun: (runId) => {
@@ -436,6 +462,15 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   for (const recovery of engineerExecution?.recoverQueued() ?? []) {
     recovery.promise.catch((error) => {
       log("error", "engineer.recovery_failed", {
+        runId: recovery.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  for (const recovery of engineerRuns.recoverPlanning()) {
+    recovery.promise.catch((error) => {
+      if (error instanceof BudgetPausedError) return;
+      log("error", "engineer.planning_recovery_failed", {
         runId: recovery.runId,
         error: error instanceof Error ? error.message : String(error),
       });

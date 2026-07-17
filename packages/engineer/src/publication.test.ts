@@ -74,7 +74,99 @@ function restartPublicationHarness(root: string, reconciliation: "SUCCEEDED" | "
   return { manager, state: () => state, operations, branchKey, artifacts, failures, calls };
 }
 
+function activePublicationHarness(root: string, options: { inspectMatches: boolean[]; maxArtifactBytes?: number }) {
+  const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n";
+  const resultCommitSha = "b".repeat(40);
+  const evidenceBundleHash = `sha256:${"c".repeat(64)}`;
+  let state: EngineerRun["state"] = "REVIEW_APPROVED";
+  let lastError: string | null = null;
+  const failures: Array<{ reasonCode?: string; retryable?: boolean }> = [];
+  const operations = new Map<string, GitOperationRecord>();
+  const calls = { inspect: 0, createBranch: 0, push: 0, createPr: 0 };
+  const run = (): EngineerRun => ({
+    runId: "run-active", userId: "user-1",
+    repository: { repositoryId: "repo-1", provider: "github", owner: "o", name: "r", baseBranch: "main", baseCommitSha: "d".repeat(40) },
+    requestOriginal: "change", requestNormalized: "change", state, stateVersion: 10,
+    manifestHash: `sha256:${"a".repeat(64)}`, riskTier: "LOW", humanGateRequired: false,
+    createdAt: "2026-07-14T09:00:00.000Z", updatedAt: "2026-07-14T10:00:00.000Z", terminalAt: null,
+  });
+  const supervisor = {
+    getRun: () => run(), listOpenDecisions: () => [],
+    getPublicationEvidence: () => ({
+      runId: run().runId, reviewerSessionId: "reviewer-1", reviewerDecision: "APPROVE",
+      reviewerDiffHash: sha256(diff), reviewerEvidenceBundleHash: evidenceBundleHash, reviewerIsolationVerified: true,
+      evidenceBundleId: "bundle-1", evidenceBundleHash, resultCommitSha,
+      allRequiredChecksPassed: true, openCriticalSecurityFindings: 0,
+    }),
+    findGitOperation: (_runId: string, key: string) => operations.get(key) ?? null,
+    recordGitOperation: (record: GitOperationRecord) => { operations.set(record.idempotencyKey, record); return record; },
+    recordArtifact: (artifact: unknown) => artifact,
+    recordFailure: (failure: { reasonCode?: string; retryable?: boolean }) => { failures.push(failure); return failure; },
+    listRuns: (states: EngineerRun["state"][]) => states.includes(state) ? [run()] : [],
+    listFailures: () => failures,
+    transition: (input: { nextState: EngineerRun["state"] }) => { state = input.nextState; return { run: run() }; },
+    setLastError: (_runId: string, value: string | null) => { lastError = value; },
+    getManifest: () => null, listClaimEvidence: () => [],
+  } as unknown as EngineerSupervisor;
+  const manager = new EngineerPublicationManager({
+    supervisor,
+    artifactStore: new LocalArtifactStore({ root: join(root, "artifacts"), ...(options.maxArtifactBytes ? { maxArtifactBytes: options.maxArtifactBytes } : {}) }),
+    diffForRun: () => diff,
+    commandSigningSecret: "phase4-active-signing-secret-at-least-32-bytes",
+    autoPublishLowRisk: true,
+    gitService: {
+      async inspectBaseBranch(input) {
+        const matchesExpected = options.inspectMatches[calls.inspect] ?? options.inspectMatches.at(-1) ?? true;
+        calls.inspect += 1;
+        return { currentCommitSha: matchesExpected ? input.expectedBaseCommitSha : "e".repeat(40), matchesExpected, protectionEnforced: true };
+      },
+      async createRunBranch() { calls.createBranch += 1; return { branchName: "zintus/engineer/run-active", remoteReference: "refs/heads/zintus/engineer/run-active" }; },
+      async pushVerifiedCommit(input) { calls.push += 1; return { remoteReference: `refs/heads/${input.branchName}` }; },
+      async createPullRequest() { calls.createPr += 1; return { id: "pr-1", number: 1, url: "https://github.test/pull/1" }; },
+    },
+  });
+  return { manager, state: () => state, lastError: () => lastError, failures, calls };
+}
+
 describe("Phase 4 approval deadlines", () => {
+  test("rechecks the base immediately before PR creation and stops on mid-flight drift", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-phase4-base-toctou-"));
+    const harness = activePublicationHarness(root, { inspectMatches: [true, false] });
+    await expect(harness.manager.start("run-active", "reviewer-1")).resolves.toEqual({
+      status: "BASE_STALE", currentBaseCommitSha: "e".repeat(40),
+    });
+    expect(harness.state()).toBe("BASE_BRANCH_STALE");
+    expect(harness.calls).toEqual({ inspect: 2, createBranch: 1, push: 1, createPr: 0 });
+    expect(harness.failures).toContainEqual(expect.objectContaining({ reasonCode: "BASE_BRANCH_CHANGED_BEFORE_PR" }));
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("detects a base move during draft PR creation and refuses to mark publication complete", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-phase4-base-post-create-"));
+    const harness = activePublicationHarness(root, { inspectMatches: [true, true, false] });
+    await expect(harness.manager.start("run-active", "reviewer-1")).resolves.toEqual({
+      status: "BASE_STALE", currentBaseCommitSha: "e".repeat(40),
+    });
+    expect(harness.state()).toBe("BASE_BRANCH_STALE");
+    expect(harness.calls).toEqual({ inspect: 3, createBranch: 1, push: 1, createPr: 1 });
+    expect(harness.failures).toContainEqual(expect.objectContaining({ reasonCode: "BASE_BRANCH_CHANGED_DURING_PR" }));
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("persists a non-retryable publication failure when the artifact budget is exhausted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-phase4-artifact-limit-"));
+    const harness = activePublicationHarness(root, { inspectMatches: [true], maxArtifactBytes: 1 });
+    await expect(harness.manager.start("run-active", "reviewer-1")).rejects.toThrow("artifact exceeds");
+    expect(harness.lastError()).toContain("artifact exceeds");
+    expect(harness.failures).toContainEqual(expect.objectContaining({
+      reasonCode: "PUBLICATION_ARTIFACT_LIMIT_EXCEEDED", retryable: false,
+    }));
+    const callsAfterFailure = { ...harness.calls };
+    await expect(harness.manager.recoverPending()).resolves.toEqual({ resumedRunIds: [], failedRunIds: ["run-active"] });
+    expect(harness.calls).toEqual(callsAfterFailure);
+    rmSync(root, { recursive: true, force: true });
+  });
+
   test("defers every Git call until deferred decisions resolve and replay does not duplicate publication", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-phase4-deferred-decisions-"));
     const diff = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n";
@@ -135,10 +227,10 @@ describe("Phase 4 approval deadlines", () => {
     deferredOpen = false;
     await expect(manager.start("run-deferred", "reviewer-1")).resolves.toMatchObject({ status: "PUBLISHED" });
     expect(String(state)).toBe("COMPLETED");
-    expect(calls).toEqual({ inspect: 1, createBranch: 1, push: 1, createPr: 1 });
+    expect(calls).toEqual({ inspect: 3, createBranch: 1, push: 1, createPr: 1 });
 
     await expect(manager.resume("run-deferred")).resolves.toMatchObject({ status: "PUBLISHED" });
-    expect(calls).toEqual({ inspect: 1, createBranch: 1, push: 1, createPr: 1 });
+    expect(calls).toEqual({ inspect: 3, createBranch: 1, push: 1, createPr: 1 });
     rmSync(root, { recursive: true, force: true });
   });
 

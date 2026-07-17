@@ -14,9 +14,10 @@ export interface EngineerPrincipal {
 export function canEnableEngineerPublication(input: {
   publicationSecret?: string;
   githubToken?: string;
+  githubCredentialProvider?: boolean;
   gatewayToken?: string;
 }): boolean {
-  return Boolean(input.publicationSecret?.trim() && input.githubToken?.trim() && input.gatewayToken?.trim());
+  return Boolean(input.publicationSecret?.trim() && (input.githubToken?.trim() || input.githubCredentialProvider) && input.gatewayToken?.trim());
 }
 
 function digest(secret: string, purpose: string): string {

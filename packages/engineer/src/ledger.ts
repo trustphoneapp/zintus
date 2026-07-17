@@ -376,6 +376,34 @@ export class EngineerLedger {
     this.db.exec("PRAGMA busy_timeout=5000");
     this.db.exec("PRAGMA journal_mode=WAL");
     this.db.exec(ENGINEER_DATABASE_SCHEMA_SQL);
+    const sandboxSchema = this.db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sandboxes'")
+      .get() as { sql: string } | null;
+    if (sandboxSchema?.sql && /run_id\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(sandboxSchema.sql)) {
+      this.db.exec("PRAGMA foreign_keys=OFF");
+      try {
+        this.db.exec(`BEGIN IMMEDIATE;
+          CREATE TABLE sandboxes_v14 (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+            workspace_identity TEXT NOT NULL UNIQUE,
+            image_digest TEXT NOT NULL,
+            environment_digest TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            destroyed_at TEXT
+          );
+          INSERT INTO sandboxes_v14 SELECT id, run_id, workspace_identity, image_digest, environment_digest, status, created_at, destroyed_at FROM sandboxes;
+          DROP TABLE sandboxes;
+          ALTER TABLE sandboxes_v14 RENAME TO sandboxes;
+          CREATE INDEX idx_sandboxes_run ON sandboxes(run_id, created_at);
+          COMMIT;`);
+      } catch (error) {
+        try { this.db.exec("ROLLBACK"); } catch { /* preserve the original migration error */ }
+        throw error;
+      } finally {
+        this.db.exec("PRAGMA foreign_keys=ON");
+      }
+    }
     const reviewerColumns = this.db.query("PRAGMA table_info(reviewer_sessions)").all() as Array<{ name: string }>;
     if (!reviewerColumns.some((column) => column.name === "cache_observed")) {
       this.db.exec("ALTER TABLE reviewer_sessions ADD COLUMN cache_observed INTEGER NOT NULL DEFAULT 0 CHECK(cache_observed IN (0, 1))");
@@ -1447,10 +1475,10 @@ export class EngineerLedger {
   recordSandbox(record: SandboxRecord): SandboxRecord {
     const parsed = SandboxRecordSchema.parse(record);
     this.getRun(parsed.runId);
-    const existing = this.db.query("SELECT id, workspace_identity, image_digest FROM sandboxes WHERE run_id = ?")
-      .get(parsed.runId) as { id: string; workspace_identity: string; image_digest: string } | null;
+    const existing = this.db.query("SELECT id, run_id, workspace_identity, image_digest FROM sandboxes WHERE id = ?")
+      .get(parsed.sandboxId) as { id: string; run_id: string; workspace_identity: string; image_digest: string } | null;
     if (existing) {
-      if (existing.id !== parsed.sandboxId || existing.workspace_identity !== parsed.workspaceIdentity ||
+      if (existing.run_id !== parsed.runId || existing.workspace_identity !== parsed.workspaceIdentity ||
           existing.image_digest !== parsed.imageDigest) {
         throw new IdempotencyConflictError(parsed.runId, `sandbox:${parsed.sandboxId}`);
       }

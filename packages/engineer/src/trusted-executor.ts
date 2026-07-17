@@ -33,19 +33,19 @@ export interface CommandProcessResult {
 export type CommandRunner = (
   executable: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv },
+  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv; signal?: AbortSignal },
 ) => CommandProcessResult;
 
 export type AsyncCommandRunner = (
   executable: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv },
+  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv; signal?: AbortSignal },
 ) => Promise<CommandProcessResult>;
 
 function defaultRunner(
   executable: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv },
+  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv; signal?: AbortSignal },
 ): CommandProcessResult {
   const result: SpawnSyncReturns<string> = spawnSync(executable, args, {
     cwd: options.cwd,
@@ -67,7 +67,7 @@ function defaultRunner(
 function defaultAsyncRunner(
   executable: string,
   args: string[],
-  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv },
+  options: { cwd: string; timeoutMs: number; maxOutputBytes: number; env: NodeJS.ProcessEnv; signal?: AbortSignal },
 ): Promise<CommandProcessResult> {
   return runProcessAsync(executable, args, options);
 }
@@ -109,6 +109,7 @@ export interface TrustedCommandExecutorOptions {
   currentCommit: () => string;
   currentCommitAsync?: () => Promise<string>;
   onRecord?: (record: CommandExecutionRecord) => void;
+  signal?: AbortSignal;
 }
 
 /** Executes only exact manifest commands through argv-only, no-shell process spawning. */
@@ -144,6 +145,7 @@ export class TrustedCommandExecutor {
       timeoutMs: this.options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
       maxOutputBytes: this.options.maxOutputBytes ?? DEFAULT_MAX_COMMAND_OUTPUT_BYTES,
       env: runtimeEnvironment(this.options.manifest.runId),
+      signal: this.options.signal,
     });
     return this.finalize(command, idempotencyKey, commandExecutionId, startedAt, result, this.options.currentCommit());
   }
@@ -172,6 +174,7 @@ export class TrustedCommandExecutor {
       timeoutMs: this.options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
       maxOutputBytes: this.options.maxOutputBytes ?? DEFAULT_MAX_COMMAND_OUTPUT_BYTES,
       env: runtimeEnvironment(this.options.manifest.runId),
+      signal: this.options.signal,
     }).then(async (result) => this.finalize(
       command,
       idempotencyKey,

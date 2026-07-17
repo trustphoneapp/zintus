@@ -9,6 +9,27 @@ const repository = {
 };
 
 describe("Phase 4 credentialed Git publication", () => {
+  test("refreshes an expired API credential once without retaining the old token", async () => {
+    const tokens: string[] = [];
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository",
+      token: () => "expired-token",
+      refreshToken: () => "fresh-token",
+      fetch: (async (_url, init) => {
+        const token = String((init?.headers as Record<string, string>)?.Authorization ?? "");
+        tokens.push(token);
+        return token === "Bearer fresh-token"
+          ? new Response(JSON.stringify([]), { status: 200 })
+          : new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+      }) as typeof fetch,
+    });
+    await expect(service.createPullRequest({
+      runId: "run-1", repository, branchName: "zintus/engineer/run-1",
+      baseBranch: "main", title: "Title", body: "Body", idempotencyKey: "pr-1",
+    })).rejects.toThrow("GitHub returned an invalid pull request result");
+    expect(tokens).toEqual(["Bearer expired-token", "Bearer fresh-token", "Bearer expired-token", "Bearer fresh-token"]);
+  });
+
   test("uses an ephemeral askpass token without placing the credential in argv", async () => {
     const calls: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
     const service = new GitHubGitService({
@@ -27,6 +48,48 @@ describe("Phase 4 credentialed Git publication", () => {
     expect(calls[0]!.env.GIT_TERMINAL_PROMPT).toBe("0");
     expect(calls.every((call) => !call.args.join(" ").includes("github-secret-token"))).toBe(true);
     expect(calls.every((call) => existsSync(String(call.env.GIT_ASKPASS)) === false)).toBe(true);
+  });
+
+  test("refreshes the credential once for authenticated Git transport", async () => {
+    const usedTokens: string[] = [];
+    const resultCommitSha = "b".repeat(40);
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository",
+      token: () => "expired-token",
+      refreshToken: () => "fresh-token",
+      spawn: ((_command, args, options) => {
+        const token = String(options?.env?.ZINTUS_GIT_PASSWORD ?? "");
+        usedTokens.push(token);
+        if (token === "expired-token") {
+          return { status: 128, stdout: "", stderr: "Authentication failed", pid: 1, output: [], signal: null } as unknown as SpawnSyncReturns<string>;
+        }
+        const stdout = args?.includes("ls-remote") ? `${resultCommitSha}\trefs/heads/zintus/engineer/run-1\n` : "";
+        return { status: 0, stdout, stderr: "", pid: 1, output: [], signal: null } as unknown as SpawnSyncReturns<string>;
+      }) as typeof import("node:child_process").spawnSync,
+    });
+
+    await service.pushVerifiedCommit({
+      runId: "run-1", repository, resultCommitSha, branchName: "zintus/engineer/run-1",
+    });
+    expect(usedTokens).toEqual(["expired-token", "fresh-token", "expired-token", "fresh-token"]);
+  });
+
+  test("does not refresh or replay a non-authentication Git failure", async () => {
+    let refreshes = 0;
+    let commands = 0;
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "current-token",
+      refreshToken: () => { refreshes += 1; return "rotated-token"; },
+      spawn: (() => {
+        commands += 1;
+        return { status: 1, stdout: "", stderr: "non-fast-forward", pid: 1, output: [], signal: null } as unknown as SpawnSyncReturns<string>;
+      }) as unknown as typeof import("node:child_process").spawnSync,
+    });
+    await expect(service.pushVerifiedCommit({
+      runId: "run-1", repository, resultCommitSha: "b".repeat(40), branchName: "zintus/engineer/run-1",
+    })).rejects.toThrow("non-fast-forward");
+    expect(refreshes).toBe(0);
+    expect(commands).toBe(1);
   });
 
   test("requires reviews, stale-approval invalidation, strict checks, admin enforcement, and immutable history", async () => {

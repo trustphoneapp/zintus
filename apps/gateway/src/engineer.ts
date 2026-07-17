@@ -24,8 +24,11 @@ import {
   canTransition,
   EngineerPlanningCancelledError,
   EngineerPlanningTimeoutError,
+  isProviderModelTimeout,
   BudgetPausedError,
   FailureRecordSchema,
+  type EngineerWorkerLeaseManager,
+  type WorkerLeaseGrant,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
 import { previewEngineerArtifact } from "./engineer-artifact-preview.js";
@@ -45,6 +48,10 @@ export interface EngineerRunManagerOptions {
   preflight: EngineerCapabilityPreflight;
   principal: EngineerPrincipal;
   context?: EngineerContextManager;
+  leaseManager?: EngineerWorkerLeaseManager;
+  workerOwnerId?: string;
+  leaseTtlMs?: number;
+  heartbeatIntervalMs?: number;
 }
 
 export function correctedRunRepository(source: RepositoryReference, current: RepositoryReference): RepositoryReference {
@@ -61,6 +68,7 @@ export class EngineerRunManager {
   private readonly options: EngineerRunManagerOptions;
   private readonly background = new Set<Promise<void>>();
   private readonly activePlanning = new Map<string, AbortController>();
+  private readonly activePlanningSettled = new Map<string, Promise<void>>();
   private draining = false;
 
   constructor(options: EngineerRunManagerOptions) {
@@ -302,14 +310,65 @@ export class EngineerRunManager {
     if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
     if (this.activePlanning.has(runId)) throw new Error("Evidence planning is already active for this run");
     const cancellation = new AbortController();
+    const leaseOwnerId = this.options.workerOwnerId ?? "engineer-planning-worker";
+    let lease: WorkerLeaseGrant | null = null;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    if (this.options.leaseManager) {
+      lease = this.options.leaseManager.acquire({
+        resourceKey: `run:${runId}`,
+        ownerId: leaseOwnerId,
+        ttlMs: this.options.leaseTtlMs ?? 30_000,
+        idempotencyKey: `plan:${runId}:${this.options.supervisor.getRun(runId).stateVersion}`,
+      });
+      let heartbeatSequence = 0;
+      heartbeatTimer = setInterval(() => {
+        if (!lease) return;
+        heartbeatSequence += 1;
+        try {
+          const record = this.options.leaseManager!.heartbeat({
+            leaseId: lease.lease.leaseId,
+            ownerId: leaseOwnerId,
+            fencingToken: lease.lease.fencingToken,
+            leaseToken: lease.leaseToken,
+            idempotencyKey: `plan-heartbeat:${heartbeatSequence}`,
+          });
+          lease = { ...lease, lease: record };
+        } catch (error) {
+          if (heartbeatTimer) clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+          cancellation.abort(error);
+        }
+      }, this.options.heartbeatIntervalMs ?? 10_000);
+      heartbeatTimer.unref?.();
+    }
     this.activePlanning.set(runId, cancellation);
+    let markPlanningSettled!: () => void;
+    const planningSettled = new Promise<void>((resolve) => { markPlanningSettled = resolve; });
+    this.activePlanningSettled.set(runId, planningSettled);
+    const assertPlanningAuthority = () => {
+      if (cancellation.signal.aborted) throw new EngineerPlanningCancelledError();
+      if (lease && this.options.leaseManager) {
+        try {
+          this.options.leaseManager.assertActive({
+            leaseId: lease.lease.leaseId,
+            ownerId: leaseOwnerId,
+            fencingToken: lease.lease.fencingToken,
+            leaseToken: lease.leaseToken,
+          });
+        } catch {
+          cancellation.abort(new EngineerPlanningCancelledError());
+          throw new EngineerPlanningCancelledError();
+        }
+      }
+    };
     this.beginPlanning(runId);
     this.clearError(runId);
     const failureCountBefore = this.options.supervisor.listFailures(runId).length;
     try {
       await this.options.context.build(runId);
-      if (cancellation.signal.aborted) throw new EngineerPlanningCancelledError();
-      const plan = await this.options.planning.plan(runId, cancellation.signal);
+      assertPlanningAuthority();
+      const plan = await this.options.planning.plan(runId, cancellation.signal, assertPlanningAuthority);
+      assertPlanningAuthority();
       this.clearError(runId);
       return plan;
     } catch (error) {
@@ -319,6 +378,24 @@ export class EngineerRunManager {
       }
       if (error instanceof BudgetPausedError) {
         this.clearError(runId);
+        throw error;
+      }
+      if (isProviderModelTimeout(error) || error instanceof EngineerPlanningTimeoutError) {
+        const message = this.persistError(runId, error);
+        const current = this.options.supervisor.getRun(runId);
+        this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+          failureId: randomUUID(), runId, failureClass: "MODEL_FAILURE",
+          reasonCode: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS",
+          fingerprint: sha256({ reasonCode: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS", message }),
+          evidenceIds: [], retryable: true, createdAt: new Date().toISOString(),
+        }));
+        if (canTransition(current.state, "MODEL_PROVIDER_RETRY_PENDING")) {
+          this.options.supervisor.transition({
+            runId, expectedStateVersion: current.stateVersion, nextState: "MODEL_PROVIDER_RETRY_PENDING",
+            reasonCode: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS",
+            idempotencyKey: `planning-provider-timeout:${current.stateVersion}`,
+          });
+        }
         throw error;
       }
       const message = this.persistError(runId, error);
@@ -351,7 +428,61 @@ export class EngineerRunManager {
       }
       throw error;
     } finally {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      if (lease && this.options.leaseManager) {
+        try {
+          this.options.leaseManager.release({
+            leaseId: lease.lease.leaseId,
+            ownerId: leaseOwnerId,
+            fencingToken: lease.lease.fencingToken,
+            leaseToken: lease.leaseToken,
+            idempotencyKey: `plan-release:${lease.lease.renewalCount}`,
+          });
+        } catch { /* expired/fenced planning authority is already revoked */ }
+      }
       if (this.activePlanning.get(runId) === cancellation) this.activePlanning.delete(runId);
+      if (this.activePlanningSettled.get(runId) === planningSettled) this.activePlanningSettled.delete(runId);
+      markPlanningSettled();
+    }
+  }
+
+  recoverPlanning(): Array<{ runId: string; promise: Promise<unknown> }> {
+    const recoveries: Array<{ runId: string; promise: Promise<unknown> }> = [];
+    for (const run of this.options.supervisor.listRuns(["PLANNING", "REPLANNING"])) {
+      const runningPlanner = (this.options.supervisor.exportRunRecords(run.runId)?.agent_executions ?? [])
+        .some((agent) => agent.role === "PLANNER" && agent.status === "RUNNING");
+      if (runningPlanner) {
+        const now = new Date().toISOString();
+        this.options.supervisor.finalizeRunningAgentExecutions(run.runId, "FAILED", "PLANNING_PROCESS_INTERRUPTED", now);
+        this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+          failureId: randomUUID(), runId: run.runId, failureClass: "MODEL_FAILURE",
+          reasonCode: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS",
+          fingerprint: sha256({ runId: run.runId, stateVersion: run.stateVersion, reason: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS" }),
+          evidenceIds: [], retryable: true, createdAt: now,
+        }));
+        this.options.supervisor.transition({
+          runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "MODEL_PROVIDER_RETRY_PENDING",
+          reasonCode: "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS",
+          idempotencyKey: `planning-provider-ambiguous:${run.stateVersion}`,
+        });
+        continue;
+      }
+      recoveries.push({ runId: run.runId, promise: this.plan(this.options.principal, run.runId) });
+    }
+    return recoveries;
+  }
+
+  resumePlanning(runId: string): void {
+    const active = this.activePlanning.get(runId);
+    if (active) {
+      active.abort(new EngineerPlanningCancelledError());
+      const settled = this.activePlanningSettled.get(runId);
+      if (settled) void settled.finally(() => this.resumePlanning(runId));
+      return;
+    }
+    const run = this.options.supervisor.getRun(runId);
+    if (["PLANNING", "REPLANNING"].includes(run.state)) {
+      void this.plan(this.options.principal, runId).catch(() => undefined);
     }
   }
 
@@ -375,6 +506,27 @@ export class EngineerRunManager {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    const pending = this.options.supervisor.getRun(runId);
+    const reason = this.options.supervisor.listEvents(runId).at(-1)?.reasonCode;
+    if (reason === "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS") {
+      const run = this.options.supervisor.transition({
+        runId, expectedStateVersion: pending.stateVersion, nextState: "PLANNING",
+        reasonCode: "HUMAN_RETRY_PLANNING_PROVIDER", idempotencyKey: `human-retry-planning:${pending.stateVersion}`,
+      }).run;
+      this.clearError(runId);
+      this.resumePlanning(runId);
+      return run;
+    }
+    if (reason === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS") {
+      if (!this.options.verification) throw new Error("Engineer verification is not configured on this gateway");
+      const run = this.options.supervisor.transition({
+        runId, expectedStateVersion: pending.stateVersion, nextState: "SECURITY_REVIEW",
+        reasonCode: "HUMAN_RETRY_VERIFICATION_PROVIDER", idempotencyKey: `human-retry-verification:${pending.stateVersion}`,
+      }).run;
+      this.clearError(runId);
+      this.options.verification.resumeRecovered(runId);
+      return run;
+    }
     if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
     const run = await this.options.execution.retryProviderTimeout(runId);
     this.clearError(runId);
@@ -941,6 +1093,27 @@ export class EngineerRunManager {
     // path performs its own current-base checks before a remote mutation.
     const run = this.options.supervisor.getRun(runId);
     if (run.state !== "HUMAN_REVIEW_REQUIRED") throw new Error(`human review requires HUMAN_REVIEW_REQUIRED, not ${run.state}`);
+    const flakeFailure = (this.options.supervisor.listFailures?.(runId) ?? [])
+      .find((failure) => failure.reasonCode === "FLAKY_TEST_QUARANTINED");
+    if (flakeFailure) {
+      if (decision === "reject") {
+        return { run: this.options.supervisor.transition({
+          runId, expectedStateVersion: run.stateVersion, nextState: "REJECTED",
+          reasonCode: "HUMAN_REJECTED_FLAKY_CANDIDATE", actorType: "HUMAN", actorId: principal.reviewerId,
+          evidenceIds: flakeFailure.evidenceIds, manifestHash: run.manifestHash,
+          idempotencyKey: `human-flake:reject:${run.stateVersion}:${sha256(reason)}`,
+        }).run };
+      }
+      if (!this.options.verification) throw new Error("Engineer verification is not configured for a quarantined-test retry");
+      const recovery = this.options.supervisor.transition({
+        runId, expectedStateVersion: run.stateVersion, nextState: "VERIFICATION_RECOVERY",
+        reasonCode: "HUMAN_RETRY_FLAKY_TEST", actorType: "HUMAN", actorId: principal.reviewerId,
+        evidenceIds: flakeFailure.evidenceIds, manifestHash: run.manifestHash,
+        idempotencyKey: `human-flake:retry:${run.stateVersion}:${sha256(reason)}`,
+      }).run;
+      this.options.verification.resumeRecovered(runId);
+      return { run: recovery, publication: null };
+    }
     const bundle = this.options.supervisor.listEvidenceBundles(runId).at(-1);
     if (!bundle) throw new Error("human review requires an immutable evidence bundle");
     const evidenceIds = [bundle.evidenceBundleId];
@@ -974,6 +1147,8 @@ export class EngineerRunManager {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     this.activePlanning.get(runId)?.abort(new EngineerPlanningCancelledError());
+    this.options.execution?.cancel(runId);
+    this.options.verification?.cancel(runId);
     // Cancellation is a fail-safe control, not a new execution admission.
     // A run must remain stoppable after its base becomes stale or a connector
     // grant is revoked; ownership and publication cleanup fences still apply.

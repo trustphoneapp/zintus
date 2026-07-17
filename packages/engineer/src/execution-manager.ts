@@ -95,6 +95,10 @@ export class EngineerExecutionManager {
 
   isActive(runId: string): boolean { return this.active.has(runId); }
 
+  cancel(runId: string): void {
+    this.abortControllers.get(runId)?.abort(new Error("Engineer run was cancelled"));
+  }
+
   /** Requeue a human-resumed implementation while preserving its workspace checkpoint. */
   async resumeBudgetCheckpoint(runId: string) {
     const run = this.options.supervisor.getRun(runId);
@@ -453,7 +457,9 @@ export class EngineerExecutionManager {
         currentCommit: () => this.options.sandboxManager.currentCommit(provisioned!.workspace),
         currentCommitAsync: () => this.options.sandboxManager.currentCommitAsync(provisioned!.workspace),
         onRecord: (record) => { supervisor.recordCommandExecution(record); },
+        signal,
       });
+      const recoveredDiffHash = sha256(await this.options.sandboxManager.workspaceManager().diffAsync(provisioned.workspace));
       const continuation = supervisor.listArtifacts(runId)
         .filter((artifact) => artifact.type === "BUILDER_CONTINUATION" && artifact.trusted &&
           artifact.producerType === "SYSTEM" && artifact.producerId === "engineer-builder-checkpoint")
@@ -464,7 +470,9 @@ export class EngineerExecutionManager {
               JSON.parse(this.options.artifactStore.read(artifact).toString("utf8")),
             );
             return parsed.manifestHash === manifest.manifestHash &&
-              parsed.inputContextHash === sha256(manifest.request.normalized) ? [parsed] : [];
+              parsed.inputContextHash === sha256(manifest.request.normalized) &&
+              parsed.workspaceIdentity === provisioned!.record.workspaceIdentity &&
+              parsed.candidateDiffHash === recoveredDiffHash ? [parsed] : [];
           } catch { return []; }
         })[0];
       const builder = new CodexBuilder({
@@ -481,7 +489,10 @@ export class EngineerExecutionManager {
           supervisor.recordArtifact(this.options.artifactStore.put({
             runId,
             type: "BUILDER_CONTINUATION",
-            bytes: JSON.stringify(checkpoint),
+            bytes: JSON.stringify(BuilderContinuationSchema.parse({
+              ...checkpoint,
+              workspaceIdentity: provisioned!.record.workspaceIdentity,
+            })),
             producerType: "SYSTEM",
             producerId: "engineer-builder-checkpoint",
             trusted: true,

@@ -297,7 +297,7 @@ export class EngineerPlanningManager {
   private readonly options: EngineerPlanningManagerOptions;
   constructor(options: EngineerPlanningManagerOptions) { this.options = options; }
 
-  async plan(runId: string, cancellationSignal?: AbortSignal): Promise<PlanProposal> {
+  async plan(runId: string, cancellationSignal?: AbortSignal, assertAuthority: () => void = () => undefined): Promise<PlanProposal> {
     if (cancellationSignal?.aborted) throw new EngineerPlanningCancelledError();
     const run = this.options.supervisor.getRun(runId);
     if (!["REQUEST_RECEIVED", "PLANNING", "REPLANNING"].includes(run.state)) {
@@ -500,6 +500,7 @@ export class EngineerPlanningManager {
       cancellationSignal?.removeEventListener("abort", cancelPlanning);
     }
     if (cancellationSignal?.aborted) throw new EngineerPlanningCancelledError();
+    assertAuthority();
     this.options.supervisor.recordModelCall({ modelCallId: this.id(), runId, agentExecutionId: agentId, logicalTier: route.logicalTier, resolvedModel: route.model, promptTemplateVersion: PLANNER_POLICY_VERSION, inputContextRefs: [inputHash, response.id], outputSchemaVersion: "plan-proposal-v2", cacheKey, cacheHit: (response.usage?.input_tokens_details?.cached_tokens ?? 0) > 0, latencyMs: Math.max(0, Date.now() - callStarted), inputTokens: response.usage?.input_tokens ?? null, outputTokens: response.usage?.output_tokens ?? null, cachedInputTokens: response.usage?.input_tokens_details?.cached_tokens ?? 0, cacheWriteInputTokens: response.usage?.input_tokens_details?.cache_write_tokens ?? 0, retryCount: 0, status: "SUCCEEDED", createdAt: this.timestamp() }, reservationId);
     modelCallRecorded = true;
     failureStage = "STRUCTURED_OUTPUT";
@@ -522,6 +523,7 @@ export class EngineerPlanningManager {
     failureStage = "COMMAND_POLICY";
     validateGroundedPlan(output, context.manifest);
     failureStage = "WORKFLOW";
+    assertAuthority();
     let current = run;
     if (run.state === "REQUEST_RECEIVED") {
       current = this.options.supervisor.normalizeRequest({ runId, expectedStateVersion: run.stateVersion, normalizedRequest: output.normalizedRequest, idempotencyKey: `plan:normalize:${inputHash}` }).run;
@@ -568,6 +570,7 @@ export class EngineerPlanningManager {
       contextManifestHash: context.manifest.manifestHash,
     };
     const proposalHash = planProposalContentHash(proposalContent);
+    assertAuthority();
     const artifact = this.options.supervisor.recordArtifact(this.options.artifactStore.put({ runId, type: "PLAN_PROPOSAL", bytes: JSON.stringify(proposalContent), producerType: "SYSTEM", producerId: agentId, trusted: false }));
     const proposal = this.options.supervisor.recordPlanProposal(PlanProposalSchema.parse({
       proposalSchemaVersion: proposalContent.proposalSchemaVersion,
@@ -581,6 +584,7 @@ export class EngineerPlanningManager {
     this.options.supervisor.recordAgentExecution({ agentExecutionId: agentId, runId, role: "PLANNER", modelTier: route.logicalTier, status: "SUCCEEDED", inputHash, outputArtifactId: artifact.artifactId, startedAt, completedAt: this.timestamp() });
     let interrupted = false;
     for (const question of proposal.planningAnalysis.unresolvedQuestions) {
+      assertAuthority();
       if (recordedDecisionKeys.has(plannerQuestionDecisionKey(question))) continue;
       const extraction = extractDecisionFactors({
         runId,
@@ -619,6 +623,7 @@ export class EngineerPlanningManager {
       current = this.options.supervisor.getRun(runId);
     }
     if (!interrupted) {
+      assertAuthority();
       this.options.supervisor.transition({ runId, expectedStateVersion: current.stateVersion, nextState: "PLAN_READY", reasonCode: "STRUCTURED_PLAN_READY", evidenceIds: [context.artifactId, artifact.artifactId], manifestHash: null, idempotencyKey: `plan:ready:${context.manifest.manifestHash}:${proposalHash}` });
     }
     return proposal;

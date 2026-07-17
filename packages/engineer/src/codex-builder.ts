@@ -80,6 +80,8 @@ export type ResponsesResult = z.infer<typeof ResponsesResultSchema>;
 export const BuilderContinuationSchema = z.object({
   version: z.literal(1),
   runId: z.string().min(1).max(200),
+  /** Execution-manager binding; legacy records remain parseable but are not resumable. */
+  workspaceIdentity: z.string().min(1).max(2_000).optional(),
   manifestHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   inputContextHash: z.string().regex(/^sha256:[a-f0-9]{64}$/),
   nextRound: z.number().int().nonnegative().max(MAX_BUILDER_TOOL_ROUNDS),

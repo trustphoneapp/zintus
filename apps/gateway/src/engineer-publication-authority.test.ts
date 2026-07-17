@@ -8,5 +8,6 @@ describe("Engineer publication startup authority", () => {
     expect(canEnableEngineerPublication({ publicationSecret: "signing", gatewayToken: "gateway" })).toBe(false);
     expect(canEnableEngineerPublication({ githubToken: "github", gatewayToken: "gateway" })).toBe(false);
     expect(canEnableEngineerPublication({ publicationSecret: " ", githubToken: "github", gatewayToken: "gateway" })).toBe(false);
+    expect(canEnableEngineerPublication({ publicationSecret: "signing", githubCredentialProvider: true, gatewayToken: "gateway" })).toBe(true);
   });
 });

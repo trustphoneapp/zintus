@@ -32,7 +32,7 @@ export interface DockerSandboxManagerOptions {
   imageDigest: string;
   limits?: DockerSandboxLimits;
   dockerSpawn?: typeof spawnSync;
-  dockerRunAsync?: (args: string[], options: { timeoutMs: number; maxOutputBytes: number; env?: NodeJS.ProcessEnv }) => Promise<AsyncProcessResult>;
+  dockerRunAsync?: (args: string[], options: { timeoutMs: number; maxOutputBytes: number; env?: NodeJS.ProcessEnv; signal?: AbortSignal }) => Promise<AsyncProcessResult>;
   now?: () => Date;
   idFactory?: () => string;
   warmPool?: {
@@ -99,6 +99,7 @@ export class DockerSandboxManager implements ISandbox {
           timeoutMs: processOptions.timeoutMs,
           maxOutputBytes: processOptions.maxOutputBytes,
           env: processOptions.env,
+          signal: processOptions.signal,
         }));
   }
 
@@ -445,6 +446,7 @@ export class DockerSandboxManager implements ISandbox {
         timeoutMs: commandOptions.timeoutMs,
         maxOutputBytes: commandOptions.maxOutputBytes,
         env: hostEnvironment,
+        signal: commandOptions.signal,
       });
     };
   }

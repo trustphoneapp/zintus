@@ -166,6 +166,7 @@ export interface IsolatedReviewerOptions {
     reservationId?: string;
     latencyMs: number;
   }) => boolean;
+  signal?: AbortSignal;
 }
 
 export interface IsolatedReviewResult {
@@ -305,7 +306,7 @@ export class IsolatedReviewer {
       });
       const attemptStarted = Date.now();
       try {
-        response = await this.options.transport.create(request);
+        response = await this.options.transport.create(request, { signal: this.options.signal });
         break;
       } catch (error) {
         if (!this.options.authorizeModelRetry?.({

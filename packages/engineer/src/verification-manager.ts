@@ -14,12 +14,12 @@ import {
 } from "./contracts.js";
 import { FailureRecordSchema } from "./control-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
-import { BuilderContinuationSchema, BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, type ResponsesTransport } from "./codex-builder.js";
-import type { AgentExecutionRecord, ArtifactRecord, SandboxRecord } from "./execution-contracts.js";
+import { BuilderContinuationSchema, BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, isProviderModelTimeout, type ResponsesTransport } from "./codex-builder.js";
+import { ArtifactRecordSchema, type AgentExecutionRecord, type ArtifactRecord, type SandboxRecord } from "./execution-contracts.js";
 import type { EngineerExecutionManager } from "./execution-manager.js";
 import type { ISandbox, ProvisionedSandbox } from "./sandbox-manager.js";
 import { sha256 } from "./hash.js";
-import { IndependentVerifier, IndependentVerificationFailure, StableRequiredTestFailure } from "./independent-verifier.js";
+import { IndependentVerifier, IndependentVerificationFailure, StableRequiredTestFailure, type IndependentVerificationOutput } from "./independent-verifier.js";
 import {
   IsolatedReviewer,
   REVIEWER_POLICY_VERSION,
@@ -35,6 +35,7 @@ import { canTransition, isTerminalState } from "./state-machine.js";
 import { derivePostVerificationRiskFeatures } from "./post-verification-risk.js";
 import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import { BudgetPausedError, BuilderModelCallLimitError } from "./errors.js";
+import { WorkerLeaseConflictError, type EngineerWorkerLeaseManager, type WorkerLeaseGrant } from "./worker-lease.js";
 import { TestIntegrityGuard, TestIntegrityViolationError, type TestIntegrityComparison } from "./test-integrity.js";
 import {
   buildAdversarialCoverageReport,
@@ -45,6 +46,7 @@ import {
   EvidenceBundleRecordSchema,
   ReviewerSessionRecordSchema,
   SecurityFindingRecordSchema,
+  VerificationExecutionRecordSchema,
   trustedEvidenceSupportsCriterion,
   VerificationResultSchema,
   type ClaimEvidenceRecord,
@@ -72,6 +74,10 @@ export interface EngineerVerificationManagerOptions {
   now?: () => Date;
   idFactory?: () => string;
   safetyIdentifierForUser?: (userId: string) => string;
+  leaseManager?: EngineerWorkerLeaseManager;
+  workerOwnerId?: string;
+  leaseTtlMs?: number;
+  heartbeatIntervalMs?: number;
 }
 
 interface AgentContext {
@@ -86,6 +92,8 @@ interface AgentContext {
 export class EngineerVerificationManager {
   private readonly options: EngineerVerificationManagerOptions;
   private readonly active = new Map<string, Promise<VerificationResult>>();
+  private readonly abortControllers = new Map<string, AbortController>();
+  private readonly activeLeases = new Map<string, WorkerLeaseGrant>();
 
   constructor(options: EngineerVerificationManagerOptions) {
     this.options = options;
@@ -110,14 +118,94 @@ export class EngineerVerificationManager {
   private runActive(runId: string, operation: () => Promise<VerificationResult>): Promise<VerificationResult> {
     const existing = this.active.get(runId);
     if (existing) return existing;
-    const promise = operation()
+    const controller = new AbortController();
+    this.abortControllers.set(runId, controller);
+    const promise = this.withWorkerLease(runId, controller, operation)
       .catch((error) => {
-        if (!(error instanceof BudgetPausedError)) this.failClosed(runId, error);
+        if (!(error instanceof BudgetPausedError) && !(error instanceof WorkerLeaseConflictError) && !controller.signal.aborted) {
+          this.failClosed(runId, error);
+        }
         throw error;
       })
-      .finally(() => this.active.delete(runId));
+      .finally(() => {
+        this.active.delete(runId);
+        this.abortControllers.delete(runId);
+        this.activeLeases.delete(runId);
+      });
     this.active.set(runId, promise);
     return promise;
+  }
+
+  cancel(runId: string): void {
+    this.abortControllers.get(runId)?.abort(new Error("Engineer verification was cancelled"));
+  }
+
+  resumeRecovered(runId: string): void {
+    const existing = this.active.get(runId);
+    if (existing) {
+      this.cancel(runId);
+      void existing.finally(() => {
+        const run = this.options.supervisor.getRun(runId);
+        if (!run.terminalAt && run.state !== "CANCELLATION_PENDING") {
+          void this.resumeBudgetCheckpoint(runId).catch(() => undefined);
+        }
+      });
+      return;
+    }
+    const run = this.options.supervisor.getRun(runId);
+    if (!run.terminalAt && run.state !== "CANCELLATION_PENDING") {
+      void this.resumeBudgetCheckpoint(runId).catch(() => undefined);
+    }
+  }
+
+  private async withWorkerLease(
+    runId: string,
+    controller: AbortController,
+    operation: () => Promise<VerificationResult>,
+  ): Promise<VerificationResult> {
+    const leaseManager = this.options.leaseManager;
+    if (!leaseManager) return operation();
+    const ownerId = this.options.workerOwnerId ?? "engineer-verification-worker";
+    let grant = leaseManager.acquire({
+      resourceKey: `run:${runId}`,
+      ownerId,
+      ttlMs: this.options.leaseTtlMs ?? 30_000,
+      idempotencyKey: `verify:${runId}:${this.options.supervisor.getRun(runId).stateVersion}`,
+    });
+    this.activeLeases.set(runId, grant);
+    let heartbeatSequence = 0;
+    const timer = setInterval(() => {
+      heartbeatSequence += 1;
+      try {
+        const lease = leaseManager.heartbeat({
+          leaseId: grant.lease.leaseId,
+          ownerId,
+          fencingToken: grant.lease.fencingToken,
+          leaseToken: grant.leaseToken,
+          idempotencyKey: `verify-heartbeat:${heartbeatSequence}`,
+        });
+        grant = { ...grant, lease };
+        this.activeLeases.set(runId, grant);
+      } catch (error) {
+        clearInterval(timer);
+        controller.abort(error);
+      }
+    }, this.options.heartbeatIntervalMs ?? 10_000);
+    timer.unref?.();
+    try {
+      return await operation();
+    } finally {
+      clearInterval(timer);
+      try {
+        leaseManager.release({
+          leaseId: grant.lease.leaseId,
+          ownerId,
+          fencingToken: grant.lease.fencingToken,
+          leaseToken: grant.leaseToken,
+          idempotencyKey: `verify-release:${grant.lease.renewalCount}`,
+        });
+      } catch { /* an expired/fenced lease is already released from authority */ }
+    }
   }
 
   recoverReady(): Array<{ runId: string; promise: Promise<VerificationResult> }> {
@@ -127,18 +215,36 @@ export class EngineerVerificationManager {
       "REVIEW_CHANGES_REQUESTED", "REVIEW_FIX_PREPARING", "VERIFICATION_RECOVERY", "IMPLEMENTING",
       "HUMAN_REVIEW_REQUIRED",
     ] as const;
-    return this.options.supervisor.listRuns([...states])
-      .filter((run) => run.state === "HUMAN_REVIEW_REQUIRED"
-        ? this.options.supervisor.reviewerPersistenceRecoveryCandidate(run.runId) !== null
-        : run.state !== "IMPLEMENTING" || this.isInterruptedPhase3Repair(run.runId))
-      .map((run) => ({
+    const recoveries: Array<{ runId: string; promise: Promise<VerificationResult> }> = [];
+    for (const run of this.options.supervisor.listRuns([...states])) {
+      const runningModelAgent = (this.options.supervisor.exportRunRecords(run.runId)?.agent_executions ?? [])
+        .some((agent) => agent.status === "RUNNING" && typeof agent.role === "string" &&
+          ["TESTER", "SECURITY", "REVIEWER"].includes(agent.role));
+      if (runningModelAgent && canTransition(run.state, "MODEL_PROVIDER_RETRY_PENDING")) {
+        const now = this.timestamp();
+        this.options.supervisor.finalizeRunningAgentExecutions(run.runId, "FAILED", "VERIFICATION_PROCESS_INTERRUPTED", now);
+        this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+          failureId: this.id(), runId: run.runId, failureClass: "MODEL_FAILURE",
+          reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS",
+          fingerprint: sha256({ runId: run.runId, stateVersion: run.stateVersion, reason: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS" }),
+          evidenceIds: [], retryable: true, createdAt: now,
+        }));
+        this.transition(run.runId, "MODEL_PROVIDER_RETRY_PENDING", "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS");
+        continue;
+      }
+      if (run.state === "HUMAN_REVIEW_REQUIRED"
+        ? this.options.supervisor.reviewerPersistenceRecoveryCandidate(run.runId) === null
+        : run.state === "IMPLEMENTING" && !this.isInterruptedPhase3Repair(run.runId)) continue;
+      recoveries.push({
         runId: run.runId,
         promise: run.state === "FAST_CHECKS"
           ? this.verify(run.runId)
           : run.state === "HUMAN_REVIEW_REQUIRED"
             ? this.runActive(run.runId, () => this.recoverReviewerPersistence(run.runId))
             : this.resumeBudgetCheckpoint(run.runId),
-      }));
+      });
+    }
+    return recoveries;
   }
 
   private async recoverReviewerPersistence(runId: string): Promise<VerificationResult> {
@@ -234,8 +340,8 @@ export class EngineerVerificationManager {
   private async verifyPass(runId: string): Promise<VerificationResult> {
     const supervisor = this.options.supervisor;
     const initial = supervisor.getRun(runId);
-    if (initial.state !== "FAST_CHECKS" || !initial.manifestHash) {
-      throw new Error(`Phase 3 verification requires FAST_CHECKS, not ${initial.state}`);
+    if (!["FAST_CHECKS", "SECURITY_REVIEW"].includes(initial.state) || !initial.manifestHash) {
+      throw new Error(`Phase 3 verification requires FAST_CHECKS or a durable SECURITY_REVIEW checkpoint, not ${initial.state}`);
     }
     const manifest = supervisor.getManifest(runId);
     if (!manifest) throw new Error("frozen manifest is unavailable");
@@ -250,17 +356,19 @@ export class EngineerVerificationManager {
       workspace: sandbox.workspace,
       now: this.options.now,
     });
-    const preVerificationIntegrity = testIntegrity.attest("PRE_VERIFICATION");
-      const resultCommitSha = await workspaceManager.checkpointAsync(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
-      const diff = await workspaceManager.diffAsync(sandbox.workspace);
-      supervisor.recordArtifact(this.options.artifactStore.put({
+    const resultCommitSha = await workspaceManager.checkpointAsync(sandbox.workspace, `zintus engineer ${runId} verification checkpoint`);
+    const diff = await workspaceManager.diffAsync(sandbox.workspace);
+    supervisor.recordArtifact(this.options.artifactStore.put({
         runId, type: "FINAL_DIFF", bytes: diff, producerType: "SYSTEM", producerId: "engineer-verification", trusted: true,
-      }));
+    }));
     const pass = supervisor.nextReviewerAttempt(runId);
-    const executor = this.executor(manifest, sandbox);
-    let verified;
-    try {
-      verified = new IndependentVerifier({
+    let verified = this.loadIndependentVerificationCheckpoint(runId, manifest.manifestHash, sha256(diff), resultCommitSha);
+    if (!verified) {
+      if (initial.state !== "FAST_CHECKS") throw new Error("durable independent-verification checkpoint is unavailable");
+      const preVerificationIntegrity = testIntegrity.attest("PRE_VERIFICATION");
+      const executor = this.executor(manifest, sandbox);
+      try {
+      const verification = new IndependentVerifier({
         supervisor,
         artifactStore: this.options.artifactStore,
         manifest,
@@ -274,22 +382,26 @@ export class EngineerVerificationManager {
         now: this.options.now,
         idFactory: this.options.idFactory,
       }).run();
-      verified = await verified;
+      verified = await verification;
       verified.trustedEvidence.unshift(this.testIntegrityEvidence(preVerificationIntegrity.artifact, preVerificationIntegrity.comparison));
       const postVerificationIntegrity = testIntegrity.attest("POST_INDEPENDENT_VERIFICATION");
       verified.trustedEvidence.push(this.testIntegrityEvidence(postVerificationIntegrity.artifact, postVerificationIntegrity.comparison));
-    } catch (error) {
-      if (error instanceof StableRequiredTestFailure) {
-        return this.repairStableRequiredTest(manifest, sandbox, resultCommitSha, diff, error);
+      } catch (error) {
+        if (error instanceof StableRequiredTestFailure) {
+          return this.repairStableRequiredTest(manifest, sandbox, resultCommitSha, diff, error);
+        }
+        if (error instanceof IndependentVerificationFailure) {
+          await this.recordLunaFailureAdvisory(manifest, error).catch(() => undefined);
+        }
+        throw error;
       }
-      if (error instanceof IndependentVerificationFailure) {
-        await this.recordLunaFailureAdvisory(manifest, error).catch(() => undefined);
-      }
-      throw error;
+      this.storeIndependentVerificationCheckpoint(runId, manifest.manifestHash, sha256(diff), resultCommitSha, verified);
     }
+    if (!verified) throw new Error("independent verification checkpoint resolution failed");
 
     const advisorAgents = new Map<"TESTER" | "SECURITY", AgentContext>();
     const advisors = new TerraAdvisors({
+      signal: this.abortControllers.get(runId)?.signal,
       transportForRole: (role) => this.options.transportForRole(runId, role),
       modelConfiguration: this.options.modelConfiguration,
       safetyIdentifier,
@@ -335,6 +447,7 @@ export class EngineerVerificationManager {
     let adversarialCoverage: AdversarialCoverageReport;
     try {
       testAdvisory = await advisors.testCoverage(manifest, diff, verified.trustedEvidence);
+      this.assertLeaseAuthority(runId);
       this.storeAgentOutput(runId, testerAgent, "TEST_ADVISORY", testAdvisory);
       adversarialCoverage = buildAdversarialCoverageReport(manifest, testAdvisory);
       const coverageArtifact = supervisor.recordArtifact(this.options.artifactStore.put({
@@ -366,6 +479,7 @@ export class EngineerVerificationManager {
     let securityArtifact;
     try {
       securityAdvisory = await advisors.security(manifest, diff);
+      this.assertLeaseAuthority(runId);
       securityArtifact = this.storeAgentOutput(runId, securityAgent, "SECURITY_ADVISORY", securityAdvisory);
     } catch (error) {
       this.failAgent(runId, securityAgent);
@@ -424,6 +538,7 @@ export class EngineerVerificationManager {
       throw error;
     }
     const reviewer = new IsolatedReviewer({
+      signal: this.abortControllers.get(runId)?.signal,
       transport: reviewerTransport,
       modelConfiguration: this.options.modelConfiguration,
       now: this.options.now,
@@ -460,6 +575,7 @@ export class EngineerVerificationManager {
     let reviewArtifact;
     try {
       review = await reviewer.review(reviewerInput, pass);
+      this.assertLeaseAuthority(runId);
       const [reviewedCommitSha, reviewedDiff] = await Promise.all([
         workspaceManager.currentCommitAsync(sandbox.workspace),
         workspaceManager.diffAsync(sandbox.workspace),
@@ -472,6 +588,7 @@ export class EngineerVerificationManager {
       this.failAgent(runId, reviewerAgent);
       throw error;
     }
+    this.assertLeaseAuthority(runId);
     supervisor.recordReviewerSession(review.session, review.findings);
     const claims = this.mapClaims(manifest, review.session.output, trustedEvidence, pass);
     for (const claim of claims) supervisor.recordClaimEvidence(claim);
@@ -727,6 +844,7 @@ export class EngineerVerificationManager {
       onRecord: (record) => { this.options.supervisor.recordCommandExecution(record); },
       now: this.options.now,
       idFactory: this.options.idFactory,
+      signal: this.abortControllers.get(manifest.runId)?.signal,
     });
   }
 
@@ -795,6 +913,13 @@ export class EngineerVerificationManager {
     }
     if (repairCheckpoint?.reasonCode === "STABLE_REQUIRED_TEST_REPAIR_STARTED") {
       return this.recoverInterruptedStableRequiredTestRepair(runId, sandbox, repairCheckpoint);
+    }
+    if (this.hasIndependentVerificationCheckpoint(runId)) {
+      if (initial.state !== "VERIFICATION_RECOVERY") {
+        this.transition(runId, "VERIFICATION_RECOVERY", "PHASE3_PROCESS_INTERRUPTED", [sandbox.record.sandboxId]);
+      }
+      this.transition(runId, "SECURITY_REVIEW", "INDEPENDENT_VERIFICATION_CHECKPOINT_RESUMED", [sandbox.record.sandboxId]);
+      return this.verifyPass(runId);
     }
     if (initial.state !== "VERIFICATION_RECOVERY") {
       this.transition(runId, "VERIFICATION_RECOVERY", "PHASE3_PROCESS_INTERRUPTED", [sandbox.record.sandboxId]);
@@ -910,7 +1035,60 @@ export class EngineerVerificationManager {
       && ["REVIEW_REPAIR_STARTED", "STABLE_REQUIRED_TEST_REPAIR_STARTED"].includes(latest.reasonCode);
   }
 
+  private hasIndependentVerificationCheckpoint(runId: string): boolean {
+    return this.options.supervisor.listArtifacts(runId).some((artifact) =>
+      artifact.type === "INDEPENDENT_VERIFICATION_CHECKPOINT" && artifact.trusted &&
+      artifact.producerType === "SYSTEM" && artifact.producerId === "engineer-verification");
+  }
+
+  private storeIndependentVerificationCheckpoint(
+    runId: string,
+    manifestHash: string,
+    diffHash: string,
+    resultCommitSha: string,
+    verified: IndependentVerificationOutput,
+  ): void {
+    this.assertLeaseAuthority(runId);
+    this.options.supervisor.recordArtifact(this.options.artifactStore.put({
+      runId,
+      type: "INDEPENDENT_VERIFICATION_CHECKPOINT",
+      bytes: JSON.stringify({ version: 1, runId, manifestHash, diffHash, resultCommitSha, verified }),
+      producerType: "SYSTEM",
+      producerId: "engineer-verification",
+      trusted: true,
+    }));
+  }
+
+  private loadIndependentVerificationCheckpoint(
+    runId: string,
+    manifestHash: string,
+    diffHash: string,
+    resultCommitSha: string,
+  ): IndependentVerificationOutput | null {
+    const artifacts = this.options.supervisor.listArtifacts(runId)
+      .filter((artifact) => artifact.type === "INDEPENDENT_VERIFICATION_CHECKPOINT" && artifact.trusted &&
+        artifact.producerType === "SYSTEM" && artifact.producerId === "engineer-verification")
+      .reverse();
+    for (const artifact of artifacts) {
+      try {
+        const value = JSON.parse(this.options.artifactStore.read(artifact).toString("utf8")) as Record<string, unknown>;
+        if (value.version !== 1 || value.runId !== runId || value.manifestHash !== manifestHash ||
+            value.diffHash !== diffHash || value.resultCommitSha !== resultCommitSha || !value.verified ||
+            typeof value.verified !== "object" || Array.isArray(value.verified)) continue;
+        const verified = value.verified as Record<string, unknown>;
+        return {
+          executions: VerificationExecutionRecordSchema.array().parse(verified.executions),
+          securityFindings: SecurityFindingRecordSchema.array().parse(verified.securityFindings),
+          trustedEvidence: TrustedEvidenceSchema.array().parse(verified.trustedEvidence),
+          securityReportArtifact: ArtifactRecordSchema.parse(verified.securityReportArtifact),
+        };
+      } catch { /* ignore malformed or stale checkpoints */ }
+    }
+    return null;
+  }
+
   private startAgent(runId: string, role: ModelRole, inputHash: string): AgentContext {
+    this.assertLeaseAuthority(runId);
     const route = resolveEngineerModel(role, this.options.modelConfiguration);
     const context = { id: this.id(), role, startedAt: this.timestamp(), inputHash, route };
     this.options.supervisor.recordAgentExecution({
@@ -926,6 +1104,7 @@ export class EngineerVerificationManager {
   }
 
   private storeAgentOutput(runId: string, agent: AgentContext, type: string, output: unknown): ArtifactRecord {
+    this.assertLeaseAuthority(runId);
     const artifact = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
       runId, type, bytes: JSON.stringify(output), producerType: "SYSTEM", producerId: agent.id, trusted: false,
     }));
@@ -963,6 +1142,16 @@ export class EngineerVerificationManager {
   private authorizeTransientModelRetry(runId: string, role: ModelRole, error: unknown, attempt: number): boolean {
     const message = error instanceof Error ? error.message : String(error);
     const current = this.options.supervisor.getRun(runId);
+    if (isProviderModelTimeout(error) && canTransition(current.state, "MODEL_PROVIDER_RETRY_PENDING")) {
+      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: this.id(), runId, failureClass: "MODEL_FAILURE",
+        reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS",
+        fingerprint: sha256({ role, message, reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS" }),
+        evidenceIds: [], retryable: true, createdAt: this.timestamp(),
+      }));
+      this.transition(runId, "MODEL_PROVIDER_RETRY_PENDING", "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS");
+      return false;
+    }
     const retry = this.options.supervisor.authorizeRetry({
       runId, expectedStateVersion: current.stateVersion, kind: "TRANSIENT_MODEL",
       failureFingerprint: sha256({ role, message }), patchHash: null, progressMetric: attempt,
@@ -1052,12 +1241,27 @@ export class EngineerVerificationManager {
     evidenceIds: string[] = [],
     facts?: Parameters<EngineerSupervisor["transition"]>[0]["facts"],
   ): void {
+    this.assertLeaseAuthority(runId);
     const run = this.options.supervisor.getRun(runId);
     this.options.supervisor.transition({
       runId, expectedStateVersion: run.stateVersion, nextState, reasonCode, evidenceIds,
       manifestHash: run.manifestHash, idempotencyKey: `phase3:${nextState.toLowerCase()}:${run.stateVersion + 1}`,
       ...(facts ? { facts } : {}),
     });
+  }
+
+  private assertLeaseAuthority(runId: string): void {
+    const lease = this.activeLeases.get(runId);
+    if (lease && this.options.leaseManager) {
+      this.options.leaseManager.assertActive({
+        leaseId: lease.lease.leaseId,
+        ownerId: this.options.workerOwnerId ?? "engineer-verification-worker",
+        fencingToken: lease.lease.fencingToken,
+        leaseToken: lease.leaseToken,
+      });
+    }
+    const signal = this.abortControllers.get(runId)?.signal;
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("verification worker authority was revoked");
   }
 
   private failClosed(runId: string, error: unknown): void {
@@ -1121,6 +1325,8 @@ export class EngineerVerificationManager {
     }
     const preferred = ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "VERIFICATION_RECOVERY", "REVERIFYING"].includes(run.state)
       ? "VERIFICATION_INCOMPLETE"
+      : run.state === "FLAKE_QUARANTINE"
+        ? "HUMAN_REVIEW_REQUIRED"
       : run.state === "SECURITY_REVIEW"
         ? "SECURITY_ESCALATION"
         : ["REVIEWING", "REVIEW_CHANGES_REQUESTED"].includes(run.state)

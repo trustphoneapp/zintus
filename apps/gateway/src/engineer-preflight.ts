@@ -174,7 +174,7 @@ export function createLocalEngineerCapabilityProbe(options: {
   repositoryRoot: string;
   expectedOriginUrl: string;
   repositoryRootFor?: (repositoryId: string) => string;
-  githubToken?: string;
+  githubToken?: string | (() => string | undefined | Promise<string | undefined>);
 }): EngineerCapabilityProbe {
   const command = (executable: string, args: string[], timeout = 30_000): Promise<{ status: number; stdout: string; stderr: string }> => new Promise((resolve) => {
     execFile(executable, args, { timeout, encoding: "utf8", maxBuffer: 8 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
@@ -261,10 +261,12 @@ export function createLocalEngineerCapabilityProbe(options: {
     async publication(repository) {
       if (!options.githubToken || repository.provider !== "github") return { available: false, pullRequestsWritable: false };
       try {
+        const githubToken = typeof options.githubToken === "function" ? await options.githubToken() : options.githubToken;
+        if (!githubToken) return { available: false, pullRequestsWritable: false };
         const api = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
         const response = await fetch(api, {
           headers: {
-            Authorization: `Bearer ${options.githubToken}`,
+            Authorization: `Bearer ${githubToken}`,
             Accept: "application/vnd.github+json",
             "X-GitHub-Api-Version": "2026-03-10",
           },
@@ -276,7 +278,7 @@ export function createLocalEngineerCapabilityProbe(options: {
         const canary = await fetch(`${api}/pulls`, {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${options.githubToken}`,
+            Authorization: `Bearer ${githubToken}`,
             Accept: "application/vnd.github+json",
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": "2026-03-10",

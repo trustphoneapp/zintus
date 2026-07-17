@@ -64,6 +64,17 @@ const fakeGateway = {
   }),
 };
 
+const fakeGithubCredentials = {
+  idFromName: (userId: string) => userId,
+  get: (userId: string) => ({
+    fetch: async (request: Request) => {
+      const url = new URL(request.url);
+      const token = url.searchParams.get("forceRefresh") === "1" ? `fresh-${userId}` : `current-${userId}`;
+      return Response.json({ accessToken: token });
+    },
+  }),
+};
+
 const SECRET_A = "secretA-" + crypto.randomUUID();
 const SECRET_B = "secretB-" + crypto.randomUUID();
 
@@ -78,9 +89,41 @@ async function buildEnv() {
     KV: kv,
     DB: db,
     GATEWAY_SESSION: fakeGateway,
+    GITHUB_CREDENTIALS: fakeGithubCredentials,
   } as unknown as Env;
   return { env, db, kv };
 }
+
+describe("GET /api/sessions/:id/connectors/github/token — brokered publication credential", () => {
+  test("returns only this session owner's current or refreshed token with no-store", async () => {
+    const { env } = await buildEnv();
+    const current = await app.request(
+      "http://relay.test/api/sessions/A/connectors/github/token",
+      { headers: { Authorization: `Bearer ${SECRET_A}` } },
+      env,
+    );
+    expect(current.status).toBe(200);
+    expect(current.headers.get("Cache-Control")).toBe("no-store");
+    expect(await current.json()).toEqual({ accessToken: "current-u1" });
+
+    const refreshed = await app.request(
+      "http://relay.test/api/sessions/A/connectors/github/token?forceRefresh=1",
+      { headers: { Authorization: `Bearer ${SECRET_A}` } },
+      env,
+    );
+    expect(await refreshed.json()).toEqual({ accessToken: "fresh-u1" });
+  });
+
+  test("rejects another session's gateway secret", async () => {
+    const { env } = await buildEnv();
+    const response = await app.request(
+      "http://relay.test/api/sessions/A/connectors/github/token",
+      { headers: { Authorization: `Bearer ${SECRET_B}` } },
+      env,
+    );
+    expect(response.status).toBe(401);
+  });
+});
 
 async function cookieFor(kv: ReturnType<typeof fakeKV>, user_id: string) {
   const token = await issueSessionToken(kv as unknown as KVNamespace, {

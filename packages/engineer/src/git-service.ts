@@ -69,6 +69,7 @@ export interface GitService {
 export interface GitHubGitServiceOptions {
   repositoryRoot: string;
   token: () => string | Promise<string>;
+  refreshToken?: () => string | Promise<string>;
   fetch?: typeof fetch;
   spawn?: typeof spawnSync;
 }
@@ -94,8 +95,7 @@ export class GitHubGitService implements GitService {
       return { status: "SUCCEEDED", remoteReference };
     }
     if (input.operationType === "PUSH_COMMIT") {
-      const token = await this.requireToken();
-      const result = this.authenticatedGit(input.repository, token, ["ls-remote", this.remoteUrl(input.repository), remoteReference]);
+      const result = await this.authenticatedGitCurrent(input.repository, ["ls-remote", this.remoteUrl(input.repository), remoteReference]);
       const remoteCommitSha = result.trim().split(/\s+/)[0] ?? "";
       if (!remoteCommitSha) return { status: "NOT_FOUND", detail: "publication branch is not present on the remote" };
       if (remoteCommitSha.toLowerCase() !== input.resultCommitSha.toLowerCase()) {
@@ -116,9 +116,8 @@ export class GitHubGitService implements GitService {
   }
 
   async pushVerifiedCommit(input: PushVerifiedCommitInput): Promise<PushResult> {
-    const token = await this.requireToken();
-    this.authenticatedGit(input.repository, token, ["push", "--porcelain", this.remoteUrl(input.repository), `${input.resultCommitSha}:refs/heads/${input.branchName}`]);
-    const remote = this.authenticatedGit(input.repository, token, ["ls-remote", "--exit-code", this.remoteUrl(input.repository), `refs/heads/${input.branchName}`]);
+    await this.authenticatedGitCurrent(input.repository, ["push", "--porcelain", this.remoteUrl(input.repository), `${input.resultCommitSha}:refs/heads/${input.branchName}`]);
+    const remote = await this.authenticatedGitCurrent(input.repository, ["ls-remote", "--exit-code", this.remoteUrl(input.repository), `refs/heads/${input.branchName}`]);
     const remoteCommitSha = remote.trim().split(/\s+/)[0] ?? "";
     if (remoteCommitSha.toLowerCase() !== input.resultCommitSha.toLowerCase()) {
       throw new Error("remote publication branch does not match the verified result commit");
@@ -127,13 +126,12 @@ export class GitHubGitService implements GitService {
   }
 
   async inspectBaseBranch(input: InspectBaseBranchInput): Promise<BaseBranchStatus> {
-    const token = await this.requireToken();
-    const output = this.authenticatedGit(input.repository, token, ["ls-remote", "--exit-code", this.remoteUrl(input.repository), `refs/heads/${input.repository.baseBranch}`]);
+    const output = await this.authenticatedGitCurrent(input.repository, ["ls-remote", "--exit-code", this.remoteUrl(input.repository), `refs/heads/${input.repository.baseBranch}`]);
     const currentCommitSha = output.trim().split(/\s+/)[0] ?? "";
     if (!/^[a-f0-9]{40,64}$/i.test(currentCommitSha)) throw new Error("remote base branch returned no valid commit");
-    const branch = await this.github(input.repository, `/branches/${encodeURIComponent(input.repository.baseBranch)}`, { method: "GET" }, token) as { protected?: boolean };
+    const branch = await this.github(input.repository, `/branches/${encodeURIComponent(input.repository.baseBranch)}`, { method: "GET" }) as { protected?: boolean };
     const rules = branch.protected === true
-      ? await this.github(input.repository, `/branches/${encodeURIComponent(input.repository.baseBranch)}/protection`, { method: "GET" }, token) as Record<string, unknown>
+      ? await this.github(input.repository, `/branches/${encodeURIComponent(input.repository.baseBranch)}/protection`, { method: "GET" }) as Record<string, unknown>
       : {};
     const reviews = rules.required_pull_request_reviews as Record<string, unknown> | null | undefined;
     const checks = rules.required_status_checks as Record<string, unknown> | null | undefined;
@@ -157,8 +155,7 @@ export class GitHubGitService implements GitService {
   }
 
   async synchronizeBaseBranch(input: { repository: RepositoryReference; expectedCommitSha: string }): Promise<void> {
-    const token = await this.requireToken();
-    this.authenticatedGit(input.repository, token, ["fetch", "--no-tags", "--force", this.remoteUrl(input.repository), `refs/heads/${input.repository.baseBranch}`]);
+    await this.authenticatedGitCurrent(input.repository, ["fetch", "--no-tags", "--force", this.remoteUrl(input.repository), `refs/heads/${input.repository.baseBranch}`]);
     const fetched = this.git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"]).trim();
     if (fetched.toLowerCase() !== input.expectedCommitSha.toLowerCase()) {
       throw new Error("fetched base commit does not match the credentialed remote inspection");
@@ -203,6 +200,19 @@ export class GitHubGitService implements GitService {
     }
   }
 
+  private async authenticatedGitCurrent(repository: RepositoryReference, args: string[]): Promise<string> {
+    const token = await this.requireToken();
+    try {
+      return this.authenticatedGit(repository, token, args);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!this.options.refreshToken || !/(?:authentication failed|bad credentials|could not read username|invalid credentials|http (?:401|403))/i.test(message)) throw error;
+      const refreshed = await this.options.refreshToken();
+      if (!refreshed || refreshed === token) throw error;
+      return this.authenticatedGit(repository, refreshed, args);
+    }
+  }
+
   private remoteUrl(repository: RepositoryReference): string {
     if (repository.provider !== "github") throw new Error("credentialed Git transport requires a GitHub repository");
     return `https://github.com/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}.git`;
@@ -219,13 +229,17 @@ export class GitHubGitService implements GitService {
     return token;
   }
 
-  private async github(repository: RepositoryReference, path: string, init: RequestInit, suppliedToken?: string): Promise<unknown> {
+  private async github(repository: RepositoryReference, path: string, init: RequestInit, suppliedToken?: string, refreshAttempted = false): Promise<unknown> {
     if (repository.provider !== "github") throw new Error("pull request publication requires a GitHub repository");
     const token = suppliedToken ?? await this.requireToken();
     const response = await (this.options.fetch ?? fetch)(`https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}${path}`, {
       ...init,
       headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-GitHub-Api-Version": "2026-03-10" },
     });
+    if (response.status === 401 && this.options.refreshToken && !refreshAttempted) {
+      const refreshed = await this.options.refreshToken();
+      if (refreshed && refreshed !== token) return this.github(repository, path, init, refreshed, true);
+    }
     if (!response.ok) throw new Error(`GitHub API failed with status ${response.status}`);
     return response.json();
   }

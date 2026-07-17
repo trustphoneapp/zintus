@@ -112,6 +112,7 @@ export interface TerraAdvisoryOptions {
     reservationId?: string;
     latencyMs: number;
   }) => boolean;
+  signal?: AbortSignal;
 }
 
 /** Terra supplies bounded advisory analysis; objective tools and the Supervisor remain authoritative. */
@@ -190,7 +191,7 @@ export class TerraAdvisors {
       });
       const attemptStarted = Date.now();
       try {
-        response = await transport.create(request);
+        response = await transport.create(request, { signal: this.options.signal });
         break;
       } catch (error) {
         if (!this.options.authorizeModelRetry?.({

@@ -9,7 +9,7 @@ import {
   type CloudConnection,
 } from "@zintus/gateway";
 import { isValidProvider, setKey, removeKey } from "@zintus/keychain";
-import { loadCloudConfig } from "./cloud.js";
+import { loadCloudConfig, type CloudConfig } from "./cloud.js";
 
 export interface ServeOptions {
   host?: string;
@@ -18,6 +18,27 @@ export interface ServeOptions {
   cloud?: boolean;
   /** Force Pro managed key mode check on startup (alias: --pro). */
   managed?: boolean;
+}
+
+export async function fetchGithubPublicationToken(
+  config: CloudConfig,
+  forceRefresh = false,
+  timeoutMs = 3_000,
+): Promise<string | undefined> {
+  const query = forceRefresh ? "?forceRefresh=1" : "";
+  const response = await fetch(
+    `${config.relay_url.replace(/\/$/, "")}/api/sessions/${encodeURIComponent(config.session_id)}/connectors/github/token${query}`,
+    {
+      headers: { Authorization: `Bearer ${config.gateway_secret}` },
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    },
+  ).catch(() => null);
+  if (!response?.ok) return undefined;
+  const body = await response.json().catch(() => null) as { accessToken?: unknown } | null;
+  return typeof body?.accessToken === "string" && body.accessToken.length > 0 && body.accessToken.length <= 4_096
+    ? body.accessToken
+    : undefined;
 }
 
 // ── Pro billing helpers ───────────────────────────────────────────────────
@@ -191,9 +212,18 @@ async function startCloudRelay(
  * "gateway offline" banner. Blocks until the process is killed.
  */
 export async function runServe(options?: ServeOptions): Promise<void> {
+  const cloudConfig = options?.cloud ? await loadCloudConfig() : null;
+  const initialGithubToken = cloudConfig ? await fetchGithubPublicationToken(cloudConfig) : undefined;
   let running: ReturnType<typeof startGateway>;
   try {
-    running = startGateway({ host: options?.host, port: options?.port });
+    running = startGateway({
+      host: options?.host,
+      port: options?.port,
+      ...(cloudConfig ? {
+        githubTokenProvider: ({ forceRefresh } = {}) => fetchGithubPublicationToken(cloudConfig, forceRefresh),
+        githubCredentialAvailable: Boolean(initialGithubToken),
+      } : {}),
+    });
   } catch (error) {
     console.error(
       chalk.red(error instanceof Error ? error.message : String(error)),
@@ -220,9 +250,9 @@ export async function runServe(options?: ServeOptions): Promise<void> {
   }
 
   // Pro managed key mode: fetch billing tier if cloud-connected (or --managed forced).
-  const cloudConfig = await loadCloudConfig();
-  if (cloudConfig?.session_id) {
-    await printBillingStatus(cloudConfig.session_id, cloudConfig.relay_url);
+  const billingCloudConfig = cloudConfig ?? await loadCloudConfig();
+  if (billingCloudConfig?.session_id) {
+    await printBillingStatus(billingCloudConfig.session_id, billingCloudConfig.relay_url);
   } else if (options?.managed) {
     console.error(
       chalk.yellow(

@@ -283,13 +283,21 @@ describe("Phase 3 independent verification", () => {
     }
     expect(thrown).toBeInstanceOf(Error);
     expect(thrown).not.toBeInstanceOf(StableRequiredTestFailure);
-    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("VERIFICATION_INCOMPLETE");
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("FLAKE_QUARANTINE");
+    expect(setup.supervisor.listEvents(setup.manifest.runId).at(-1)).toMatchObject({
+      nextState: "FLAKE_QUARANTINE",
+      reasonCode: "FLAKY_TEST_QUARANTINED",
+    });
     expect(setup.supervisor.listFailures(setup.manifest.runId)).toMatchObject([{
       failureClass: "TEST_FAILURE",
       reasonCode: "FLAKY_TEST_QUARANTINED",
       retryable: false,
     }]);
     expect(setup.supervisor.listFailures(setup.manifest.runId)[0]?.evidenceIds).toHaveLength(3);
+    const manager = new EngineerVerificationManager({ supervisor: setup.supervisor } as never);
+    (manager as unknown as { failClosed(runId: string, error: unknown): void })
+      .failClosed(setup.manifest.runId, thrown);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("HUMAN_REVIEW_REQUIRED");
     setup.supervisor.close();
   });
 
@@ -835,11 +843,15 @@ describe("Phase 3 authoritative verification manager", () => {
     const sandboxManager = new DockerSandboxManager({
       workspaceManager, imageReference: `oven/bun@${digest}`, imageDigest: digest,
     });
+    let objectiveCommands = 0;
     const provisioned: ProvisionedSandbox = {
       record: setup.sandbox, workspace: setup.workspace,
-      commandRunner: () => ({ status: 0, stdout: "1 pass", stderr: "" }),
+      commandRunner: () => { objectiveCommands += 1; return { status: 0, stdout: "1 pass", stderr: "" }; },
     };
-    const executionManager = { getSandbox: () => provisioned } as unknown as EngineerExecutionManager;
+    const executionManager = {
+      getSandbox: () => provisioned,
+      recoverSandbox: async () => provisioned,
+    } as unknown as EngineerExecutionManager;
     let providerCalls = 0;
     const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
     recordTestBaseline(setup, artifactStore);
@@ -856,9 +868,54 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(setup.supervisor.listEvents(setup.manifest.runId)).toContainEqual(expect.objectContaining({
       nextState: "PAUSED_BUDGET", reasonCode: "TOKEN_LIMIT_REACHED",
     }));
+    expect(setup.supervisor.listArtifacts(setup.manifest.runId).map((artifact) => artifact.type))
+      .toContain("INDEPENDENT_VERIFICATION_CHECKPOINT");
     expect(setup.supervisor.exportRunRecords(setup.manifest.runId).agent_executions).toEqual(
       expect.arrayContaining([expect.objectContaining({ status: "PAUSED" })]),
     );
+    const commandsBeforeResume = objectiveCommands;
+    const pausedRun = setup.supervisor.getRun(setup.manifest.runId);
+    const pausedBudget = setup.supervisor.getBudget(setup.manifest.runId);
+    const topped = setup.supervisor.topUpBudget({
+      runId: setup.manifest.runId, expectedRevision: pausedBudget.revision,
+      topUp: { addTokenBudget: 1, addCostBudgetUsd: 0, addTimeBudgetSeconds: 0 },
+      actorId: pausedRun.userId, idempotencyKey: "verification-checkpoint-small-top-up",
+    });
+    setup.supervisor.resumeBudget({
+      runId: setup.manifest.runId, expectedStateVersion: pausedRun.stateVersion,
+      expectedBudgetRevision: topped.revision, actorId: pausedRun.userId,
+      idempotencyKey: "verification-checkpoint-resume",
+    });
+    await expect(manager.resumeBudgetCheckpoint(setup.manifest.runId)).rejects.toThrow("paused safely");
+    expect(objectiveCommands).toBe(commandsBeforeResume);
+    expect(setup.supervisor.listEvents(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      nextState: "SECURITY_REVIEW", reasonCode: "INDEPENDENT_VERIFICATION_CHECKPOINT_RESUMED",
+    }));
+    setup.supervisor.close();
+  });
+
+  test("boot recovery requires a human retry for an ambiguous verification provider outcome", () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    let run = setup.supervisor.getRun(setup.manifest.runId);
+    for (const nextState of ["UNIT_TESTING", "INTEGRATION_TESTING", "SECURITY_REVIEW"] as const) {
+      run = setup.supervisor.transition({
+        runId: run.runId, expectedStateVersion: run.stateVersion, nextState,
+        reasonCode: `TEST_${nextState}`, idempotencyKey: `ambiguous-verification:${nextState}`,
+      }).run;
+    }
+    setup.supervisor.recordAgentExecution({
+      agentExecutionId: "reviewer-ambiguous", runId: run.runId, role: "REVIEWER", modelTier: "GPT-5.6_SOL",
+      status: "RUNNING", inputHash: `sha256:${"a".repeat(64)}`, outputArtifactId: null,
+      startedAt: run.updatedAt, completedAt: null,
+    });
+    const manager = new EngineerVerificationManager({ supervisor: setup.supervisor } as never);
+
+    expect(manager.recoverReady()).toEqual([]);
+    expect(setup.supervisor.getRun(run.runId).state).toBe("MODEL_PROVIDER_RETRY_PENDING");
+    expect(setup.supervisor.listFailures(run.runId)).toContainEqual(expect.objectContaining({
+      reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", retryable: true,
+    }));
     setup.supervisor.close();
   });
 
