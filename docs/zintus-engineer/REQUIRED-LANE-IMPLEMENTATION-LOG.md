@@ -3115,3 +3115,30 @@ unfinished pair has passed.
   approval APPROVED-but-stale — non-publishable because every startPublication
   re-runs preflight; no proactive reconciler added (cleaned on next attempt).
   resultTreeHash null [HUMAN] unchanged.
+
+### R5A — legacy publication authority retired from new-run paths (Fable-gated, 2026-07-19)
+
+- Removed from the composition root (index.ts): the `new EngineerPublicationManager`
+  construction, the `publication: engineerPublication` spread into EngineerRunManager,
+  and the sole legacy publication timer (engineerApprovalTimer 30s →
+  recoverPending/sweepExpired). New runs' run manager has NO publication path.
+- ONE-WRITER proven STRUCTURALLY (Fable-confirmed): HUMAN_APPROVAL_PENDING is
+  transitioned into by exactly ONE line in the whole codebase —
+  publication-manager.ts:125 (legacy) — and P8 (publication-authority.ts) never
+  writes it. With legacy unwired, a new run terminates at REVIEW_APPROVED and P8
+  is the only publication/approval writer. Retirement suite (5/5) includes a
+  guard that flips to false if legacy is re-wired (agent-verified RED). Gates
+  engineer 831/gateway 450/web 571/typecheck/diff.
+- HISTORY PRESERVED: EngineerPublicationManager class + legacy tables/rows +
+  all read paths (approvalView/evidenceBundles/gitOperations/artifacts/claims)
+  untouched; a completed legacy-lane run still reads its full history (test 4).
+  Web page.tsx:944 legacy HUMAN_APPROVAL_PENDING card kept for historical runs
+  (a state new runs can't reach); R3's PublicationEntryNotice routes new
+  REVIEW_APPROVED runs to the P8 screen.
+- HONEST RESIDUALS → R6/deployment note: (1) legacy approve HTTP routes
+  (handler.ts:3446) still wired but unreachable for new runs (share the route
+  block with cancel); (2) any run sitting at HUMAN_APPROVAL_PENDING/BASE_BRANCH_STALE
+  AT DEPLOY becomes readable-but-unactionable (legacy sweep/recover gone, no
+  migration) — acceptable for a not-yet-shipped product with no real in-flight
+  runs, but a deployment checklist item; (3) recoverStaleBase throws for
+  historical BASE_BRANCH_STALE (new runs use P8 base-SHA recheck).

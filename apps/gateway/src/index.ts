@@ -44,7 +44,6 @@ import {
   EngineerContextManager,
   EngineerExecutionManager,
   EngineerWorkerLeaseManager,
-  EngineerPublicationManager,
   EngineerPlanningManager,
   EngineerVerificationManager,
   EngineerSupervisor,
@@ -251,7 +250,6 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerExecution: EngineerExecutionManager | undefined;
   let engineerWorkerLeases: EngineerWorkerLeaseManager | undefined;
   let engineerVerification: EngineerVerificationManager | undefined;
-  let engineerPublication: EngineerPublicationManager | undefined;
   let engineerPublicationAuthorityService: PublicationAuthorityService | undefined;
   let engineerWarmPool: WarmSandboxPool | undefined;
   let engineerSandboxManager: DockerSandboxManager | undefined;
@@ -459,34 +457,24 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         return engineerPrincipal.safetyIdentifier;
       },
     });
-    // One credentialed git service, shared by the legacy publication manager and
-    // the P8 dispatch actuator (the real credentialed branch/PR effect).
+    // One credentialed git service for the P8 dispatch actuator (the real
+    // credentialed branch/PR effect). The legacy EngineerPublicationManager has
+    // been RETIRED from the new-run authority path (R5A): P8
+    // (PublicationAuthorityService) is the SOLE authoritative publication system
+    // for new runs. Its Git mechanics already live in GitPublicationMechanics
+    // (R5B). The legacy class is no longer constructed here and no longer wired
+    // into EngineerRunManager, so a new run is never advanced into the legacy
+    // HUMAN_APPROVAL_PENDING lane — it terminates at REVIEW_APPROVED and P8 owns
+    // approval + publication (candidate → approval → publication → dispatch).
+    // Historical runs that already went through the legacy lane still read back
+    // their approval/evidence/publication history: every EngineerRunManager read
+    // path (approvalView / evidenceBundles / gitOperations / artifacts / claims)
+    // goes through the supervisor ledger, never through the retired manager.
     const engineerGitService = new GitHubGitService({
       repositoryRoot: engineerRepositoryRoot,
       token: () => currentGithubToken(false),
       refreshToken: () => currentGithubToken(true),
     });
-    engineerPublication = publicationAuthorityReady && publicationSecret
-      ? new EngineerPublicationManager({
-          supervisor: engineerSupervisor,
-          gitService: engineerGitService,
-          artifactStore: engineerArtifactStore,
-          checkpointAttestor,
-          diffForRun: (runId) => {
-            const sandbox = engineerExecution?.getSandbox(runId);
-            if (!sandbox) {
-              const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF" && item.trusted).at(-1);
-              if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
-              return (engineerSupervisor.isOptionalHardeningChild(runId)
-                ?engineerArtifactStore.readVerifiedExact(artifact):engineerArtifactStore.read(artifact)).toString("utf8");
-            }
-            return workspaceManager.diff(sandbox.workspace);
-          },
-          commandSigningSecret: publicationSecret,
-          autoPublishLowRisk: /^(1|true)$/i.test(process.env.ZINTUS_ENGINEER_AUTO_PUBLISH_LOW_RISK ?? ""),
-          cleanupRun: (runId) => { engineerExecution?.destroy(runId); },
-        })
-      : undefined;
     engineerRuns = new EngineerRunManager({
       supervisor: engineerSupervisor,
       execution: engineerExecution,
@@ -501,7 +489,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       leaseManager: engineerWorkerLeases,
       workerOwnerId: `gateway:${process.pid}:planning`,
       cleanupRun: (runId) => { engineerExecution?.destroy(runId); },
-      ...(engineerPublication ? { publication: engineerPublication } : {}),
+      // NB: no `publication:` — the legacy publication authority is retired from
+      // the new-run path (R5A). P8 governs publication for new runs.
       diffForRun: (runId) => {
         const sandbox = engineerExecution?.getSandbox(runId);
         if (!sandbox) {
@@ -925,7 +914,6 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // so an unreachable provider is demoted by health-aware routing before a real
   // request hits it. Off by default.
   let probeTimer: ReturnType<typeof setInterval> | null = null;
-  let engineerApprovalTimer: ReturnType<typeof setInterval> | null = null;
   let engineerWarmPoolTimer: ReturnType<typeof setInterval> | null = null;
   let engineerHardeningRecoveryTimer: ReturnType<typeof setInterval> | null = null;
   let engineerCancellationTimer: ReturnType<typeof setInterval> | null = null;
@@ -1024,32 +1012,13 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     engineerWarmPoolTimer.unref?.();
     void sweep();
   }
-  if (engineerPublication) {
-    let recoveryComplete = false;
-    let sweepRunning = false;
-    const sweep = async () => {
-      if (sweepRunning) return;
-      sweepRunning = true;
-      try {
-        if (!recoveryComplete) {
-          const recovered = await engineerPublication?.recoverPending();
-          recoveryComplete = true;
-          if (recovered && (recovered.resumedRunIds.length > 0 || recovered.failedRunIds.length > 0)) {
-            log("info", "engineer.publication_recovery", recovered);
-          }
-        }
-        const expired = await engineerPublication?.sweepExpired() ?? [];
-        if (expired.length > 0) log("info", "engineer.approvals_expired", { runIds: expired.join(",") });
-      } catch (error) {
-        log("error", "engineer.approval_sweep_failed", { error: error instanceof Error ? error.message : String(error) });
-      } finally {
-        sweepRunning = false;
-      }
-    };
-    engineerApprovalTimer = setInterval(() => { void sweep(); }, 30_000);
-    engineerApprovalTimer.unref?.();
-    void sweep();
-  }
+  // The legacy publication recovery + approval-expiration timer is RETIRED
+  // (R5A). It previously drove the legacy manager's recover-pending sweep (which
+  // resumed HUMAN_APPROVAL_PENDING runs) and its expire-approvals sweep on a 30s
+  // interval. Neither fires now: P8 owns publication and has its own crash-safe
+  // boot recovery above (listResumablePublications then resume, parking
+  // DISPATCHED-but-unsettled operations in RECONCILING — never a second PR). No
+  // timer double-acts with P8.
   const probeIntervalMs = Number(process.env.PROVIDER_PROBE_INTERVAL_MS);
   if (Number.isFinite(probeIntervalMs) && probeIntervalMs >= 1000) {
     const runProbe = () => {
@@ -1114,10 +1083,6 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       if (probeTimer) {
         clearInterval(probeTimer);
         probeTimer = null;
-      }
-      if (engineerApprovalTimer) {
-        clearInterval(engineerApprovalTimer);
-        engineerApprovalTimer = null;
       }
       if (engineerWarmPoolTimer) {
         clearInterval(engineerWarmPoolTimer);
