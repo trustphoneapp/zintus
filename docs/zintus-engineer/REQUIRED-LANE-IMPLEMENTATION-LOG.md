@@ -3168,3 +3168,37 @@ unfinished pair has passed.
 - Residuals (declared): audit-export UI view DEFERRED (API-only, no web
   consumer); multi-org write path unchanged (per-plan single-tenant);
   legacy approve routes intact-but-deprecated (serve historical runs).
+
+### R5E — consolidation adversarial proof (Fable-gated, GO) (2026-07-19)
+
+- engineer-publication-r5-consolidation.test.ts (6 tests) drives the REAL engine
+  (migrated DB, real supervisor/ledger/P8 service/facade/GitPublicationMechanics/
+  audit-export DAL). All 6 dangerous properties PROVEN ABSENT end-to-end: (1)
+  one-writer — new run reaches RECEIPTED in *_v33 tables, engineer_runs stays
+  REVIEW_APPROVED, legacy git_operations=0, no HUMAN_APPROVAL_PENDING; (2)
+  historical compat — a full legacy-lane run reads back intact through all read
+  APIs + the audit-export route; (3) restart safety — durable DISPATCHED, P8 is
+  sole recoverer, parks RECONCILING, actuator never re-invoked, no legacy row;
+  (4) base-race — real GitPublicationMechanics preflight+base-SHA recheck
+  supersedes the approval (INVALIDATED), blocks publish, retry blocked, fresh
+  selection required; (5) no-duplicate-PR — exactly one createPullRequest across
+  re-dispatch/ambiguous-resume/restart; (6) crash atomicity — crash in
+  decideApprove rolls back approval+attestation+decision (all 0).
+- Fable independent verification: base-race and atomicity are single-layer
+  guards — agent RED-tripped both; Fable re-confirmed atomicity (R5C mutation)
+  and base-SHA recheck. NO-DUPLICATE-PR investigated harder: neutering
+  existing-PR discovery ALONE did NOT red the test, nor did removing the
+  dispatch-once guard alone — because the property is defended by THREE
+  independent layers (dispatch-once state check + PREFLIGHT→DISPATCHED CAS +
+  existing-PR discovery), so a second actuator call is structurally impossible
+  across every tested path. Defense-in-depth, not a vacuous test. (One mutation
+  briefly persisted through a restore path-error; Fable caught it via git diff
+  and restored — tree reconfirmed clean.)
+- Full gates: engineer 831, gateway 460, web 571, typecheck + diff clean.
+  VERDICT: GO — R5 publication consolidation is DONE. P8 is the sole publication
+  authority driving authority-free GitPublicationMechanics, atomic approval+
+  attestation, legacy retired to historical-read-only, docs reconciled. NEXT: R6
+  final release verification (full suites + adversarial + restart + independent
+  Sol/Luna + live browser traversal, zero paid calls). Deployment note carried:
+  any run parked at legacy HUMAN_APPROVAL_PENDING at cutover is
+  readable-but-unactionable (no real in-flight runs on an unshipped product).
