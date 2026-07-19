@@ -6,6 +6,7 @@ import {
   createPublication,
   createResolutionCase,
   createResolutionDirective,
+  dispatchPublication,
   getPublication,
   getPublicationCandidates,
   getResolutionCase,
@@ -189,7 +190,7 @@ describe("Resolution Desk client — error surfacing (live nested {error:{code,d
   });
 });
 
-describe("Approval/publication client (§3) — NOT wired to a live route yet; still exercised against its own documented shapes so the screen is ready the moment P8's HTTP layer is integrated", () => {
+describe("Approval/publication client (§3) — wired to the live P8 publication-authority routes (apps/gateway/src/handler.ts over publication-authority.ts)", () => {
   test("getPublicationCandidates parses the exact §3 candidate shape including lineage and lineageVerified", async () => {
     globalThis.fetch = (async () => jsonResponse({
       candidates: [
@@ -202,20 +203,35 @@ describe("Approval/publication client (§3) — NOT wired to a live route yet; s
     expect(candidates[1]).toEqual({ checkpointId: "cp_2", checkpointHash: `sha256:${"b".repeat(64)}`, lineage: "P7_REPLACEMENT", lineageVerified: false });
   });
 
-  test("createApproval sends only checkpointHash, decision, optional rationale, and idempotencyKey — never approver/requester", async () => {
-    let captured: unknown = null;
+  test("createApproval sends exactly checkpointHash, decision, policyVersion, and optional rationale — the required policyVersion is present and NO idempotencyKey is sent (the live ApprovalDecisionBodySchema is Zod .strict(); a missing policyVersion or an extra idempotencyKey both 400)", async () => {
+    let captured: Record<string, unknown> | null = null;
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
       captured = JSON.parse(String(init?.body));
-      return jsonResponse({ approval: { approvalId: "appr_1", approver: "srv-derived", requester: "srv-derived", checkpointId: "cp_1", checkpointHash: `sha256:${"a".repeat(64)}`, evidenceRoot: "sha256:e", repositoryId: "repo_1", baseCommitSha: "c".repeat(40), policyVersion: "v1", expiresAt: "2026-07-20T00:00:00.000Z", status: "APPROVED", revision: 1 } });
+      // The live service returns the BARE {approvalId, status} — no {approval:…} envelope.
+      return jsonResponse({ approvalId: "appr_1", status: "APPROVED" }, 201);
     }) as typeof fetch;
-    await createApproval("cp_1", { checkpointHash: `sha256:${"a".repeat(64)}`, decision: "APPROVE", rationale: "Looks correct" });
-    expect(Object.keys(captured as object).sort()).toEqual(["checkpointHash", "decision", "idempotencyKey", "rationale"].sort());
+    const result = await createApproval("cp_1", { checkpointHash: `sha256:${"a".repeat(64)}`, decision: "APPROVE", rationale: "Looks correct" });
+    expect(Object.keys(captured!).sort()).toEqual(["checkpointHash", "decision", "policyVersion", "rationale"].sort());
+    expect(captured!.policyVersion).toBe("engineer-publication-authority-v33");
+    expect(captured!).not.toHaveProperty("idempotencyKey");
+    // The bare response is returned directly (no unwrap of a non-existent envelope).
+    expect(result).toEqual({ approvalId: "appr_1", status: "APPROVED" });
   });
 
-  test("self-approval 403 SELF_APPROVAL is surfaced with a distinguishable code", async () => {
-    globalThis.fetch = (async () => jsonResponse({ error: "Requester and approver must differ", code: "SELF_APPROVAL" }, 403)) as unknown as typeof fetch;
+  test("createApproval omits rationale entirely when not provided (still sends the required policyVersion, still no idempotencyKey)", async () => {
+    let captured: Record<string, unknown> | null = null;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      captured = JSON.parse(String(init?.body));
+      return jsonResponse({ approvalId: "appr_2", status: "APPROVED" }, 201);
+    }) as typeof fetch;
+    await createApproval("cp_1", { checkpointHash: `sha256:${"a".repeat(64)}`, decision: "APPROVE" });
+    expect(Object.keys(captured!).sort()).toEqual(["checkpointHash", "decision", "policyVersion"].sort());
+  });
+
+  test("self-approval 403 SELF_APPROVAL surfaces with its code from the live nested {error:{code,message}} envelope (mapPublicationAuthorityError)", async () => {
+    globalThis.fetch = (async () => jsonResponse({ error: { code: "SELF_APPROVAL", message: "requester and approver are the same actor identity" } }, 403)) as unknown as typeof fetch;
     await expect(createApproval("cp_1", { checkpointHash: `sha256:${"a".repeat(64)}`, decision: "APPROVE" }))
-      .rejects.toMatchObject({ status: 403 });
+      .rejects.toMatchObject({ status: 403, code: "SELF_APPROVAL" });
   });
 
   test("createPublication sends the Idempotency-Key header (§3 explicit requirement) and only approvalId/operation/idempotencyKey in the body", async () => {
@@ -232,10 +248,24 @@ describe("Approval/publication client (§3) — NOT wired to a live route yet; s
     expect(created).toEqual({ publicationId: "pub_1", state: "PREFLIGHT" });
   });
 
-  test("409 PREFLIGHT_MISMATCH on publish surfaces distinctly so the UI can explain the approval was invalidated", async () => {
-    globalThis.fetch = (async () => jsonResponse({ error: "Branch moved since approval", code: "PREFLIGHT_MISMATCH" }, 409)) as unknown as typeof fetch;
+  test("409 PREFLIGHT_MISMATCH on publish surfaces distinctly (nested {error:{code}}) so the UI can explain the approval was invalidated", async () => {
+    globalThis.fetch = (async () => jsonResponse({ error: { code: "PREFLIGHT_MISMATCH", message: "branch/base/repo changed during preflight; approval invalidated" } }, 409)) as unknown as typeof fetch;
     await expect(createPublication("run_01", { approvalId: "appr_1", operation: "BRANCH_PR" }))
-      .rejects.toMatchObject({ status: 409 });
+      .rejects.toMatchObject({ status: 409, code: "PREFLIGHT_MISMATCH" });
+  });
+
+  test("dispatchPublication POSTs to /publications/:id/dispatch (no body) and returns the resulting {publicationId, state}", async () => {
+    let captured: { url: string; method: string | undefined; body: unknown } | null = null;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      captured = { url: String(input), method: init?.method, body: init?.body };
+      return jsonResponse({ publicationId: "pub_1", state: "RECEIPTED", receipt: { prUrl: "https://github.com/o/r/pull/1", commitSha: "d".repeat(40) } });
+    }) as typeof fetch;
+    const result = await dispatchPublication("pub_1");
+    expect(captured!.url).toContain("/v1/engineer/publications/pub_1/dispatch");
+    expect(captured!.method).toBe("POST");
+    expect(captured!.body).toBeUndefined();
+    expect(result.state).toBe("RECEIPTED");
+    expect(result.publicationId).toBe("pub_1");
   });
 
   test("getPublication parses every §3 publication state and the RECONCILING reconciliation record", async () => {

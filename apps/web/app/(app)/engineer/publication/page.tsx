@@ -1,15 +1,13 @@
 "use client";
 
-// P9 integration note (2026-07-19): P8's gateway HTTP routes
-// (publication-candidates / approvals / publications, §3 of
-// PHASE-CONTRACTS-P7-P10.md) are NOT wired into apps/gateway/src/handler.ts
-// yet — only the P7 §2 resolution-desk routes are live. This screen still
-// calls the same typed client (@/lib/engineer-resolution) it was built
-// against, but every request below hits a route the running gateway does
-// not serve (it will 404 through the generic handler, not a resolutionDesk
-// 503, since there is no dedicated facade check for these paths). Treat this
-// whole screen as fixture-backed / awaiting-live-routes until the P8 lane's
-// HTTP layer is integrated — do not report it as connected.
+// R3 integration (2026-07-19): P8's gateway HTTP routes
+// (publication-candidates / approvals / publications + the dispatch/resume/
+// reconcile controls, §3 of PHASE-CONTRACTS-P7-P10.md) are wired live in
+// apps/gateway/src/handler.ts over the EngineerPublicationAuthorityFacade.
+// This screen drives the real vertical: select → approve → publish
+// (PREFLIGHT) → dispatch (credentialed branch/PR) → poll to RECEIPTED /
+// RECONCILING. It is reachable from the primary run screen for a
+// REVIEW_APPROVED run and from the Resolution Desk's resolved replacement.
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
@@ -20,11 +18,12 @@ import {
   ResolutionApiError,
   createApproval,
   createPublication,
+  dispatchPublication,
   getPublication,
   getPublicationCandidates,
   type EngineerPublication,
   type PublicationCandidate,
-  type ResolutionApproval,
+  type PublicationApprovalResult,
 } from "@/lib/engineer-resolution";
 import {
   ApprovalRationaleControls,
@@ -45,7 +44,7 @@ function PublicationDeskInner() {
   const [candidates, setCandidates] = useState<PublicationCandidate[] | null>(null);
   const [selected, setSelected] = useState<PublicationCandidate | null>(null);
   const [rationale, setRationale] = useState("");
-  const [approval, setApproval] = useState<ResolutionApproval | null>(null);
+  const [approval, setApproval] = useState<PublicationApprovalResult | null>(null);
   const [publicationId, setPublicationId] = useState<string | null>(null);
   const [publication, setPublication] = useState<EngineerPublication | null>(null);
   const [budget, setBudget] = useState<EngineerBudgetSnapshot | null>(null);
@@ -128,6 +127,19 @@ function PublicationDeskInner() {
     });
   }, [runId, approval, withMutation]);
 
+  // Dispatch drives the credentialed branch/PR effect. DISPATCHED is committed
+  // server-side BEFORE the remote call, so a crash never re-issues it; polling
+  // the read-only GET is how the UI learns the settled RECEIPTED / RECONCILING
+  // outcome. The button never re-issues a remote effect for a DISPATCHED
+  // operation — the server reconciles instead.
+  const dispatch = useCallback(async () => {
+    if (!publicationId) return;
+    await withMutation("publication:dispatch", async () => {
+      const next = await dispatchPublication(publicationId);
+      setPublication(next);
+    });
+  }, [publicationId, withMutation]);
+
   const disabled = pendingAction !== null;
 
   return (
@@ -184,6 +196,17 @@ function PublicationDeskInner() {
 
         {approval && approval.status === "REJECTED" ? (
           <section className="engineer-card"><p className="engineer-muted">This candidate was rejected. Select a different candidate to continue.</p></section>
+        ) : null}
+
+        {publication && publication.state === "PREFLIGHT" ? (
+          <section className="engineer-card engineer-gate" aria-labelledby="publication-dispatch-heading">
+            <div>
+              <span className="engineer-kicker">Preflight passed</span>
+              <h2 id="publication-dispatch-heading">Dispatch the credentialed branch and pull request</h2>
+              <p>The publication is recorded and preflight matched. Dispatch commits the DISPATCHED state before any remote call, so an interrupted dispatch is reconciled by a human and never re-issued as a second pull request.</p>
+            </div>
+            <button type="button" className="engineer-primary" disabled={disabled} onClick={() => void dispatch()}>{pendingAction === "publication:dispatch" ? "Dispatching…" : "Dispatch publication"}</button>
+          </section>
         ) : null}
 
         {publication ? <PublicationStateTimeline state={publication.state} receipt={publication.receipt} reconciliation={publication.reconciliation} budget={budget} /> : null}

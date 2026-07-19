@@ -411,6 +411,37 @@ describe("v33 publication flow — RECONCILING is durable & typed", () => {
   });
 });
 
+// R3 finding 1d: boot-recovery enumeration + resume-drives-no-redispatch. A
+// crash mid-DISPATCHED must be discoverable on restart and parked in
+// RECONCILING, never re-dispatched into a second PR.
+describe("v33 boot recovery — listResumablePublications drives resume, never a second PR", () => {
+  test("a durable DISPATCHED (crash mid-dispatch) is enumerated; a settled RECEIPTED is not", async () => {
+    const receiptH = harness();
+    const a1 = await seedApprovedOriginal(receiptH);
+    const settled = await receiptH.draft.startPublication({ runId: RUN_ID, approvalId: a1.approvalId, operation: "BRANCH_PR", idempotencyKey: "k-ok" });
+    await receiptH.draft.dispatch(settled.publicationId);
+    expect(receiptH.draft.getPublication(settled.publicationId).state).toBe("RECEIPTED");
+    // A settled publication is NOT resumable.
+    expect(receiptH.draft.listResumablePublications()).toEqual([]);
+
+    // A separate publication that crashed mid-dispatch: it stays DISPATCHED.
+    const crashH = harness({ actuatorThrows: true });
+    const a2 = await seedApprovedOriginal(crashH, CK2_ID, CK2_HASH);
+    const started = await crashH.draft.startPublication({ runId: RUN_ID, approvalId: a2.approvalId, operation: "BRANCH_PR", idempotencyKey: "k-crash" });
+    await expect(crashH.draft.dispatch(started.publicationId)).rejects.toThrow(/network partition/);
+    expect(crashH.draft.getPublication(started.publicationId).state).toBe("DISPATCHED");
+    expect(crashH.draft.listResumablePublications()).toEqual([started.publicationId]);
+
+    // Boot recovery: resume each resumable id. It parks RECONCILING, never redispatches.
+    const callsBefore = crashH.actuatorCalls;
+    for (const id of crashH.draft.listResumablePublications()) crashH.draft.resume(id);
+    expect(crashH.draft.getPublication(started.publicationId).state).toBe("RECONCILING");
+    expect(crashH.actuatorCalls).toBe(callsBefore); // no second remote effect
+    // After resume, nothing remains resumable (no infinite recovery loop).
+    expect(crashH.draft.listResumablePublications()).toEqual([]);
+  });
+});
+
 describe("v33 migration table immutability", () => {
   const tables = [
     "publication_candidate_selections_v33",

@@ -120,6 +120,36 @@ interface PublicationAuthorityServiceLike {
   invalidateApprovalById(approvalId: string, reason: string): void;
   startPublication(input: unknown): Promise<{ publicationId: string; state: string }>;
   getPublication(publicationId: string): { publicationId: string; state: string };
+  // R3 dispatch/reconcile/restart seams.
+  dispatch(publicationId: string): Promise<{ publicationId: string; state: string }>;
+  resume(publicationId: string): { publicationId: string; state: string };
+  resolveReconciliation(publicationId: string, resolution: "RECEIPTED" | "FAILED", detail: string): { publicationId: string; state: string };
+}
+
+/**
+ * The [HUMAN] credential boundary. Publication DISPATCH is the credentialed
+ * GitHub branch/PR effect; when no GitHub token is configured we withhold the
+ * dispatch and keep the publication in PREFLIGHT (re-driveable once the
+ * credential is connected), rather than committing DISPATCHED and parking a
+ * human-only RECONCILING for a publish that never left the building.
+ */
+export class PublicationCredentialUnavailableError extends Error {
+  readonly httpStatus = 503;
+  readonly code = "PUBLICATION_CREDENTIAL_UNAVAILABLE";
+  constructor() {
+    super("GitHub publication credentials are not configured; connect GitHub before dispatching a publication");
+    this.name = "PublicationCredentialUnavailableError";
+  }
+}
+
+/** A reconcile request whose `resolution` is not the required RECEIPTED|FAILED. */
+export class PublicationReconciliationInputError extends Error {
+  readonly httpStatus = 400;
+  readonly code = "PUBLICATION_RECONCILIATION_INVALID";
+  constructor() {
+    super("reconciliation resolution must be 'RECEIPTED' or 'FAILED'");
+    this.name = "PublicationReconciliationInputError";
+  }
 }
 
 /** Minimal structural shape of the ledger approval_request row the bridge reads. */
@@ -139,6 +169,12 @@ export interface PublicationFacadeDeps {
   /** The ledger's live connection — reads the v33 selection row (server-owned). */
   connection: Database;
   now: () => Date;
+  /**
+   * Whether a GitHub publication credential is configured. Gates DISPATCH
+   * (the credentialed effect) — false ⇒ a fail-closed 503 that leaves the
+   * publication in PREFLIGHT. Defaults to true when omitted (older callers).
+   */
+  credentialAvailable?: boolean;
   /**
    * True when v35 provenance attestation is REQUIRED for a durable APPROVE
    * (`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` true AND a signer is configured).
@@ -239,6 +275,18 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
     (connection
       .query("SELECT run_id FROM publication_approvals_v33 WHERE approval_id=? AND requester_actor_id=? ORDER BY revision DESC LIMIT 1")
       .get(approvalId, principal.ownerId) as { run_id: string } | null)?.run_id ?? null;
+
+  /**
+   * R3: confirms a publication is owned by the principal. The current
+   * (max-revision) operation row's `requester_actor_id` is the P8 requester,
+   * which is the selection's `requester_user_id` = the principal's ownerId. An
+   * unknown OR cross-owner publication collapses to the SAME not-found shape
+   * (no ownership oracle) — never derived from the URL segment.
+   */
+  const isOwnedPublication = (publicationId: string): boolean =>
+    connection
+      .query("SELECT requester_actor_id FROM publication_git_operations_v33 WHERE publication_id=? AND requester_actor_id=? ORDER BY revision DESC LIMIT 1")
+      .get(publicationId, principal.ownerId) !== null;
 
   return {
     listCandidates(_p, runId) {
@@ -415,6 +463,36 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
 
     getPublication(_p, publicationId) {
       return service.getPublication(publicationId);
+    },
+
+    // --- R3 dispatch / restart / reconcile (owner-scoped) -------------------
+    // All three name the publication ONLY by opaque publicationId; ownership is
+    // derived from the durable operation row (never the URL), and an unknown or
+    // cross-owner publication collapses to the same not-found shape.
+
+    async dispatch(_p, publicationId) {
+      if (!isOwnedPublication(publicationId)) throw new CandidateNotFoundError();
+      // [HUMAN] credential boundary: without a configured GitHub token, withhold
+      // the credentialed effect and leave the publication in PREFLIGHT rather
+      // than committing DISPATCHED for a publish that cannot reach the remote.
+      if (deps.credentialAvailable === false) throw new PublicationCredentialUnavailableError();
+      return service.dispatch(publicationId);
+    },
+
+    resume(_p, publicationId) {
+      if (!isOwnedPublication(publicationId)) throw new CandidateNotFoundError();
+      return service.resume(publicationId);
+    },
+
+    resolveReconciliation(_p, publicationId, body) {
+      if (!isOwnedPublication(publicationId)) throw new CandidateNotFoundError();
+      const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+      const resolution = record.resolution;
+      if (resolution !== "RECEIPTED" && resolution !== "FAILED") {
+        throw new PublicationReconciliationInputError();
+      }
+      const detail = typeof record.detail === "string" && record.detail.trim() ? record.detail : "operator reconciliation";
+      return service.resolveReconciliation(publicationId, resolution, detail);
     },
   };
 }

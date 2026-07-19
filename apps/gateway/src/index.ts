@@ -76,6 +76,7 @@ import { loadEngineerPromptCacheAuthority } from "./engineer-prompt-cache-author
 import { loadEngineerResolutionSigningAuthority } from "./engineer-resolution-authority.js";
 import type { EngineerResolutionDeskFacade, EngineerPublicationAuthorityFacade } from "./handler.js";
 import { createEngineerPublicationAuthorityFacade } from "./engineer-publication-facade.js";
+import { createBranchPrActuator } from "./engineer-publication-actuator.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -458,14 +459,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         return engineerPrincipal.safetyIdentifier;
       },
     });
+    // One credentialed git service, shared by the legacy publication manager and
+    // the P8 dispatch actuator (the real credentialed branch/PR effect).
+    const engineerGitService = new GitHubGitService({
+      repositoryRoot: engineerRepositoryRoot,
+      token: () => currentGithubToken(false),
+      refreshToken: () => currentGithubToken(true),
+    });
     engineerPublication = publicationAuthorityReady && publicationSecret
       ? new EngineerPublicationManager({
           supervisor: engineerSupervisor,
-          gitService: new GitHubGitService({
-            repositoryRoot: engineerRepositoryRoot,
-            token: () => currentGithubToken(false),
-            refreshToken: () => currentGithubToken(true),
-          }),
+          gitService: engineerGitService,
           artifactStore: engineerArtifactStore,
           checkpointAttestor,
           diffForRun: (runId) => {
@@ -512,19 +516,32 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     // P8 publication-authority service, constructed on the ledger's live
     // connection with the REAL replacement-lineage verifier (bound inside
     // createPublicationAuthorityService). The credentialed effect seams
-    // (preflight / credentialProvider / actuator) are supplied here; the actuator
-    // (the credentialed GitHub branch/PR dispatch) is NOT route-reachable in this
-    // slice — POST publications only records the durable PREFLIGHT operation — so
-    // it throws if driven, rather than pretending the remote effect is wired.
+    // (preflight / credentialProvider / actuator) are supplied here. The actuator
+    // is the REAL credentialed GitHub branch/PR effect (createBranchPrActuator
+    // over the shared engineerGitService); DISPATCH is committed durably before
+    // the remote call, so a crash never re-issues it (boot recovery parks
+    // RECONCILING). The [HUMAN] credential boundary is enforced in the facade:
+    // when no GitHub token is configured, dispatch is withheld with a 503 and the
+    // publication stays PREFLIGHT (re-driveable once GitHub is connected).
     if (publicationAuthorityReady) {
       engineerPublicationAuthorityService = engineerSupervisor.createPublicationAuthorityService({
         preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
         credentialProvider: { getPublicationCredentials: async () => ({ token: await currentGithubToken(false) }) },
-        actuator: {
-          createBranchPr: async () => {
-            throw new Error("P8 publication dispatch (credentialed GitHub branch/PR effect) is not wired in this slice");
+        actuator: createBranchPrActuator({
+          gitService: engineerGitService,
+          resolveRunContext: (runId) => {
+            try {
+              const run = engineerSupervisor.getRun(runId);
+              return {
+                repository: run.repository,
+                title: run.requestNormalized || run.requestOriginal,
+                body: `Zintus Engineer verified publication for run ${runId}.`,
+              };
+            } catch {
+              return null;
+            }
           },
-        },
+        }),
       });
     }
     recoverHardeningPaidCalls = () => {
@@ -608,6 +625,29 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     recovery.promise.catch((error)=>log("error","engineer.hardening_verification_recovery_failed",{
       runId:recovery.runId,error:error instanceof Error?error.message:String(error),
     }));
+  }
+  // P8 publication boot recovery (R3 finding 1d). A crash mid-DISPATCHED left a
+  // durable DISPATCHED operation whose remote outcome was never settled. Park
+  // each in RECONCILING (a human resolves the true remote state) — NEVER a
+  // second PR. `resume` is idempotent, so a repeated restart converges without
+  // re-dispatching.
+  if (engineerPublicationAuthorityService) {
+    try {
+      for (const publicationId of engineerPublicationAuthorityService.listResumablePublications()) {
+        try {
+          const view = engineerPublicationAuthorityService.resume(publicationId);
+          log("info", "engineer.publication_dispatch_recovery", { publicationId, state: view.state });
+        } catch (error) {
+          log("error", "engineer.publication_dispatch_recovery_failed", {
+            publicationId, error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    } catch (error) {
+      log("error", "engineer.publication_dispatch_recovery_scan_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
   // QUEUED is the durable dispatch record. A gateway restart reclaims queued
   // work only after reading that committed state; failures are handled by the
@@ -781,6 +821,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       principal: engineerPrincipal,
       connection: engineerSupervisor.resolutionDeskConnection(),
       now: () => new Date(),
+      // [HUMAN] credential boundary: gate DISPATCH on a configured GitHub
+      // credential. `publicationAuthorityReady` already requires one, so this is
+      // normally true; when false, dispatch fails closed at PREFLIGHT.
+      credentialAvailable: Boolean(githubToken?.trim()) || Boolean(options.githubTokenProvider && options.githubCredentialAvailable),
       attestationRequired: provenanceAttestationRequired && resolutionSigning.status === "READY",
       latestApprovalRequest: (runId) => {
         const request = engineerSupervisor.latestApprovalRequest(runId);

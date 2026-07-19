@@ -51,8 +51,8 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("void refresh(runId)");
   });
 
-  it("maps the machine-only REVIEW_APPROVED fallback to truthful publication copy", () => {
-    expect(source).toContain('latestState === "REVIEW_APPROVED" && !approval ? <PublicationUnavailableNotice /> : null');
+  it("hands a machine-only REVIEW_APPROVED run off to the authoritative P8 publication screen (no invented human approval)", () => {
+    expect(source).toContain('latestState === "REVIEW_APPROVED" && !approval ? <PublicationEntryNotice runId={run.runId} /> : null');
     expect(source).not.toContain("The candidate passed human review");
     expect(source).not.toContain('<span className="engineer-kicker">Review approved</span>');
   });

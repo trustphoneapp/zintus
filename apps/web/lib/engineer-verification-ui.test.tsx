@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ApprovalDecisionControls, PublicationUnavailableNotice, VerifiedCandidateCard } from "../app/(app)/engineer/EngineerVerificationControls";
+import { ApprovalDecisionControls, PublicationEntryNotice, VerifiedCandidateCard } from "../app/(app)/engineer/EngineerVerificationControls";
 import type { VerifiedCandidateSummary } from "./engineer";
 
 const candidate: VerifiedCandidateSummary = {
@@ -80,14 +80,16 @@ describe("Engineer verified-candidate rendered UI", () => {
     expect(notices).toHaveLength(0);
   });
 
-  it("describes REVIEW_APPROVED without inventing human approval or publication", () => {
-    const markup = renderToStaticMarkup(<PublicationUnavailableNotice />);
+  it("hands a REVIEW_APPROVED run off to the P8 Approval and publication screen scoped to the run, without inventing that approval/publication already happened", () => {
+    const markup = renderToStaticMarkup(<PublicationEntryNotice runId="run-42" />);
 
     expect(markup).toContain("Machine verified");
-    expect(markup).toContain("Publication is not configured locally");
-    expect(markup).toContain("The signed candidate passed deterministic verification; no human approval or publication has occurred.");
-    expect(markup).not.toContain("Review approved");
+    // A real entry point into the authoritative P8 lane, scoped to this run.
+    expect(markup).toContain('href="/engineer/publication?run=run-42"');
+    expect(markup).toContain("Open Approval and publication");
+    // Still honest: it invites approval, it does not claim approval already occurred.
     expect(markup).not.toContain("passed human review");
+    expect(markup).not.toContain("has been published");
   });
 });
 

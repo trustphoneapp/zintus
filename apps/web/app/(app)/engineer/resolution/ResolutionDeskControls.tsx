@@ -350,6 +350,12 @@ export function ResolutionTerminalSummary({ resolutionCase, replacementRunId }: 
       <span className="engineer-kicker">Resolved</span>
       <h2 id="resolution-terminal-heading">{humanizeResolutionCaseState(resolutionCase.state)}</h2>
       {replacementRunId ? <p><a href={`/engineer?run=${encodeURIComponent(replacementRunId)}`}>Open the replacement run →</a></p> : null}
+      {/* R3 (Blocker 3): a resolved corrected/reverified replacement run is the
+          new publication subject — hand off directly to the P8 Approval and
+          publication screen scoped to that run. The screen shows an empty state
+          until the replacement is verified and approvable, so this link is safe
+          before the run reaches REVIEW_APPROVED. */}
+      {replacementRunId ? <p><a href={`/engineer/publication?run=${encodeURIComponent(replacementRunId)}`}>Approve and publish the replacement →</a></p> : null}
       <p className="engineer-muted">This case is closed. No further mutation is possible from this screen.</p>
     </section>
   );

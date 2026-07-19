@@ -3247,6 +3247,9 @@ describe("P8 publication-authority HTTP routes", () => {
       approve: method("approve", { approvalId: "approval-1", status: "APPROVED" }),
       startPublication: method("startPublication", { publicationId: "pub-1", state: "PREFLIGHT" }),
       getPublication: method("getPublication", { publicationId: "pub-1", state: "PREFLIGHT" }),
+      dispatch: method("dispatch", { publicationId: "pub-1", state: "RECEIPTED", receipt: { prUrl: "https://github.com/o/r/pull/1", commitSha: "d".repeat(40) } }),
+      resume: method("resume", { publicationId: "pub-1", state: "RECONCILING", reconciliation: { reason: "RESTART_UNCERTAIN_DISPATCH", observedRemoteState: "unknown" } }),
+      resolveReconciliation: method("resolveReconciliation", { publicationId: "pub-1", state: "FAILED" }),
     } as unknown as GatewayHandlerDeps["publicationAuthority"];
     const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
     return { handler: makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns, publicationAuthority }), calls };
@@ -3354,5 +3357,48 @@ describe("P8 publication-authority HTTP routes", () => {
     const { handler } = makePublicationHandler();
     const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/bogus", { method: "POST", headers: authorized }));
     expect(response.status).toBe(404);
+  });
+
+  test("POST /publications/:id/dispatch forwards principal + publicationId and returns the settled view (200)", async () => {
+    const { handler, calls } = makePublicationHandler();
+    const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/dispatch", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ publicationId: "pub-1", state: "RECEIPTED", receipt: { prUrl: "https://github.com/o/r/pull/1", commitSha: "d".repeat(40) } });
+    expect(calls[0]).toEqual({ method: "dispatch", args: [principal, "pub-1"] });
+  });
+
+  test("dispatch withheld at the [HUMAN] credential boundary surfaces 503 PUBLICATION_CREDENTIAL_UNAVAILABLE", async () => {
+    const { handler } = makePublicationHandler({
+      dispatch: () => { throw Object.assign(new Error("GitHub publication credentials are not configured"), { name: "PublicationCredentialUnavailableError", httpStatus: 503, code: "PUBLICATION_CREDENTIAL_UNAVAILABLE" }); },
+    });
+    const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/dispatch", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(503);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe("PUBLICATION_CREDENTIAL_UNAVAILABLE");
+  });
+
+  test("POST /publications/:id/resume forwards principal + publicationId and returns the RECONCILING view (200)", async () => {
+    const { handler, calls } = makePublicationHandler();
+    const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/resume", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(200);
+    expect((await response.json() as { state: string }).state).toBe("RECONCILING");
+    expect(calls[0]).toEqual({ method: "resume", args: [principal, "pub-1"] });
+  });
+
+  test("POST /publications/:id/reconcile forwards principal + publicationId + body (200)", async () => {
+    const { handler, calls } = makePublicationHandler();
+    const body = { resolution: "FAILED", detail: "operator confirmed no PR landed" };
+    const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/reconcile", { method: "POST", headers: authorized, body: JSON.stringify(body) }));
+    expect(response.status).toBe(200);
+    expect((await response.json() as { state: string }).state).toBe("FAILED");
+    expect(calls[0]).toEqual({ method: "resolveReconciliation", args: [principal, "pub-1", body] });
+  });
+
+  test("a cross-owner/unknown publication dispatch collapses to the single 404 CANDIDATE_NOT_FOUND (no ownership oracle)", async () => {
+    const { handler } = makePublicationHandler({
+      dispatch: () => { throw Object.assign(new Error("no such publication candidate for this principal"), { name: "CandidateNotFoundError", httpStatus: 404, code: "CANDIDATE_NOT_FOUND" }); },
+    });
+    const response = await handler(new Request("http://x/v1/engineer/publications/other-owner-pub/dispatch", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(404);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe("CANDIDATE_NOT_FOUND");
   });
 });

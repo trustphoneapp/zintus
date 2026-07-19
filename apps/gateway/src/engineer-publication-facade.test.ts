@@ -467,3 +467,74 @@ function seedChildLineageAttestation(db: Database, opts: { childCheckpointId: st
     "{}", "{}", hx(`stmt-${n}`), "ed25519", "key-1", "sig", AT);
   db.exec("PRAGMA foreign_keys=ON");
 }
+
+// R3: the facade dispatch/resume/reconcile methods over the real service +
+// durable rows. Each names the publication only by opaque publicationId; every
+// authority (ownership, credential boundary) is server-derived.
+async function seedStartedPublication(facade: ReturnType<typeof createEngineerPublicationAuthorityFacade>): Promise<string> {
+  await facade.selectCandidate(principal, RUN_ID, selectBody);
+  const approval = facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }) as { approvalId: string };
+  const started = await facade.startPublication(principal, RUN_ID, { approvalId: approval.approvalId }, "idem-1") as { publicationId: string; state: string };
+  return started.publicationId;
+}
+
+describe("P8 publication facade — R3 dispatch / restart / reconcile (owner-scoped)", () => {
+  test("dispatch drives PREFLIGHT → RECEIPTED and records the durable receipt", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    const publicationId = await seedStartedPublication(facade);
+    expect((facade.getPublication(principal, publicationId) as { state: string }).state).toBe("PREFLIGHT");
+    const dispatched = await facade.dispatch(principal, publicationId) as { state: string; receipt?: { prUrl: string } };
+    expect(dispatched.state).toBe("RECEIPTED");
+    expect(dispatched.receipt?.prUrl).toBe("https://x/pr/1");
+    const receipts = db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number };
+    expect(receipts.c).toBe(1);
+  });
+
+  test("dispatch is withheld at the [HUMAN] credential boundary (503) and leaves the publication in PREFLIGHT", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db, { credentialAvailable: false });
+    const publicationId = await seedStartedPublication(facade);
+    await expect(facade.dispatch(principal, publicationId)).rejects.toMatchObject({ httpStatus: 503, code: "PUBLICATION_CREDENTIAL_UNAVAILABLE" });
+    // The publication is untouched — still PREFLIGHT, re-driveable once GitHub is connected.
+    expect((facade.getPublication(principal, publicationId) as { state: string }).state).toBe("PREFLIGHT");
+  });
+
+  test("an AMBIGUOUS remote outcome parks RECONCILING (requires_human) with no auto-redispatch; an explicit reconcile resolves it", async () => {
+    const db = scratchDb();
+    const ambiguousService = (() => {
+      const actuator: PublicationActuator = { async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "receipt lost" }; } };
+      return new PublicationAuthorityService(db, {
+        actuator,
+        preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+        credentialProvider: { getPublicationCredentials: () => ({ token: "ghp_x" }) },
+        now: () => new Date(AT), idFactory: () => `amb-${(counter += 1)}`,
+      });
+    })();
+    const { facade } = makeFacade(db, { service: ambiguousService });
+    const publicationId = await seedStartedPublication(facade);
+    const parked = await facade.dispatch(principal, publicationId) as { state: string; reconciliation?: { reason: string } };
+    expect(parked.state).toBe("RECONCILING");
+    expect(parked.reconciliation?.reason).toBe("AMBIGUOUS_REMOTE_OUTCOME");
+    const recon = db.query("SELECT requires_human FROM publication_reconciliations_v33 WHERE publication_id=?").get(publicationId) as { requires_human: number };
+    expect(recon.requires_human).toBe(1);
+    // Explicit operator resolution is the ONLY legal successor.
+    const resolved = facade.resolveReconciliation(principal, publicationId, { resolution: "FAILED", detail: "operator confirmed no PR landed" }) as { state: string };
+    expect(resolved.state).toBe("FAILED");
+  });
+
+  test("reconcile rejects a resolution that is not RECEIPTED|FAILED (400)", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    const publicationId = await seedStartedPublication(facade);
+    expect(() => facade.resolveReconciliation(principal, publicationId, { resolution: "MAYBE" })).toThrow(/RECEIPTED.*FAILED/);
+  });
+
+  test("an unknown / cross-owner publication collapses to the single 404 not-found (no ownership oracle) for dispatch, resume, and reconcile", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    await expect(facade.dispatch(principal, "not-a-real-publication")).rejects.toBeInstanceOf(CandidateNotFoundError);
+    expect(() => facade.resume(principal, "not-a-real-publication")).toThrow(CandidateNotFoundError);
+    expect(() => facade.resolveReconciliation(principal, "not-a-real-publication", { resolution: "FAILED" })).toThrow(CandidateNotFoundError);
+  });
+});

@@ -277,15 +277,19 @@ describe("Resolution Desk terminal / empty / error states", () => {
     expect(markup).toContain('role="alert"');
   });
 
-  it("terminal state links to the replacement run when one exists and states no further mutation is possible", () => {
+  it("terminal state links to the replacement run AND hands off to the P8 publication screen scoped to that run, and states no further mutation is possible", () => {
     const withReplacement = renderToStaticMarkup(<ResolutionTerminalSummary resolutionCase={{ ...openCase, state: "RESOLVED_CORRECTED" }} replacementRunId="run_2" />);
     expect(withReplacement).toContain("/engineer?run=run_2");
+    // R3: the resolved replacement is the new publication subject.
+    expect(withReplacement).toContain("/engineer/publication?run=run_2");
+    expect(withReplacement).toContain("Approve and publish the replacement");
     expect(withReplacement).toContain("No further mutation is possible");
   });
 
-  it("terminal state for reject/close renders without a replacement-run link", () => {
+  it("terminal state for reject/close renders without a replacement-run link or a publication handoff", () => {
     const rejected = renderToStaticMarkup(<ResolutionTerminalSummary resolutionCase={{ ...openCase, state: "REJECTED_CLOSED" }} replacementRunId={null} />);
     expect(rejected).not.toContain("Open the replacement run");
+    expect(rejected).not.toContain("/engineer/publication?run=");
   });
 });
 
