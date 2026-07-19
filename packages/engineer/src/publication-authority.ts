@@ -693,6 +693,26 @@ export class PublicationAuthorityService {
         revision, status, reason, this.now(), approvalJson, current.approval_id, current.revision);
   }
 
+  // --- Recovery enumeration -------------------------------------------------
+
+  /**
+   * Boot-recovery seam (R3, finding 1d). Returns the ids of every publication
+   * whose CURRENT (max-revision) state is DISPATCHED — i.e. a dispatch that was
+   * committed durably but whose remote outcome was never settled (a crash
+   * window). The gateway restart loop calls `resume(id)` for each, which parks
+   * it in RECONCILING with a durable record and NEVER re-dispatches, so a crash
+   * mid-DISPATCHED can never produce a second pull request. Read-only; does not
+   * mutate state.
+   */
+  listResumablePublications(): string[] {
+    const rows = this.db.query(`SELECT o.publication_id AS publication_id
+      FROM publication_git_operations_v33 o
+      WHERE o.revision = (SELECT MAX(revision) FROM publication_git_operations_v33 WHERE publication_id = o.publication_id)
+        AND o.state = 'DISPATCHED'
+      ORDER BY o.publication_id`).all() as unknown as Array<{ publication_id: string }>;
+    return rows.map((row) => row.publication_id);
+  }
+
   // --- View ----------------------------------------------------------------
 
   getPublication(publicationId: string): PublicationView {

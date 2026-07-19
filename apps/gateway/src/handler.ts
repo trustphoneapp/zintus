@@ -842,6 +842,11 @@ export interface EngineerPublicationAuthorityFacade {
   approve(principal: unknown, checkpointId: string, body: unknown): unknown | Promise<unknown>;
   startPublication(principal: unknown, runId: string, body: unknown, idempotencyKey: string): unknown | Promise<unknown>;
   getPublication(principal: unknown, publicationId: string): unknown | Promise<unknown>;
+  // R3: advance PREFLIGHT → DISPATCHED (credentialed effect), idempotent restart
+  // recovery, and explicit typed reconciliation resolution. All owner-scoped.
+  dispatch(principal: unknown, publicationId: string): unknown | Promise<unknown>;
+  resume(principal: unknown, publicationId: string): unknown | Promise<unknown>;
+  resolveReconciliation(principal: unknown, publicationId: string, body: unknown): unknown | Promise<unknown>;
 }
 
 /** Hard cap on SERVER-SIDE MCP tool-loop rounds (model calls) per request. Each
@@ -3070,6 +3075,25 @@ export function createGatewayHandler(
         // GET /v1/engineer/publications/:publicationId
         if (parts[3] === "publications" && parts[4] && !parts[5] && request.method === "GET") {
           return json(request, await publicationAuthority.getPublication(engineerPrincipal!, decodeURIComponent(parts[4])), 200, { "Cache-Control": "no-store" });
+        }
+        // POST /v1/engineer/publications/:publicationId/dispatch  (credentialed branch/PR effect)
+        if (parts[3] === "publications" && parts[4] && parts[5] === "dispatch" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          return json(request, await publicationAuthority.dispatch(engineerPrincipal!, decodeURIComponent(parts[4])), 200, { "Cache-Control": "no-store" });
+        }
+        // POST /v1/engineer/publications/:publicationId/resume  (idempotent restart recovery)
+        if (parts[3] === "publications" && parts[4] && parts[5] === "resume" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          return json(request, await publicationAuthority.resume(engineerPrincipal!, decodeURIComponent(parts[4])), 200, { "Cache-Control": "no-store" });
+        }
+        // POST /v1/engineer/publications/:publicationId/reconcile  (explicit typed resolution)
+        if (parts[3] === "publications" && parts[4] && parts[5] === "reconcile" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          const body = await request.json().catch(() => ({}));
+          return json(request, await publicationAuthority.resolveReconciliation(engineerPrincipal!, decodeURIComponent(parts[4]), body), 200, { "Cache-Control": "no-store" });
         }
         return json(request, { error: { message: "Publication resource not found" } }, 404);
       } catch (error) {
