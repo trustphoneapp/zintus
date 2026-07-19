@@ -145,7 +145,7 @@ function fakeGit(config: FakeConfig): GitService {
 function mechanics(config: FakeConfig, contextOverride?: GitPublicationContext | null): GitPublicationMechanics {
   return new GitPublicationMechanics({
     gitService: fakeGit(config),
-    resolveRepository: (repositoryId) => (repositoryId === REPO_ID ? REPO : null),
+    resolveRepository: ({ repositoryId }) => (repositoryId === REPO_ID ? REPO : null),
     resolvePublicationContext: () => (contextOverride === undefined ? CONTEXT : contextOverride),
   });
 }
@@ -274,7 +274,7 @@ describe("GitPublicationMechanics preflight (driven through real P8 authority)",
       resolveRepository: () => null,
       resolvePublicationContext: () => CONTEXT,
     });
-    await expect(mech.preflight({ repositoryId: "missing", baseCommitSha: BASE_COMMIT }))
+    await expect(mech.preflight({ runId: RUN_ID, repositoryId: "missing", baseCommitSha: BASE_COMMIT }))
       .rejects.toBeInstanceOf(PublicationRepositoryUnavailableError);
   });
 });
@@ -314,6 +314,71 @@ describe("synthesizePublicationPrBody", () => {
     expect(published!).toContain("### Verified diff");
     expect(published!).toContain("+refreshed = true");
     expect(published!).toContain("Risk tier: HIGH");
+  });
+});
+
+describe("synthesizePublicationPrBody hardening (F7)", () => {
+  test("bounds the COMPLETE assembled body to a UTF-8 BYTE budget under fence-breakout + multibyte input", () => {
+    const budget = 4_000;
+    // A ``` fence-breakout AND multibyte Unicode (each 🚀 is 4 UTF-8 bytes) that
+    // together far exceed the byte budget even though the CHAR count is small.
+    const evil = "```\n## INJECTED HEADING\n```\n" + "🚀".repeat(5_000);
+    const body = synthesizePublicationPrBody(
+      { ...NARRATIVE, diff: "diff --git a/x b/x\n+++ b/x\n" + evil },
+      100_000, // huge CHAR cap so ONLY the byte budget can bound the body
+      budget,
+    );
+    // (1) the produced body stays within the byte budget (chars-only cap cannot).
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(budget);
+    // (2) the diff fence is intact: the diff's ``` (3 backticks) must NOT be able
+    // to close the code block — the opening fence uses MORE than 3 backticks.
+    const openFence = body.split("\n").find((line) => /^`{3,}diff$/.test(line));
+    expect(openFence).toBeDefined();
+    expect(openFence!.replace("diff", "").length).toBeGreaterThan(3);
+  });
+
+  test("neutralizes markdown/HTML injection in request, criteria, and claims (no structural breakout)", () => {
+    const body = synthesizePublicationPrBody({
+      ...NARRATIVE,
+      requestNormalized: "legit request\n## PWNED HEADING\n- injected list item",
+      acceptanceCriteria: [{ statement: "ok\n### sneaky heading" }],
+      claims: [{ status: "VERIFIED", claim: "fine\n# claim heading <img src=x>" }],
+    });
+    // No untrusted line survives as a real markdown block/heading/list or raw HTML.
+    expect(body).not.toMatch(/^## PWNED HEADING$/m);
+    expect(body).not.toMatch(/^### sneaky heading$/m);
+    expect(body).not.toMatch(/^# claim heading/m);
+    expect(body).not.toContain("<img src=x>");
+  });
+});
+
+describe("repository resolution is selection/run-bound (F8)", () => {
+  test("preflight resolves the repository of the publication's OWN run, never the latest run sharing a repository_id", async () => {
+    const repoA: RepositoryReference = { ...REPO, baseBranch: "main" };
+    const repoB: RepositoryReference = { ...REPO, baseBranch: "develop" };
+    const captured: { baseBranch: string | null } = { baseBranch: null };
+    const gitService: GitService = {
+      async inspectBaseBranch(input) {
+        captured.baseBranch = input.repository.baseBranch;
+        return { currentCommitSha: BASE_COMMIT, matchesExpected: true, protectionEnforced: true, protection: FULL_PROTECTION };
+      },
+      async createRunBranch() { return { branchName: "b", remoteReference: "r" }; },
+      async pushVerifiedCommit() { return { remoteReference: "r" }; },
+      async createPullRequest() { return { id: "p", number: 1, url: "u" }; },
+    };
+    // Two runs share REPO_ID but resolve to DIFFERENT repositories (base branch).
+    // The resolver is RUN-bound: it must key off the publication's own run, not a
+    // loose "latest run with this repository_id" lookup.
+    const mech = new GitPublicationMechanics({
+      gitService,
+      resolveRepository: (input) => (input.runId === "run-A" ? repoA : repoB),
+      resolvePublicationContext: (runId) =>
+        runId === "run-A"
+          ? { repository: repoA, title: "t", narrative: NARRATIVE }
+          : { repository: repoB, title: "t", narrative: NARRATIVE },
+    });
+    await mech.preflight({ runId: "run-A", repositoryId: REPO_ID, baseCommitSha: BASE_COMMIT });
+    expect(captured.baseBranch).toBe("main"); // run A's repository, never run B's
   });
 });
 

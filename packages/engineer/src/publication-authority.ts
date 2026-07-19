@@ -86,6 +86,9 @@ export interface PublicationCredentialProvider {
 /** Deterministic branch/base/repo probe used by preflight, immediately before Git effects. */
 export interface RepositoryPreflightProbe {
   probe(input: {
+    /** The publication's OWN run — the probe binds repository resolution to THIS
+     * run (F8), never to a loose "latest run with this repository_id" lookup. */
+    readonly runId: string;
     readonly repositoryId: string;
     readonly baseCommitSha: string;
   }): { repositoryId: string; baseCommitSha: string } | Promise<{ repositoryId: string; baseCommitSha: string }>;
@@ -153,6 +156,23 @@ export class ApprovalAuthorityInvalidError extends Error {
   readonly httpStatus = 409;
   readonly code = "APPROVAL_AUTHORITY_INVALID";
   constructor(message: string) { super(message); this.name = "ApprovalAuthorityInvalidError"; }
+}
+/**
+ * F9: raised when `approveWithinTx` is invoked WITHOUT an active write
+ * transaction on its connection. The method silently depends on the caller
+ * having opened a transaction on THIS SAME connection so the P8 approval and its
+ * paired v35 attestation commit together or not at all; a caller that opened no
+ * transaction would autocommit an approval with no attestation. This assertion
+ * makes that atomicity contract non-bypassable (fail closed, HTTP 500 — it is a
+ * server wiring fault, never a client-driven condition).
+ */
+export class ApprovalTransactionRequiredError extends Error {
+  readonly httpStatus = 500;
+  readonly code = "APPROVAL_TRANSACTION_REQUIRED";
+  constructor() {
+    super("approveWithinTx requires an active write transaction on its connection (atomicity with the required attestation)");
+    this.name = "ApprovalTransactionRequiredError";
+  }
 }
 export class PublicationStateConflictError extends Error {
   readonly httpStatus = 409;
@@ -429,6 +449,10 @@ export class PublicationAuthorityService {
    * live-approval CAS run here; a second live APPROVE still fails closed.
    */
   approveWithinTx(checkpointId: string, rawBody: ApprovalDecisionBody, rawContext: ApproverAuthContext): { approvalId: string; status: string } {
+    // F9: the atomicity contract is non-bypassable. A caller that opened no
+    // transaction on this connection would autocommit an approval with no paired
+    // attestation (defeating R5C atomicity). Refuse before ANY DB effect.
+    if (!this.db.inTransaction) throw new ApprovalTransactionRequiredError();
     const body = ApprovalDecisionBodySchema.parse(rawBody);
     const context = ApproverAuthContextSchema.parse(rawContext);
 
@@ -518,7 +542,7 @@ export class PublicationAuthorityService {
 
     // Preflight immediately before Git effects.
     const observed = await this.deps.preflight.probe({
-      repositoryId: approval.repository_id, baseCommitSha: approval.base_commit_sha,
+      runId: approval.run_id, repositoryId: approval.repository_id, baseCommitSha: approval.base_commit_sha,
     });
     if (observed.repositoryId !== approval.repository_id || observed.baseCommitSha !== approval.base_commit_sha) {
       this.invalidateApproval(approval, "PREFLIGHT_MISMATCH");

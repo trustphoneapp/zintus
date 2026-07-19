@@ -54,10 +54,14 @@ export interface GitPublicationContext {
 export interface GitPublicationMechanicsDeps {
   readonly gitService: GitService;
   /**
-   * Resolves a `repositoryId` to its durable repository reference for preflight
-   * inspection. Returns null ONLY when the repository is genuinely unknown.
+   * Resolves the durable repository reference for preflight inspection, bound to
+   * the SELECTED publication's OWN run (F8) — NOT a loose "latest run with this
+   * repository_id" lookup. The `repositoryId` is passed alongside as a defensive
+   * cross-check (the run must actually be bound to it); org-scoping is enforced by
+   * the run-scoped resolver at the composition root. Returns null ONLY when the
+   * run's repository is genuinely unavailable.
    */
-  readonly resolveRepository: (repositoryId: string) => RepositoryReference | null;
+  readonly resolveRepository: (input: { runId: string; repositoryId: string }) => RepositoryReference | null;
   /**
    * Resolves the run's durable repository + PR title + narrative from server
    * records. Returns null ONLY when the run is genuinely unavailable — a
@@ -117,45 +121,143 @@ export function evaluateBranchProtection(protection: BranchProtectionEvidence | 
   return { enforced: reasons.length === 0, reasons };
 }
 
+/** Conservative UTF-8 byte budget for the assembled PR body. GitHub's own limit
+ * is 65536 chars, but we budget in BYTES with headroom so multibyte Unicode in
+ * the request/criteria/claims/diff can never push the real payload over. */
+const DEFAULT_PR_BODY_BYTE_BUDGET = 60_000;
+const BODY_BYTE_TRUNCATION_MARKER = "\n\n… pull request body truncated to fit the GitHub body byte budget.";
+
+function utf8ByteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+/** Truncate to at most `maxBytes` UTF-8 bytes on a code-point boundary (never
+ * splitting a surrogate pair / multibyte sequence). */
+function truncateToUtf8Bytes(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (utf8ByteLength(value) <= maxBytes) return value;
+  const points = Array.from(value); // iterates by code point, so slices stay valid
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (utf8ByteLength(points.slice(0, mid).join("")) <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  return points.slice(0, lo).join("");
+}
+
+/**
+ * Neutralize UNTRUSTED text so it cannot inject markdown structure or raw HTML
+ * when rendered as ordinary PR-body prose / list content. Line breaks survive,
+ * but every line-leading block marker (heading, list, blockquote, table, thematic
+ * break, setext underline) is backslash-escaped, all inline structural/HTML
+ * characters (backtick, angle brackets, link brackets, backslash) are escaped so
+ * no code span/fence, autolink, or HTML tag can open, and CR is normalized. This
+ * is applied to the request, criteria statements, changed-file paths, and claim
+ * status/text — the diff is instead protected by an over-long code fence (below).
+ */
+function neutralizeMarkdown(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => {
+      // Escape inline structural + HTML vectors first (backslash included).
+      let out = line.replace(/([\\`<>[\]])/g, "\\$1");
+      // Then neutralize a single line-leading block marker after optional indent.
+      out = out.replace(/^(\s*)([#+*|~=-]|\d+[.)])/, "$1\\$2");
+      return out;
+    })
+    .join("\n");
+}
+
+/** A code fence guaranteed longer than the longest backtick run in `content`,
+ * so no line inside the (untrusted) diff can prematurely close the block. */
+function codeFenceFor(content: string): string {
+  const longestRun = Math.max(0, ...[...content.matchAll(/`+/g)].map((match) => match[0].length));
+  return "`".repeat(Math.max(3, longestRun + 1));
+}
+
 /**
  * Synthesizes a rich PR body from trusted server records only. Includes the
  * normalized request, risk tier, evidence-bundle hash, frozen acceptance
- * criteria, changed files, evidence-backed claims, AND the exact reviewed diff
- * (bounded so an enormous diff never blows the GitHub body limit — when it
- * would, the diff is truncated with an explicit marker and its length noted).
- * Builder narrative is never used.
+ * criteria, changed files, evidence-backed claims, AND the exact reviewed diff.
+ *
+ * HARDENED (F7): the COMPLETE assembled body is bounded to ONE UTF-8 BYTE budget
+ * (not just the diff, and not by JavaScript char length) so multibyte Unicode in
+ * any section can never push the real payload over GitHub's limit — the diff is
+ * shrunk first, then a final byte-guard truncates the whole body deterministically
+ * with a clear marker. Untrusted sections are rendered SAFELY: the diff sits in an
+ * over-long code fence so an embedded ``` can never break out, and the request /
+ * criteria / claims / file paths are markdown+HTML neutralized so no untrusted
+ * input can inject structure. Builder narrative is never used.
  */
-export function synthesizePublicationPrBody(narrative: PublicationNarrative, maxDiffBodyChars = 60_000): string {
-  const changed = [...narrative.diff.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((match) => match[1]);
-  const criteria = narrative.acceptanceCriteria.map((item) => `- ${item.statement}`);
-  const claims = narrative.claims.map((claim) => `- [${claim.status}] ${claim.claim}`);
-  const diffBody = narrative.diff.length > maxDiffBodyChars
-    ? `${narrative.diff.slice(0, maxDiffBodyChars)}\n… diff truncated (${narrative.diff.length} bytes total)`
+export function synthesizePublicationPrBody(
+  narrative: PublicationNarrative,
+  maxDiffBodyChars = 60_000,
+  maxBodyBytes = DEFAULT_PR_BODY_BYTE_BUDGET,
+): string {
+  const changed = [...narrative.diff.matchAll(/^\+\+\+ b\/(.+)$/gm)].map((match) => neutralizeMarkdown(match[1] ?? ""));
+  const criteria = narrative.acceptanceCriteria.map((item) => `- ${neutralizeMarkdown(item.statement)}`);
+  const claims = narrative.claims.map((claim) => `- [${neutralizeMarkdown(claim.status)}] ${neutralizeMarkdown(claim.claim)}`);
+  const requestText = neutralizeMarkdown(narrative.requestNormalized || narrative.requestOriginal);
+  const riskTier = neutralizeMarkdown(narrative.riskTier);
+  const evidenceBundle = neutralizeMarkdown(narrative.evidenceBundleHash);
+  const totalDiffBytes = utf8ByteLength(narrative.diff);
+  const diffMarker = `\n… diff truncated (${totalDiffBytes} bytes total)`;
+
+  const assemble = (diffBody: string): string => {
+    const fence = codeFenceFor(diffBody);
+    return [
+      "## Zintus Engineer verified change",
+      "",
+      requestText,
+      "",
+      `Risk tier: ${riskTier}`,
+      `Evidence bundle: ${evidenceBundle}`,
+      "",
+      "### Acceptance criteria",
+      ...(criteria.length ? criteria : ["- (none recorded)"]),
+      "",
+      "### Changed files",
+      ...(changed.length ? changed.map((file) => `- ${file}`) : ["- (none)"]),
+      "",
+      "### Evidence-backed claims",
+      ...(claims.length ? claims : ["- (none recorded)"]),
+      "",
+      "### Verified diff",
+      `${fence}diff`,
+      diffBody,
+      fence,
+      "",
+      "Generated from trusted Zintus system records; Builder narrative was not used.",
+    ].join("\n");
+  };
+
+  // 1) Soft CHAR cap on the diff (backward-compatible behavior).
+  let diffBody = narrative.diff.length > maxDiffBodyChars
+    ? `${narrative.diff.slice(0, maxDiffBodyChars)}${diffMarker}`
     : narrative.diff.trimEnd();
-  return [
-    "## Zintus Engineer verified change",
-    "",
-    narrative.requestNormalized || narrative.requestOriginal,
-    "",
-    `Risk tier: ${narrative.riskTier}`,
-    `Evidence bundle: ${narrative.evidenceBundleHash}`,
-    "",
-    "### Acceptance criteria",
-    ...(criteria.length ? criteria : ["- (none recorded)"]),
-    "",
-    "### Changed files",
-    ...(changed.length ? changed.map((file) => `- ${file}`) : ["- (none)"]),
-    "",
-    "### Evidence-backed claims",
-    ...(claims.length ? claims : ["- (none recorded)"]),
-    "",
-    "### Verified diff",
-    "```diff",
-    diffBody,
-    "```",
-    "",
-    "Generated from trusted Zintus system records; Builder narrative was not used.",
-  ].join("\n");
+
+  // 2) Enforce the TOTAL byte budget by shrinking the diff first (it is the
+  //    largest, least-structured section). The frame (everything but the diff)
+  //    is measured with an empty diff so the diff gets whatever budget remains.
+  let body = assemble(diffBody);
+  if (utf8ByteLength(body) > maxBodyBytes) {
+    const frameBytes = utf8ByteLength(assemble(""));
+    const diffBudget = maxBodyBytes - frameBytes - utf8ByteLength(diffMarker);
+    diffBody = diffBudget > 0
+      ? `${truncateToUtf8Bytes(narrative.diff, diffBudget)}${diffMarker}`
+      : diffMarker.trimStart();
+    body = assemble(diffBody);
+  }
+
+  // 3) Final hard byte-guard: the request/criteria/claims themselves could exceed
+  //    the budget even with an empty diff. Truncate the whole body deterministically.
+  if (utf8ByteLength(body) > maxBodyBytes) {
+    body = truncateToUtf8Bytes(body, Math.max(0, maxBodyBytes - utf8ByteLength(BODY_BYTE_TRUNCATION_MARKER))) + BODY_BYTE_TRUNCATION_MARKER;
+  }
+  return body;
 }
 
 function errorMessage(error: unknown): string {
@@ -190,8 +292,8 @@ export class GitPublicationMechanics {
     probe: (input) => this.preflight(input),
   };
 
-  async preflight(input: { repositoryId: string; baseCommitSha: string }): Promise<{ repositoryId: string; baseCommitSha: string }> {
-    const repository = this.deps.resolveRepository(input.repositoryId);
+  async preflight(input: { runId: string; repositoryId: string; baseCommitSha: string }): Promise<{ repositoryId: string; baseCommitSha: string }> {
+    const repository = this.deps.resolveRepository({ runId: input.runId, repositoryId: input.repositoryId });
     if (!repository) throw new PublicationRepositoryUnavailableError(input.repositoryId);
     const status = await this.deps.gitService.inspectBaseBranch({
       repository,
@@ -224,7 +326,7 @@ export class GitPublicationMechanics {
   createReceiptDiscovery(): PublicationReceiptDiscovery {
     return {
       discoverExistingReceipt: async (input) => {
-        const repository = this.deps.resolveRepository(input.repositoryId);
+        const repository = this.deps.resolveRepository({ runId: input.runId, repositoryId: input.repositoryId });
         if (!repository) {
           return {
             kind: "AMBIGUOUS",

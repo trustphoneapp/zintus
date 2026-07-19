@@ -321,7 +321,7 @@ const nextId = (prefix: string): string => `${prefix}-${(idCounter += 1)}`;
 const RECEIPT_ACTUATOR: PublicationActuator = {
   async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "RECEIPT", prUrl: "https://github.test/pull/1", commitSha: "b".repeat(40) }; },
 };
-const ECHO_PREFLIGHT = { probe: (input: { repositoryId: string; baseCommitSha: string }) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) };
+const ECHO_PREFLIGHT = { probe: (input: { runId: string; repositoryId: string; baseCommitSha: string }) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) };
 
 interface Harness {
   supervisor: EngineerSupervisor;
@@ -329,7 +329,7 @@ interface Harness {
   principal: EngineerPrincipal;
   singleInstallPrincipal: EngineerPrincipal;
   seed: TenantSeed;
-  buildService: (opts?: { actuator?: PublicationActuator; preflight?: { probe: (input: { repositoryId: string; baseCommitSha: string }) => { repositoryId: string; baseCommitSha: string } | Promise<{ repositoryId: string; baseCommitSha: string }> } }) => PublicationAuthorityService;
+  buildService: (opts?: { actuator?: PublicationActuator; preflight?: { probe: (input: { runId: string; repositoryId: string; baseCommitSha: string }) => { repositoryId: string; baseCommitSha: string } | Promise<{ repositoryId: string; baseCommitSha: string }> } }) => PublicationAuthorityService;
   buildFacade: (service: PublicationAuthorityService, opts?: { attestationRequired?: boolean; resultTreeHashFor?: () => string | null; decideApprove?: PublicationFacadeDeps["decideApprove"]; principal?: EngineerPrincipal; credentialAvailable?: boolean }) => ReturnType<typeof createEngineerPublicationAuthorityFacade>;
   readerDb: () => Database;
 }
@@ -421,7 +421,7 @@ class CountingGitService implements GitService {
 function makeMechanics(git: CountingGitService): GitPublicationMechanics {
   return new GitPublicationMechanics({
     gitService: git,
-    resolveRepository: (repositoryId) => repositoryRef(repositoryId),
+    resolveRepository: ({ repositoryId }) => repositoryRef(repositoryId),
     resolvePublicationContext: (runId) => ({
       repository: repositoryRef("repo-a"),
       title: `publish ${runId}`,

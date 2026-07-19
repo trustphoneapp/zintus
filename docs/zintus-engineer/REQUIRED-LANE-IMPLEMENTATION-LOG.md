@@ -3257,3 +3257,27 @@ unfinished pair has passed.
   typecheck/diff. RESIDUAL [HUMAN]: the real happy path needs the verified result
   commit present in the gateway's local object store at approval time; wired +
   tested with a trusted git-subprocess stand-in, live-git keyed-smoke open.
+
+### R5F-3 — hardening F7/F8/F9 (Fable-gated, 2026-07-19)
+
+- F7 PR body: hard UTF-8 BYTE budget over the COMPLETE assembled body (default
+  60000, binary-search truncateToUtf8Bytes never splits a multibyte seq) +
+  fence-breakout defense (codeFenceFor picks longestBacktickRun+1 so an embedded
+  ``` can't close the block) + neutralizeMarkdown on request/criteria/claims/paths
+  (escapes backtick/<>/[]/backslash + line-leading block markers). RED-first: a
+  ```-breakout + 5000 4-byte emoji under a 4000-byte budget → body ≤4000 bytes
+  with an over-long fence (pre-fix ~20KB, 3-backtick fence).
+- F8 repo resolution selection/run-bound: probe input gains runId; startPublication
+  passes approval.run_id; index.ts resolves org-scoped getRun(runId).repository
+  (+ repositoryId cross-check) instead of "latest run with repository_id". RED-first:
+  two runs share a repo_id with different base branches → run A's publication
+  resolves A's branch (pre-fix resolved B's). Residual: mechanics-level bind, not
+  schema-enforced; multi-tenant follow-up should thread selection_id+org.
+- F9 atomicity non-bypassable: approveWithinTx asserts this.db.inTransaction
+  (ApprovalTransactionRequiredError) before any DB effect — a bare call outside a
+  txn is rejected (was silently committing an orphan approval without attestation).
+  Fable mutation-verified: removing the guard reds 1 test, restore clean. Residual:
+  doesn't assert WRITE-lock mode (theoretical; real callers use write txns).
+- Gates engineer 854/gateway 466/web 571/typecheck/diff. R5F-3 = last audit tier
+  (all 9 findings F1-F9 now closed). NEXT: R5F-4/R6 gate — RED-first adversarial
+  tests + LIVE /qa+/browse localhost traversal + Sol/Luna, zero paid calls.

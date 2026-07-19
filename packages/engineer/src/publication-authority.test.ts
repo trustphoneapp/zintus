@@ -704,3 +704,33 @@ describe("v33 selectCandidate — defense-in-depth promoted-checkpoint self-veri
     expect(count).toBe(1);
   });
 });
+
+describe("F9 — approveWithinTx atomicity is non-bypassable", () => {
+  test("calling approveWithinTx WITHOUT an active transaction is rejected and persists NO approval", async () => {
+    const h = harness();
+    await selectOriginal(h);
+    // The facade drives approveWithinTx INSIDE a shared-connection transaction so
+    // the P8 approval and its required v35 attestation commit together. A caller
+    // that opens NO transaction would otherwise autocommit an approval with no
+    // paired attestation — defeating R5C atomicity. The guard must refuse it.
+    expect(() =>
+      h.draft.approveWithinTx(CK_ID,
+        { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: PUBLICATION_AUTHORITY_POLICY_VERSION }, CTX),
+    ).toThrow();
+    const n = (h.db.query("SELECT COUNT(*) c FROM publication_approvals_v33").get() as { c: number }).c;
+    expect(n).toBe(0);
+    expect(h.db.inTransaction).toBe(false);
+  });
+
+  test("approveWithinTx commits normally when the caller holds an active transaction (the facade path)", async () => {
+    const h = harness();
+    await selectOriginal(h);
+    h.db.exec("BEGIN IMMEDIATE");
+    const res = h.draft.approveWithinTx(CK_ID,
+      { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: PUBLICATION_AUTHORITY_POLICY_VERSION }, CTX);
+    h.db.exec("COMMIT");
+    expect(res.status).toBe("APPROVED");
+    const n = (h.db.query("SELECT COUNT(*) c FROM publication_approvals_v33").get() as { c: number }).c;
+    expect(n).toBe(1);
+  });
+});

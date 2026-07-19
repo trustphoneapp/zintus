@@ -538,19 +538,20 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         }
         return workspaceManager.diff(sandbox.workspace);
       };
-      const publicationDeskConnection = engineerSupervisor.resolutionDeskConnection();
       const gitPublicationMechanics = new GitPublicationMechanics({
         gitService: engineerGitService,
-        // repositoryId -> durable repository reference (owner/name/provider/base
-        // branch) via the latest run bound to it. Preflight overrides the base
-        // commit with the approval's and reads the live remote head itself.
-        resolveRepository: (repositoryId) => {
+        // F8: durable repository reference bound to the SELECTED publication's OWN
+        // run — never a loose "latest run with this repository_id" lookup, which
+        // could resolve a DIFFERENT run's repository/base-branch when two runs
+        // share a repository_id. `getRun` is org-scoped (P10), and we defensively
+        // cross-check the run is actually bound to the claimed repository_id before
+        // returning it. Preflight overrides the base commit with the approval's and
+        // reads the live remote head itself.
+        resolveRepository: ({ runId, repositoryId }) => {
           try {
-            const row = publicationDeskConnection
-              .query("SELECT id FROM engineer_runs WHERE repository_id=? ORDER BY created_at DESC, id DESC LIMIT 1")
-              .get(repositoryId) as { id: string } | null;
-            if (!row) return null;
-            return engineerSupervisor.getRun(row.id).repository;
+            const repository = engineerSupervisor.getRun(runId).repository;
+            if (repository.repositoryId !== repositoryId) return null;
+            return repository;
           } catch {
             return null;
           }
