@@ -3313,3 +3313,50 @@ unfinished pair has passed.
   RECONCILING liveness, one-shot-approve-per-candidate, attestation-off-by-default
   documented, v33 no org_id single-tenant) are accepted/deferred with tradeoffs.
   NEXT: Luna re-challenge on the FIXED receipt path before any GO.
+
+### R6 RULING (Fable) — code/adversarial gates PASS; release CONDITIONAL on the [HUMAN] live tail (2026-07-19)
+
+NOT an unconditional GO. Scoped honestly to avoid the earlier narrowed-posture mistake.
+
+PROVEN (driven / mutation-verified / two independent adversarial audits + a re-challenge):
+- All 9 audit findings F1-F9 closed and Fable-mutation-verified (F3/F4/F6/F9/F-L1
+  each: neuter the guard → its test reds).
+- Both R6 audits: Sol (architecture) GO after P1-1 orphan-actuator deletion —
+  no forward gap in the authority chain, F9 atomicity genuine (Sol probed
+  bun:sqlite savepoints), single-tenant enforced by construction, structural
+  unique-index backstops present. Luna (adversarial) F-L1 fixed, re-challenge GO
+  on the receipt-integrity gate: commit binding non-bypassable + server-derived;
+  no normalization/TOCTOU/sibling-path hole.
+- Fable confirmed the F-L1 prUrl residual is display-only (sole consumer is an
+  <a href> in PublicationControls.tsx:152 — nothing acts on it).
+- Full suites: engineer 858, gateway 464, web 571, typecheck + diff clean.
+- HTTP/SSR live traversal: /engineer, /engineer/resolution, /engineer/publication
+  render 200, retired corrected-run endpoint GONE from the served page.
+
+NOT DONE — [HUMAN] verification tail (REQUIRED before a true production GO; these
+are gate items, NOT deferrals):
+- LIVE INTERACTIVE browser traversal (connect repo→run→approve→publish click-through)
+  — needs a configured gateway + a run in the target state; a FULL run needs
+  models (paid) so it is fundamentally bounded by the zero-paid-calls rule; a
+  seeded-run + Chrome-bridge traversal is possible but needs [HUMAN] setup.
+- Real GitHub keyed-smoke (actual PR create + existing-PR discovery + crash-then-
+  restart-recovers-the-PR against the live GitHub API).
+- Real approver ceremony (two independent secret files = two humans).
+- Live result-tree-hash against a real on-disk object store holding the verified commit.
+- Real multi-process SQLite concurrency (both audits reasoned about the
+  partial-unique-index backstops but did not run a two-process race).
+
+DEFERRED-PER-PLAN (ARCHITECTURE.md Deferred integrations): multi-tenant org-scale
+RBAC; attestation on-by-default (operational when ENGINEER_PROVENANCE_ATTESTATION_
+REQUIRED + a signer + a tree-hash source are provisioned).
+
+ACCEPTED-RISK (documented): F-L1 prUrl operator-trust in the discovery-can't-confirm
+fallback (display-only, operator-gated, commit server-bound; recommend a UI
+"operator-asserted, not remote-confirmed" badge). Sol P2 liveness edges:
+credential-fail-after-DISPATCHED parks a safe phantom RECONCILING; a transient
+preflight blip one-shots that candidate's approval (correct-for-stale).
+
+VERDICT: the automated + architecture + adversarial verification is COMPLETE and
+PASSES; the human-in-the-loop live verification tail is NOT done and gates a
+production GO. R5/R5F publication consolidation is code-complete and independently
+audit-clean; a real ship requires the [HUMAN] tail above.
