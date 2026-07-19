@@ -76,6 +76,7 @@ import {
   type ProvenanceEmissionContext,
 } from "./ledger.js";
 import { buildOptionalHardeningManifest } from "./hardening-manifest.js";
+import type { PublicationAuthorityService, PublicationAuthorityDeps } from "./publication-authority.js";
 import { HardeningBudgetExtensionRequiresNewRunError } from "./hardening-budget-contracts.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
 import { derivePostVerificationRiskFeatures } from "./post-verification-risk.js";
@@ -2047,6 +2048,17 @@ export class EngineerSupervisor {
    */
   resolutionDeskConnection(): Database {
     return this.ledger.resolutionDeskConnection();
+  }
+
+  /**
+   * The P8 publication-authority service, constructed on the ledger's single live
+   * connection and bound to the REAL companion-aware replacement-lineage verifier
+   * (see `EngineerLedger.createPublicationAuthorityService`). The caller supplies
+   * only the credentialed effect seams (actuator/preflight/credentialProvider) —
+   * never the verifier, never the db. Composition-root use only.
+   */
+  createPublicationAuthorityService(deps: Omit<PublicationAuthorityDeps, "lineageVerifier">): PublicationAuthorityService {
+    return this.ledger.createPublicationAuthorityService(deps);
   }
 
   private applyDecisionSideEffect(decision: DecisionRecord, expectedStateVersion: number): void {

@@ -60,6 +60,7 @@ import {
   deriveCaseCreationInput,
   serverPricingPolicyDigest,
   WarmSandboxPool,
+  type PublicationAuthorityService,
 } from "@zintus/engineer";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -73,7 +74,8 @@ import { recoverHardeningPaidCallsOnce, recoverOptionalHardeningAfterPaidReconci
   type HardeningPaidCallRecoverySweepResult } from "./hardening-recovery.js";
 import { loadEngineerPromptCacheAuthority } from "./engineer-prompt-cache-authority.js";
 import { loadEngineerResolutionSigningAuthority } from "./engineer-resolution-authority.js";
-import type { EngineerResolutionDeskFacade } from "./handler.js";
+import type { EngineerResolutionDeskFacade, EngineerPublicationAuthorityFacade } from "./handler.js";
+import { createEngineerPublicationAuthorityFacade } from "./engineer-publication-facade.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -243,6 +245,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerWorkerLeases: EngineerWorkerLeaseManager | undefined;
   let engineerVerification: EngineerVerificationManager | undefined;
   let engineerPublication: EngineerPublicationManager | undefined;
+  let engineerPublicationAuthorityService: PublicationAuthorityService | undefined;
   let engineerWarmPool: WarmSandboxPool | undefined;
   let engineerSandboxManager: DockerSandboxManager | undefined;
   let engineerPrewarmConfig: { repositoryId: string; repositoryRoot: string; getBaseCommitSha: () => string } | undefined;
@@ -500,6 +503,24 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         return workspaceManager.diff(sandbox.workspace);
       },
     });
+    // P8 publication-authority service, constructed on the ledger's live
+    // connection with the REAL replacement-lineage verifier (bound inside
+    // createPublicationAuthorityService). The credentialed effect seams
+    // (preflight / credentialProvider / actuator) are supplied here; the actuator
+    // (the credentialed GitHub branch/PR dispatch) is NOT route-reachable in this
+    // slice — POST publications only records the durable PREFLIGHT operation — so
+    // it throws if driven, rather than pretending the remote effect is wired.
+    if (publicationAuthorityReady) {
+      engineerPublicationAuthorityService = engineerSupervisor.createPublicationAuthorityService({
+        preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+        credentialProvider: { getPublicationCredentials: async () => ({ token: await currentGithubToken(false) }) },
+        actuator: {
+          createBranchPr: async () => {
+            throw new Error("P8 publication dispatch (credentialed GitHub branch/PR effect) is not wired in this slice");
+          },
+        },
+      });
+    }
     recoverHardeningPaidCalls = () => {
       if(!engineerWorkerLeases||!hardeningPromptCacheSecret)return {recovered:[],errors:[]};
       return recoverHardeningPaidCallsOnce({supervisor:engineerSupervisor,workerLeases:engineerWorkerLeases,workerLeaseSecret});
@@ -694,6 +715,42 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     log("warn", "engineer.resolution_desk_unavailable", { detail: resolutionSigning.detail });
   }
 
+  // P8 publication-authority facade. The routes forward JSON; this facade derives
+  // ALL authority server-side (requester from the principal owner, approver from the
+  // principal reviewer, idempotency from the header). Attestation last-mile: when a
+  // provenance signer is configured (resolutionSigning READY, above), a durable
+  // APPROVE must emit a v35 attestation over the ledger approval_decision path or
+  // FAIL CLOSED. The result-tree-hash seam is NOT yet sourced for v33 candidates
+  // (only result_commit_sha is durable; a git tree read is not wired to the v33
+  // selection), so `resultTreeHashFor` returns null and a signer-configured APPROVE
+  // fails closed with a precise 503 — never a silent approve-without-attestation.
+  let publicationAuthority: EngineerPublicationAuthorityFacade | undefined;
+  if (engineerPublicationAuthorityService) {
+    publicationAuthority = createEngineerPublicationAuthorityFacade({
+      service: engineerPublicationAuthorityService,
+      principal: engineerPrincipal,
+      connection: engineerSupervisor.resolutionDeskConnection(),
+      now: () => new Date(),
+      signerConfigured: resolutionSigning.status === "READY",
+      latestApprovalRequest: (runId) => {
+        const request = engineerSupervisor.latestApprovalRequest(runId);
+        return request ? {
+          approvalRequestId: request.approvalRequestId, status: request.status,
+          approvalRevision: request.approvalRevision, deadlineAt: request.deadlineAt,
+          evidenceBundleHash: request.evidenceBundleHash,
+          verifiedCheckpointId: request.verifiedCheckpointId ?? null,
+          verifiedCheckpointHash: request.verifiedCheckpointHash ?? null,
+        } : null;
+      },
+      decideApprove: (record, provenanceContext) => {
+        engineerSupervisor.decideApproval(record as never, "APPROVED", provenanceContext);
+      },
+      // Fail-closed seam: the verified candidate's git result-tree hash is not
+      // durably recorded and no gateway git-tree read is wired to v33 selections.
+      resultTreeHashFor: () => null,
+    });
+  }
+
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
@@ -708,6 +765,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       mcpRegistry,
       engineerRuns,
       resolutionDesk,
+      publicationAuthority,
       getDraining: () => draining,
       // Real, in-flight-aware free-tier quota signal for Tokzen's quota-aware
       // compression dial (was always the hardcoded 1.0 default before wiring).

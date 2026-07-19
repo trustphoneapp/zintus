@@ -2814,3 +2814,31 @@ unfinished pair has passed.
   threaded-but-dormant on that route until it supplies resultTreeHash and calls
   decideApproval. Generation+persistence+atomicity are proven in-process/tests.
   resultTreeHash (not durably recorded) and real KMS/Sigstore ([HUMAN]) remain.
+
+### Day 3 — Integration step 6: P8 gateway HTTP surface, approve fails closed (2026-07-19)
+
+- The P8 publication-authority HTTP surface is wired: publication-candidate
+  list/select, approvals, publications (→{publicationId,state} per S2),
+  GET publication (RECONCILING surfaced), owner-scoped, Idempotency-Key from the
+  HEADER, strict bodies with no authority fields, ZodError→400, SelfApproval→403,
+  consumed/idempotency→409, unconfigured→503. Approver is server-derived
+  (principal reviewer, distinct from the owner-requester). Gateway 407 (baseline
+  391 + 16).
+- Approve-route attestation last-mile is FAIL-CLOSED and proven: with a
+  provenance signer configured but no durably-recorded resultTreeHash and no
+  approval_decision bridge to bind a v35 attestation, APPROVE throws
+  PublicationAttestationUnavailableError (503) and writes NO approval row — a
+  signer-configured production APPROVE cannot approve-without-attestation. The
+  facade test suite ships the RED-without counterpart internally (same inputs,
+  no signer → approval IS written), and Fable confirmed both green (facade 5/5,
+  handler 108/108). Honest state: live v35 emission OVER HTTP is NOT proven — it
+  fails closed; the decideApprove→ledger.decideApproval bridge is wired-and-ready.
+- REMAINING SEAMS precisely marked: (1) resultTreeHash is not durably recorded
+  for a verified candidate (only result_commit_sha is) — the source that unblocks
+  live HTTP attestation emission; (2) the candidate↔approval_request bridge; (3)
+  a real credentialed GitHub actuator (createBranchPr) — stubbed to throw, no
+  route drives dispatch, so POST publications returns the durable PREFLIGHT op
+  only. Legacy publication-manager double-PR path left intact (P8 dispatch()
+  already closes the window on the new path; a full gateway cutover needs the
+  three unbuilt pieces above + a large publication.test.ts rewrite — not forced).
+  Gates: engineer 775, gateway 407, typecheck + diff clean.

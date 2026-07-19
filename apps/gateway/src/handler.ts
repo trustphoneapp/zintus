@@ -314,6 +314,29 @@ function mapResolutionDeskError(error: unknown): { status: number; body: unknown
 }
 
 /**
+ * Map a P8 publication-authority error to an HTTP response. A ZodError from a
+ * strict §3 body `.parse` becomes a typed `400` with field-level issues; a
+ * `PublicationAuthority*Error` (duck-typed by its numeric `httpStatus` + string
+ * `code` — e.g. SelfApprovalError httpStatus 403 / code SELF_APPROVAL, the
+ * idempotency/consumed conflicts httpStatus 409) surfaces its exact status/code;
+ * a fail-closed `PublicationAttestationUnavailableError` (httpStatus 503) surfaces
+ * as its own 503; anything else is a redacted `400`.
+ */
+function mapPublicationAuthorityError(error: unknown): { status: number; body: unknown } {
+  const candidate = error as { name?: string; httpStatus?: unknown; code?: unknown; issues?: unknown; message?: unknown };
+  if (error instanceof Error && candidate.name === "ZodError" && Array.isArray(candidate.issues)) {
+    return { status: 400, body: { error: { message: "Invalid request body", issues: formatIssues(error as unknown as Parameters<typeof formatIssues>[0]) } } };
+  }
+  if (typeof candidate.httpStatus === "number" && typeof candidate.code === "string") {
+    return {
+      status: candidate.httpStatus,
+      body: { error: { code: candidate.code, message: redactSecrets(error instanceof Error ? error.message : String(error)) } },
+    };
+  }
+  return { status: 400, body: { error: { message: redactSecrets(error instanceof Error ? error.message : String(error)) } } };
+}
+
+/**
  * Normalize a routing trace into an OpenRouter-style `/activity` entry. Built
  * ONLY from data the gateway already records (the same `RequestTrace` exposed
  * by `/v1/traces`), plus any optional usage fields the trace happens to carry.
@@ -784,6 +807,16 @@ export interface GatewayHandlerDeps {
    * is disabled.
    */
   resolutionDesk?: EngineerResolutionDeskFacade;
+  /**
+   * P8 publication-authority facade. Owner-scoped like every other engineer route
+   * (the server-owned engineer principal is the owner; request bodies never select
+   * an owner OR an actor identity). The gateway forwards JSON and maps errors; the
+   * real adapter — deriving the requester from the selection, the approver from the
+   * server principal, sourcing the resultTreeHash and threading the v35 provenance
+   * attestation (or failing closed) — lives in engineer-publication-authority.ts /
+   * index.ts. Omitted when publication is not configured (routes report 503).
+   */
+  publicationAuthority?: EngineerPublicationAuthorityFacade;
 }
 
 /** P7 Resolution Desk gateway facade (loosely typed; the routes forward JSON). */
@@ -793,6 +826,22 @@ export interface EngineerResolutionDeskFacade {
   getCase(principal: unknown, caseId: string): unknown | Promise<unknown>;
   issueDirective(principal: unknown, caseId: string, body: unknown, idempotencyKey: string): unknown | Promise<unknown>;
   applyDirective(principal: unknown, directiveId: string, idempotencyKey: string): unknown | Promise<unknown>;
+}
+
+/**
+ * P8 publication-authority gateway facade (loosely typed; the routes forward JSON).
+ * Every mutating method derives ALL authority (requester, approver, idempotency
+ * key) server-side — the request body carries only the browser's choice. `body`
+ * is the strict §3 Zod body (no authority fields); the facade `.parse`s it and a
+ * ZodError surfaces as a typed 400. `startPublication` receives the Idempotency-Key
+ * from the HTTP header (never the body), matching the P9 client.
+ */
+export interface EngineerPublicationAuthorityFacade {
+  listCandidates(principal: unknown, runId: string): unknown | Promise<unknown>;
+  selectCandidate(principal: unknown, runId: string, body: unknown): unknown | Promise<unknown>;
+  approve(principal: unknown, checkpointId: string, body: unknown): unknown | Promise<unknown>;
+  startPublication(principal: unknown, runId: string, body: unknown, idempotencyKey: string): unknown | Promise<unknown>;
+  getPublication(principal: unknown, publicationId: string): unknown | Promise<unknown>;
 }
 
 /** Hard cap on SERVER-SIDE MCP tool-loop rounds (model calls) per request. Each
@@ -831,6 +880,7 @@ export function createGatewayHandler(
   const mcpRegistry = deps.mcpRegistry ?? new MCPRegistry();
   const engineerRuns = deps.engineerRuns;
   const resolutionDesk = deps.resolutionDesk;
+  const publicationAuthority = deps.publicationAuthority;
   // P2: gateway-hosted agent runtime (one manager per handler; tasks live for
   // the life of the process, finished runs persist to ~/.zintus/agents).
   const agents = new AgentTaskManager(engine as unknown as AgentEngine);
@@ -2971,6 +3021,59 @@ export function createGatewayHandler(
         return json(request, { error: { message: "Resolution resource not found" } }, 404);
       } catch (error) {
         const mapped = mapResolutionDeskError(error);
+        return json(request, mapped.body, mapped.status, { "Cache-Control": "no-store" });
+      }
+    }
+
+    // P8 publication-authority routes. Handled here — before the engineerRuns
+    // readiness gate below — because publication is a separate facade with its own
+    // configured/not-configured 503. All mutating routes are owner-scoped (server
+    // principal derives requester + approver; request bodies carry ONLY the
+    // browser's choice, never an actor/idempotency field) and the Idempotency-Key
+    // for `POST publications` is read from the HEADER (the P9 client sends it
+    // there). Errors map through mapPublicationAuthorityError (strict-body ZodError
+    // -> typed 400 with issues; SelfApprovalError -> 403; consumed/idempotency
+    // conflicts -> 409; fail-closed attestation -> 503).
+    if (url.pathname.startsWith("/v1/engineer/")
+      && (url.pathname.includes("/publication-candidates") || url.pathname.includes("/publications"))) {
+      if (!publicationAuthority) return json(request, { error: { message: "Engineer publication authority is not configured" } }, 503);
+      const parts = url.pathname.split("/");
+      const idempotencyKey = request.headers.get("Idempotency-Key") ?? "";
+      try {
+        // GET/POST /v1/engineer/runs/:runId/publication-candidates
+        if (parts[3] === "runs" && parts[5] === "publication-candidates" && !parts[6]) {
+          const runId = decodeURIComponent(parts[4] ?? "");
+          if (request.method === "GET") {
+            return json(request, { candidates: await publicationAuthority.listCandidates(engineerPrincipal!, runId) }, 200, { "Cache-Control": "no-store" });
+          }
+          if (request.method === "POST") {
+            const limited = enforceRateLimit(request, requestId, url.pathname);
+            if (limited) return limited;
+            const body = await request.json().catch(() => ({}));
+            return json(request, { candidate: await publicationAuthority.selectCandidate(engineerPrincipal!, runId, body) }, 201, { "Cache-Control": "no-store" });
+          }
+        }
+        // POST /v1/engineer/publication-candidates/:checkpointId/approvals
+        if (parts[3] === "publication-candidates" && parts[4] && parts[5] === "approvals" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          const body = await request.json().catch(() => ({}));
+          return json(request, await publicationAuthority.approve(engineerPrincipal!, decodeURIComponent(parts[4]), body), 201, { "Cache-Control": "no-store" });
+        }
+        // POST /v1/engineer/runs/:runId/publications  (Idempotency-Key from header)
+        if (parts[3] === "runs" && parts[5] === "publications" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          const body = await request.json().catch(() => ({}));
+          return json(request, await publicationAuthority.startPublication(engineerPrincipal!, decodeURIComponent(parts[4] ?? ""), body, idempotencyKey), 201, { "Cache-Control": "no-store" });
+        }
+        // GET /v1/engineer/publications/:publicationId
+        if (parts[3] === "publications" && parts[4] && !parts[5] && request.method === "GET") {
+          return json(request, await publicationAuthority.getPublication(engineerPrincipal!, decodeURIComponent(parts[4])), 200, { "Cache-Control": "no-store" });
+        }
+        return json(request, { error: { message: "Publication resource not found" } }, 404);
+      } catch (error) {
+        const mapped = mapPublicationAuthorityError(error);
         return json(request, mapped.body, mapped.status, { "Cache-Control": "no-store" });
       }
     }

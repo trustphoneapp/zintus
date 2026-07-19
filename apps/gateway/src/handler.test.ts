@@ -3182,3 +3182,134 @@ describe("P7 Resolution Desk — REAL create -> issue -> apply end-to-end (no 50
     }
   });
 });
+
+describe("P8 publication-authority HTTP routes", () => {
+  const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "publication-handler-owner" });
+  const authorized = { Authorization: "Bearer secret", "Content-Type": "application/json" } as Record<string, string>;
+  const POLICY = "engineer-publication-authority-v33";
+  const CK_ID = `sha256:${"a".repeat(64)}`;
+  const CK_HASH = `sha256:${"b".repeat(64)}`;
+
+  const makePublicationHandler = (results: Record<string, unknown> = {}) => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    const method = (name: string, fallback: unknown) => (...args: unknown[]) => {
+      calls.push({ method: name, args });
+      const configured = results[name];
+      if (typeof configured === "function") return (configured as (...a: unknown[]) => unknown)(...args);
+      return configured !== undefined ? configured : fallback;
+    };
+    const publicationAuthority = {
+      listCandidates: method("listCandidates", []),
+      selectCandidate: method("selectCandidate", { checkpointId: CK_ID, checkpointHash: CK_HASH, lineage: "ORIGINAL", lineageVerified: true }),
+      approve: method("approve", { approvalId: "approval-1", status: "APPROVED" }),
+      startPublication: method("startPublication", { publicationId: "pub-1", state: "PREFLIGHT" }),
+      getPublication: method("getPublication", { publicationId: "pub-1", state: "PREFLIGHT" }),
+    } as unknown as GatewayHandlerDeps["publicationAuthority"];
+    const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
+    return { handler: makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns, publicationAuthority }), calls };
+  };
+
+  test("unconfigured publication authority is a 503 (never a wrong classification)", async () => {
+    const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/publication-candidates", { headers: authorized }));
+    expect(response.status).toBe(503);
+    expect((await response.json() as { error: { message: string } }).error.message).toMatch(/not configured/i);
+  });
+
+  test("lists publication candidates owner-scoped as 200 { candidates }", async () => {
+    const { handler, calls } = makePublicationHandler({ listCandidates: () => [{ checkpointId: CK_ID, checkpointHash: CK_HASH, lineage: "ORIGINAL", lineageVerified: true }] });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/publication-candidates", { headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ candidates: [{ checkpointId: CK_ID, checkpointHash: CK_HASH, lineage: "ORIGINAL", lineageVerified: true }] });
+    expect(calls[0]).toEqual({ method: "listCandidates", args: [principal, "run-1"] });
+  });
+
+  test("selects a candidate owner-scoped, forwarding principal + runId + body (201 { candidate })", async () => {
+    const { handler, calls } = makePublicationHandler();
+    const body = { candidateRunId: "run-1", repositoryId: "repo-1", checkpointId: CK_ID, checkpointHash: CK_HASH, resultCommitSha: "1".repeat(40), lineage: "ORIGINAL", parentSelectionId: null };
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/publication-candidates", { method: "POST", headers: authorized, body: JSON.stringify(body) }));
+    expect(response.status).toBe(201);
+    expect(calls[0]).toEqual({ method: "selectCandidate", args: [principal, "run-1", body] });
+  });
+
+  test("approve forwards principal + checkpointId + body; body carries NO actor fields", async () => {
+    const { handler, calls } = makePublicationHandler();
+    const body = { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY, rationale: "ship it" };
+    const response = await handler(new Request(`http://x/v1/engineer/publication-candidates/${CK_ID}/approvals`, { method: "POST", headers: authorized, body: JSON.stringify(body) }));
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ approvalId: "approval-1", status: "APPROVED" });
+    expect(calls[0]).toEqual({ method: "approve", args: [principal, CK_ID, body] });
+    // The route derives the approver from the principal (arg 0), never from the body.
+    const forwardedBody = calls[0]!.args[2] as Record<string, unknown>;
+    expect(forwardedBody.approverActorId).toBeUndefined();
+    expect(forwardedBody.requesterUserId).toBeUndefined();
+  });
+
+  test("self-approval surfaces as 403 with its code", async () => {
+    const { handler } = makePublicationHandler({
+      approve: () => { throw Object.assign(new Error("requester and approver are the same actor identity"), { name: "SelfApprovalError", httpStatus: 403, code: "SELF_APPROVAL" }); },
+    });
+    const response = await handler(new Request(`http://x/v1/engineer/publication-candidates/${CK_ID}/approvals`, { method: "POST", headers: authorized, body: "{}" }));
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: { code: "SELF_APPROVAL", message: "requester and approver are the same actor identity" } });
+  });
+
+  test("publish returns { publicationId, state } and reads the Idempotency-Key from the HEADER (not the body)", async () => {
+    const { handler, calls } = makePublicationHandler();
+    // The body deliberately carries a DIFFERENT idempotencyKey to prove the header wins.
+    const body = { approvalId: "approval-1", idempotencyKey: "body-key-should-be-ignored" };
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/publications", {
+      method: "POST", headers: { ...authorized, "Idempotency-Key": "header-key-abc" }, body: JSON.stringify(body),
+    }));
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ publicationId: "pub-1", state: "PREFLIGHT" });
+    expect(calls[0]).toEqual({ method: "startPublication", args: [principal, "run-1", body, "header-key-abc"] });
+  });
+
+  test("publication idempotency conflict surfaces as 409 with its code", async () => {
+    const { handler } = makePublicationHandler({
+      startPublication: () => { throw Object.assign(new Error("Idempotency-Key was already used to bind a different approval"), { name: "PublicationIdempotencyConflictError", httpStatus: 409, code: "IDEMPOTENCY_CONFLICT" }); },
+    });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/publications", {
+      method: "POST", headers: { ...authorized, "Idempotency-Key": "k" }, body: "{}",
+    }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "IDEMPOTENCY_CONFLICT", message: "Idempotency-Key was already used to bind a different approval" } });
+  });
+
+  test("fail-closed attestation surfaces as 503 with PUBLICATION_ATTESTATION_UNAVAILABLE", async () => {
+    const { handler } = makePublicationHandler({
+      approve: () => { throw Object.assign(new Error("publication approval is fail-closed: no PENDING ledger approval request"), { name: "PublicationAttestationUnavailableError", httpStatus: 503, code: "PUBLICATION_ATTESTATION_UNAVAILABLE" }); },
+    });
+    const response = await handler(new Request(`http://x/v1/engineer/publication-candidates/${CK_ID}/approvals`, { method: "POST", headers: authorized, body: "{}" }));
+    expect(response.status).toBe(503);
+    expect((await response.json() as { error: { code: string } }).error.code).toBe("PUBLICATION_ATTESTATION_UNAVAILABLE");
+  });
+
+  test("a strict-body ZodError maps to a typed 400 with issues", async () => {
+    const zodError = Object.assign(new Error("Invalid input"), { name: "ZodError", issues: [{ path: ["policyVersion"], message: "Invalid literal value" }] });
+    const { handler } = makePublicationHandler({ approve: () => { throw zodError; } });
+    const response = await handler(new Request(`http://x/v1/engineer/publication-candidates/${CK_ID}/approvals`, { method: "POST", headers: authorized, body: "{}" }));
+    expect(response.status).toBe(400);
+    const parsed = await response.json() as { error: { message: string; issues: unknown[] } };
+    expect(parsed.error.message).toBe("Invalid request body");
+    expect(parsed.error.issues).toEqual([{ path: "policyVersion", message: "Invalid literal value" }]);
+  });
+
+  test("gets a publication and surfaces RECONCILING honestly", async () => {
+    const { handler, calls } = makePublicationHandler({
+      getPublication: () => ({ publicationId: "pub-1", state: "RECONCILING", reconciliation: { reason: "AMBIGUOUS_REMOTE_OUTCOME", observedRemoteState: "unknown" } }),
+    });
+    const response = await handler(new Request("http://x/v1/engineer/publications/pub-1", { headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ publicationId: "pub-1", state: "RECONCILING", reconciliation: { reason: "AMBIGUOUS_REMOTE_OUTCOME", observedRemoteState: "unknown" } });
+    expect(calls[0]).toEqual({ method: "getPublication", args: [principal, "pub-1"] });
+  });
+
+  test("an unknown publication sub-path is a 404", async () => {
+    const { handler } = makePublicationHandler();
+    const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/bogus", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(404);
+  });
+});
