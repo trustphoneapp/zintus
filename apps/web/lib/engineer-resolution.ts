@@ -45,20 +45,31 @@
  *    (`resolutionErrorDetail` in ResolutionDeskControls.tsx) now sees the
  *    real values instead of always-null.
  *
- * §3 (Approval/publication) is UNCHANGED and still calls these same paths,
- * but P8's HTTP routes are NOT wired into the live gateway yet (only the
- * §2 resolution-desk routes are). Calling any §3 function below against a
- * running gateway will fail (404, not a graceful 503) until that lane is
- * integrated — treat §3 as fixture-backed/awaiting-live-routes, see the
- * publication page's own header comment.
- *
- * STILL OPEN (field-level, not route-level):
- *  - The success response body for `POST .../publications` is not stated
- *    (only the request body and the *error* case are documented). This
- *    module assumes it echoes at least `publicationId` alongside the same
- *    `state` shape as the GET, since the caller has no other way to learn
- *    the created publication's ID. Unverifiable until §3 is wired live.
+ * §3 (Approval/publication) is now WIRED against the live P8 publication
+ * authority routes in apps/gateway/src/handler.ts (the
+ * EngineerPublicationAuthorityFacade over packages/engineer/src/
+ * publication-authority.ts). Reading that implementation directly (R3
+ * integration) fixed three client/server disagreements that made a real
+ * browser approve ALWAYS 400 and the publish gate never enable:
+ *  - `createApproval` MUST send `policyVersion:
+ *    "engineer-publication-authority-v33"` and MUST NOT send an
+ *    `idempotencyKey` — the server body schema (`ApprovalDecisionBodySchema`)
+ *    is Zod `.strict()`, so a missing policyVersion or an extra idempotencyKey
+ *    both 400. The approval is single-use server-side; idempotency for the
+ *    PUBLISH step comes from its Idempotency-Key header, not the approve body.
+ *  - The approve response is the BARE `{approvalId, status}` the service
+ *    returns (no `{approval: …}` envelope); the client returns it directly.
+ *  - `POST .../publications` echoes `{publicationId, state}` (the
+ *    PublicationView plus its id), read directly.
  */
+
+/**
+ * The single frozen publication-authority policy version
+ * (`PUBLICATION_AUTHORITY_POLICY_VERSION` in
+ * packages/engineer/src/publication-authority.ts). The approve body schema is
+ * `z.literal(...)` on this exact value, so the client must send it verbatim.
+ */
+export const PUBLICATION_AUTHORITY_POLICY_VERSION = "engineer-publication-authority-v33";
 
 import { GATEWAY_URL, gatewayAuthHeaders } from "./gateway";
 
@@ -219,6 +230,17 @@ export interface CreateApprovalInput {
   checkpointHash: string;
   decision: ApprovalDecision;
   rationale?: string;
+}
+
+/**
+ * The bare approve response the live service returns (§3):
+ * `{approvalId, status}` — NOT the fuller `ResolutionApproval` envelope this
+ * module used to (wrongly) unwrap. `status` is `APPROVED` for an APPROVE
+ * decision, `REJECTED` for a REJECT; the publish gate keys on it.
+ */
+export interface PublicationApprovalResult {
+  approvalId: string;
+  status: "APPROVED" | "REJECTED";
 }
 
 /**
@@ -403,27 +425,32 @@ export function projectsWithinCumulativeCeiling(spending: ResolutionSpending, ne
 }
 
 // ---------------------------------------------------------------------------
-// §3 calls — NOT wired to a live route yet (see module header). P8's HTTP
-// layer is not present in apps/gateway/src/handler.ts; every call below
-// still targets the contract-documented path so the Publication screen is
-// ready to connect the moment that lane is integrated, but until then a
-// real gateway returns a generic 404 here, not a graceful 503.
+// §3 calls — WIRED to the live P8 publication-authority routes in
+// apps/gateway/src/handler.ts. Every body below carries ONLY the browser's
+// choice; the server derives all authority (requester/approver/idempotency).
 // ---------------------------------------------------------------------------
 
 export async function getPublicationCandidates(runId: string): Promise<PublicationCandidate[]> {
   return (await request<{ candidates: PublicationCandidate[] }>(`/v1/engineer/runs/${encodeURIComponent(runId)}/publication-candidates`)).candidates;
 }
 
-export async function createApproval(checkpointId: string, input: CreateApprovalInput): Promise<ResolutionApproval> {
-  return (await request<{ approval: ResolutionApproval }>(`/v1/engineer/publication-candidates/${encodeURIComponent(checkpointId)}/approvals`, {
+/**
+ * The live approve body is Zod `.strict()`: exactly `checkpointHash`,
+ * `decision`, `policyVersion`, and optional `rationale`. It carries NO
+ * `idempotencyKey` (single-use approval; the PUBLISH step is what is
+ * idempotency-keyed). The response is the bare `{approvalId, status}` the
+ * service returns — returned directly, never unwrapped from an envelope.
+ */
+export async function createApproval(checkpointId: string, input: CreateApprovalInput): Promise<PublicationApprovalResult> {
+  return request<PublicationApprovalResult>(`/v1/engineer/publication-candidates/${encodeURIComponent(checkpointId)}/approvals`, {
     method: "POST",
     body: JSON.stringify({
       checkpointHash: input.checkpointHash,
       decision: input.decision,
+      policyVersion: PUBLICATION_AUTHORITY_POLICY_VERSION,
       ...(input.rationale ? { rationale: input.rationale } : {}),
-      idempotencyKey: idempotencyKey(["approval", checkpointId, input.checkpointHash, input.decision]),
     }),
-  })).approval;
+  });
 }
 
 export async function createPublication(runId: string, input: CreatePublicationInput): Promise<EngineerPublicationCreated> {
@@ -432,6 +459,18 @@ export async function createPublication(runId: string, input: CreatePublicationI
     method: "POST",
     headers: { "Idempotency-Key": key },
     body: JSON.stringify({ approvalId: input.approvalId, operation: input.operation, idempotencyKey: key }),
+  });
+}
+
+/**
+ * Advances a PREFLIGHT publication to DISPATCHED and drives the credentialed
+ * branch/PR effect. Idempotent on the server (a re-dispatch of a DISPATCHED
+ * operation never re-issues the remote effect; it reconciles). The response
+ * is the resulting `{publicationId, state}` PublicationView.
+ */
+export async function dispatchPublication(publicationId: string): Promise<EngineerPublicationCreated> {
+  return request<EngineerPublicationCreated>(`/v1/engineer/publications/${encodeURIComponent(publicationId)}/dispatch`, {
+    method: "POST",
   });
 }
 
