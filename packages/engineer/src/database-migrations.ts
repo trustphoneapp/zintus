@@ -23,6 +23,7 @@ import {
   ENGINEER_DATABASE_MIGRATION_28_SQL,
   ENGINEER_DATABASE_MIGRATION_29_SQL,
   ENGINEER_DATABASE_MIGRATION_30_SQL,
+  ENGINEER_DATABASE_MIGRATION_31_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
 } from "./database-schema.js";
 
@@ -48,6 +49,7 @@ const MIGRATIONS: readonly Migration[] = [
   { version: 28, sql: ENGINEER_DATABASE_MIGRATION_28_SQL },
   { version: 29, sql: ENGINEER_DATABASE_MIGRATION_29_SQL },
   { version: 30, sql: ENGINEER_DATABASE_MIGRATION_30_SQL },
+  { version: 31, sql: ENGINEER_DATABASE_MIGRATION_31_SQL },
 ];
 
 function assertHardeningBudgetShape(db: Database): void {
@@ -898,6 +900,32 @@ function assertApprovalDecisionCheckpointShape(db: Database): void {
   }
 }
 
+function assertResolutionDeskShape(db: Database): void {
+  const expected = new Map<string, string>();
+  const pattern = /CREATE (?:UNIQUE )?(?:TABLE|INDEX|TRIGGER)\s+([A-Za-z0-9_]+)[\s\S]*?;\s*(?=CREATE |$)/g;
+  for (const match of ENGINEER_DATABASE_MIGRATION_31_SQL.matchAll(pattern)) expected.set(match[1]!, normalizeSchemaSql(match[0]!));
+  const names = [
+    "resolution_cases", "uq_resolution_case_pair_v31", "idx_resolution_cases_owner_created_v31", "idx_resolution_cases_source_run_v31",
+    "require_resolution_case_projection_v31", "fence_resolution_case_update_v31", "prevent_resolution_case_delete_v31",
+    "resolution_directives", "uq_resolution_directive_pair_v31", "uq_resolution_directive_case_open_v31",
+    "idx_resolution_directives_case_created_v31", "require_resolution_directive_projection_v31",
+    "prevent_resolution_directive_update_v31", "prevent_resolution_directive_delete_v31",
+    "resolution_events", "idx_resolution_events_case_sequence_v31", "require_resolution_event_chain_v31",
+    "prevent_resolution_event_update_v31", "prevent_resolution_event_delete_v31",
+    "resolution_replacements", "idx_resolution_replacements_state_v31", "require_resolution_replacement_binding_v31",
+    "fence_resolution_replacement_update_v31", "prevent_resolution_replacement_delete_v31",
+    "freeze_source_engineer_run_update_v31", "freeze_source_run_state_event_v31", "freeze_source_budget_event_v31",
+    "freeze_source_approval_request_v31", "freeze_source_approval_decision_v31", "freeze_source_git_operation_v31",
+    "freeze_source_builder_dispatch_v31", "freeze_source_hardening_lineage_v31",
+  ];
+  if (expected.size !== names.length) throw new Error("Engineer schema v31 validator is missing exact definitions");
+  for (const name of names) {
+    const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as { sql: string } | null;
+    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== expected.get(name)) throw new Error(`Engineer schema v31 has invalid ${name}`);
+  }
+  assertForeignKeys(db);
+}
+
 /** Apply ordered migrations after the legacy bootstrap/shape repairs finish. */
 export function migrateEngineerDatabase(db: Database, now = new Date().toISOString()): void {
   assertEngineerDatabaseVersionSupported(db);
@@ -952,6 +980,9 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
   if (appliedVersions.has(30) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29].every((version) => appliedVersions.has(version)))) {
     throw new Error("Engineer schema v30 is missing required migration ancestry");
   }
+  if (appliedVersions.has(31) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30].every((version) => appliedVersions.has(version)))) {
+    throw new Error("Engineer schema v31 is missing required migration ancestry");
+  }
 
   for (const migration of MIGRATIONS) {
     if (maximumAppliedVersion(db) >= migration.version) continue;
@@ -991,6 +1022,7 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
       if (migration.version === 29) assertHardeningBudgetShape(db);
       if (migration.version === 30) assertHardeningBudgetShape(db);
       if (migration.version === 30) assertHardeningRecoveryWorkerFenceShape(db);
+      if (migration.version === 31) assertResolutionDeskShape(db);
       db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(migration.version, now);
       db.exec("COMMIT");
@@ -1020,4 +1052,5 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
   if (finalVersion >= 28) assertHardeningExecutionFencingShape(db);
   if (finalVersion >= 29) assertHardeningBudgetShape(db);
   if (finalVersion >= 30) assertHardeningRecoveryWorkerFenceShape(db);
+  if (finalVersion >= 31) assertResolutionDeskShape(db);
 }

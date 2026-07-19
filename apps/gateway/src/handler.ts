@@ -3014,7 +3014,15 @@ export function createGatewayHandler(
           return json(request, await engineerRuns.recoverStaleBase(engineerPrincipal!, runId), 202);
         }
         if (action === "corrected-run" && request.method === "POST") {
-          return json(request, await engineerRuns.createCorrectedRun(engineerPrincipal!, runId), 201);
+          // Superseded by the P7 Developer Resolution Desk. The legacy
+          // corrected-run endpoint and its planner directive artifact were a
+          // direct authority/budget bypass; new calls are closed with 410 and
+          // must go through the case/directive/event/replacement CAS. Old runs
+          // remain readable through every existing GET.
+          return json(request, {
+            error: { code: "GONE", message: "corrected-run is superseded by resolution cases" },
+            successor: "resolution-cases",
+          }, 410);
         }
         if (action === "approval" && request.method === "GET") {
           return json(request, engineerRuns.approvalView(runId));

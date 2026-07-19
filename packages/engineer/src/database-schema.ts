@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 30;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 31;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -2449,4 +2449,286 @@ export const ENGINEER_DATABASE_MIGRATION_30_SQL = `
   CREATE TRIGGER prevent_hardening_recovery_worker_fence_delete_v30 BEFORE DELETE ON hardening_recovery_worker_fences BEGIN
     SELECT RAISE(ABORT,'hardening recovery worker fences are durable');
   END;
+`;
+
+/**
+ * P7 Developer Resolution Desk (Day 2C). Four additive authority tables plus
+ * their indexes, immutability/projection triggers, and the ledger-wide source
+ * freeze that opening a case installs. Every v14-v30 byte is preserved; the
+ * migration only creates new objects.
+ *
+ * The freeze is not a fifth table: a `resolution_cases` row keyed to a source
+ * run IS the freeze. The `freeze_source_*` triggers below reject every
+ * competing mutation of that source run at the storage layer, so the freeze is
+ * enforced inside the transaction of every path that writes a source-owned row
+ * (transition, retry/resume/top-up, hardening, approval, publication/Git,
+ * worker dispatch) regardless of which code path attempts it. Case decisions
+ * operate on the new resolution tables and on the *replacement* run (a distinct
+ * run id with no case), so they are never blocked.
+ *
+ * A case binds only its immutable authority in `case_json`/`case_hash`; the
+ * mutable lifecycle (`state`, `case_version`) is fenced separately and every
+ * transition appends an immutable `resolution_events` row, mirroring the
+ * engineer_runs + run_state_events split.
+ */
+export const ENGINEER_DATABASE_MIGRATION_31_SQL = `
+  PRAGMA defer_foreign_keys=ON;
+
+  CREATE TABLE resolution_cases (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=71 AND substr(id,1,7)='sha256:' AND substr(id,8) NOT GLOB '*[^0-9a-f]*'),
+    case_hash TEXT NOT NULL UNIQUE CHECK(length(case_hash)=71 AND substr(case_hash,1,7)='sha256:' AND substr(case_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    schema_version INTEGER NOT NULL CHECK(schema_version=1),
+    policy_version TEXT NOT NULL CHECK(policy_version='engineer-resolution-case-v1'),
+    source_run_id TEXT NOT NULL UNIQUE REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    repository_id TEXT NOT NULL REFERENCES repository_connections(id) ON DELETE RESTRICT,
+    source_state TEXT NOT NULL,
+    source_state_version INTEGER NOT NULL CHECK(source_state_version>=0),
+    base_commit_sha TEXT NOT NULL,
+    manifest_hash TEXT NOT NULL,
+    required_lane_contract_hash TEXT NOT NULL,
+    blockers_json TEXT NOT NULL CHECK(json_valid(blockers_json)=1 AND json_type(blockers_json)='array'),
+    blocker_count INTEGER NOT NULL CHECK(blocker_count>=0 AND blocker_count=json_array_length(blockers_json)),
+    correction_eligible INTEGER NOT NULL CHECK(correction_eligible IN (0,1)),
+    reverify_eligible INTEGER NOT NULL CHECK(reverify_eligible IN (0,1)),
+    reverify_reason TEXT NOT NULL,
+    pre_verification_candidate_present INTEGER NOT NULL CHECK(pre_verification_candidate_present IN (0,1)),
+    pre_verification_candidate_digest TEXT CHECK(pre_verification_candidate_digest IS NULL OR (length(pre_verification_candidate_digest)=71 AND substr(pre_verification_candidate_digest,1,7)='sha256:' AND substr(pre_verification_candidate_digest,8) NOT GLOB '*[^0-9a-f]*')),
+    source_actual_microusd INTEGER NOT NULL CHECK(source_actual_microusd>=0),
+    prior_replacement_actual_microusd INTEGER NOT NULL CHECK(prior_replacement_actual_microusd>=0),
+    ambiguous_liability_microusd INTEGER NOT NULL CHECK(ambiguous_liability_microusd>=0),
+    cumulative_ceiling_microusd INTEGER NOT NULL CHECK(cumulative_ceiling_microusd>=0),
+    pricing_policy_digest TEXT NOT NULL CHECK(length(pricing_policy_digest)=71 AND substr(pricing_policy_digest,1,7)='sha256:' AND substr(pricing_policy_digest,8) NOT GLOB '*[^0-9a-f]*'),
+    case_version INTEGER NOT NULL DEFAULT 0 CHECK(case_version>=0),
+    state TEXT NOT NULL CHECK(state IN ('OPEN','DIRECTIVE_ISSUED','APPLYING','RESOLVED_CORRECTED','RESOLVED_REVERIFIED','REJECTED_CLOSED')),
+    case_json TEXT NOT NULL CHECK(json_valid(case_json)=1),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    CHECK((pre_verification_candidate_present=1)=(pre_verification_candidate_digest IS NOT NULL)),
+    FOREIGN KEY(source_run_id,manifest_hash) REFERENCES task_manifest_versions(run_id,manifest_hash) ON DELETE RESTRICT
+  );
+  CREATE UNIQUE INDEX uq_resolution_case_pair_v31 ON resolution_cases(id,case_hash);
+  CREATE INDEX idx_resolution_cases_owner_created_v31 ON resolution_cases(owner_user_id,created_at DESC,id);
+  CREATE INDEX idx_resolution_cases_source_run_v31 ON resolution_cases(source_run_id,case_version);
+  CREATE TRIGGER require_resolution_case_projection_v31 BEFORE INSERT ON resolution_cases BEGIN
+    SELECT CASE WHEN json_extract(NEW.case_json,'$.caseId')!=NEW.id OR
+      json_extract(NEW.case_json,'$.caseHash')!=NEW.case_hash OR
+      json_extract(NEW.case_json,'$.schemaVersion')!=NEW.schema_version OR
+      json_extract(NEW.case_json,'$.policyVersion')!=NEW.policy_version OR
+      json_extract(NEW.case_json,'$.sourceRunId')!=NEW.source_run_id OR
+      json_extract(NEW.case_json,'$.ownerUserId')!=NEW.owner_user_id OR
+      json_extract(NEW.case_json,'$.repositoryId')!=NEW.repository_id OR
+      json_extract(NEW.case_json,'$.sourceState')!=NEW.source_state OR
+      json_extract(NEW.case_json,'$.sourceStateVersion')!=NEW.source_state_version OR
+      json_extract(NEW.case_json,'$.baseCommitSha')!=NEW.base_commit_sha OR
+      json_extract(NEW.case_json,'$.manifestHash')!=NEW.manifest_hash OR
+      json_extract(NEW.case_json,'$.requiredLaneContractHash')!=NEW.required_lane_contract_hash OR
+      json(json_extract(NEW.case_json,'$.blockers'))!=json(NEW.blockers_json) OR
+      json_extract(NEW.case_json,'$.blockerCount')!=NEW.blocker_count OR
+      json_extract(NEW.case_json,'$.correctionEligible')!=NEW.correction_eligible OR
+      json_extract(NEW.case_json,'$.reverifyEligible')!=NEW.reverify_eligible OR
+      json_extract(NEW.case_json,'$.reverifyReason')!=NEW.reverify_reason OR
+      json_extract(NEW.case_json,'$.preVerificationCandidatePresent')!=NEW.pre_verification_candidate_present OR
+      json_extract(NEW.case_json,'$.preVerificationCandidateDigest') IS NOT NEW.pre_verification_candidate_digest OR
+      json_extract(NEW.case_json,'$.spendingMicrousd.sourceActual')!=NEW.source_actual_microusd OR
+      json_extract(NEW.case_json,'$.spendingMicrousd.priorReplacementActual')!=NEW.prior_replacement_actual_microusd OR
+      json_extract(NEW.case_json,'$.spendingMicrousd.ambiguousLiability')!=NEW.ambiguous_liability_microusd OR
+      json_extract(NEW.case_json,'$.spendingMicrousd.cumulativeCeiling')!=NEW.cumulative_ceiling_microusd OR
+      json_extract(NEW.case_json,'$.pricingPolicyDigest')!=NEW.pricing_policy_digest OR
+      json_extract(NEW.case_json,'$.createdAt')!=NEW.created_at OR
+      json_extract(NEW.case_json,'$.expiresAt')!=NEW.expires_at
+      THEN RAISE(ABORT,'resolution case JSON projection mismatch') END;
+    SELECT CASE WHEN NEW.case_version!=0 OR NEW.state!='OPEN'
+      THEN RAISE(ABORT,'resolution case must open at version 0') END;
+  END;
+  CREATE TRIGGER fence_resolution_case_update_v31 BEFORE UPDATE ON resolution_cases BEGIN
+    SELECT CASE WHEN OLD.id IS NOT NEW.id OR OLD.case_hash IS NOT NEW.case_hash OR OLD.schema_version IS NOT NEW.schema_version OR
+      OLD.policy_version IS NOT NEW.policy_version OR OLD.source_run_id IS NOT NEW.source_run_id OR OLD.owner_user_id IS NOT NEW.owner_user_id OR
+      OLD.repository_id IS NOT NEW.repository_id OR OLD.source_state IS NOT NEW.source_state OR OLD.source_state_version IS NOT NEW.source_state_version OR
+      OLD.base_commit_sha IS NOT NEW.base_commit_sha OR OLD.manifest_hash IS NOT NEW.manifest_hash OR OLD.required_lane_contract_hash IS NOT NEW.required_lane_contract_hash OR
+      OLD.blockers_json IS NOT NEW.blockers_json OR OLD.blocker_count IS NOT NEW.blocker_count OR OLD.correction_eligible IS NOT NEW.correction_eligible OR
+      OLD.reverify_eligible IS NOT NEW.reverify_eligible OR OLD.reverify_reason IS NOT NEW.reverify_reason OR
+      OLD.pre_verification_candidate_present IS NOT NEW.pre_verification_candidate_present OR OLD.pre_verification_candidate_digest IS NOT NEW.pre_verification_candidate_digest OR
+      OLD.source_actual_microusd IS NOT NEW.source_actual_microusd OR OLD.prior_replacement_actual_microusd IS NOT NEW.prior_replacement_actual_microusd OR
+      OLD.ambiguous_liability_microusd IS NOT NEW.ambiguous_liability_microusd OR OLD.cumulative_ceiling_microusd IS NOT NEW.cumulative_ceiling_microusd OR
+      OLD.pricing_policy_digest IS NOT NEW.pricing_policy_digest OR
+      OLD.case_json IS NOT NEW.case_json OR OLD.created_at IS NOT NEW.created_at OR OLD.expires_at IS NOT NEW.expires_at
+      THEN RAISE(ABORT,'resolution case authority is immutable') END;
+    SELECT CASE WHEN NOT (NEW.case_version=OLD.case_version+1 AND (
+      (OLD.state='OPEN' AND NEW.state='DIRECTIVE_ISSUED') OR
+      (OLD.state='DIRECTIVE_ISSUED' AND NEW.state IN ('APPLYING','REJECTED_CLOSED')) OR
+      (OLD.state='APPLYING' AND NEW.state IN ('RESOLVED_CORRECTED','RESOLVED_REVERIFIED'))))
+      THEN RAISE(ABORT,'resolution case transition mismatch') END;
+  END;
+  CREATE TRIGGER prevent_resolution_case_delete_v31 BEFORE DELETE ON resolution_cases BEGIN SELECT RAISE(ABORT,'resolution cases are durable'); END;
+
+  CREATE TABLE resolution_directives (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=71 AND substr(id,1,7)='sha256:' AND substr(id,8) NOT GLOB '*[^0-9a-f]*'),
+    directive_hash TEXT NOT NULL UNIQUE CHECK(length(directive_hash)=71 AND substr(directive_hash,1,7)='sha256:' AND substr(directive_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    schema_version INTEGER NOT NULL CHECK(schema_version=1),
+    policy_version TEXT NOT NULL CHECK(policy_version='engineer-resolution-directive-v1'),
+    case_id TEXT NOT NULL REFERENCES resolution_cases(id) ON DELETE RESTRICT,
+    case_hash TEXT NOT NULL,
+    type TEXT NOT NULL CHECK(type IN ('CREATE_CORRECTED_RUN','CREATE_REVERIFY_RUN','REJECT_AND_CLOSE')),
+    expected_case_version INTEGER NOT NULL CHECK(expected_case_version>=0),
+    expected_source_run_version INTEGER NOT NULL CHECK(expected_source_run_version>=0),
+    selected_blockers_json TEXT NOT NULL CHECK(json_valid(selected_blockers_json)=1 AND json_type(selected_blockers_json)='array'),
+    budget_max_cost_microusd INTEGER CHECK(budget_max_cost_microusd IS NULL OR budget_max_cost_microusd>=0),
+    budget_max_tokens INTEGER CHECK(budget_max_tokens IS NULL OR budget_max_tokens>=0),
+    budget_max_active_seconds INTEGER CHECK(budget_max_active_seconds IS NULL OR budget_max_active_seconds>0),
+    budget_pricing_policy_digest TEXT CHECK(budget_pricing_policy_digest IS NULL OR (length(budget_pricing_policy_digest)=71 AND substr(budget_pricing_policy_digest,1,7)='sha256:' AND substr(budget_pricing_policy_digest,8) NOT GLOB '*[^0-9a-f]*')),
+    signature_algorithm TEXT NOT NULL CHECK(signature_algorithm='HMAC-SHA256'),
+    signature_key_id TEXT NOT NULL,
+    signature TEXT NOT NULL CHECK(length(signature)=64 AND signature NOT GLOB '*[^0-9a-f]*'),
+    directive_json TEXT NOT NULL CHECK(json_valid(directive_json)=1),
+    idempotency_key TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=71 AND substr(request_fingerprint,1,7)='sha256:' AND substr(request_fingerprint,8) NOT GLOB '*[^0-9a-f]*'),
+    response_json TEXT NOT NULL CHECK(json_valid(response_json)=1),
+    ttl_seconds INTEGER NOT NULL CHECK(ttl_seconds=900),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    UNIQUE(case_id,idempotency_key),
+    CHECK((type='CREATE_CORRECTED_RUN')=(budget_max_cost_microusd IS NOT NULL AND budget_max_tokens IS NOT NULL AND budget_max_active_seconds IS NOT NULL AND budget_pricing_policy_digest IS NOT NULL)),
+    CHECK((type='CREATE_CORRECTED_RUN' AND json_array_length(selected_blockers_json)>0) OR (type!='CREATE_CORRECTED_RUN' AND json_array_length(selected_blockers_json)=0)),
+    FOREIGN KEY(case_id,case_hash) REFERENCES resolution_cases(id,case_hash) ON DELETE RESTRICT
+  );
+  CREATE UNIQUE INDEX uq_resolution_directive_pair_v31 ON resolution_directives(id,directive_hash);
+  CREATE UNIQUE INDEX uq_resolution_directive_case_open_v31 ON resolution_directives(case_id);
+  CREATE INDEX idx_resolution_directives_case_created_v31 ON resolution_directives(case_id,created_at,id);
+  CREATE TRIGGER require_resolution_directive_projection_v31 BEFORE INSERT ON resolution_directives BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM resolution_cases c WHERE c.id=NEW.case_id AND c.case_hash=NEW.case_hash)
+      THEN RAISE(ABORT,'resolution directive case binding mismatch') END;
+    SELECT CASE WHEN json_extract(NEW.directive_json,'$.directiveId')!=NEW.id OR
+      json_extract(NEW.directive_json,'$.directiveHash')!=NEW.directive_hash OR
+      json_extract(NEW.directive_json,'$.schemaVersion')!=NEW.schema_version OR
+      json_extract(NEW.directive_json,'$.policyVersion')!=NEW.policy_version OR
+      json_extract(NEW.directive_json,'$.caseId')!=NEW.case_id OR
+      json_extract(NEW.directive_json,'$.caseHash')!=NEW.case_hash OR
+      json_extract(NEW.directive_json,'$.type')!=NEW.type OR
+      json_extract(NEW.directive_json,'$.expectedCaseVersion')!=NEW.expected_case_version OR
+      json_extract(NEW.directive_json,'$.expectedSourceRunVersion')!=NEW.expected_source_run_version OR
+      json(json_extract(NEW.directive_json,'$.selectedBlockers'))!=json(NEW.selected_blockers_json) OR
+      json_extract(NEW.directive_json,'$.budget.maxCostMicrousd') IS NOT NEW.budget_max_cost_microusd OR
+      json_extract(NEW.directive_json,'$.budget.maxTokens') IS NOT NEW.budget_max_tokens OR
+      json_extract(NEW.directive_json,'$.budget.maxActiveSeconds') IS NOT NEW.budget_max_active_seconds OR
+      json_extract(NEW.directive_json,'$.budget.pricingPolicyDigest') IS NOT NEW.budget_pricing_policy_digest OR
+      json_extract(NEW.directive_json,'$.ttlSeconds')!=NEW.ttl_seconds OR
+      json_extract(NEW.directive_json,'$.createdAt')!=NEW.created_at OR
+      json_extract(NEW.directive_json,'$.expiresAt')!=NEW.expires_at
+      THEN RAISE(ABORT,'resolution directive JSON projection mismatch') END;
+  END;
+  CREATE TRIGGER prevent_resolution_directive_update_v31 BEFORE UPDATE ON resolution_directives BEGIN SELECT RAISE(ABORT,'resolution directives are immutable'); END;
+  CREATE TRIGGER prevent_resolution_directive_delete_v31 BEFORE DELETE ON resolution_directives BEGIN SELECT RAISE(ABORT,'resolution directives are immutable'); END;
+
+  CREATE TABLE resolution_events (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=71 AND substr(id,1,7)='sha256:' AND substr(id,8) NOT GLOB '*[^0-9a-f]*'),
+    event_hash TEXT NOT NULL UNIQUE CHECK(length(event_hash)=71 AND substr(event_hash,1,7)='sha256:' AND substr(event_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    schema_version INTEGER NOT NULL CHECK(schema_version=1),
+    policy_version TEXT NOT NULL CHECK(policy_version='engineer-resolution-event-v1'),
+    case_id TEXT NOT NULL REFERENCES resolution_cases(id) ON DELETE RESTRICT,
+    sequence INTEGER NOT NULL CHECK(sequence>0),
+    previous_event_hash TEXT CHECK(previous_event_hash IS NULL OR (length(previous_event_hash)=71 AND substr(previous_event_hash,1,7)='sha256:' AND substr(previous_event_hash,8) NOT GLOB '*[^0-9a-f]*')),
+    event_type TEXT NOT NULL CHECK(event_type IN ('CASE_OPENED','DIRECTIVE_ISSUED','REPLACEMENT_PREPARING','REPLACEMENT_READY','REPLACEMENT_FAILED','CASE_RESOLVED','CASE_REJECTED')),
+    case_version INTEGER NOT NULL CHECK(case_version>=0),
+    directive_id TEXT REFERENCES resolution_directives(id) ON DELETE RESTRICT,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL CHECK(json_valid(payload_json)=1),
+    created_at TEXT NOT NULL,
+    UNIQUE(case_id,sequence),
+    UNIQUE(case_id,case_version),
+    CHECK((sequence=1)=(previous_event_hash IS NULL))
+  );
+  CREATE INDEX idx_resolution_events_case_sequence_v31 ON resolution_events(case_id,sequence);
+  CREATE TRIGGER require_resolution_event_chain_v31 BEFORE INSERT ON resolution_events BEGIN
+    SELECT CASE WHEN NEW.sequence=1 THEN NULL WHEN NOT EXISTS(SELECT 1 FROM resolution_events e
+      WHERE e.case_id=NEW.case_id AND e.sequence=NEW.sequence-1 AND e.event_hash=NEW.previous_event_hash)
+      THEN RAISE(ABORT,'resolution event chain mismatch') END;
+    SELECT CASE WHEN json_extract(NEW.payload_json,'$.eventId')!=NEW.id OR
+      json_extract(NEW.payload_json,'$.eventHash')!=NEW.event_hash OR
+      json_extract(NEW.payload_json,'$.caseId')!=NEW.case_id OR
+      json_extract(NEW.payload_json,'$.sequence')!=NEW.sequence OR
+      json_extract(NEW.payload_json,'$.previousEventHash') IS NOT NEW.previous_event_hash OR
+      json_extract(NEW.payload_json,'$.eventType')!=NEW.event_type OR
+      json_extract(NEW.payload_json,'$.caseVersion')!=NEW.case_version
+      THEN RAISE(ABORT,'resolution event projection mismatch') END;
+  END;
+  CREATE TRIGGER prevent_resolution_event_update_v31 BEFORE UPDATE ON resolution_events BEGIN SELECT RAISE(ABORT,'resolution events are immutable'); END;
+  CREATE TRIGGER prevent_resolution_event_delete_v31 BEFORE DELETE ON resolution_events BEGIN SELECT RAISE(ABORT,'resolution events are immutable'); END;
+
+  CREATE TABLE resolution_replacements (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=71 AND substr(id,1,7)='sha256:' AND substr(id,8) NOT GLOB '*[^0-9a-f]*'),
+    replacement_hash TEXT NOT NULL UNIQUE CHECK(length(replacement_hash)=71 AND substr(replacement_hash,1,7)='sha256:' AND substr(replacement_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    schema_version INTEGER NOT NULL CHECK(schema_version=1),
+    policy_version TEXT NOT NULL CHECK(policy_version='engineer-resolution-replacement-v1'),
+    case_id TEXT NOT NULL UNIQUE REFERENCES resolution_cases(id) ON DELETE RESTRICT,
+    directive_id TEXT NOT NULL UNIQUE REFERENCES resolution_directives(id) ON DELETE RESTRICT,
+    directive_hash TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('CORRECTED','REVERIFY')),
+    replacement_run_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('PREPARING','READY','FAILED')),
+    budget_max_cost_microusd INTEGER NOT NULL CHECK(budget_max_cost_microusd>=0),
+    budget_max_tokens INTEGER NOT NULL CHECK(budget_max_tokens>=0),
+    budget_max_active_seconds INTEGER NOT NULL CHECK(budget_max_active_seconds>0),
+    budget_pricing_policy_digest TEXT NOT NULL CHECK(length(budget_pricing_policy_digest)=71 AND substr(budget_pricing_policy_digest,1,7)='sha256:' AND substr(budget_pricing_policy_digest,8) NOT GLOB '*[^0-9a-f]*'),
+    replacement_json TEXT NOT NULL CHECK(json_valid(replacement_json)=1),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(replacement_run_id),
+    FOREIGN KEY(directive_id,directive_hash) REFERENCES resolution_directives(id,directive_hash) ON DELETE RESTRICT
+  );
+  CREATE INDEX idx_resolution_replacements_state_v31 ON resolution_replacements(state,created_at,id);
+  CREATE TRIGGER require_resolution_replacement_binding_v31 BEFORE INSERT ON resolution_replacements BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM resolution_directives d WHERE d.id=NEW.directive_id AND d.directive_hash=NEW.directive_hash
+      AND d.case_id=NEW.case_id AND NEW.kind=CASE d.type WHEN 'CREATE_CORRECTED_RUN' THEN 'CORRECTED' WHEN 'CREATE_REVERIFY_RUN' THEN 'REVERIFY' ELSE 'INVALID' END)
+      THEN RAISE(ABORT,'resolution replacement directive binding mismatch') END;
+    SELECT CASE WHEN NEW.state!='PREPARING' THEN RAISE(ABORT,'resolution replacement must scaffold in PREPARING') END;
+    SELECT CASE WHEN json_extract(NEW.replacement_json,'$.replacementId')!=NEW.id OR
+      json_extract(NEW.replacement_json,'$.caseId')!=NEW.case_id OR
+      json_extract(NEW.replacement_json,'$.directiveId')!=NEW.directive_id OR
+      json_extract(NEW.replacement_json,'$.kind')!=NEW.kind OR
+      json_extract(NEW.replacement_json,'$.replacementRunId')!=NEW.replacement_run_id OR
+      json_extract(NEW.replacement_json,'$.budget.maxCostMicrousd')!=NEW.budget_max_cost_microusd OR
+      json_extract(NEW.replacement_json,'$.budget.maxTokens')!=NEW.budget_max_tokens OR
+      json_extract(NEW.replacement_json,'$.budget.maxActiveSeconds')!=NEW.budget_max_active_seconds OR
+      json_extract(NEW.replacement_json,'$.budget.pricingPolicyDigest')!=NEW.budget_pricing_policy_digest
+      THEN RAISE(ABORT,'resolution replacement projection mismatch') END;
+  END;
+  CREATE TRIGGER fence_resolution_replacement_update_v31 BEFORE UPDATE ON resolution_replacements BEGIN
+    SELECT CASE WHEN OLD.id IS NOT NEW.id OR OLD.replacement_hash IS NOT NEW.replacement_hash OR OLD.case_id IS NOT NEW.case_id OR
+      OLD.directive_id IS NOT NEW.directive_id OR OLD.directive_hash IS NOT NEW.directive_hash OR OLD.kind IS NOT NEW.kind OR
+      OLD.replacement_run_id IS NOT NEW.replacement_run_id OR OLD.budget_max_cost_microusd IS NOT NEW.budget_max_cost_microusd OR
+      OLD.budget_max_tokens IS NOT NEW.budget_max_tokens OR OLD.budget_max_active_seconds IS NOT NEW.budget_max_active_seconds OR
+      OLD.budget_pricing_policy_digest IS NOT NEW.budget_pricing_policy_digest OR OLD.replacement_json IS NOT NEW.replacement_json OR
+      OLD.created_at IS NOT NEW.created_at
+      THEN RAISE(ABORT,'resolution replacement scaffold is immutable') END;
+    SELECT CASE WHEN NOT (OLD.state='PREPARING' AND NEW.state IN ('READY','FAILED') AND NEW.updated_at>=OLD.updated_at)
+      THEN RAISE(ABORT,'resolution replacement fence mismatch') END;
+  END;
+  CREATE TRIGGER prevent_resolution_replacement_delete_v31 BEFORE DELETE ON resolution_replacements BEGIN SELECT RAISE(ABORT,'resolution replacements are durable'); END;
+
+  CREATE TRIGGER freeze_source_engineer_run_update_v31 BEFORE UPDATE ON engineer_runs
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=OLD.id)
+    BEGIN SELECT RAISE(ABORT,'source run is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_run_state_event_v31 BEFORE INSERT ON run_state_events
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_budget_event_v31 BEFORE INSERT ON budget_events
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run budget is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_approval_request_v31 BEFORE INSERT ON approval_requests
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run approval is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_approval_decision_v31 BEFORE INSERT ON approval_decisions
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c JOIN approval_requests r ON r.run_id=c.source_run_id WHERE r.id=NEW.approval_request_id)
+    BEGIN SELECT RAISE(ABORT,'source run approval is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_git_operation_v31 BEFORE INSERT ON git_operations
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run publication is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_builder_dispatch_v31 BEFORE INSERT ON builder_dispatch_claims
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run dispatch is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_hardening_lineage_v31 BEFORE INSERT ON engineer_run_lineage
+    WHEN NEW.relation='OPTIONAL_HARDENING' AND EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.parent_run_id)
+    BEGIN SELECT RAISE(ABORT,'source run hardening is frozen by a resolution case'); END;
 `;

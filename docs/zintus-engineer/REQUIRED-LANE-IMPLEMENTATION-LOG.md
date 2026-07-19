@@ -2516,3 +2516,38 @@ unfinished pair has passed.
   reviewer-evidence binding re-runs the scanner server-side over the trusted
   diff and byte-matches semantics). P6 is released; P7 implementation may begin
   per the frozen Day 2C go/no-go invariants.
+
+### Day 3 — P7 implementation pair 1 (2026-07-19)
+
+- v31 landed: exactly four additive resolution tables with immutability/
+  projection/fence triggers plus eight source-freeze triggers spanning run
+  updates, state events, budget events, approval requests/decisions, git
+  operations, builder dispatch claims and hardening lineage; ancestry and
+  exact-definition startup validation extended; every v14-v30 byte preserved
+  (full suite 581/0, gateway 377/0, typecheck clean — integrator-verified
+  directly). Legacy corrected-run POST now returns 410 GONE with the
+  resolution-cases successor. Contract supersession S1 (blocker shape,
+  pricingPolicyDigest with 409 drift, wrapper convention) implemented.
+- Domain and persistence authority shipped: canonical case creation installs
+  the freeze in one transaction with an idempotent one-case-per-source rule;
+  signed directives (gateway-held HMAC, fixed 900s TTL, case+source CAS,
+  exact-byte replay, UNIQUE one-directive-per-case); fenced
+  PREPARING→READY|FAILED replacement scaffold with ceiling arithmetic
+  (prior actual + ambiguous + cap ≤ ceiling); reverify law with the closed
+  typed allowlist, SOURCE_CLASS_EXCLUDED for optional-hardening/v2, and the
+  Phase-3 typed-cause classifier delivered (not yet wired into the strict
+  FailureRecordSchema erasure site — reverify honestly reports
+  PHASE3_CAUSE_UNTYPED until the column lands in pair 2).
+- Integrator adversarial probe (independent of implementer tests, 12 attacks):
+  freeze scope, case/event/directive tamper and delete-as-freeze-lift,
+  conflicting replay, expired-directive apply with zero replacement rows,
+  ceiling and pricing-drift rejection, fourth-directive-type rejection, and
+  frozen-source dispatch-claim rejection — all blocked. Noted P2 for route
+  wiring: service-seam schema violations surface as raw ZodErrors; the
+  gateway wrapper must map them to typed 400s.
+- Honest pair-2 seams, unchanged from the frozen plan: executable replacement
+  dispatch through the supervisor with the full lane rerun and fresh isolated
+  Reviewer; deep signed B-prime candidate authority (digest is currently
+  untrusted input); companion-aware lineage verifier with no legacy fallback;
+  gateway HTTP routes for cases/directives/apply; typed-cause column wiring;
+  evidence-export inclusion of the v31 tables.
