@@ -128,6 +128,23 @@ by the UI lane; a missing need is a contract-change request, not a workaround.
   ones (no existence oracle). Self-approval rejection (§3) must hold across
   role changes: the check binds actor identity, not current role.
 
+## 5a. Supersession log
+
+**S1 (2026-07-19, Sol, from P9 lane contract-gap reports):**
+1. `CanonicalBlocker` is frozen as `{blockerId, kind: "BLOCKING"|"ADVISORY",
+   reasonCode, description, sourceRef?}` (P9's inferred minimal shape adopted).
+2. List/detail GET responses use the wrapper-object convention already
+   established in `apps/web/lib/engineer.ts` — codified, not changed.
+3. `ResolutionCase` response GAINS `pricingPolicyDigest` (the server's current
+   pricing-policy digest). A directive's `ReplacementBudget.pricingPolicyDigest`
+   must equal the case's current value; drift → `409 PRICING_POLICY_DRIFT`.
+   This is the source route for the digest the UI must echo back.
+4. `approvalId` is confirmed as a first-class field on approval records; the
+   publications route body references it.
+5. §4 correction: spend fields are `used/reserved/ambiguous/remaining` (the
+   real `EngineerBudgetSnapshot`); "released" folds into settled/used and is
+   not a separate field. The UI renders the four real fields.
+
 ## 6. Lane and integration rules
 
 1. Lanes: P7 = main tree (integration spine). P8, P9, P10 = isolated
