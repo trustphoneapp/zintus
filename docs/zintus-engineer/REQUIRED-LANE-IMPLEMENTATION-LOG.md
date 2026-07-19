@@ -2699,3 +2699,34 @@ unfinished pair has passed.
   (3) Positive real-verifier publish path proven only with a mock=true; a
   fully-signed resolved P7 chain being publishable is unproven; (4) real
   concurrency and real GitHub actuator injected as fakes.
+
+### Day 3 — Integration step 3: P10 tenancy/RBAC live (v34) (2026-07-19)
+
+- v34 is in the live chain: org_id NOT NULL additively on all 71 tenant-owned
+  tables (extended to cover the P7 v31 resolution tables and P8 v33 publication
+  tables, not just the v30-base draft set), single-tenant DEFAULT org backfill,
+  3 authority tables (orgs/org_memberships/non_human_actors) with immutability
+  triggers + sponsor CHECKs, version 33→34, every v14-v33 byte preserved
+  (forward-install on a populated v33 DB verified, foreign_key_check clean). The
+  delicate part — SQLite ALTER ADD COLUMN rewrites stored table sql — was
+  handled with a single-source column-DDL list + shared tolerances so ~13
+  historical shape validators still match pristine bytes minus exactly the v34
+  columns. Tenant-scoped DAL + 7-role deny-by-default matrix + non-human actor
+  identity ported live; 5 highest-traffic ledger.ts sites org-scoped alongside
+  the existing owner predicate (behavior-preserving today, multi-tenant-ready).
+- Fable mutation-verified cross-tenant isolation directly: stripping the org_id
+  predicate from the DAL run-fetch turned three isolation tests red (tenant A
+  sees tenant B's run), restore clean. Load-bearing. Gates: engineer 720,
+  gateway 391, typecheck + diff clean.
+- Integration-surfaced regression found + fixed: exportRunRecords SELECT * leaked
+  v34 columns into content-integrity/attestation hashes (broke ~7 verification
+  tests); stripped tenancy annotations at the exportRunRecordPage attestation
+  chokepoint (operational metadata, not attested run content; keeps pre-v34
+  attestations valid). This is exactly the class of bug parallel-lane integration
+  banks for P12 — surfaced and closed at merge.
+- TRACKED SEAMS (honest, → later steps / P12): gateway per-request identity→org
+  derivation not closed (DAL uses the single default org; multi-tenant-ready but
+  single-tenant-today); resolution_cases isolation is column-enforced + in the
+  tripwire but not exercised through a DAL method (no case query on the DAL yet);
+  org_id→orgs(id) referential integrity is DAL-enforced not a DB FK (SQLite
+  additive limitation); ~140ms one-time migrate cost from 90 additive ALTERs.

@@ -26,7 +26,17 @@ import {
   ENGINEER_DATABASE_MIGRATION_31_SQL,
   ENGINEER_DATABASE_MIGRATION_32_SQL,
   ENGINEER_DATABASE_MIGRATION_33_SQL,
+  ENGINEER_DATABASE_MIGRATION_34_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
+  ENGINEER_DEFAULT_ORG_ID,
+  AUTHORITY_ACTOR_TABLES,
+  CONNECTOR_IDENTITY_TABLES,
+  RETENTION_CLASS_TABLES,
+  TENANT_OWNED_TABLES,
+  V34_AUGMENTED_V31_TABLES,
+  V34_AUGMENTED_V33_TABLES,
+  V34_ADDITIVE_COLUMN_DDLS,
+  V34_ADDITIVE_COLUMN_NAMES,
 } from "./database-schema.js";
 
 interface Migration {
@@ -54,6 +64,7 @@ const MIGRATIONS: readonly Migration[] = [
   { version: 31, sql: ENGINEER_DATABASE_MIGRATION_31_SQL },
   { version: 32, sql: ENGINEER_DATABASE_MIGRATION_32_SQL },
   { version: 33, sql: ENGINEER_DATABASE_MIGRATION_33_SQL },
+  { version: 34, sql: ENGINEER_DATABASE_MIGRATION_34_SQL },
 ];
 
 function assertHardeningBudgetShape(db: Database): void {
@@ -85,7 +96,7 @@ function assertHardeningBudgetShape(db: Database): void {
   ];
   for (const name of names) {
     const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as { sql: string } | null;
-    if (!actual?.sql || normalizeSchemaSql(actual.sql).replaceAll('"', '') !== expected.get(name)?.replaceAll('"', '')) throw new Error(`Engineer schema v29 has invalid ${name}`);
+    if (!actual?.sql || normalizePreV34(actual.sql).replaceAll('"', '') !== expected.get(name)?.replaceAll('"', '')) throw new Error(`Engineer schema v29 has invalid ${name}`);
   }
   assertForeignKeys(db);
 }
@@ -98,7 +109,7 @@ function assertHardeningRecoveryWorkerFenceShape(db: Database): void {
     "require_hardening_recovery_worker_fence_child_v30","fence_hardening_recovery_worker_fence_update_v30",
     "prevent_hardening_recovery_worker_fence_delete_v30"]){
     const actual=db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as {sql:string}|null;
-    if(!actual?.sql||normalizeSchemaSql(actual.sql)!==expected.get(name))throw new Error(`Engineer schema v30 has invalid ${name}`);
+    if(!actual?.sql||normalizePreV34(actual.sql)!==expected.get(name))throw new Error(`Engineer schema v30 has invalid ${name}`);
   }
   assertForeignKeys(db);
 }
@@ -117,7 +128,7 @@ function assertHardeningExecutionFencingShape(db: Database): void {
   if (expected.size !== names.length) throw new Error("Engineer schema v28 validator is missing exact definitions");
   for (const name of names) {
     const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as { sql: string } | null;
-    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== expected.get(name)) throw new Error(`Engineer schema v28 has invalid ${name}`);
+    if (!actual?.sql || normalizePreV34(actual.sql) !== expected.get(name)) throw new Error(`Engineer schema v28 has invalid ${name}`);
   }
   assertForeignKeys(db);
 }
@@ -131,7 +142,7 @@ function assertVerifiedHardeningCandidateCheckpointShape(db: Database): void {
   const normalizeTable = (sql: string): string => normalizeSchemaSql(sql)
     .replaceAll('"', "")
     .replaceAll("VERIFIED_CANDIDATE_CHECKPOINTS_V27", "VERIFIED_CANDIDATE_CHECKPOINTS");
-  if (!actual?.sql || !expected || normalizeTable(actual.sql) !== normalizeTable(expected)) {
+  if (!actual?.sql || !expected || stripV34AdditiveColumns(normalizeTable(actual.sql)) !== normalizeTable(expected)) {
     throw new Error("Engineer schema v27 has invalid verified_candidate_checkpoints authority");
   }
   const expectedObjects = [
@@ -203,7 +214,7 @@ function assertHardeningStartShape(db: Database): void {
   if (definitions.size !== required.length) throw new Error("Engineer schema v26 validator is missing exact definitions");
   for (const name of required) {
     const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as {sql:string}|null;
-    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== definitions.get(name)) throw new Error(`Engineer schema v26 has invalid ${name}`);
+    if (!actual?.sql || normalizePreV34(actual.sql) !== definitions.get(name)) throw new Error(`Engineer schema v26 has invalid ${name}`);
   }
   const foreignKeys = db.query("PRAGMA foreign_key_check").all();
   if (foreignKeys.length !== 0) throw new Error("Engineer schema v26 has invalid foreign keys");
@@ -212,7 +223,7 @@ function assertHardeningStartShape(db: Database): void {
 function assertHardeningChildBudgetShape(db: Database): void {
   const table=db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='run_budgets'").get() as {sql:string}|null;
   const expected=ENGINEER_DATABASE_MIGRATION_25_SQL.match(/CREATE TABLE run_budgets_v25[\s\S]*?;\s*(?=INSERT)/)?.[0];
-  const actualSql=table?.sql?normalizeSchemaSql(table.sql).replace('CREATE TABLE "RUN_BUDGETS"','CREATE TABLE RUN_BUDGETS'):null;
+  const actualSql=table?.sql?stripV34AdditiveColumns(normalizeSchemaSql(table.sql)).replace('CREATE TABLE "RUN_BUDGETS"','CREATE TABLE RUN_BUDGETS'):null;
   const expectedSql=expected?normalizeSchemaSql(expected).replace("CREATE TABLE RUN_BUDGETS_V25","CREATE TABLE RUN_BUDGETS"):null;
   if(!actualSql||!expectedSql||actualSql!==expectedSql) throw new Error("Engineer schema v25 has invalid run_budgets authority");
   const columns=new Map((db.query("PRAGMA table_info(run_budgets)").all() as Array<{name:string;type:string;notnull:number;pk:number;dflt_value:string|null}>).map((column)=>[column.name,column]));
@@ -223,7 +234,7 @@ function assertHardeningChildBudgetShape(db: Database): void {
 function assertHardeningQuoteRequestShape(db: Database): void {
   const table = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='hardening_quote_requests'").get() as { sql: string } | null;
   const expectedTable=ENGINEER_DATABASE_MIGRATION_24_SQL.match(/CREATE TABLE hardening_quote_requests[\s\S]*?;\s*(?=CREATE )/)?.[0];
-  if (!table?.sql||!expectedTable||normalizeSchemaSql(table.sql)!==normalizeSchemaSql(expectedTable)) throw new Error("Engineer schema v24 has invalid hardening_quote_requests");
+  if (!table?.sql||!expectedTable||normalizePreV34(table.sql)!==normalizeSchemaSql(expectedTable)) throw new Error("Engineer schema v24 has invalid hardening_quote_requests");
   const columns = new Map((db.query("PRAGMA table_info(hardening_quote_requests)").all() as Array<{name:string;type:string;notnull:number;pk:number}>).map((column)=>[column.name,column]));
   for (const name of ["id","request_hash","requester_user_id","parent_run_id","idempotency_key","quote_id","quote_hash","request_json","created_at"]) {
     const column=columns.get(name); if(!column||column.type.toUpperCase()!=="TEXT"||column.notnull!==1) throw new Error(`Engineer schema v24 has invalid hardening_quote_requests.${name}`);
@@ -241,6 +252,47 @@ function assertHardeningQuoteRequestShape(db: Database): void {
 
 function normalizeSchemaSql(sql: string): string {
   return sql.replace(/\s+/g, " ").trim().replace(/;$/, "").toUpperCase();
+}
+
+/**
+ * The exact normalized fragments SQLite splices into a table's stored `sql` when
+ * v34 adds a column via `ALTER TABLE ... ADD COLUMN` (SQLite inserts each after
+ * the last column definition, before any table-level constraint). Derived from
+ * the single source of truth in database-schema.ts so they can never drift.
+ */
+const V34_COLUMN_INSERT_FRAGMENTS = V34_ADDITIVE_COLUMN_DDLS.map((ddl) => normalizeSchemaSql(`, ${ddl}`));
+const V34_COLUMN_NAME_SET = new Set<string>(V34_ADDITIVE_COLUMN_NAMES);
+
+/**
+ * Reconstruct a tenant table's PRISTINE (pre-v34) normalized `sql` by removing
+ * exactly the v34 additive columns and nothing else. A no-op on any object that
+ * never gained a v34 column (indexes, triggers, non-tenant tables), so it is
+ * safe to apply to every stored `sql`.
+ */
+function stripV34AdditiveColumns(normSql: string): string {
+  let out = normSql;
+  for (const fragment of V34_COLUMN_INSERT_FRAGMENTS) out = out.replace(fragment, "");
+  return out;
+}
+
+/** normalizeSchemaSql with the v34 additive columns removed — matches pre-v34 bytes. */
+function normalizePreV34(sql: string): string {
+  return stripV34AdditiveColumns(normalizeSchemaSql(sql));
+}
+
+/**
+ * Exact-shape match for a v31/v33 table whose definition v34 augments with the
+ * additive org_id column. Matches the pristine historical bytes, or — when
+ * `augmented` and the column is present — the historical bytes with EXACTLY the
+ * v34 additive column(s) removed and nothing else. Triggers/indexes (never
+ * augmented by ADD COLUMN) always require a byte-exact match.
+ */
+function tenantTableSqlMatches(actualSql: string, expectedNorm: string, augmented: boolean): boolean {
+  const actualNorm = normalizeSchemaSql(actualSql);
+  if (actualNorm === expectedNorm) return true;
+  if (!augmented) return false;
+  const stripped = stripV34AdditiveColumns(actualNorm);
+  return stripped !== actualNorm && stripped === expectedNorm;
 }
 
 function expectedV23Objects(type: "table" | "index" | "trigger"): Map<string, string> {
@@ -268,7 +320,7 @@ function assertAdvisoryHardeningShape(db: Database): void {
       if (!actual?.sql || !normalizeSchemaSql(actual.sql).includes("SCHEMA_VERSION IN (1,2)")) throw new Error("Engineer schema v29 has invalid hardening quote union");
       continue;
     }
-    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== expectedTables.get(name)) throw new Error(`Engineer schema v23 has invalid table ${name}`);
+    if (!actual?.sql || normalizePreV34(actual.sql) !== expectedTables.get(name)) throw new Error(`Engineer schema v23 has invalid table ${name}`);
   }
   for (const [name, expected] of expectedIndexes) {
     const actual = db.query("SELECT sql FROM sqlite_master WHERE type='index' AND name=?").get(name) as { sql: string } | null;
@@ -464,7 +516,7 @@ function assertReviewClassificationShape(db: Database): void {
   if (!table?.sql) throw new Error("Engineer schema v18 is missing review_classification_batches");
   const columns = new Map((db.query("PRAGMA table_info(review_classification_batches)").all() as Array<{
     name: string; type: string; notnull: number; pk: number;
-  }>).map((column) => [column.name, column]));
+  }>).filter((column) => !V34_COLUMN_NAME_SET.has(column.name)).map((column) => [column.name, column]));
   const expected = {
     classification_hash: { type: "TEXT", notnull: 1, pk: 1 },
     reviewer_session_id: { type: "TEXT", notnull: 1, pk: 0 },
@@ -576,7 +628,7 @@ function assertReviewClassificationShape(db: Database): void {
   if (!itemTable?.sql) throw new Error("Engineer schema v18 is missing review_finding_classifications");
   const itemColumns = (db.query("PRAGMA table_info(review_finding_classifications)").all() as Array<{
     name: string; type: string; notnull: number; pk: number;
-  }>).map((row) => `${row.name}:${row.type.toUpperCase()}:${row.notnull}:${row.pk}`);
+  }>).filter((row) => !V34_COLUMN_NAME_SET.has(row.name)).map((row) => `${row.name}:${row.type.toUpperCase()}:${row.notnull}:${row.pk}`);
   const expectedItemColumns = [
     "classification_hash:TEXT:1:1", "batch_hash:TEXT:1:0", "reviewer_session_id:TEXT:1:0", "finding_id:TEXT:1:0",
     "finding_fingerprint:TEXT:1:0", "disposition:TEXT:1:0", "authority:TEXT:1:0", "reason_code:TEXT:1:0",
@@ -648,7 +700,7 @@ function assertBuilderDispatchClaimShape(db: Database): void {
   if (!table?.sql) throw new Error("Engineer schema v20 is missing builder_dispatch_claims");
   const columns = (db.query("PRAGMA table_info(builder_dispatch_claims)").all() as Array<{
     name: string; type: string; notnull: number; pk: number;
-  }>).map((column) => `${column.name}:${column.type.toUpperCase()}:${column.notnull}:${column.pk}`);
+  }>).filter((column) => !V34_COLUMN_NAME_SET.has(column.name)).map((column) => `${column.name}:${column.type.toUpperCase()}:${column.notnull}:${column.pk}`);
   const expected = [
     "run_id:TEXT:1:1", "input_hash:TEXT:1:2", "agent_execution_id:TEXT:1:0", "model_tier:TEXT:1:0",
     "worker_owner_id:TEXT:0:0", "worker_fencing_token:INTEGER:0:0", "claimed_at:TEXT:1:0",
@@ -716,7 +768,7 @@ function assertVerifiedCandidateCheckpointShape(db: Database): void {
   if (!table?.sql) throw new Error("Engineer schema v21 is missing verified_candidate_checkpoints");
   const columns = (db.query("PRAGMA table_info(verified_candidate_checkpoints)").all() as Array<{
     name: string; type: string; notnull: number; pk: number;
-  }>).map((column) => `${column.name}:${column.type.toUpperCase()}:${column.notnull}:${column.pk}`);
+  }>).filter((column) => !V34_COLUMN_NAME_SET.has(column.name)).map((column) => `${column.name}:${column.type.toUpperCase()}:${column.notnull}:${column.pk}`);
   const legacyExpected = [
     "id:TEXT:0:1", "checkpoint_hash:TEXT:1:0", "parent_checkpoint_id:TEXT:0:0", "run_id:TEXT:1:0",
     "requester_user_id:TEXT:1:0", "repository_id:TEXT:1:0", "required_lane_contract_hash:TEXT:1:0",
@@ -923,9 +975,12 @@ function assertResolutionDeskShape(db: Database): void {
     "freeze_source_builder_dispatch_v31", "freeze_source_hardening_lineage_v31",
   ];
   if (expected.size !== names.length) throw new Error("Engineer schema v31 validator is missing exact definitions");
+  const augmented = new Set<string>(V34_AUGMENTED_V31_TABLES);
   for (const name of names) {
     const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as { sql: string } | null;
-    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== expected.get(name)) throw new Error(`Engineer schema v31 has invalid ${name}`);
+    if (!actual?.sql || !tenantTableSqlMatches(actual.sql, expected.get(name)!, augmented.has(name))) {
+      throw new Error(`Engineer schema v31 has invalid ${name}`);
+    }
   }
   assertForeignKeys(db);
 }
@@ -954,15 +1009,94 @@ function assertPublicationAuthorityShape(db: Database): void {
     "publication_reconciliations_v33", "require_pub_reconciliation_state_v33", "prevent_pub_reconciliation_update_v33", "prevent_pub_reconciliation_delete_v33",
   ];
   if (expected.size !== names.length) throw new Error("Engineer schema v33 validator is missing exact definitions");
+  const augmented = new Set<string>(V34_AUGMENTED_V33_TABLES);
   for (const name of names) {
     const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as { sql: string } | null;
-    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== expected.get(name)) throw new Error(`Engineer schema v33 has invalid ${name}`);
+    if (!actual?.sql || !tenantTableSqlMatches(actual.sql, expected.get(name)!, augmented.has(name))) {
+      throw new Error(`Engineer schema v33 has invalid ${name}`);
+    }
   }
   assertForeignKeys(db);
 }
 
+function assertTenancyShape(db: Database): void {
+  const tableExists = (name: string): boolean =>
+    db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) != null;
+  const objectExists = (name: string): boolean =>
+    db.query("SELECT 1 FROM sqlite_master WHERE name=?").get(name) != null;
+  const columnsOf = (table: string): Map<string, { notnull: number }> =>
+    new Map((db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string; notnull: number }>)
+      .map((c) => [c.name, { notnull: c.notnull }]));
+
+  // New tenancy-authority tables and their required columns.
+  const authorityColumns: Record<string, string[]> = {
+    orgs: ["id", "display_name", "default_retention_class", "status", "created_at", "updated_at"],
+    org_memberships: ["membership_id", "org_id", "actor_id", "actor_kind", "role", "human_sponsor_id",
+      "status", "granted_by_actor_id", "created_at", "updated_at", "revoked_at"],
+    non_human_actors: ["actor_id", "org_id", "human_sponsor_id", "display_name", "status",
+      "created_at", "updated_at", "revoked_at"],
+  };
+  for (const [table, cols] of Object.entries(authorityColumns)) {
+    if (!tableExists(table)) throw new Error(`Engineer schema v34 is missing table ${table}`);
+    const actual = columnsOf(table);
+    for (const c of cols) if (!actual.has(c)) throw new Error(`Engineer schema v34 ${table} is missing column ${c}`);
+  }
+
+  // Immutability / fence triggers (v29/v30 style) must exist.
+  for (const trigger of [
+    "fence_orgs_update_v34", "prevent_orgs_delete_v34",
+    "fence_org_memberships_update_v34", "prevent_org_memberships_delete_v34",
+    "fence_non_human_actors_update_v34", "prevent_non_human_actors_delete_v34",
+  ]) {
+    if (!objectExists(trigger)) throw new Error(`Engineer schema v34 is missing trigger ${trigger}`);
+  }
+
+  // Sponsor CHECKs on both membership-bearing tables (B2 regression guard).
+  const normalizedTableSql = (table: string): string =>
+    ((db.query("SELECT sql FROM sqlite_master WHERE name=?").get(table) as { sql: string } | null)?.sql ?? "")
+      .replace(/\s+/g, " ");
+  for (const table of ["org_memberships", "non_human_actors"]) {
+    const sql = normalizedTableSql(table);
+    if (!/length\(trim\(human_sponsor_id\)\) >= 1/i.test(sql) || !/human_sponsor_id <> actor_id/i.test(sql)) {
+      throw new Error(`Engineer schema v34 ${table} is missing the non-human sponsor CHECK`);
+    }
+  }
+
+  // Every tenant-owned table carries a NOT NULL org_id.
+  for (const table of TENANT_OWNED_TABLES) {
+    const col = columnsOf(table).get("org_id");
+    if (!col) throw new Error(`Engineer schema v34 tenant table ${table} is missing org_id`);
+    if (col.notnull !== 1) throw new Error(`Engineer schema v34 tenant table ${table} has a nullable org_id`);
+  }
+  for (const table of RETENTION_CLASS_TABLES) {
+    if (!columnsOf(table).has("retention_class")) throw new Error(`Engineer schema v34 ${table} is missing retention_class`);
+  }
+  for (const table of CONNECTOR_IDENTITY_TABLES) {
+    const cols = columnsOf(table);
+    if (!cols.has("connector_actor_id") || !cols.has("connector_actor_kind")) {
+      throw new Error(`Engineer schema v34 ${table} is missing connector identity`);
+    }
+  }
+  for (const table of AUTHORITY_ACTOR_TABLES) {
+    const cols = columnsOf(table);
+    if (!cols.has("authority_actor_id") || !cols.has("authority_actor_kind")) {
+      throw new Error(`Engineer schema v34 ${table} is missing authority actor identity`);
+    }
+  }
+
+  // The single-tenant default org row is created exactly once.
+  const orgCount = db.query("SELECT COUNT(*) AS n FROM orgs WHERE id=?").get(ENGINEER_DEFAULT_ORG_ID) as { n: number };
+  if (orgCount.n !== 1) throw new Error("Engineer schema v34 default org row is missing");
+
+  assertForeignKeys(db);
+}
+
 /** Apply ordered migrations after the legacy bootstrap/shape repairs finish. */
-export function migrateEngineerDatabase(db: Database, now = new Date().toISOString()): void {
+export function migrateEngineerDatabase(
+  db: Database,
+  now = new Date().toISOString(),
+  targetVersion: number = ENGINEER_DATABASE_SCHEMA_VERSION,
+): void {
   assertEngineerDatabaseVersionSupported(db);
 
   const appliedVersions = new Set((db.query("SELECT version FROM schema_migrations").all() as Array<{ version: number }>)
@@ -1021,8 +1155,12 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
   if (appliedVersions.has(33) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32].every((version) => appliedVersions.has(version)))) {
     throw new Error("Engineer schema v33 is missing required migration ancestry");
   }
+  if (appliedVersions.has(34) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33].every((version) => appliedVersions.has(version)))) {
+    throw new Error("Engineer schema v34 is missing required migration ancestry");
+  }
 
   for (const migration of MIGRATIONS) {
+    if (migration.version > targetVersion) break;
     if (maximumAppliedVersion(db) >= migration.version) continue;
     db.exec("BEGIN IMMEDIATE");
     try {
@@ -1063,6 +1201,9 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
       if (migration.version === 31) assertResolutionDeskShape(db);
       if (migration.version === 32) assertFailureUnderlyingCauseShape(db);
       if (migration.version === 33) assertPublicationAuthorityShape(db);
+      // v34 tenancy shape validated pre-commit; the v31/v33 exact-shape validators
+      // (which tolerate exactly the additive org_id column) re-run in the end block.
+      if (migration.version === 34) assertTenancyShape(db);
       db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(migration.version, now);
       db.exec("COMMIT");
@@ -1095,4 +1236,5 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
   if (finalVersion >= 31) assertResolutionDeskShape(db);
   if (finalVersion >= 32) assertFailureUnderlyingCauseShape(db);
   if (finalVersion >= 33) assertPublicationAuthorityShape(db);
+  if (finalVersion >= 34) assertTenancyShape(db);
 }

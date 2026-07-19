@@ -75,6 +75,8 @@ import {
 import {
   ENGINEER_DATABASE_BASE_SCHEMA_VERSION,
   ENGINEER_DATABASE_SCHEMA_SQL,
+  ENGINEER_DEFAULT_ORG_ID,
+  V34_ADDITIVE_COLUMN_NAMES,
 } from "./database-schema.js";
 import { assertEngineerDatabaseVersionSupported, migrateEngineerDatabase } from "./database-migrations.js";
 import {
@@ -595,6 +597,16 @@ function enableWalWithBoundedRetry(db: Database): void {
 export class EngineerLedger {
   private readonly db: Database;
   private readonly now: () => Date;
+  /**
+   * P10 tenancy: the org context these ledger queries scope to. Today the whole
+   * ledger is a single tenant — every pre/post-v34 row lives in the DEFAULT org,
+   * so scoping the high-traffic owner queries on `org_id = <default>` preserves
+   * behavior exactly while making them tenant-fenced. The multi-tenant path is
+   * `TenantScopedLedgerDal` (org bound at construction, isolation-tested); the
+   * SEAM not closed here is the gateway deriving a per-request org from the
+   * authenticated identity and threading it in place of this constant.
+   */
+  private readonly tenantOrgId: string = ENGINEER_DEFAULT_ORG_ID;
   private hardeningPromptCacheSecret?: string;
   private hardeningArtifactReader?: ArtifactByteReader;
   // P7 replacement-lineage authority. Injected at composition time via
@@ -880,8 +892,9 @@ export class EngineerLedger {
   }
 
   getRepositoryAdmission(ownerUserId: string, repositoryId: string): RepositoryAdmission | null {
-    const row = this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? AND a.repository_id = ?`)
-      .get(ownerUserId, repositoryId) as RepositoryAdmissionRow | null;
+    // P10: repository-admission read, org-scoped (default org today) + owner-scoped.
+    const row = this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? AND a.repository_id = ? AND a.org_id = ?`)
+      .get(ownerUserId, repositoryId, this.tenantOrgId) as RepositoryAdmissionRow | null;
     return row ? rowToRepositoryAdmission(row) : null;
   }
 
@@ -917,8 +930,9 @@ export class EngineerLedger {
   }
 
   listRepositoryAdmissions(ownerUserId: string): RepositoryAdmission[] {
-    return (this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? ORDER BY a.created_at, a.repository_id`)
-      .all(ownerUserId) as RepositoryAdmissionRow[]).map(rowToRepositoryAdmission);
+    // P10: repository-admission listing, org-scoped (default org today) + owner-scoped.
+    return (this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? AND a.org_id = ? ORDER BY a.created_at, a.repository_id`)
+      .all(ownerUserId, this.tenantOrgId) as RepositoryAdmissionRow[]).map(rowToRepositoryAdmission);
   }
 
   advanceRepositoryAdmissionBase(ownerUserId: string, repositoryId: string, previousSha: string, nextSha: string, now: string): RepositoryAdmission {
@@ -1016,7 +1030,8 @@ export class EngineerLedger {
   }
 
   getRun(runId: string): EngineerRun {
-    const row = this.db.query(`${RUN_SELECT} WHERE r.id = ?`).get(runId) as RunRow | null;
+    // P10: the ubiquitous run ownership guard, now org-scoped (default org today).
+    const row = this.db.query(`${RUN_SELECT} WHERE r.id = ? AND r.org_id = ?`).get(runId, this.tenantOrgId) as RunRow | null;
     if (!row) throw new EngineerNotFoundError("run", runId);
     return rowToRun(row);
   }
@@ -1142,10 +1157,11 @@ export class EngineerLedger {
   listRunsForUser(userId: string, limit = 50, before?: { createdAt: string; runId: string }): EngineerRun[] {
     if (!userId.trim()) throw new TypeError("run owner is required");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError("run page limit must be between 1 and 100");
+    // P10: keeps the existing owner (user_id) scope AND adds org scope (default org today).
     const rows = before
-      ? this.db.query(`${RUN_SELECT} WHERE r.user_id = ? AND (r.created_at < ? OR (r.created_at = ? AND r.id < ?)) ORDER BY r.created_at DESC, r.id DESC LIMIT ?`)
-        .all(userId, before.createdAt, before.createdAt, before.runId, limit)
-      : this.db.query(`${RUN_SELECT} WHERE r.user_id = ? ORDER BY r.created_at DESC, r.id DESC LIMIT ?`).all(userId, limit);
+      ? this.db.query(`${RUN_SELECT} WHERE r.user_id = ? AND r.org_id = ? AND (r.created_at < ? OR (r.created_at = ? AND r.id < ?)) ORDER BY r.created_at DESC, r.id DESC LIMIT ?`)
+        .all(userId, this.tenantOrgId, before.createdAt, before.createdAt, before.runId, limit)
+      : this.db.query(`${RUN_SELECT} WHERE r.user_id = ? AND r.org_id = ? ORDER BY r.created_at DESC, r.id DESC LIMIT ?`).all(userId, this.tenantOrgId, limit);
     return (rows as RunRow[]).map(rowToRun);
   }
 
@@ -1157,7 +1173,7 @@ export class EngineerLedger {
     const sql = `
       WITH
       selected_runs AS (
-        SELECT id FROM engineer_runs ${ownerId === undefined ? "" : "WHERE user_id = ?"}
+        SELECT id FROM engineer_runs ${ownerId === undefined ? "WHERE org_id = ?" : "WHERE org_id = ? AND user_id = ?"}
       ),
       pending AS (
         SELECT run_id, 1 AS pending_approvals
@@ -1236,7 +1252,8 @@ export class EngineerLedger {
       cache_write_input_tokens: number; estimated_cost_usd: number;
       approval_latency_total: number; approval_latency_count: number; evidence_complete: number;
     };
-    const rows = (ownerId === undefined ? this.db.query(sql).all() : this.db.query(sql).all(ownerId)) as ProjectionRow[];
+    // P10: org-scope the run projection (default org today), preserving the owner filter.
+    const rows = (ownerId === undefined ? this.db.query(sql).all(this.tenantOrgId) : this.db.query(sql).all(this.tenantOrgId, ownerId)) as ProjectionRow[];
     return rows.map((row) => ({
       run: rowToRun(row),
       pendingApprovals: Number(row.pending_approvals),
@@ -1257,9 +1274,9 @@ export class EngineerLedger {
     const sql = `SELECT failure.failure_class, COUNT(*) AS count
       FROM failure_records failure
       JOIN engineer_runs run ON run.id = failure.run_id
-      ${ownerId === undefined ? "" : "WHERE run.user_id = ?"}
+      ${ownerId === undefined ? "WHERE run.org_id = ?" : "WHERE run.org_id = ? AND run.user_id = ?"}
       GROUP BY failure.failure_class ORDER BY failure.failure_class`;
-    const rows = (ownerId === undefined ? this.db.query(sql).all() : this.db.query(sql).all(ownerId)) as Array<{ failure_class: string; count: number }>;
+    const rows = (ownerId === undefined ? this.db.query(sql).all(this.tenantOrgId) : this.db.query(sql).all(this.tenantOrgId, ownerId)) as Array<{ failure_class: string; count: number }>;
     return rows.map((row) => ({ failureClass: row.failure_class, count: Number(row.count) }));
   }
 
@@ -1293,7 +1310,33 @@ export class EngineerLedger {
     return [...RUN_EXPORT_TABLES];
   }
 
+  /**
+   * Export a page of a run's records for attestation / byte-graph integrity.
+   *
+   * The v34 tenancy annotations (org_id, retention_class, connector/authority
+   * actor identity) are STRIPPED here: they are operational tenancy metadata,
+   * not part of a run's attested CONTENT. Leaving them in would make every
+   * content-integrity hash (hardening semantic/evidence authority, verification
+   * byte-graph, tamper detection) tenancy-dependent and would break attestations
+   * computed before v34. Tenant isolation is enforced by the tenant-scoped DAL
+   * on the query path, not by these content hashes.
+   */
   exportRunRecordPage(runId: string, table: RunExportTable, offset: number, limit = 500): Array<Record<string, unknown>> {
+    const rows = this.exportRunRecordPageRaw(runId, table, offset, limit);
+    if (rows.length === 0) return rows;
+    return rows.map((row) => {
+      let stripped: Record<string, unknown> | undefined;
+      for (const column of V34_ADDITIVE_COLUMN_NAMES) {
+        if (column in row) {
+          stripped ??= { ...row };
+          delete stripped[column];
+        }
+      }
+      return stripped ?? row;
+    });
+  }
+
+  private exportRunRecordPageRaw(runId: string, table: RunExportTable, offset: number, limit = 500): Array<Record<string, unknown>> {
     this.getRun(runId);
     if (!RUN_EXPORT_TABLES.includes(table)) throw new TypeError("unknown run export table");
     if (!Number.isSafeInteger(offset) || offset < 0) throw new TypeError("run export offset must be a non-negative safe integer");
@@ -4837,7 +4880,8 @@ export class EngineerLedger {
     try {
       const run=this.db.query("SELECT user_id,repository_id,state_version FROM engineer_runs WHERE id=? AND user_id=?").get(input.runId,ownerId) as {user_id:string;repository_id:string;state_version:number}|null;
       if(!run)throw new EngineerNotFoundError("hardening quote",input.runId);
-      const existingRequest=this.db.query("SELECT * FROM hardening_quote_requests WHERE requester_user_id=? AND idempotency_key=?").get(ownerId,input.idempotencyKey) as Record<string,unknown>|null;
+      // P10: hardening requester-scoped idempotency read, org-scoped (default org today).
+      const existingRequest=this.db.query("SELECT * FROM hardening_quote_requests WHERE requester_user_id=? AND idempotency_key=? AND org_id=?").get(ownerId,input.idempotencyKey,this.tenantOrgId) as Record<string,unknown>|null;
       if(existingRequest){
         this.assertQuoteRequestRow(existingRequest,ownerId,input);
         const checkpoint=this.assertSignedHardeningParent(input.runId,signed);
@@ -4940,7 +4984,8 @@ export class EngineerLedger {
     try {
       const run=this.db.query("SELECT state_version FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId) as {state_version:number}|null;
       if(!run)throw new EngineerNotFoundError("hardening consent",input.quoteId);
-      const existingRow=this.db.query("SELECT * FROM hardening_consents WHERE requester_user_id=? AND idempotency_key=?").get(ownerId,input.idempotencyKey) as Record<string,unknown>|null;
+      // P10: hardening requester-scoped idempotency read, org-scoped (default org today).
+      const existingRow=this.db.query("SELECT * FROM hardening_consents WHERE requester_user_id=? AND idempotency_key=? AND org_id=?").get(ownerId,input.idempotencyKey,this.tenantOrgId) as Record<string,unknown>|null;
       if(existingRow){const existing=this.hardeningConsentFromRow(existingRow);
         if(existing.parentRunId!==runId||existing.quoteId!==input.quoteId||existing.quoteHash!==input.quoteHash||existing.parentStateVersion!==input.expectedParentStateVersion||
           canonicalJson(existing.authorizedBudget)!==canonicalJson(input.authorizedBudget)||canonicalJson(existing.acknowledgements)!==canonicalJson(input.acknowledgements))

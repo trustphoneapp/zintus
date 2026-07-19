@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 33;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 34;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -2918,3 +2918,345 @@ export const ENGINEER_DATABASE_MIGRATION_33_SQL = `
   CREATE TRIGGER prevent_pub_reconciliation_update_v33 BEFORE UPDATE ON publication_reconciliations_v33 BEGIN SELECT RAISE(ABORT,'publication reconciliations are immutable'); END;
   CREATE TRIGGER prevent_pub_reconciliation_delete_v33 BEFORE DELETE ON publication_reconciliations_v33 BEGIN SELECT RAISE(ABORT,'publication reconciliations are immutable'); END;
 `;
+
+/**
+ * P10 tenancy — migration v34 (LIVE integration of the p10-tenancy lane draft).
+ *
+ * Additive-only tenancy/RBAC substrate. Authored from the frozen table lists
+ * below so the migration SQL, the DAL scoping column, and the completeness
+ * tripwire all derive from a single source of truth.
+ *
+ * Design constraints (unchanged from the vetted draft):
+ *  - additive only: no legacy-row rewrite, no table rebuild, every v14-v33
+ *    object's identity/triggers/indexes preserved byte-for-byte (only each
+ *    tenant-owned TABLE's stored `sql` gains a trailing `org_id` column, which
+ *    the v31/v33 exact-shape validators explicitly tolerate);
+ *  - every tenant-owned table gains `org_id TEXT NOT NULL`, backfilled to the
+ *    single-tenant DEFAULT org for all pre-v34 rows;
+ *  - actor identity on authority rows; connector identity on repository rows;
+ *    retention class on durable content owners;
+ *  - new authority tables (orgs, org_memberships, non_human_actors) carry the
+ *    v29/v30-style immutability/fence triggers.
+ *
+ * SQLite additive-column limitation: an `ALTER TABLE ... ADD COLUMN` may not
+ * carry a `REFERENCES` clause with a non-NULL default, and a `NOT NULL` column
+ * requires a constant default. `org_id` is therefore a plain `NOT NULL DEFAULT`
+ * column; referential integrity to `orgs(id)` is enforced by the tenant DAL and
+ * documented, not by an FK. This is the only additive way to add a backfilled
+ * NOT NULL tenant key in SQLite.
+ *
+ * Coverage vs the standalone v30-base draft: this list is EXTENDED to cover the
+ * tables that did not exist at the draft's v30 base — the P7 resolution tables
+ * (v31) and the P8 publication tables (v33) — so the completeness tripwire holds
+ * against the live v33 schema.
+ */
+
+/** The single-tenant org every pre-v34 row is backfilled into. */
+export const ENGINEER_DEFAULT_ORG_ID = "org_default_single_tenant";
+
+/** Retention classes; STANDARD is the backfill default for legacy rows. */
+export const ENGINEER_RETENTION_CLASSES = ["STANDARD", "EXTENDED", "LEGAL_HOLD", "EPHEMERAL"] as const;
+export type EngineerRetentionClass = (typeof ENGINEER_RETENTION_CLASSES)[number];
+
+/** Sentinel connector identity stamped onto legacy repository rows. */
+export const LEGACY_CONNECTOR_ACTOR_ID = "connector:legacy-unattributed";
+/** Sentinel authority actor stamped onto legacy authority rows. */
+export const LEGACY_AUTHORITY_ACTOR_ID = "actor:legacy-unattributed";
+
+/**
+ * Every tenant-owned table that gains `org_id`. Excludes the global principal
+ * table (`users`) and `schema_migrations`. Self-checking: the completeness
+ * tripwire fails if any live table carrying an ownership-shaped column is absent
+ * here, and the shape assertion fails if any name here lacks `org_id`.
+ */
+export const TENANT_OWNED_TABLES = [
+  "engineer_runs",
+  "repository_connections",
+  "repository_admissions",
+  "task_manifest_versions",
+  "plan_proposals",
+  "context_manifests",
+  "context_sources",
+  "context_warnings",
+  "decisions",
+  "decision_evidence",
+  "decision_resolutions",
+  "acceptance_criteria",
+  "agent_executions",
+  "model_calls",
+  "model_routing_decisions",
+  "builder_dispatch_claims",
+  "verified_candidate_checkpoints",
+  "sandboxes",
+  "sandbox_heartbeats",
+  "warm_sandboxes",
+  "command_executions",
+  "artifacts",
+  "evidence_bundles",
+  "claim_evidence",
+  "test_executions",
+  "test_results",
+  "security_findings",
+  "reviewer_sessions",
+  "review_classification_batches",
+  "review_findings",
+  "review_finding_classifications",
+  "risk_assessments",
+  "approval_requests",
+  "approval_decisions",
+  "retry_attempts",
+  "failure_records",
+  "cost_records",
+  "budget_events",
+  "audit_events",
+  "git_operations",
+  "run_budgets",
+  "run_state_events",
+  "required_lane_contracts",
+  "advisory_backlog_items",
+  "advisory_backlog_events",
+  "candidate_lineage_attestations",
+  "publication_candidate_selections",
+  "engineer_run_lineage",
+  "hardening_quote_advisories",
+  "hardening_quotes",
+  "hardening_quote_requests",
+  "hardening_quote_sizing_authorities",
+  "hardening_consents",
+  "hardening_start_operations",
+  "hardening_start_claims",
+  "hardening_seed_attestations",
+  "hardening_model_call_slots",
+  "hardening_child_budget_authorities",
+  "hardening_child_model_reservations",
+  "hardening_child_tool_actions",
+  "hardening_paid_call_finalizations",
+  "hardening_recovery_worker_fences",
+  // P7 resolution tables (v31) — did not exist at the draft's v30 base.
+  "resolution_cases",
+  "resolution_directives",
+  "resolution_events",
+  "resolution_replacements",
+  // P8 publication authority tables (v33) — did not exist at the draft's v30 base.
+  "publication_candidate_selections_v33",
+  "publication_approvals_v33",
+  "publication_git_operations_v33",
+  "publication_remote_receipts_v33",
+  "publication_reconciliations_v33",
+] as const;
+export type TenantOwnedTable = (typeof TENANT_OWNED_TABLES)[number];
+
+/**
+ * Tables that pre-exist in v31/v33 and carry their own exact-shape validators.
+ * Adding `org_id` via ALTER rewrites only these tables' stored `sql`
+ * (triggers/indexes are untouched by ADD COLUMN); the v31/v33 validators
+ * tolerate exactly this trailing additive column and nothing else.
+ */
+export const V34_AUGMENTED_V31_TABLES = [
+  "resolution_cases",
+  "resolution_directives",
+  "resolution_events",
+  "resolution_replacements",
+] as const;
+export const V34_AUGMENTED_V33_TABLES = [
+  "publication_candidate_selections_v33",
+  "publication_approvals_v33",
+  "publication_git_operations_v33",
+  "publication_remote_receipts_v33",
+  "publication_reconciliations_v33",
+] as const;
+
+/** Durable content owners that gain an explicit `retention_class`. */
+export const RETENTION_CLASS_TABLES = [
+  "engineer_runs",
+  "repository_connections",
+  "repository_admissions",
+  "artifacts",
+  "evidence_bundles",
+  "run_budgets",
+] as const;
+
+/** Repository rows that gain connector identity. */
+export const CONNECTOR_IDENTITY_TABLES = [
+  "repository_connections",
+  "repository_admissions",
+] as const;
+
+/**
+ * Authority rows that gain an explicit actor identity. The DAL requires a real
+ * actor at write time; the legacy default is a non-authoritative sentinel.
+ */
+export const AUTHORITY_ACTOR_TABLES = [
+  "approval_requests",
+  "approval_decisions",
+  "repository_admissions",
+  "run_budgets",
+  "verified_candidate_checkpoints",
+  "publication_candidate_selections",
+] as const;
+
+/**
+ * Every additive column v34 splices onto a tenant table, as its exact column
+ * DDL. SINGLE SOURCE OF TRUTH: the migration builders below and the v18-v33
+ * shape validators (which must tolerate exactly these columns) both derive from
+ * this list, so the two can never drift.
+ */
+export const V34_ORG_ID_COLUMN_DDL = `org_id TEXT NOT NULL DEFAULT '${ENGINEER_DEFAULT_ORG_ID}'`;
+const V34_RETENTION_COLUMN_DDL = `retention_class TEXT NOT NULL DEFAULT 'STANDARD'`;
+const V34_CONNECTOR_ID_COLUMN_DDL = `connector_actor_id TEXT NOT NULL DEFAULT '${LEGACY_CONNECTOR_ACTOR_ID}'`;
+const V34_CONNECTOR_KIND_COLUMN_DDL = `connector_actor_kind TEXT NOT NULL DEFAULT 'HUMAN'`;
+const V34_AUTHORITY_ID_COLUMN_DDL = `authority_actor_id TEXT NOT NULL DEFAULT '${LEGACY_AUTHORITY_ACTOR_ID}'`;
+const V34_AUTHORITY_KIND_COLUMN_DDL = `authority_actor_kind TEXT NOT NULL DEFAULT 'HUMAN'`;
+
+/** All v34 additive column DDLs (order = migration application order per table). */
+export const V34_ADDITIVE_COLUMN_DDLS = [
+  V34_ORG_ID_COLUMN_DDL,
+  V34_RETENTION_COLUMN_DDL,
+  V34_CONNECTOR_ID_COLUMN_DDL,
+  V34_CONNECTOR_KIND_COLUMN_DDL,
+  V34_AUTHORITY_ID_COLUMN_DDL,
+  V34_AUTHORITY_KIND_COLUMN_DDL,
+] as const;
+
+/** The bare column names v34 adds — used to filter tenant-table column lists. */
+export const V34_ADDITIVE_COLUMN_NAMES = [
+  "org_id", "retention_class",
+  "connector_actor_id", "connector_actor_kind",
+  "authority_actor_id", "authority_actor_kind",
+] as const;
+
+function orgIdColumnSql(table: string): string {
+  return `  ALTER TABLE ${table} ADD COLUMN ${V34_ORG_ID_COLUMN_DDL};`;
+}
+
+function retentionColumnSql(table: string): string {
+  return `  ALTER TABLE ${table} ADD COLUMN ${V34_RETENTION_COLUMN_DDL};`;
+}
+
+function connectorIdentitySql(table: string): string {
+  return [
+    `  ALTER TABLE ${table} ADD COLUMN ${V34_CONNECTOR_ID_COLUMN_DDL};`,
+    `  ALTER TABLE ${table} ADD COLUMN ${V34_CONNECTOR_KIND_COLUMN_DDL};`,
+  ].join("\n");
+}
+
+function authorityActorSql(table: string): string {
+  return [
+    `  ALTER TABLE ${table} ADD COLUMN ${V34_AUTHORITY_ID_COLUMN_DDL};`,
+    `  ALTER TABLE ${table} ADD COLUMN ${V34_AUTHORITY_KIND_COLUMN_DDL};`,
+  ].join("\n");
+}
+
+/**
+ * New tenancy-authority tables + their fence/immutability triggers. Trigger
+ * style mirrors v29/v30: RAISE(ABORT) guards, an update fence pinning immutable
+ * identity columns, monotonic status transitions, and a durable posture.
+ */
+const TENANCY_AUTHORITY_TABLES_SQL = `
+  CREATE TABLE orgs (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
+    display_name TEXT NOT NULL,
+    default_retention_class TEXT NOT NULL DEFAULT 'STANDARD'
+      CHECK(default_retention_class IN ('STANDARD','EXTENDED','LEGAL_HOLD','EPHEMERAL')),
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','SUSPENDED')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE TRIGGER fence_orgs_update_v34 BEFORE UPDATE ON orgs BEGIN
+    SELECT CASE WHEN OLD.id IS NOT NEW.id OR OLD.created_at IS NOT NEW.created_at
+      THEN RAISE(ABORT,'org identity is immutable') END;
+  END;
+  CREATE TRIGGER prevent_orgs_delete_v34 BEFORE DELETE ON orgs BEGIN
+    SELECT RAISE(ABORT,'orgs are durable'); END;
+
+  CREATE TABLE org_memberships (
+    membership_id TEXT PRIMARY KEY NOT NULL CHECK(length(membership_id) BETWEEN 1 AND 200),
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE RESTRICT,
+    actor_id TEXT NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 200),
+    actor_kind TEXT NOT NULL CHECK(actor_kind IN ('HUMAN','NON_HUMAN')),
+    role TEXT NOT NULL CHECK(role IN
+      ('REQUESTER','RESOLVER','APPROVER','SECURITY_REVIEWER','REPO_ADMIN','ORG_ADMIN','AUDITOR')),
+    human_sponsor_id TEXT,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','REVOKED')),
+    granted_by_actor_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    UNIQUE(org_id, actor_id, role),
+    CHECK((actor_kind='HUMAN' AND human_sponsor_id IS NULL)
+      OR (actor_kind='NON_HUMAN' AND human_sponsor_id IS NOT NULL
+        AND length(trim(human_sponsor_id)) >= 1 AND human_sponsor_id <> actor_id)),
+    CHECK((status='ACTIVE' AND revoked_at IS NULL)
+      OR (status='REVOKED' AND revoked_at IS NOT NULL))
+  );
+  CREATE INDEX idx_org_memberships_actor_v34 ON org_memberships(actor_id, status, org_id);
+  CREATE INDEX idx_org_memberships_org_role_v34 ON org_memberships(org_id, role, status);
+  CREATE TRIGGER fence_org_memberships_update_v34 BEFORE UPDATE ON org_memberships BEGIN
+    SELECT CASE WHEN OLD.membership_id IS NOT NEW.membership_id OR OLD.org_id IS NOT NEW.org_id
+      OR OLD.actor_id IS NOT NEW.actor_id OR OLD.actor_kind IS NOT NEW.actor_kind
+      OR OLD.role IS NOT NEW.role OR OLD.human_sponsor_id IS NOT NEW.human_sponsor_id
+      OR OLD.created_at IS NOT NEW.created_at OR OLD.granted_by_actor_id IS NOT NEW.granted_by_actor_id
+      THEN RAISE(ABORT,'org membership identity is immutable') END;
+    SELECT CASE WHEN NOT (OLD.status='ACTIVE' AND NEW.status='REVOKED')
+      THEN RAISE(ABORT,'org membership status is monotonic (ACTIVE -> REVOKED only)') END;
+  END;
+  CREATE TRIGGER prevent_org_memberships_delete_v34 BEFORE DELETE ON org_memberships BEGIN
+    SELECT RAISE(ABORT,'org memberships are durable; revoke instead of delete'); END;
+
+  CREATE TABLE non_human_actors (
+    actor_id TEXT PRIMARY KEY NOT NULL CHECK(length(actor_id) BETWEEN 1 AND 200),
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE RESTRICT,
+    human_sponsor_id TEXT NOT NULL CHECK(length(trim(human_sponsor_id)) >= 1 AND length(human_sponsor_id) <= 200),
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','REVOKED')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    revoked_at TEXT,
+    CHECK(human_sponsor_id <> actor_id),
+    CHECK((status='ACTIVE' AND revoked_at IS NULL)
+      OR (status='REVOKED' AND revoked_at IS NOT NULL))
+  );
+  CREATE INDEX idx_non_human_actors_sponsor_v34 ON non_human_actors(human_sponsor_id, org_id);
+  CREATE TRIGGER fence_non_human_actors_update_v34 BEFORE UPDATE ON non_human_actors BEGIN
+    SELECT CASE WHEN OLD.actor_id IS NOT NEW.actor_id OR OLD.org_id IS NOT NEW.org_id
+      OR OLD.human_sponsor_id IS NOT NEW.human_sponsor_id OR OLD.created_at IS NOT NEW.created_at
+      THEN RAISE(ABORT,'non-human actor identity and its human sponsor are immutable') END;
+    SELECT CASE WHEN NOT (OLD.status='ACTIVE' AND NEW.status='REVOKED')
+      THEN RAISE(ABORT,'non-human actor status is monotonic (ACTIVE -> REVOKED only)') END;
+  END;
+  CREATE TRIGGER prevent_non_human_actors_delete_v34 BEFORE DELETE ON non_human_actors BEGIN
+    SELECT RAISE(ABORT,'non-human actor identities are durable'); END;
+`;
+
+/**
+ * Build the full v34 migration SQL deterministically from the frozen table
+ * lists. `now` stamps the default org's created_at/updated_at.
+ */
+export function buildTenancyMigration34Sql(now: string): string {
+  const parts: string[] = [];
+  parts.push(TENANCY_AUTHORITY_TABLES_SQL.trim());
+  parts.push(
+    `  INSERT INTO orgs(id, display_name, default_retention_class, status, created_at, updated_at)` +
+      ` VALUES ('${ENGINEER_DEFAULT_ORG_ID}', 'Default single-tenant org', 'STANDARD', 'ACTIVE', '${now}', '${now}');`,
+  );
+  parts.push("  -- org_id on every tenant-owned table (backfilled to the default org)");
+  for (const table of TENANT_OWNED_TABLES) parts.push(orgIdColumnSql(table));
+  parts.push("  -- retention class on durable content owners");
+  for (const table of RETENTION_CLASS_TABLES) parts.push(retentionColumnSql(table));
+  parts.push("  -- connector identity on repository rows");
+  for (const table of CONNECTOR_IDENTITY_TABLES) parts.push(connectorIdentitySql(table));
+  parts.push("  -- actor identity on authority rows");
+  for (const table of AUTHORITY_ACTOR_TABLES) parts.push(authorityActorSql(table));
+  parts.push(
+    "  -- org-scoped indexes for tenant-scoped listing",
+    "  CREATE INDEX idx_engineer_runs_org_created_v34 ON engineer_runs(org_id, created_at DESC, id DESC);",
+    "  CREATE INDEX idx_repository_connections_org_v34 ON repository_connections(org_id, user_id);",
+  );
+  return `\n${parts.join("\n")}\n`;
+}
+
+/**
+ * Materialized v34 migration SQL with a fixed default-org timestamp. Applied by
+ * the live migration chain (database-migrations.ts).
+ */
+export const ENGINEER_DATABASE_MIGRATION_34_SQL = buildTenancyMigration34Sql("2026-07-19T00:00:00.000Z");
