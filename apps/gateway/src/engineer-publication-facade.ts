@@ -137,7 +137,7 @@ interface PublicationAuthorityServiceLike {
     resolution: "RECEIPTED" | "FAILED",
     detail: string,
     receipt?: { prUrl: string; commitSha: string },
-  ): { publicationId: string; state: string };
+  ): Promise<{ publicationId: string; state: string }>;
 }
 
 /**
@@ -529,7 +529,7 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
       return service.resume(publicationId);
     },
 
-    resolveReconciliation(_p, publicationId, body) {
+    async resolveReconciliation(_p, publicationId, body) {
       if (!isOwnedPublication(publicationId)) throw new CandidateNotFoundError();
       const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
       const resolution = record.resolution;
@@ -543,6 +543,10 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
       // F5: a RECEIPTED resolution must carry a real receipt. Validate prUrl +
       // a 40/64-hex commitSha here so the operator establishes the true remote
       // outcome; the service persists it atomically with the RECEIPTED transition.
+      // F-L1 (Luna): shape is NOT sufficient — the service additionally BINDS the
+      // receipt to this publication (commitSha == the run's verified result commit,
+      // and, when discovery confirms, prUrl == the discovered open-draft PR), so a
+      // foreign prUrl/commitSha can no longer be persisted verbatim.
       const prUrl = record.prUrl;
       const commitSha = record.commitSha;
       if (typeof prUrl !== "string" || !prUrl.trim() ||

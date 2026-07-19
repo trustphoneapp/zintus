@@ -8,6 +8,7 @@ import {
   ApprovalConsumedError,
   PreflightMismatchError,
   PublicationIdempotencyConflictError,
+  PublicationReceiptBindingError,
   SelfApprovalError,
   StaleCandidateError,
   PUBLICATION_AUTHORITY_POLICY_VERSION,
@@ -419,7 +420,7 @@ describe("v33 publication flow — RECONCILING is durable & typed", () => {
     const approval = await seedApprovedOriginal(h);
     const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
     await h.draft.dispatch(started.publicationId);
-    const resolved = h.draft.resolveReconciliation(started.publicationId, "FAILED", "operator confirmed no PR landed");
+    const resolved = await h.draft.resolveReconciliation(started.publicationId, "FAILED", "operator confirmed no PR landed");
     expect(resolved.state).toBe("FAILED");
   });
 });
@@ -438,7 +439,7 @@ describe("F5 — manual RECEIPTED resolution must persist a real receipt", () =>
   test("resolveReconciliation to RECEIPTED WITHOUT a receipt is rejected; no RECEIPTED row is written", async () => {
     const h = harness({ outcome: { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" } });
     const publicationId = await seedReconciling(h);
-    expect(() => h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator says it landed")).toThrow();
+    await expect(h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator says it landed")).rejects.toThrow();
     // Still RECONCILING; no phantom RECEIPTED, no receipt.
     expect(h.draft.getPublication(publicationId).state).toBe("RECONCILING");
     const receipts = h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number };
@@ -448,7 +449,7 @@ describe("F5 — manual RECEIPTED resolution must persist a real receipt", () =>
   test("resolveReconciliation to RECEIPTED WITH a receipt persists it; getPublication returns it", async () => {
     const h = harness({ outcome: { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" } });
     const publicationId = await seedReconciling(h);
-    const resolved = h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed PR", {
+    const resolved = await h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed PR", {
       prUrl: "https://example/pr/recovered", commitSha: RESULT_COMMIT,
     });
     expect(resolved.state).toBe("RECEIPTED");
@@ -458,6 +459,76 @@ describe("F5 — manual RECEIPTED resolution must persist a real receipt", () =>
     expect(view.receipt?.prUrl).toBe("https://example/pr/recovered");
     const receipts = h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number };
     expect(receipts.c).toBe(1);
+  });
+});
+
+// F-L1 (Luna): a MANUAL RECEIPTED resolution must BIND to THIS publication — not
+// merely be well-shaped. The AUTO-discovery path binds tightly (exact head/sha/base/
+// open/draft); the human override previously validated SHAPE only, so an operator
+// could reconcile to RECEIPTED with a FOREIGN prUrl + a foreign commitSha and it
+// persisted verbatim. The receipt is now server-BOUND: commitSha == the run's
+// verified result commit, and — when read-only discovery confirms — prUrl == the
+// discovered open-draft PR. These tests are RED on the shape-only code.
+describe("F-L1 — manual RECEIPTED receipt must BIND to the publication (provenance integrity)", () => {
+  async function seedReconciling(h: Harness) {
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await h.draft.dispatch(started.publicationId); // AMBIGUOUS actuator parks RECONCILING
+    expect(h.draft.getPublication(started.publicationId).state).toBe("RECONCILING");
+    return started.publicationId;
+  }
+  const AMBIGUOUS: ActuatorOutcome = { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" };
+  // The exact Luna attack: a real GitHub URL in a DIFFERENT repo + a foreign commit.
+  const FOREIGN_PR = "https://github.com/attacker/other-repo/pull/999";
+  const FOREIGN_COMMIT = "9".repeat(40);
+  const DISCOVERED_PR = "https://example/pr/authoritative";
+  const confirmingDiscovery: PublicationReceiptDiscovery = {
+    discoverExistingReceipt: async (input) => ({ kind: "RECEIPT", prUrl: DISCOVERED_PR, commitSha: input.resultCommitSha }),
+  };
+
+  test("RED: a FOREIGN commitSha (≠ the run's verified result commit) is REJECTED; no RECEIPTED row, still RECONCILING", async () => {
+    const h = harness({ outcome: AMBIGUOUS });
+    const publicationId = await seedReconciling(h);
+    await expect(h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator claims it landed", {
+      prUrl: FOREIGN_PR, commitSha: FOREIGN_COMMIT,
+    })).rejects.toThrow(PublicationReceiptBindingError);
+    expect(h.draft.getPublication(publicationId).state).toBe("RECONCILING");
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
+  });
+
+  test("RED: a prUrl NOT matching the discovered open-draft PR is REJECTED even with the correct commitSha", async () => {
+    const h = harness({ outcome: AMBIGUOUS, receiptDiscovery: confirmingDiscovery });
+    const publicationId = await seedReconciling(h);
+    await expect(h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator claims it landed", {
+      prUrl: FOREIGN_PR, commitSha: RESULT_COMMIT,
+    })).rejects.toThrow(PublicationReceiptBindingError);
+    expect(h.discoveryCalls).toBe(1); // the read-only discovery actually ran
+    expect(h.draft.getPublication(publicationId).state).toBe("RECONCILING");
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
+  });
+
+  test("a correctly-bound receipt (commitSha == verified result commit, prUrl == discovered PR) is ACCEPTED and persists the discovered reference", async () => {
+    const h = harness({ outcome: AMBIGUOUS, receiptDiscovery: confirmingDiscovery });
+    const publicationId = await seedReconciling(h);
+    const resolved = await h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed PR", {
+      prUrl: DISCOVERED_PR, commitSha: RESULT_COMMIT,
+    });
+    expect(resolved.state).toBe("RECEIPTED");
+    expect(resolved.receipt).toEqual({ prUrl: DISCOVERED_PR, commitSha: RESULT_COMMIT });
+    expect(h.discoveryCalls).toBe(1);
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(1);
+  });
+
+  test("no discovery seam: the commitSha binding alone still rejects a foreign commit and accepts the bound one (prUrl operator-trusted, documented)", async () => {
+    const h = harness({ outcome: AMBIGUOUS }); // no receiptDiscovery wired
+    const publicationId = await seedReconciling(h);
+    await expect(h.draft.resolveReconciliation(publicationId, "RECEIPTED", "x", { prUrl: FOREIGN_PR, commitSha: FOREIGN_COMMIT }))
+      .rejects.toThrow(PublicationReceiptBindingError);
+    const resolved = await h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed", { prUrl: FOREIGN_PR, commitSha: RESULT_COMMIT });
+    expect(resolved.state).toBe("RECEIPTED");
+    // With no remote to confirm the PR, the commit is server-bound but the prUrl remains operator-trusted.
+    expect(resolved.receipt).toEqual({ prUrl: FOREIGN_PR, commitSha: RESULT_COMMIT });
+    expect(h.discoveryCalls).toBe(0);
   });
 });
 

@@ -9,6 +9,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./publication-manager": {
+      "types": "./src/publication-manager.ts",
+      "default": "./src/publication-manager.ts"
     }
   },
   "scripts": {

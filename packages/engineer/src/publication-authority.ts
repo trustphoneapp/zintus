@@ -194,6 +194,23 @@ export class PublicationReceiptRequiredError extends Error {
   readonly code = "PUBLICATION_RECEIPT_REQUIRED";
   constructor() { super("a RECEIPTED resolution must carry a real receipt (prUrl + commitSha)"); this.name = "PublicationReceiptRequiredError"; }
 }
+/**
+ * F-L1 (Luna): a MANUAL RECEIPTED resolution must BIND to THIS publication, not
+ * merely be well-shaped. Raised when an operator-supplied receipt does not bind:
+ *   - its `commitSha` is not this publication's server-derived selection result
+ *     commit (a foreign/wrong commit is rejected — it can never be re-labelled the
+ *     verified change's receipt), OR
+ *   - read-only existing-PR discovery positively found the live OPEN DRAFT PR for
+ *     this publication and its `html_url` does not equal the operator-supplied
+ *     `prUrl` (a receipt pointing at a different/foreign PR is rejected).
+ * The binding is derived SERVER-SIDE from the durable operation → selection → run;
+ * the operator can no longer persist an unbound receipt verbatim.
+ */
+export class PublicationReceiptBindingError extends Error {
+  readonly httpStatus = 409;
+  readonly code = "PUBLICATION_RECEIPT_BINDING";
+  constructor(message: string) { super(message); this.name = "PublicationReceiptBindingError"; }
+}
 
 // ---------------------------------------------------------------------------
 // Input schemas (frozen §3 bodies; server derives all authority)
@@ -597,12 +614,12 @@ export class PublicationAuthorityService {
    * any other. It is never invoked automatically — a human/operator drives it
    * after establishing the true remote state.
    */
-  resolveReconciliation(
+  async resolveReconciliation(
     publicationId: string,
     resolution: "RECEIPTED" | "FAILED",
     detail: string,
     receipt?: { readonly prUrl: string; readonly commitSha: string },
-  ): PublicationView {
+  ): Promise<PublicationView> {
     const current = this.requireCurrentOperation(publicationId);
     if (current.state !== "RECONCILING") {
       throw new PublicationStateConflictError(`resolution requires RECONCILING, not ${current.state}`);
@@ -618,6 +635,53 @@ export class PublicationAuthorityService {
     if (!receipt || !receipt.prUrl.trim() || !receipt.commitSha.trim()) {
       throw new PublicationReceiptRequiredError();
     }
+    // F-L1 (Luna): the manual RECEIPTED path validated the receipt for SHAPE only,
+    // so an operator could reconcile to RECEIPTED with a FOREIGN prUrl + a foreign
+    // commitSha and it persisted verbatim (unlike the tight AUTO-discovery path).
+    // BIND the manual receipt to THIS publication server-side:
+    //
+    // (1) commitSha MUST equal the publication's OWN verified result commit, derived
+    //     server-side from the durable operation → selection → run (never trusted
+    //     from the operator). A foreign/wrong commit is rejected before any state
+    //     change — it can never be re-labelled this verified change's receipt.
+    const expectedCommitSha = this.selectionResultCommit(current);
+    if (receipt.commitSha.trim().toLowerCase() !== expectedCommitSha.trim().toLowerCase()) {
+      throw new PublicationReceiptBindingError(
+        "manual RECEIPTED receipt commitSha does not match the publication's verified result commit",
+      );
+    }
+    // (2) STRONGLY PREFERRED: re-run the READ-ONLY exact-PR discovery (the same
+    //     side-effect-free credentialed lookup the restart path uses). When it
+    //     CONFIRMS an exact OPEN DRAFT PR for this publication, its html_url is
+    //     authoritative: the operator-supplied prUrl MUST equal it (else reject),
+    //     and the discovered reference is what we persist. When discovery cannot
+    //     positively confirm (no discovery seam, no remote access → throw, or no
+    //     matching PR found), we fall back to the commitSha binding alone; in that
+    //     documented case the prUrl remains OPERATOR-TRUSTED (the commit binding is
+    //     the non-bypassable minimum). Discovery is side-effect-free — it never
+    //     creates/updates/deletes a remote ref or PR.
+    let boundPrUrl = receipt.prUrl.trim();
+    const discovery = this.deps.receiptDiscovery;
+    if (discovery) {
+      let discovered: ActuatorOutcome | null = null;
+      try {
+        discovered = await discovery.discoverExistingReceipt({
+          runId: current.run_id, publicationId, repositoryId: current.repository_id,
+          baseCommitSha: current.base_commit_sha, resultCommitSha: expectedCommitSha,
+          idempotencyKey: current.idempotency_key,
+        });
+      } catch {
+        discovered = null; // remote unknown => cannot confirm => commitSha binding only
+      }
+      if (discovered && discovered.kind === "RECEIPT") {
+        if (discovered.prUrl.trim() !== boundPrUrl) {
+          throw new PublicationReceiptBindingError(
+            "manual RECEIPTED prUrl does not match the discovered open-draft pull request for this publication",
+          );
+        }
+        boundPrUrl = discovered.prUrl.trim(); // persist the authoritative discovered reference
+      }
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const receipted = this.appendTransitionLocked(current, "RECEIPTED", "RECONCILING", detail, "RESOLVED_RECEIPTED");
@@ -625,7 +689,7 @@ export class PublicationAuthorityService {
         (id, publication_id, publication_revision, idempotency_key, pr_url, commit_sha, observed_at, created_at)
         VALUES (?,?,?,?,?,?,?,?)`).run(
           this.id(), current.publication_id, receipted.revision, current.idempotency_key,
-          receipt.prUrl, receipt.commitSha, this.now(), this.now());
+          boundPrUrl, expectedCommitSha, this.now(), this.now());
       this.db.exec("COMMIT");
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* preserve resolution failure */ }

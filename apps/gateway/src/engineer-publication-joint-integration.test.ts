@@ -410,6 +410,62 @@ describe("JOINT GATE — R3 publication + R4 attestation/export/tenant driven to
   });
 
   // ------------------------------------------------------------------------
+  // Assertion 1b (Sol P2-3): REAL-LEDGER ATOMICITY. The facade's other atomicity
+  // tests use a MOCK decideApprove (sentinel write) — they prove the rollback
+  // wrapper but NOT the REAL ledger.decideApproval savepoint nesting. The entire
+  // R5C guarantee rides on bun:sqlite nested `.transaction()` savepoints unwinding
+  // the P8 approval TOGETHER with the ledger's real approval_decision/attestation
+  // writes. This drives the REAL supervisor.decideApproval INSIDE the facade's
+  // connection.transaction and forces a throw in the REAL v35 attestation path (an
+  // invalid resultTreeHash fails the provenance predicate's sha256 shape inside
+  // persistPromotionAttestation, AFTER the real approval_decisions INSERT + the
+  // approval_requests CAS UPDATE). It asserts BOTH sides roll back to ZERO rows —
+  // a regression guard against a future bun savepoint-nesting change.
+  // ------------------------------------------------------------------------
+  test("1b. REAL-LEDGER ATOMICITY: a throw in the REAL attestation path rolls BOTH the P8 approval AND the ledger approval_decision/attestation back (0 rows)", async () => {
+    const h = await makeHarness();
+    const { principal, seed } = h;
+    // Everything REAL (decideApprove → supervisor.decideApproval, attestationRequired,
+    // real PENDING approval_request), except an INVALID resultTreeHash: it passes the
+    // facade's non-null feasibility gate, then throws deep in the REAL attestation
+    // emission (ProvenancePredicateContentSchema rejects the malformed hash). This is
+    // a genuine throw in the real ledger's attestation path, not a mock sentinel.
+    const facade = h.makeFacade({ resultTreeHashFor: () => "not-a-valid-sha256-tree-hash" });
+    await facade.selectCandidate(principal, seed.runId, { checkpointId: seed.checkpointId });
+
+    // The atomic APPROVE fails closed (503): the required v35 attestation could not
+    // be emitted, so the approval is NOT committed.
+    expect(() => facade.approve(principal, seed.checkpointId, {
+      checkpointHash: seed.checkpointHash, decision: "APPROVE", policyVersion: POLICY,
+    })).toThrow(PublicationAttestationUnavailableError);
+
+    // BOTH sides rolled back atomically: the OUTER P8-approval transaction AND the
+    // NESTED real-ledger savepoint (whose approval_decisions INSERT + approval_requests
+    // UPDATE ran BEFORE the attestation throw). Zero rows everywhere the two phases wrote.
+    const db = readerDb(h.dbPath);
+    expect((db.query("SELECT COUNT(*) n FROM publication_approvals_v33").get() as { n: number }).n).toBe(0);
+    expect((db.query("SELECT COUNT(*) n FROM approval_decisions").get() as { n: number }).n).toBe(0);
+    expect((db.query("SELECT COUNT(*) n FROM provenance_attestations").get() as { n: number }).n).toBe(0);
+    // The PENDING approval_request CAS was unwound too — still PENDING at revision 0.
+    const request = db.query("SELECT status, approval_revision r FROM approval_requests WHERE id=?")
+      .get(seed.approvalRequestId) as { status: string; r: number };
+    expect(request.status).toBe("PENDING");
+    expect(request.r).toBe(0);
+
+    // POSITIVE CONTROL: the SAME real path with a VALID resultTreeHash DOES commit
+    // both sides — proving it is the attestation throw (not some unrelated block) that
+    // caused the rollback, and that the atomic path is otherwise live.
+    const okFacade = h.makeFacade();
+    const ok = okFacade.approve(principal, seed.checkpointId, {
+      checkpointHash: seed.checkpointHash, decision: "APPROVE", policyVersion: POLICY,
+    }) as { status: string };
+    expect(ok.status).toBe("APPROVED");
+    expect((db.query("SELECT COUNT(*) n FROM publication_approvals_v33").get() as { n: number }).n).toBe(1);
+    expect((db.query("SELECT COUNT(*) n FROM approval_decisions").get() as { n: number }).n).toBe(1);
+    expect((db.query("SELECT COUNT(*) n FROM provenance_attestations").get() as { n: number }).n).toBe(1);
+  });
+
+  // ------------------------------------------------------------------------
   // Assertion 2: RESTART RECOVERY — a durable DISPATCHED (crash mid-remote) parks
   // RECONCILING on boot recovery; exactly one PR path, never a redispatch.
   // ------------------------------------------------------------------------
@@ -489,10 +545,10 @@ describe("JOINT GATE — R3 publication + R4 attestation/export/tenant driven to
     expect((db.query("SELECT requires_human h FROM publication_reconciliations_v33 WHERE publication_id=?").get(started.publicationId) as { h: number }).h).toBe(1);
     // A non-RECEIPTED/FAILED resolution is rejected (400) — RECONCILING is not
     // silently escapable.
-    expect(() => facade.resolveReconciliation(principal, started.publicationId, { resolution: "MAYBE" })).toThrow(/RECEIPTED.*FAILED/);
+    await expect(facade.resolveReconciliation(principal, started.publicationId, { resolution: "MAYBE" })).rejects.toThrow(/RECEIPTED.*FAILED/);
     expect((facade.getPublication(principal, started.publicationId) as { state: string }).state).toBe("RECONCILING");
     // Only an explicit operator resolution drives it terminal.
-    const resolved = facade.resolveReconciliation(principal, started.publicationId, { resolution: "FAILED", detail: "operator confirmed no PR landed" }) as { state: string };
+    const resolved = await facade.resolveReconciliation(principal, started.publicationId, { resolution: "FAILED", detail: "operator confirmed no PR landed" }) as { state: string };
     expect(resolved.state).toBe("FAILED");
   });
 

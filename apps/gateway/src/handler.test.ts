@@ -8,9 +8,11 @@ import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
+// The retired legacy authority is no longer a public-API value export (Sol P2-2);
+// this historical test imports the concrete class from its explicit legacy subpath.
+import { EngineerPublicationManager } from "@zintus/engineer/publication-manager";
 import {
   ApprovalAuthorityConflictError,
-  EngineerPublicationManager,
   EngineerSupervisor,
   IdempotencyConflictError,
   LocalArtifactStore,

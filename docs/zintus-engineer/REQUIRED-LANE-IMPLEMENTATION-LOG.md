@@ -3281,3 +3281,35 @@ unfinished pair has passed.
 - Gates engineer 854/gateway 466/web 571/typecheck/diff. R5F-3 = last audit tier
   (all 9 findings F1-F9 now closed). NEXT: R5F-4/R6 gate — RED-first adversarial
   tests + LIVE /qa+/browse localhost traversal + Sol/Luna, zero paid calls.
+
+### R6-fix — close Luna F-L1 + Sol P1-1 + hardening (Fable-gated, 2026-07-19)
+
+- Luna F-L1 (receipt-integrity BLOCKER): manual RECEIPTED now BINDS. Service
+  resolveReconciliation (now async) rejects a receipt whose commitSha != the
+  publication's SERVER-DERIVED result commit (selectionResultCommit,
+  PublicationReceiptBindingError 409) before any state change; when receiptDiscovery
+  confirms an exact open-draft PR, the operator prUrl must equal the discovered
+  html_url (else 409) and the discovered ref persists. Fable mutation-verified (I
+  DROVE it this time, not RED-first trust): substituting the operator commit for
+  the server-derived one reds 2 tests incl. Luna's exact attack
+  (attacker/other-repo/pull/999 + foreign sha → 409, no receipt row). Residual
+  (documented): when discovery can't confirm (no seam/throw/no-match → all
+  AMBIGUOUS), fall back to commitSha-binding-only, prUrl operator-trusted — the
+  commit binding (the core hole) always holds.
+- Sol P1-1 (BLOCKER): deleted the orphan createBranchPrActuator + its test
+  (strictly-weaker, unwired, opened a PR unconditionally = false-confidence
+  double-PR risk one import from being wired). Zero importers confirmed; wired
+  actuator remains gitPublicationMechanics.createActuator().
+- Sol P2-2: retired EngineerPublicationManager de-exported — main barrel now
+  `export type` only (historical reads keep the type); the instantiable class
+  reachable only via explicit @zintus/engineer/publication-manager subpath. No
+  external consumer can instantiate the retired authority from the main API.
+- Sol P2-3: real-ledger atomicity regression test — drives the REAL
+  supervisor.decideApproval inside the facade transaction; a genuine throw in the
+  real attestation path rolls back BOTH the P8 approval AND approval_decisions
+  (0 rows, request still PENDING@rev0), guarding R5C against a bun savepoint change.
+- Gates engineer 858/gateway 464/web 571/typecheck/diff. Both audits' GO-blockers
+  closed; remaining Sol P2s (credential-fail-after-dispatch safe-phantom
+  RECONCILING liveness, one-shot-approve-per-candidate, attestation-off-by-default
+  documented, v33 no org_id single-tenant) are accepted/deferred with tradeoffs.
+  NEXT: Luna re-challenge on the FIXED receipt path before any GO.

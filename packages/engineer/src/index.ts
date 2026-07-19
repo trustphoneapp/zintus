@@ -37,7 +37,14 @@ export * from "./phase56-evaluation-matrix.js";
 export * from "./control-contracts.js";
 export * from "./corrected-run.js";
 export * from "./git-service.js";
-export * from "./publication-manager.js";
+// Sol P2-2: the retired legacy publication authority (EngineerPublicationManager)
+// is NO LONGER re-exported as an instantiable value from the public API — an
+// external @zintus/engineer consumer must not be able to `new` the retired
+// authority. Only the TYPE is re-exported (apps/gateway/src/engineer.ts needs it
+// for historical-read field/return types). The concrete class remains importable
+// solely via the explicit "@zintus/engineer/publication-manager" legacy subpath
+// (used only by the retirement/historical tests), never through the main barrel.
+export type { EngineerPublicationManager } from "./publication-manager.js";
 export * from "./publication-authority.js";
 export * from "./git-publication-mechanics.js";
 export * from "./planning.js";

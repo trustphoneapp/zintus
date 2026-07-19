@@ -13,7 +13,6 @@ import {
   EngineerWorkerLeaseManager,
   EngineerExecutionManager,
   EngineerSupervisor,
-  EngineerPublicationManager,
   EngineerVerificationManager,
   DockerSandboxManager,
   GitWorkspaceManager,
@@ -46,6 +45,9 @@ import {
   type TaskManifest,
   type WorkspaceRecord,
 } from "./index.js";
+// The retired legacy authority is no longer a public-API value export (Sol P2-2);
+// this historical test imports the concrete class directly from its module.
+import { EngineerPublicationManager } from "./publication-manager.js";
 import type { OptionalHardeningStartPreparation } from "./ledger.js";
 import { transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 
