@@ -77,13 +77,13 @@ export interface ListRunsOptions {
 const RUN_SELECT = `
   SELECT r.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
   FROM engineer_runs r
-  JOIN repository_connections rc ON rc.id = r.repository_id
+  JOIN repository_connections rc ON rc.id = r.repository_id AND rc.org_id = r.org_id
 `;
 
 const REPOSITORY_ADMISSION_SELECT = `
   SELECT a.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
   FROM repository_admissions a
-  JOIN repository_connections rc ON rc.id = a.repository_id
+  JOIN repository_connections rc ON rc.id = a.repository_id AND rc.org_id = a.org_id
 `;
 
 export class TenantScopedLedgerDal {
@@ -246,12 +246,21 @@ export class TenantScopedLedgerDal {
       });
       attestationSequence += 1;
     }
-    const provenance = this.tableExists("promotion_provenance_attestations")
+    // v35 provenance attestations. The real durable store is `provenance_attestations`
+    // (database-schema.ts:3294) — checkpoint-keyed with NO run_id column, so the run is
+    // reached by JOINing its subject `verified_candidate_checkpoints` row on the bound
+    // (id, checkpoint_hash) pair and filtering on that checkpoint's `run_id`. The
+    // attestation's OWN `org_id` is the load-bearing tenant fence (a foreign-org
+    // attestation smuggled under this run's checkpoint is excluded by `AND pa.org_id=?`).
+    const provenance = this.tableExists("provenance_attestations")
       ? (this.db
           .query(
-            "SELECT id, checkpoint_id, checkpoint_hash, approver_user_id, requester_user_id, is_replacement," +
-              " envelope_json, statement_hash, created_at FROM promotion_provenance_attestations" +
-              " WHERE run_id=? AND org_id=? ORDER BY created_at, id",
+            "SELECT pa.statement_hash, pa.subject_checkpoint_id, pa.subject_checkpoint_hash," +
+              " pa.approval_decision_id, pa.approver_actor_id, pa.signature_key_id, pa.signature_algorithm," +
+              " pa.payload_type, pa.created_at FROM provenance_attestations pa" +
+              " JOIN verified_candidate_checkpoints vcc" +
+              " ON pa.subject_checkpoint_id = vcc.id AND pa.subject_checkpoint_hash = vcc.checkpoint_hash" +
+              " WHERE vcc.run_id=? AND pa.org_id=? ORDER BY pa.created_at, pa.statement_hash",
           )
           .all(runId, this.context.orgId) as Array<Record<string, unknown>>)
       : [];
@@ -259,19 +268,20 @@ export class TenantScopedLedgerDal {
     for (const row of provenance) {
       entries.push({
         kind: "ATTESTATION",
-        id: String(row.id),
+        id: String(row.statement_hash),
         sequence: provenanceSequence,
         tenantId: this.context.orgId,
         runId,
         recordedAt: String(row.created_at),
         payload: {
-          checkpointId: row.checkpoint_id,
-          checkpointHash: row.checkpoint_hash,
-          approverUserId: row.approver_user_id,
-          requesterUserId: row.requester_user_id,
-          isReplacement: Number(row.is_replacement) === 1,
           statementHash: row.statement_hash,
-          envelopeJson: row.envelope_json,
+          subjectCheckpointId: row.subject_checkpoint_id,
+          subjectCheckpointHash: row.subject_checkpoint_hash,
+          approvalDecisionId: row.approval_decision_id,
+          approverActorId: row.approver_actor_id,
+          keyId: row.signature_key_id,
+          algorithm: row.signature_algorithm,
+          payloadType: row.payload_type,
         },
       });
       provenanceSequence += 1;
