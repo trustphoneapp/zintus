@@ -448,7 +448,7 @@ describe("JOINT GATE — R3 publication + R4 attestation/export/tenant driven to
     });
     const resumable = service2.listResumablePublications();
     expect(resumable).toEqual([started.publicationId]);
-    const recovered = service2.resume(started.publicationId);
+    const recovered = await service2.resume(started.publicationId);
     expect(recovered.state).toBe("RECONCILING");
 
     // Exactly one reconciliation record, requires_human; the actuator was NEVER
@@ -459,7 +459,7 @@ describe("JOINT GATE — R3 publication + R4 attestation/export/tenant driven to
     expect(recon.c).toBe(1);
     expect(recon.h).toBe(1);
     // A repeated restart is idempotent — still one reconciliation, still RECONCILING.
-    service2.resume(started.publicationId);
+    await service2.resume(started.publicationId);
     const reconAfter = db.query("SELECT COUNT(*) c FROM publication_reconciliations_v33 WHERE publication_id=?").get(started.publicationId) as { c: number };
     expect(reconAfter.c).toBe(1);
     expect((service2.getPublication(started.publicationId)).state).toBe("RECONCILING");

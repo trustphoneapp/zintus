@@ -91,7 +91,11 @@ const CREDS = { token: "ghp_secret" };
 interface FakeConfig {
   calls: string[];
   currentCommitSha?: string;
+  /** Per-inspect override: element i is the sha returned by the i-th inspectBaseBranch call. */
+  currentCommitShaSequence?: string[];
   protection?: BranchProtectionEvidence;
+  /** Per-inspect override: element i is the protection returned by the i-th inspectBaseBranch call. */
+  protectionSequence?: BranchProtectionEvidence[];
   createPr?: () => Promise<{ id: string; number: number; url: string }>;
   capturePrBody?: (body: string) => void;
   reconcile?: () => Promise<PublicationOperationReconciliation>;
@@ -99,12 +103,14 @@ interface FakeConfig {
 }
 
 function fakeGit(config: FakeConfig): GitService {
+  let inspectCount = 0;
   const service: GitService = {
     async inspectBaseBranch(): Promise<BaseBranchStatus> {
       config.calls.push("inspect");
       if (config.inspectThrows) throw new Error("remote base unreachable");
-      const currentCommitSha = config.currentCommitSha ?? BASE_COMMIT;
-      const protection = config.protection ?? FULL_PROTECTION;
+      const index = inspectCount++;
+      const currentCommitSha = config.currentCommitShaSequence?.[index] ?? config.currentCommitSha ?? BASE_COMMIT;
+      const protection = config.protectionSequence?.[index] ?? config.protection ?? FULL_PROTECTION;
       return {
         currentCommitSha,
         matchesExpected: currentCommitSha.toLowerCase() === BASE_COMMIT.toLowerCase(),
@@ -331,11 +337,41 @@ describe("evaluateBranchProtection", () => {
 // ---------------------------------------------------------------------------
 
 describe("GitPublicationMechanics actuator", () => {
-  test("drives branch → push → PR in order and returns a RECEIPT bound to the result commit", async () => {
+  test("drives branch → push → re-inspect → PR in order and returns a RECEIPT bound to the result commit", async () => {
     const config: FakeConfig = { calls: [] };
     const outcome = await mechanics(config).createActuator().createBranchPr(ACTUATOR_INPUT, CREDS);
-    expect(config.calls).toEqual(["inspect", "branch", "push", "pr"]);
+    // F4: a SECOND base observation runs AFTER push and immediately BEFORE PR create.
+    expect(config.calls).toEqual(["inspect", "branch", "push", "inspect", "pr"]);
     expect(outcome).toEqual({ kind: "RECEIPT", prUrl: "https://github.com/acme/svc/pull/7", commitSha: RESULT_COMMIT });
+  });
+
+  // F4 (P1 regression): the base can advance between push and PR-create. The
+  // legacy manager re-inspected the base immediately before createPullRequest;
+  // the port dropped that mid-flight check. Re-observe base+protection after push
+  // and, if the base advanced, do NOT open the PR (fail closed, typed failure).
+  test("F4: base advances AFTER push, BEFORE PR-create → no PR opened, typed FAILED", async () => {
+    const config: FakeConfig = {
+      calls: [],
+      // 1st inspect (pre-mutation recheck) = fresh base; 2nd inspect (post-push, pre-PR) = advanced.
+      currentCommitShaSequence: [BASE_COMMIT, ADVANCED_COMMIT],
+    };
+    const outcome = await mechanics(config).createActuator().createBranchPr(ACTUATOR_INPUT, CREDS);
+    expect(outcome.kind).toBe("FAILED");
+    if (outcome.kind === "FAILED") expect(outcome.detail).toMatch(/advanced|base/i);
+    // branch + push ran, but the PR was NEVER created.
+    expect(config.calls).toEqual(["inspect", "branch", "push", "inspect"]);
+    expect(config.calls).not.toContain("pr");
+  });
+
+  test("F4: base protection LAPSES AFTER push, BEFORE PR-create → no PR opened, typed FAILED", async () => {
+    const config: FakeConfig = {
+      calls: [],
+      protectionSequence: [FULL_PROTECTION, { ...FULL_PROTECTION, enforcesAdmins: false }],
+    };
+    const outcome = await mechanics(config).createActuator().createBranchPr(ACTUATOR_INPUT, CREDS);
+    expect(outcome.kind).toBe("FAILED");
+    expect(config.calls).toEqual(["inspect", "branch", "push", "inspect"]);
+    expect(config.calls).not.toContain("pr");
   });
 
   test("an unresolvable run context is a definite pre-remote FAILED (no git effect)", async () => {
@@ -408,5 +444,44 @@ describe("GitPublicationMechanics actuator", () => {
     const config: FakeConfig = { calls: [], createPr: async () => { throw new Error("boom during PR create"); } };
     const outcome = await mechanics(config).createActuator().createBranchPr(ACTUATOR_INPUT, CREDS);
     expect(outcome.kind).toBe("AMBIGUOUS");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F2: read-only restart receipt discovery (used by P8 restart recovery)
+// ---------------------------------------------------------------------------
+
+describe("GitPublicationMechanics receipt discovery (F2 restart recovery)", () => {
+  test("discovers the exact existing PR as a RECEIPT (read-only, no branch/push/pr)", async () => {
+    const config: FakeConfig = {
+      calls: [],
+      reconcile: async () => ({ status: "SUCCEEDED", remoteReference: "https://github.com/acme/svc/pull/7" }),
+    };
+    const outcome = await mechanics(config).createReceiptDiscovery().discoverExistingReceipt(ACTUATOR_INPUT);
+    expect(outcome).toEqual({ kind: "RECEIPT", prUrl: "https://github.com/acme/svc/pull/7", commitSha: RESULT_COMMIT });
+    // Purely a reconcile read — never a mutation.
+    expect(config.calls).toEqual(["reconcile"]);
+    expect(config.calls).not.toContain("branch");
+    expect(config.calls).not.toContain("pr");
+  });
+
+  test("no exact PR found → non-RECEIPT (park RECONCILING), never a mutation", async () => {
+    const config: FakeConfig = {
+      calls: [],
+      reconcile: async () => ({ status: "NOT_FOUND", detail: "nothing landed" }),
+    };
+    const outcome = await mechanics(config).createReceiptDiscovery().discoverExistingReceipt(ACTUATOR_INPUT);
+    expect(outcome.kind).not.toBe("RECEIPT");
+    expect(config.calls).toEqual(["reconcile"]);
+  });
+
+  test("unresolvable repository → non-RECEIPT (no reconcile attempted)", async () => {
+    const mech = new GitPublicationMechanics({
+      gitService: fakeGit({ calls: [] }),
+      resolveRepository: () => null,
+      resolvePublicationContext: () => CONTEXT,
+    });
+    const outcome = await mech.createReceiptDiscovery().discoverExistingReceipt(ACTUATOR_INPUT);
+    expect(outcome.kind).not.toBe("RECEIPT");
   });
 });

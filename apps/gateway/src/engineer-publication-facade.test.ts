@@ -18,6 +18,7 @@ import {
   CandidateNotFoundError,
   PublicationApproverNotProvisionedError,
   PublicationAttestationUnavailableError,
+  PublicationReconciliationReceiptError,
   type PublicationFacadeDeps,
 } from "./engineer-publication-facade.js";
 
@@ -616,6 +617,38 @@ describe("P8 publication facade — R3 dispatch / restart / reconcile (owner-sco
     const { facade } = makeFacade(db);
     const publicationId = await seedStartedPublication(facade);
     expect(() => facade.resolveReconciliation(principal, publicationId, { resolution: "MAYBE" })).toThrow(/RECEIPTED.*FAILED/);
+  });
+
+  // F5 (P1): a RECEIPTED reconciliation MUST carry a real receipt so a RECEIPTED
+  // publication can never exist without its durable receipt (prUrl + commit_sha).
+  test("F5: RECEIPTED reconciliation without a real receipt is rejected (400); with one it persists and getPublication returns it", async () => {
+    const db = scratchDb();
+    const ambiguousService = new PublicationAuthorityService(db, {
+      actuator: { async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "receipt lost" }; } },
+      preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+      credentialProvider: { getPublicationCredentials: () => ({ token: "ghp_x" }) },
+      now: () => new Date(AT), idFactory: () => `f5-${(counter += 1)}`,
+    });
+    const { facade } = makeFacade(db, { service: ambiguousService });
+    const publicationId = await seedStartedPublication(facade);
+    expect((await facade.dispatch(principal, publicationId) as { state: string }).state).toBe("RECONCILING");
+
+    // No receipt in the body => rejected; the publication is NOT advanced to RECEIPTED.
+    expect(() => facade.resolveReconciliation(principal, publicationId, { resolution: "RECEIPTED", detail: "operator says it landed" }))
+      .toThrow(PublicationReconciliationReceiptError);
+    // A non-hex commitSha is likewise rejected.
+    expect(() => facade.resolveReconciliation(principal, publicationId, { resolution: "RECEIPTED", prUrl: "https://x/pr/1", commitSha: "not-a-sha" }))
+      .toThrow(PublicationReconciliationReceiptError);
+    expect((facade.getPublication(principal, publicationId) as { state: string }).state).toBe("RECONCILING");
+    expect((db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
+
+    // A real receipt persists atomically with the RECEIPTED transition.
+    const resolved = facade.resolveReconciliation(principal, publicationId, {
+      resolution: "RECEIPTED", detail: "operator confirmed PR", prUrl: "https://github.test/pull/42", commitSha: "b".repeat(40),
+    }) as { state: string; receipt?: { prUrl: string; commitSha: string } };
+    expect(resolved.state).toBe("RECEIPTED");
+    expect(resolved.receipt?.prUrl).toBe("https://github.test/pull/42");
+    expect((db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(1);
   });
 
   test("an unknown / cross-owner publication collapses to the single 404 not-found (no ownership oracle) for dispatch, resume, and reconcile", async () => {

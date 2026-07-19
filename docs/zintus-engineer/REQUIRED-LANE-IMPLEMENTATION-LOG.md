@@ -3202,3 +3202,34 @@ unfinished pair has passed.
   Sol/Luna + live browser traversal, zero paid calls). Deployment note carried:
   any run parked at legacy HUMAN_APPROVAL_PENDING at cutover is
   readable-but-unactionable (no real in-flight runs on an unshipped product).
+
+### R5F-1 — effect-path correctness blockers (Fable-gated, 2026-07-19)
+
+- The 4 audit-confirmed publication-effect P1s closed RED-first (13 targeted
+  failures captured on today's code before fixes):
+  - F2 restart recovery: resume() now runs read-only receiptDiscovery first — a
+    crash-after-PR-created resolves DISPATCHED→RECEIPTED with the discovered PR
+    (actuator never re-invoked); no-match/throw/absent → RECONCILING fail-closed.
+  - F3 reconcile: git-service reconcile now queries state=open AND re-asserts
+    state==="open" && draft===true && !merged_at — closed/merged/ready PRs →
+    NOT_FOUND. Fable mutation-verified: relaxing the check reds 3 tests.
+  - F4 REGRESSION: base+protection re-inspected AFTER push, BEFORE createPullRequest
+    (git-publication-mechanics:315-338); base-advanced-after-push → FAILED, no PR
+    (call order inspect,branch,push,inspect — no pr). Fable mutation-verified:
+    removing the recheck reds 1 test.
+  - F5 RECEIPTED: resolveReconciliation requires a receipt {prUrl,commitSha};
+    missing → PublicationReceiptRequiredError before any state change; the
+    RECEIPTED transition + publication_remote_receipts_v33 insert commit in one
+    BEGIN IMMEDIATE txn. (DB trigger infeasible — circular insert order vs the
+    receipt FK + frozen v33 shape validators; enforced atomically in code.)
+- LEGACY DIFFERENTIAL (publishFenced vs GitPublicationMechanics): F4 was the
+  ONLY mechanics regression from the R5B port. Every other legacy check is
+  covered or justified: post-CREATE base re-inspect dropped-but-justified (draft
+  PR + requiresStrictStatusChecks blocks a stale-base merge; receipt URL stays
+  valid); HMAC command signing not needed (the supervisor→executor trust
+  boundary it protected no longer exists — P8 drives mechanics in-process with
+  DB-enforced authority, creds only at the actuator); authority gates
+  (CRITICAL-risk/deferred-decision/evidence binding) enforced upstream by P8.
+- Gates engineer 845/gateway 461/typecheck/diff. RESIDUAL: F2 restart
+  auto-recovery is wired end-to-end but exercised only through fakes — a real
+  crash-after-PR-create→restart against live GitHub is [HUMAN] keyed-smoke.

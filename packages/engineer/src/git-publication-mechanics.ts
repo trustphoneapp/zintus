@@ -4,6 +4,7 @@ import type {
   ActuatorOutcome,
   PublicationActuator,
   PublicationCredentials,
+  PublicationReceiptDiscovery,
   RepositoryPreflightProbe,
 } from "./publication-authority.js";
 
@@ -210,6 +211,41 @@ export class GitPublicationMechanics {
     return { createBranchPr: (input, credentials) => this.createBranchPr(input, credentials) };
   }
 
+  /**
+   * F2 restart-recovery seam. P8's `resume` drives this READ-ONLY discovery for a
+   * durable DISPATCHED publication before parking RECONCILING: a crash AFTER the
+   * PR was created but BEFORE the receipt was recorded is auto-recovered to
+   * RECEIPTED with the discovered PR. This NEVER mutates the remote (no branch,
+   * push, or PR create) — it only runs the credentialed, side-effect-free
+   * existing-PR discovery. An exact OPEN DRAFT PR => RECEIPT; anything else (none
+   * found, repository unavailable) => a non-RECEIPT outcome so P8 parks
+   * RECONCILING for a human. It never re-invokes the actuator, so no second PR.
+   */
+  createReceiptDiscovery(): PublicationReceiptDiscovery {
+    return {
+      discoverExistingReceipt: async (input) => {
+        const repository = this.deps.resolveRepository(input.repositoryId);
+        if (!repository) {
+          return {
+            kind: "AMBIGUOUS",
+            observedRemoteState: "REPOSITORY_UNAVAILABLE",
+            detail: `repository ${input.repositoryId} is unavailable for restart receipt discovery`,
+          };
+        }
+        const discovered = await this.lookupExistingPr(
+          { runId: input.runId, resultCommitSha: input.resultCommitSha, idempotencyKey: input.idempotencyKey },
+          repository,
+        );
+        if (discovered) return { kind: "RECEIPT", prUrl: discovered, commitSha: input.resultCommitSha };
+        return {
+          kind: "AMBIGUOUS",
+          observedRemoteState: "RESTART_NO_RECEIPT_DISCOVERED",
+          detail: "no exact OPEN DRAFT pull request was discovered for the dispatched publication",
+        };
+      },
+    };
+  }
+
   private async createBranchPr(
     input: {
       readonly runId: string;
@@ -274,6 +310,34 @@ export class GitPublicationMechanics {
         resultCommitSha: input.resultCommitSha,
         branchName: branch.branchName,
       });
+      // F4 (regression from the R5B port): the base can advance — or its
+      // protection lapse — between the push and PR creation. The legacy manager
+      // re-inspected the base immediately before opening the PR; that mid-flight
+      // check was dropped. Re-observe base+protection AFTER push, immediately
+      // BEFORE createPullRequest, and fail closed (no PR) if it moved. The pushed
+      // branch is a benign dangling ref; NO pull request is opened against a base
+      // that is no longer the reviewed/approved one.
+      let preCreate: BaseBranchStatus;
+      try {
+        preCreate = await this.deps.gitService.inspectBaseBranch({
+          repository: context.repository,
+          expectedBaseCommitSha: input.baseCommitSha,
+        });
+      } catch (error) {
+        return { kind: "FAILED", detail: `base re-inspection failed before PR creation: ${errorMessage(error)}` };
+      }
+      if (!preCreate.matchesExpected) {
+        return {
+          kind: "FAILED",
+          detail: `base branch advanced to ${preCreate.currentCommitSha} after push, before PR creation; no pull request opened`,
+        };
+      }
+      if (!branchProtectionEnforced(preCreate)) {
+        return {
+          kind: "FAILED",
+          detail: "base branch protection is no longer enforced after push, before PR creation; no pull request opened",
+        };
+      }
       const pr = await this.deps.gitService.createPullRequest({
         runId: input.runId,
         repository: context.repository,

@@ -17,6 +17,7 @@ import {
   type PublicationActuator,
   type PublicationAuthorityDeps,
   type PublicationCredentials,
+  type PublicationReceiptDiscovery,
   type RepositoryPreflightProbe,
 } from "./publication-authority.js";
 
@@ -71,6 +72,7 @@ interface Harness {
   draft: PublicationAuthorityService;
   actuatorCalls: number;
   credentialCalls: number;
+  discoveryCalls: number;
   seenCredentials: PublicationCredentials[];
   nextOutcome: ActuatorOutcome;
   actuatorThrows: boolean;
@@ -81,10 +83,12 @@ function harness(overrides: {
   actuatorThrows?: boolean;
   preflight?: RepositoryPreflightProbe;
   lineageVerifier?: CompanionLineageVerifier;
+  /** F2: read-only restart receipt discovery. Absent => resume parks RECONCILING. */
+  receiptDiscovery?: PublicationReceiptDiscovery;
 } = {}): Harness {
   const db = scratchDb();
   const state: Harness = {
-    db, draft: null as unknown as PublicationAuthorityService, actuatorCalls: 0, credentialCalls: 0, seenCredentials: [],
+    db, draft: null as unknown as PublicationAuthorityService, actuatorCalls: 0, credentialCalls: 0, discoveryCalls: 0, seenCredentials: [],
     nextOutcome: overrides.outcome ?? { kind: "RECEIPT", prUrl: "https://example/pr/1", commitSha: RESULT_COMMIT },
     actuatorThrows: overrides.actuatorThrows ?? false,
   };
@@ -102,9 +106,18 @@ function harness(overrides: {
   const credentialProvider = {
     getPublicationCredentials: () => { state.credentialCalls += 1; return { token: "ghp_secret" }; },
   };
+  const receiptDiscovery: PublicationReceiptDiscovery | undefined = overrides.receiptDiscovery
+    ? {
+        discoverExistingReceipt: async (input) => {
+          state.discoveryCalls += 1;
+          return overrides.receiptDiscovery!.discoverExistingReceipt(input);
+        },
+      }
+    : undefined;
   const deps: PublicationAuthorityDeps = {
     actuator, preflight, credentialProvider,
     lineageVerifier: overrides.lineageVerifier,
+    receiptDiscovery,
     now: () => new Date(AT), idFactory: deterministicId,
   };
   state.draft = new PublicationAuthorityService(db, deps);
@@ -359,7 +372,7 @@ describe("v33 publication flow — RECONCILING is durable & typed", () => {
     expect(parked.reconciliation?.reason).toBe("AMBIGUOUS_REMOTE_OUTCOME");
     expect(h.actuatorCalls).toBe(1);
 
-    const resumed = h.draft.resume(started.publicationId);
+    const resumed = await h.draft.resume(started.publicationId);
     expect(resumed.state).toBe("RECONCILING");
     expect(h.actuatorCalls).toBe(1);
 
@@ -375,11 +388,11 @@ describe("v33 publication flow — RECONCILING is durable & typed", () => {
     expect(h.draft.getPublication(started.publicationId).state).toBe("DISPATCHED");
     expect(h.actuatorCalls).toBe(1);
 
-    const resumed = h.draft.resume(started.publicationId);
+    const resumed = await h.draft.resume(started.publicationId);
     expect(resumed.state).toBe("RECONCILING");
     expect(resumed.reconciliation?.reason).toBe("RESTART_UNCERTAIN_DISPATCH");
     expect(h.actuatorCalls).toBe(1);
-    expect(h.draft.resume(started.publicationId).state).toBe("RECONCILING");
+    expect((await h.draft.resume(started.publicationId)).state).toBe("RECONCILING");
     expect(h.actuatorCalls).toBe(1);
   });
 
@@ -411,6 +424,108 @@ describe("v33 publication flow — RECONCILING is durable & typed", () => {
   });
 });
 
+// F5 (P1): a RECEIPTED resolution MUST carry and persist a real receipt atomically
+// with the transition. A RECEIPTED state without a receipt row must be impossible.
+describe("F5 — manual RECEIPTED resolution must persist a real receipt", () => {
+  async function seedReconciling(h: Harness) {
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await h.draft.dispatch(started.publicationId);
+    expect(h.draft.getPublication(started.publicationId).state).toBe("RECONCILING");
+    return started.publicationId;
+  }
+
+  test("resolveReconciliation to RECEIPTED WITHOUT a receipt is rejected; no RECEIPTED row is written", async () => {
+    const h = harness({ outcome: { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" } });
+    const publicationId = await seedReconciling(h);
+    expect(() => h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator says it landed")).toThrow();
+    // Still RECONCILING; no phantom RECEIPTED, no receipt.
+    expect(h.draft.getPublication(publicationId).state).toBe("RECONCILING");
+    const receipts = h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number };
+    expect(receipts.c).toBe(0);
+  });
+
+  test("resolveReconciliation to RECEIPTED WITH a receipt persists it; getPublication returns it", async () => {
+    const h = harness({ outcome: { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" } });
+    const publicationId = await seedReconciling(h);
+    const resolved = h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed PR", {
+      prUrl: "https://example/pr/recovered", commitSha: RESULT_COMMIT,
+    });
+    expect(resolved.state).toBe("RECEIPTED");
+    expect(resolved.receipt).toEqual({ prUrl: "https://example/pr/recovered", commitSha: RESULT_COMMIT });
+    const view = h.draft.getPublication(publicationId);
+    expect(view.state).toBe("RECEIPTED");
+    expect(view.receipt?.prUrl).toBe("https://example/pr/recovered");
+    const receipts = h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number };
+    expect(receipts.c).toBe(1);
+  });
+});
+
+// F2 (P1): restart recovery for a DISPATCHED publication must FIRST run read-only
+// existing-PR discovery. A crash AFTER GitHub created the PR but before the receipt
+// was recorded must auto-recover to RECEIPTED with the discovered PR — the actuator
+// is NEVER re-invoked (no second PR). Only when no PR is found does it park RECONCILING.
+describe("F2 — restart recovery discovers a created PR before parking RECONCILING", () => {
+  test("crash-after-PR-created → resume discovers the PR and resolves RECEIPTED; actuator not re-invoked", async () => {
+    const h = harness({
+      actuatorThrows: true, // the dispatch crashed mid-remote-call
+      receiptDiscovery: {
+        discoverExistingReceipt: async (input) => ({ kind: "RECEIPT", prUrl: "https://example/pr/discovered", commitSha: input.resultCommitSha }),
+      },
+    });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await expect(h.draft.dispatch(started.publicationId)).rejects.toThrow(/network partition/);
+    expect(h.draft.getPublication(started.publicationId).state).toBe("DISPATCHED");
+    const actuatorCallsAtCrash = h.actuatorCalls;
+
+    const resumed = await h.draft.resume(started.publicationId);
+    expect(resumed.state).toBe("RECEIPTED");
+    expect(resumed.receipt?.prUrl).toBe("https://example/pr/discovered");
+    expect(h.discoveryCalls).toBe(1);
+    // The actuator was NEVER re-invoked: no second PR.
+    expect(h.actuatorCalls).toBe(actuatorCallsAtCrash);
+    const receipts = h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(started.publicationId) as { c: number };
+    expect(receipts.c).toBe(1);
+    // Idempotent: a repeat resume stays RECEIPTED and never rediscovers/redispatches.
+    expect((await h.draft.resume(started.publicationId)).state).toBe("RECEIPTED");
+    expect(h.actuatorCalls).toBe(actuatorCallsAtCrash);
+  });
+
+  test("crash with NO PR found → resume parks RECONCILING (discovery ran, actuator not re-invoked)", async () => {
+    const h = harness({
+      actuatorThrows: true,
+      receiptDiscovery: {
+        discoverExistingReceipt: async () => ({ kind: "AMBIGUOUS", observedRemoteState: "RESTART_NO_RECEIPT_DISCOVERED", detail: "no exact PR" }),
+      },
+    });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await expect(h.draft.dispatch(started.publicationId)).rejects.toThrow(/network partition/);
+    const actuatorCallsAtCrash = h.actuatorCalls;
+
+    const resumed = await h.draft.resume(started.publicationId);
+    expect(resumed.state).toBe("RECONCILING");
+    expect(resumed.reconciliation?.reason).toBe("RESTART_UNCERTAIN_DISPATCH");
+    expect(h.discoveryCalls).toBe(1);
+    expect(h.actuatorCalls).toBe(actuatorCallsAtCrash);
+  });
+
+  test("discovery throwing → resume fails closed to RECONCILING (never RECEIPTED without a receipt)", async () => {
+    const h = harness({
+      actuatorThrows: true,
+      receiptDiscovery: {
+        discoverExistingReceipt: async () => { throw new Error("discovery transport down"); },
+      },
+    });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await expect(h.draft.dispatch(started.publicationId)).rejects.toThrow(/network partition/);
+    const resumed = await h.draft.resume(started.publicationId);
+    expect(resumed.state).toBe("RECONCILING");
+  });
+});
+
 // R3 finding 1d: boot-recovery enumeration + resume-drives-no-redispatch. A
 // crash mid-DISPATCHED must be discoverable on restart and parked in
 // RECONCILING, never re-dispatched into a second PR.
@@ -434,7 +549,7 @@ describe("v33 boot recovery — listResumablePublications drives resume, never a
 
     // Boot recovery: resume each resumable id. It parks RECONCILING, never redispatches.
     const callsBefore = crashH.actuatorCalls;
-    for (const id of crashH.draft.listResumablePublications()) crashH.draft.resume(id);
+    for (const id of crashH.draft.listResumablePublications()) await crashH.draft.resume(id);
     expect(crashH.draft.getPublication(started.publicationId).state).toBe("RECONCILING");
     expect(crashH.actuatorCalls).toBe(callsBefore); // no second remote effect
     // After resume, nothing remains resumable (no infinite recovery loop).

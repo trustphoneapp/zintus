@@ -214,7 +214,7 @@ describe("Phase 4 credentialed Git publication", () => {
       fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
         methods.push(init?.method ?? "GET");
         return new Response(JSON.stringify([{
-          id: 91, number: 12, html_url: "https://github.test/pull/12",
+          id: 91, number: 12, html_url: "https://github.test/pull/12", state: "open", draft: true,
           head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
         }]), { status: 200 });
       }) as unknown as typeof fetch,
@@ -224,5 +224,76 @@ describe("Phase 4 credentialed Git publication", () => {
       baseBranch: "main", idempotencyKey: "pr:create:run-1",
     })).toEqual({ status: "SUCCEEDED", remoteReference: "https://github.test/pull/12" });
     expect(methods).toEqual(["GET"]);
+  });
+
+  // F3 (P1): reconciliation must accept ONLY an exact OPEN DRAFT pull request as a
+  // live receipt — mirroring the creation-path invariants (open state, draft:true).
+  // A CLOSED, MERGED, or ready-for-review PR that happens to match branch+sha+base
+  // is NOT the live publication receipt and must reconcile to NOT_FOUND.
+  test("F3: a CLOSED pull request matching branch+sha is NOT accepted as a receipt", async () => {
+    const resultCommitSha = "b".repeat(40);
+    const branchName = `zintus/engineer/run-1-${resultCommitSha.slice(0, 12)}`;
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async () => new Response(JSON.stringify([{
+        id: 91, number: 12, html_url: "https://github.test/pull/12", state: "closed", draft: true,
+        head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
+      }]), { status: 200 })) as unknown as typeof fetch,
+    });
+    const result = await service.reconcilePublicationOperation({
+      runId: "run-1", repository, operationType: "CREATE_PR", resultCommitSha,
+      baseBranch: "main", idempotencyKey: "pr:create:run-1",
+    });
+    expect(result.status).toBe("NOT_FOUND");
+  });
+
+  test("F3: a MERGED pull request matching branch+sha is NOT accepted as a receipt", async () => {
+    const resultCommitSha = "b".repeat(40);
+    const branchName = `zintus/engineer/run-1-${resultCommitSha.slice(0, 12)}`;
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async () => new Response(JSON.stringify([{
+        id: 91, number: 12, html_url: "https://github.test/pull/12", state: "closed", draft: false, merged_at: "2026-07-19T00:00:00Z",
+        head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
+      }]), { status: 200 })) as unknown as typeof fetch,
+    });
+    const result = await service.reconcilePublicationOperation({
+      runId: "run-1", repository, operationType: "CREATE_PR", resultCommitSha,
+      baseBranch: "main", idempotencyKey: "pr:create:run-1",
+    });
+    expect(result.status).toBe("NOT_FOUND");
+  });
+
+  test("F3: a ready-for-review (non-draft) OPEN pull request is NOT accepted as a receipt", async () => {
+    const resultCommitSha = "b".repeat(40);
+    const branchName = `zintus/engineer/run-1-${resultCommitSha.slice(0, 12)}`;
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async () => new Response(JSON.stringify([{
+        id: 91, number: 12, html_url: "https://github.test/pull/12", state: "open", draft: false,
+        head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
+      }]), { status: 200 })) as unknown as typeof fetch,
+    });
+    const result = await service.reconcilePublicationOperation({
+      runId: "run-1", repository, operationType: "CREATE_PR", resultCommitSha,
+      baseBranch: "main", idempotencyKey: "pr:create:run-1",
+    });
+    expect(result.status).toBe("NOT_FOUND");
+  });
+
+  test("F3: an exact OPEN DRAFT pull request IS accepted as the live receipt (control)", async () => {
+    const resultCommitSha = "b".repeat(40);
+    const branchName = `zintus/engineer/run-1-${resultCommitSha.slice(0, 12)}`;
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async () => new Response(JSON.stringify([{
+        id: 91, number: 12, html_url: "https://github.test/pull/12", state: "open", draft: true,
+        head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
+      }]), { status: 200 })) as unknown as typeof fetch,
+    });
+    expect(await service.reconcilePublicationOperation({
+      runId: "run-1", repository, operationType: "CREATE_PR", resultCommitSha,
+      baseBranch: "main", idempotencyKey: "pr:create:run-1",
+    })).toEqual({ status: "SUCCEEDED", remoteReference: "https://github.test/pull/12" });
   });
 });

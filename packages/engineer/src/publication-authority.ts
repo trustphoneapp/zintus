@@ -111,6 +111,25 @@ export interface PublicationActuator {
   ): Promise<ActuatorOutcome>;
 }
 
+/**
+ * F2 restart-recovery seam. READ-ONLY discovery of whether a durable DISPATCHED
+ * publication's PR already exists on the remote. `resume` invokes this BEFORE it
+ * would park RECONCILING: an exact match resolves the publication to RECEIPTED
+ * with the discovered PR; anything else parks RECONCILING for a human. It must
+ * NEVER create, update, or delete any remote ref or PR (no re-dispatch): a RECEIPT
+ * outcome means "an existing PR was observed", never "a PR was opened now".
+ */
+export interface PublicationReceiptDiscovery {
+  discoverExistingReceipt(input: {
+    readonly runId: string;
+    readonly publicationId: string;
+    readonly repositoryId: string;
+    readonly baseCommitSha: string;
+    readonly resultCommitSha: string;
+    readonly idempotencyKey: string;
+  }): Promise<ActuatorOutcome>;
+}
+
 // ---------------------------------------------------------------------------
 // Errors (draft equivalents of the frozen HTTP statuses)
 // ---------------------------------------------------------------------------
@@ -149,6 +168,11 @@ export class PublicationIdempotencyConflictError extends Error {
   readonly httpStatus = 409;
   readonly code = "IDEMPOTENCY_CONFLICT";
   constructor() { super("Idempotency-Key was already used to bind a different approval"); this.name = "PublicationIdempotencyConflictError"; }
+}
+export class PublicationReceiptRequiredError extends Error {
+  readonly httpStatus = 400;
+  readonly code = "PUBLICATION_RECEIPT_REQUIRED";
+  constructor() { super("a RECEIPTED resolution must carry a real receipt (prUrl + commitSha)"); this.name = "PublicationReceiptRequiredError"; }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +278,13 @@ export interface PublicationAuthorityDeps {
   readonly actuator: PublicationActuator;
   readonly preflight: RepositoryPreflightProbe;
   readonly credentialProvider: PublicationCredentialProvider;
+  /**
+   * F2: READ-ONLY restart existing-PR discovery. When present, `resume` runs it
+   * for a durable DISPATCHED publication BEFORE parking RECONCILING, so a crash
+   * after the PR was created auto-recovers to RECEIPTED. Absent (dev/tests) =>
+   * `resume` parks RECONCILING directly, as before.
+   */
+  readonly receiptDiscovery?: PublicationReceiptDiscovery;
   /** Absent => every P7_REPLACEMENT candidate is ineligible (fail closed). */
   readonly lineageVerifier?: CompanionLineageVerifier;
   /** Absent => the promoted-checkpoint self-verify is not enforced (bound in prod by the ledger factory). */
@@ -542,13 +573,40 @@ export class PublicationAuthorityService {
    * any other. It is never invoked automatically — a human/operator drives it
    * after establishing the true remote state.
    */
-  resolveReconciliation(publicationId: string, resolution: "RECEIPTED" | "FAILED", detail: string): PublicationView {
+  resolveReconciliation(
+    publicationId: string,
+    resolution: "RECEIPTED" | "FAILED",
+    detail: string,
+    receipt?: { readonly prUrl: string; readonly commitSha: string },
+  ): PublicationView {
     const current = this.requireCurrentOperation(publicationId);
     if (current.state !== "RECONCILING") {
       throw new PublicationStateConflictError(`resolution requires RECONCILING, not ${current.state}`);
     }
-    const resolutionType = resolution === "RECEIPTED" ? "RESOLVED_RECEIPTED" : "RESOLVED_FAILED";
-    this.appendTransition(current, resolution, "RECONCILING", detail, resolutionType);
+    if (resolution === "FAILED") {
+      this.appendTransition(current, "FAILED", "RECONCILING", detail, "RESOLVED_FAILED");
+      return this.getPublication(publicationId);
+    }
+    // F5: a RECEIPTED resolution MUST carry and persist a real receipt atomically
+    // with the transition. A RECEIPTED state without a receipt row is impossible:
+    // the transition and the receipt insert commit together or not at all, and a
+    // missing/blank receipt is rejected BEFORE any state change.
+    if (!receipt || !receipt.prUrl.trim() || !receipt.commitSha.trim()) {
+      throw new PublicationReceiptRequiredError();
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const receipted = this.appendTransitionLocked(current, "RECEIPTED", "RECONCILING", detail, "RESOLVED_RECEIPTED");
+      this.db.query(`INSERT INTO publication_remote_receipts_v33
+        (id, publication_id, publication_revision, idempotency_key, pr_url, commit_sha, observed_at, created_at)
+        VALUES (?,?,?,?,?,?,?,?)`).run(
+          this.id(), current.publication_id, receipted.revision, current.idempotency_key,
+          receipt.prUrl, receipt.commitSha, this.now(), this.now());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* preserve resolution failure */ }
+      throw error;
+    }
     return this.getPublication(publicationId);
   }
 
@@ -608,14 +666,40 @@ export class PublicationAuthorityService {
    * is NEVER re-dispatched or rebase-retried. Terminal/reconciling states are
    * returned unchanged.
    */
-  resume(publicationId: string): PublicationView {
+  async resume(publicationId: string): Promise<PublicationView> {
     const current = this.requireCurrentOperation(publicationId);
-    if (current.state === "DISPATCHED") {
-      this.parkReconciling(current, "RESTART_UNCERTAIN_DISPATCH",
-        "dispatched operation observed without a durable receipt after restart",
-        "No remote mutation was retried. Human reconciliation is required.");
-      return this.getPublication(publicationId);
+    if (current.state !== "DISPATCHED") return this.getPublication(publicationId);
+
+    // F2: a durable DISPATCHED row is an ambiguous remote outcome, but a crash
+    // AFTER GitHub created the PR (and BEFORE the receipt was recorded) is
+    // auto-recoverable. FIRST run the READ-ONLY existing-PR discovery: if an exact
+    // matching PR is found, resolve DISPATCHED -> RECEIPTED with its receipt (the
+    // actuator is NEVER re-invoked — no second PR). Only when no PR is found, the
+    // remote is unknown, or discovery is unavailable do we park RECONCILING for a
+    // human. Discovery is side-effect-free, so this never re-dispatches.
+    const discovery = this.deps.receiptDiscovery;
+    if (discovery) {
+      let outcome: ActuatorOutcome | null = null;
+      try {
+        outcome = await discovery.discoverExistingReceipt({
+          runId: current.run_id, publicationId, repositoryId: current.repository_id,
+          baseCommitSha: current.base_commit_sha, resultCommitSha: this.selectionResultCommit(current),
+          idempotencyKey: current.idempotency_key,
+        });
+      } catch {
+        outcome = null; // discovery failure => remote unknown => park RECONCILING (fail closed)
+      }
+      if (outcome && outcome.kind === "RECEIPT") {
+        // Re-read under the current row: only settle if it is still DISPATCHED
+        // (a concurrent settle already resolved it => return that view).
+        const live = this.requireCurrentOperation(publicationId);
+        if (live.state === "DISPATCHED") return this.settleOutcome(live, outcome);
+        return this.getPublication(publicationId);
+      }
     }
+    this.parkReconciling(current, "RESTART_UNCERTAIN_DISPATCH",
+      "dispatched operation observed without a durable receipt after restart",
+      "No remote mutation was retried. Human reconciliation is required.");
     return this.getPublication(publicationId);
   }
 

@@ -562,13 +562,13 @@ describe("R5E — R5 publication consolidation proof suite", () => {
     // ONLY P8 recovery: the P8 service is the sole thing that enumerates resumable
     // publications. It finds exactly the durable DISPATCHED and parks it RECONCILING.
     expect(service2.listResumablePublications()).toEqual([started.publicationId]);
-    expect(service2.resume(started.publicationId).state).toBe("RECONCILING");
+    expect((await service2.resume(started.publicationId)).state).toBe("RECONCILING");
     expect(restartActuatorCalls).toBe(0);
     expect(actuatorCalls).toBe(1); // the original actuator was never re-invoked either
 
     // Exactly one reconciliation record, requires_human; a repeated restart is idempotent.
     expect((db.query("SELECT COUNT(*) c, MAX(requires_human) h FROM publication_reconciliations_v33 WHERE publication_id=?").get(started.publicationId) as { c: number; h: number })).toEqual({ c: 1, h: 1 });
-    service2.resume(started.publicationId);
+    await service2.resume(started.publicationId);
     expect((db.query("SELECT COUNT(*) c FROM publication_reconciliations_v33 WHERE publication_id=?").get(started.publicationId) as { c: number }).c).toBe(1);
     // No legacy publication row was ever produced for this run — no legacy timer/sweep
     // fired a legacy publication action across the restart.
@@ -657,7 +657,7 @@ describe("R5E — R5 publication consolidation proof suite", () => {
       expect(parked.state).toBe("RECONCILING");
       expect(git.createPullRequestCalls).toBe(1);
       // Resume the reconciling publication — the effect layer is NEVER driven again.
-      expect((facade.resume(principal, started.publicationId) as { state: string }).state).toBe("RECONCILING");
+      expect(((await facade.resume(principal, started.publicationId)) as { state: string }).state).toBe("RECONCILING");
       expect(git.createPullRequestCalls).toBe(1);
     }
 
@@ -681,7 +681,7 @@ describe("R5E — R5 publication consolidation proof suite", () => {
         credentialProvider: { getPublicationCredentials: () => ({ token: "ghp_r5" }) },
         now: () => new Date(AT), idFactory: () => nextId("pub-restartC"),
       });
-      for (const id of service2.listResumablePublications()) service2.resume(id);
+      for (const id of service2.listResumablePublications()) await service2.resume(id);
       expect(service2.getPublication(started.publicationId).state).toBe("RECONCILING");
       expect(git.createPullRequestCalls).toBe(0);
     }

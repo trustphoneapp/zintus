@@ -131,8 +131,13 @@ interface PublicationAuthorityServiceLike {
   getPublication(publicationId: string): { publicationId: string; state: string };
   // R3 dispatch/reconcile/restart seams.
   dispatch(publicationId: string): Promise<{ publicationId: string; state: string }>;
-  resume(publicationId: string): { publicationId: string; state: string };
-  resolveReconciliation(publicationId: string, resolution: "RECEIPTED" | "FAILED", detail: string): { publicationId: string; state: string };
+  resume(publicationId: string): Promise<{ publicationId: string; state: string }>;
+  resolveReconciliation(
+    publicationId: string,
+    resolution: "RECEIPTED" | "FAILED",
+    detail: string,
+    receipt?: { prUrl: string; commitSha: string },
+  ): { publicationId: string; state: string };
 }
 
 /**
@@ -158,6 +163,20 @@ export class PublicationReconciliationInputError extends Error {
   constructor() {
     super("reconciliation resolution must be 'RECEIPTED' or 'FAILED'");
     this.name = "PublicationReconciliationInputError";
+  }
+}
+
+/**
+ * A RECEIPTED reconciliation whose body carries no real receipt. F5: a RECEIPTED
+ * resolution MUST carry a genuine receipt (prUrl + a 40/64-hex commitSha) so a
+ * RECEIPTED publication can never exist without its durable receipt.
+ */
+export class PublicationReconciliationReceiptError extends Error {
+  readonly httpStatus = 400;
+  readonly code = "PUBLICATION_RECONCILIATION_RECEIPT_REQUIRED";
+  constructor() {
+    super("a RECEIPTED reconciliation must carry a real receipt: { prUrl, commitSha }");
+    this.name = "PublicationReconciliationReceiptError";
   }
 }
 
@@ -518,7 +537,19 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
         throw new PublicationReconciliationInputError();
       }
       const detail = typeof record.detail === "string" && record.detail.trim() ? record.detail : "operator reconciliation";
-      return service.resolveReconciliation(publicationId, resolution, detail);
+      if (resolution === "FAILED") {
+        return service.resolveReconciliation(publicationId, resolution, detail);
+      }
+      // F5: a RECEIPTED resolution must carry a real receipt. Validate prUrl +
+      // a 40/64-hex commitSha here so the operator establishes the true remote
+      // outcome; the service persists it atomically with the RECEIPTED transition.
+      const prUrl = record.prUrl;
+      const commitSha = record.commitSha;
+      if (typeof prUrl !== "string" || !prUrl.trim() ||
+          typeof commitSha !== "string" || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commitSha.trim())) {
+        throw new PublicationReconciliationReceiptError();
+      }
+      return service.resolveReconciliation(publicationId, resolution, detail, { prUrl: prUrl.trim(), commitSha: commitSha.trim().toLowerCase() });
     },
   };
 }

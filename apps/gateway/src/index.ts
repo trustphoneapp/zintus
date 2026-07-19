@@ -573,6 +573,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         preflight: gitPublicationMechanics.preflightProbe,
         credentialProvider: { getPublicationCredentials: async () => ({ token: await currentGithubToken(false) }) },
         actuator: gitPublicationMechanics.createActuator(),
+        // F2: restart recovery runs this READ-ONLY existing-PR discovery for a
+        // durable DISPATCHED publication before parking RECONCILING, so a crash
+        // after the PR was created auto-recovers to RECEIPTED (never a 2nd PR).
+        receiptDiscovery: gitPublicationMechanics.createReceiptDiscovery(),
       });
     }
     recoverHardeningPaidCalls = () => {
@@ -665,14 +669,16 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   if (engineerPublicationAuthorityService) {
     try {
       for (const publicationId of engineerPublicationAuthorityService.listResumablePublications()) {
-        try {
-          const view = engineerPublicationAuthorityService.resume(publicationId);
-          log("info", "engineer.publication_dispatch_recovery", { publicationId, state: view.state });
-        } catch (error) {
-          log("error", "engineer.publication_dispatch_recovery_failed", {
+        // `resume` is async (F2: it runs read-only existing-PR discovery before
+        // parking RECONCILING). `startGateway` is synchronous, so drive each
+        // recovery in the background and log its terminal state — discovery is
+        // side-effect-free and `resume` is idempotent, so a repeated restart
+        // converges without ever re-dispatching a second PR.
+        engineerPublicationAuthorityService.resume(publicationId)
+          .then((view) => log("info", "engineer.publication_dispatch_recovery", { publicationId, state: view.state }))
+          .catch((error) => log("error", "engineer.publication_dispatch_recovery_failed", {
             publicationId, error: error instanceof Error ? error.message : String(error),
-          });
-        }
+          }));
       }
     } catch (error) {
       log("error", "engineer.publication_dispatch_recovery_scan_failed", {

@@ -103,14 +103,22 @@ export class GitHubGitService implements GitService {
       }
       return { status: "SUCCEEDED", remoteReference };
     }
-    const query = new URLSearchParams({ state: "all", head: `${input.repository.owner}:${branchName}`, base: input.baseBranch });
+    // F3: the live receipt is ONLY an exact OPEN DRAFT pull request — the same
+    // invariants the creation path enforces (open state, draft:true). A CLOSED,
+    // MERGED, or ready-for-review PR that happens to match branch+sha+base is NOT
+    // the live publication and must reconcile to NOT_FOUND, never SUCCEEDED. We
+    // scope the query to open PRs AND re-assert state/draft on each candidate, so
+    // a stale or non-draft PR is rejected even if the provider ignores the filter.
+    const query = new URLSearchParams({ state: "open", head: `${input.repository.owner}:${branchName}`, base: input.baseBranch });
     const matches = await this.github(input.repository, `/pulls?${query.toString()}`, { method: "GET" }) as Array<{
-      id?: number; number?: number; html_url?: string; head?: { sha?: string; ref?: string }; base?: { ref?: string };
+      id?: number; number?: number; html_url?: string; state?: string; draft?: boolean;
+      merged_at?: string | null; head?: { sha?: string; ref?: string }; base?: { ref?: string };
     }>;
     const exact = matches.find((candidate) => candidate.head?.ref === branchName &&
-      candidate.head?.sha?.toLowerCase() === input.resultCommitSha.toLowerCase() && candidate.base?.ref === input.baseBranch);
+      candidate.head?.sha?.toLowerCase() === input.resultCommitSha.toLowerCase() && candidate.base?.ref === input.baseBranch &&
+      candidate.state === "open" && candidate.draft === true && !candidate.merged_at);
     if (!exact?.id || !exact.number || !exact.html_url) {
-      return { status: "NOT_FOUND", detail: "no exact pull request matches the verified branch, commit, and base" };
+      return { status: "NOT_FOUND", detail: "no exact OPEN DRAFT pull request matches the verified branch, commit, and base" };
     }
     return { status: "SUCCEEDED", remoteReference: exact.html_url };
   }
