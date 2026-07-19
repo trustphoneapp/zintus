@@ -2479,3 +2479,40 @@ unfinished pair has passed.
   the deterministic scan is one layer, not a completeness claim. Gates verified
   directly: engineer src 529/529 (4,164 expect), gateway 377/377, web 478/478,
   workspace typecheck and `git diff --check` clean.
+
+### Day 3 — P6 release ruling (Sol): GO (2026-07-19)
+
+- Three-party gate satisfied. Terra repair: the live-void finalization seam and
+  both 2026-07-18 audit bypasses are closed at `965476e5` with gates re-verified
+  directly. Independent Luna red-team (read-only, refute mode): GO with zero
+  confirmed P0/P1; its two uncertifiable runtime claims were closed by direct
+  trace — the hardening recovery sweep runs on a 10s non-reentrant interval
+  (gateway index.ts) with an immediate startup sweep, and a FAILED
+  final-change-scope attestation can never bind a verified candidate
+  (ledger.ts:3941-3948 hard-throws unless trusted SYSTEM producer, byte-hash
+  bound, status SUCCEEDED, zero violations; no fallback path).
+- Release-proof review: both stated obligations exist and pass at HEAD —
+  composed signed ExecutionManager preparation/activation into a newly
+  constructed VerificationManager across H/H-O/H-O-R/H-C restart prefixes with
+  exactly one Reviewer and provider 1/1 (verification.test.ts:1401), and
+  post-C SEMANTIC_ROW + nested-artifact tamper rejected at provider 0/0 with
+  zero reservations/finalizations/routes/slots (verification.test.ts:1436),
+  corroborated by the real signed schema-v2 C with exact [BUILDER, REVIEWER]
+  calls and post-C durable tamper closure (review-classification-ledger
+  :3054/:3012). Mutation testing found the tamper invariant over-determined by
+  at least three independent layers (strict-read fd/inode identity, exact
+  byte size+sha256, durable risk compare, semantic-authority hash recompute,
+  recovery verifyPass); no one- or two-line neuter flipped it red.
+- Honest residuals carried to the P12 matrix, none release-blocking: (1) no
+  single test composes the restart boundary with a freshly promoted real
+  signed v2 checkpoint (the composed test's C is the ingress authority; real
+  v2 C is proven without restart) — P12's restart-at-every-durable-stage
+  journeys own this; (2) recovery tests model restart at the manager layer,
+  sharing the producer's SQLite connection/store objects (durability-immaterial
+  by strict re-reads, but not connection-level); (3) Luna P2s: cancellation-race
+  recovery latency bounded by fence TTL + sweep cadence, the `!sawHeader`
+  plain-diff fallback lacks an `@@` break (unreachable for trusted FINAL_DIFF),
+  and POSSIBLE_SECRET keyword/backtick completeness (heuristic layer only; the
+  reviewer-evidence binding re-runs the scanner server-side over the trusted
+  diff and byte-matches semantics). P6 is released; P7 implementation may begin
+  per the frozen Day 2C go/no-go invariants.
