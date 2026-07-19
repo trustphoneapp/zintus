@@ -2764,3 +2764,24 @@ unfinished pair has passed.
   head-version bump breaks ~16 version assertions + needs promotion-path surgery,
   too risky to leave MAIN red under budget. Generation is a real tested library
   call; persistence + call-site wiring is the tracked seam.
+
+### Day 3 — Integration step 5b: P9 UI wired to live P7 routes (2026-07-19)
+
+- The P9 Resolution Desk UI (brought into the integration tree from the
+  p9-engineer-ui lane) is now connected to the REAL live P7 gateway routes
+  (createCase/list/get/directive/apply) instead of fixtures. Reading the live
+  handler + resolution-desk service directly (not the doc prose) surfaced four
+  real deltas the fixture build would have shipped broken: (1) CRITICAL — the
+  Idempotency-Key was sent in the JSON body, but the live routes read it from
+  the Idempotency-Key HEADER and the directive body is Zod .strict() with no
+  such property, so every real directive-create would have 400'd before the
+  idempotency check; fixed to header. (2) createCase response is {case:...}
+  (unwrap); the route parses no POST body (matches §2). (3) error envelope nests
+  code/detail under error.code/error.detail, not top-level — the fixture client
+  read top-level, silently nulling every CEILING/EXPIRED/DRIFT/CONFLICT branch;
+  fixed in request(). (4) directive budget is maxCostMicrousd int not maxCostUsd
+  float (type-accuracy). No route/field gap found. Publication screen (§3) stays
+  fixture-backed and is now clearly marked awaiting-live-routes (P8 HTTP routes
+  confirmed absent from the handler). Gates: web 568 (baseline 478), web
+  typecheck clean. Committed apps/web scoped (v35 persistence concurrently in
+  flight on packages/engineer — not in this commit).
