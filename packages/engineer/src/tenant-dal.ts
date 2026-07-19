@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { EngineerNotFoundError } from "./errors.js";
 import type { ActorIdentity } from "./tenant-roles.js";
+import { exportAuditChain, type AuditEntry, type AuditExport } from "./audit-export.js";
 
 /**
  * P10 tenancy — tenant-scoped Data Access Layer (standalone, contract §5).
@@ -183,6 +184,113 @@ export class TenantScopedLedgerDal {
       .get(repositoryId, this.context.orgId) as Record<string, unknown> | null;
     if (!row) tenantNotFound("repository admission", repositoryId);
     return row;
+  }
+
+  /**
+   * P11 live audit export — reads a run's event + attestation chain ORG-SCOPED
+   * and maps it into the redaction-and-checksum `AuditEntry` shape. Every query
+   * carries `AND org_id=?`, so a row that was smuggled under this tenant's
+   * `run_id` but stamped to a FOREIGN org is excluded (the `AND org_id=?`
+   * clauses are the load-bearing tenant fence; without them a cross-org row
+   * would leak into this tenant's export). The run itself is first fenced by
+   * `assertRunInOrg`, so a foreign run id is the byte-identical not-found.
+   */
+  readRunAuditEntries(runId: string): AuditEntry[] {
+    this.assertRunInOrg(runId);
+    const entries: AuditEntry[] = [];
+    const events = this.db
+      .query(
+        "SELECT event_id, sequence, timestamp, previous_state, next_state, reason_code, actor_type," +
+          " actor_id, state_version FROM run_state_events WHERE run_id=? AND org_id=? ORDER BY sequence, event_id",
+      )
+      .all(runId, this.context.orgId) as Array<Record<string, unknown>>;
+    for (const event of events) {
+      entries.push({
+        kind: "EVENT",
+        id: String(event.event_id),
+        sequence: Number(event.sequence),
+        tenantId: this.context.orgId,
+        runId,
+        recordedAt: String(event.timestamp),
+        payload: {
+          previousState: event.previous_state,
+          nextState: event.next_state,
+          reasonCode: event.reason_code,
+          actorType: event.actor_type,
+          actorId: event.actor_id,
+          stateVersion: event.state_version,
+        },
+      });
+    }
+    const checkpoints = this.db
+      .query(
+        "SELECT id, checkpoint_hash, created_at, statement_hash, signature_algorithm, signature_key_id" +
+          " FROM verified_candidate_checkpoints WHERE run_id=? AND org_id=? ORDER BY created_at, id",
+      )
+      .all(runId, this.context.orgId) as Array<Record<string, unknown>>;
+    let attestationSequence = 1_000_000;
+    for (const checkpoint of checkpoints) {
+      entries.push({
+        kind: "ATTESTATION",
+        id: String(checkpoint.id),
+        sequence: attestationSequence,
+        tenantId: this.context.orgId,
+        runId,
+        recordedAt: String(checkpoint.created_at),
+        payload: {
+          checkpointHash: checkpoint.checkpoint_hash,
+          statementHash: checkpoint.statement_hash,
+          algorithm: checkpoint.signature_algorithm,
+          keyId: checkpoint.signature_key_id,
+        },
+      });
+      attestationSequence += 1;
+    }
+    const provenance = this.tableExists("promotion_provenance_attestations")
+      ? (this.db
+          .query(
+            "SELECT id, checkpoint_id, checkpoint_hash, approver_user_id, requester_user_id, is_replacement," +
+              " envelope_json, statement_hash, created_at FROM promotion_provenance_attestations" +
+              " WHERE run_id=? AND org_id=? ORDER BY created_at, id",
+          )
+          .all(runId, this.context.orgId) as Array<Record<string, unknown>>)
+      : [];
+    let provenanceSequence = 2_000_000;
+    for (const row of provenance) {
+      entries.push({
+        kind: "ATTESTATION",
+        id: String(row.id),
+        sequence: provenanceSequence,
+        tenantId: this.context.orgId,
+        runId,
+        recordedAt: String(row.created_at),
+        payload: {
+          checkpointId: row.checkpoint_id,
+          checkpointHash: row.checkpoint_hash,
+          approverUserId: row.approver_user_id,
+          requesterUserId: row.requester_user_id,
+          isReplacement: Number(row.is_replacement) === 1,
+          statementHash: row.statement_hash,
+          envelopeJson: row.envelope_json,
+        },
+      });
+      provenanceSequence += 1;
+    }
+    return entries;
+  }
+
+  /** Build the deterministic, redacted, org-scoped audit export for a run. */
+  exportRunAuditChain(runId: string, pageSize = 100): AuditExport {
+    return exportAuditChain({
+      tenantId: this.context.orgId,
+      runId,
+      entries: this.readRunAuditEntries(runId),
+      pageSize,
+    });
+  }
+
+  private tableExists(name: string): boolean {
+    return this.db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) !== null;
   }
 
   /**

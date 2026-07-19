@@ -2730,3 +2730,37 @@ unfinished pair has passed.
   tripwire but not exercised through a DAL method (no case query on the DAL yet);
   org_id→orgs(id) referential integrity is DAL-enforced not a DB FK (SQLite
   additive limitation); ~140ms one-time migrate cost from 90 additive ALTERs.
+
+### Day 3 — Integration step 4: P11 attestation + audit export live (2026-07-19)
+
+- Attestation GENERATION is live and sourced from real durable records:
+  emitPromotionProvenanceAttestation builds+signs a DSSE in-toto statement whose
+  subject is the verified-candidate digest and whose predicate pulls contract/
+  commit/test/security/scope digests + requester from verified_candidate_
+  checkpoints, roles from agent_executions, budget from run_budgets, and P7
+  replacement lineage from resolution_replacements⋈resolution_cases (present iff
+  the run owns a replacement row). Audit export is live and org-scoped through
+  the P10 DAL (readRunAuditEntries/exportRunAuditChain, every query AND org_id=?)
+  with redaction + per-page checksums. Independent offline verifier accepts a
+  real attestation and rejects tampered predicate / wrong subject / missing
+  replacement lineage / approver==requester. Gates: engineer 768, gateway 391,
+  typecheck + diff clean.
+- Reconciliation bug fixed: the ported code bound isReplacement to
+  checkpoint.schemaVersion===2, which is the HARDENING lineage — disjoint from
+  P7. A P7 replacement emits an ordinary v1 checkpoint; isReplacement is now a
+  promotion-context flag cross-bound only to P7-lineage presence.
+- Fable mutation-verified both load-bearing gates: making the budget read ignore
+  the row failed the real-sourced-fields test; dropping org_id from the audit
+  events read failed the cross-tenant smuggled-row test; both restore clean.
+- ARCHITECTURAL CORRECTION (agent, accepted): the attestation auto-call-site is
+  decideApproval (the APPROVE path — the only point a distinct human approver
+  bound to the exact subject exists), NOT promoteVerifiedCandidate as the task
+  assumed. approverUserId + resultTreeHash are caller-supplied seams today (no
+  distinct approver exists at REVIEW_APPROVED; result tree hash not durably
+  recorded for the verified candidate); publicationReceipt is honestly null
+  until a downstream publish reaches RECEIPTED.
+- OPEN SEAM (→ remaining work / P12): v35 attestation-storage table + the
+  auto-emit call inside decideApproval are deliberately NOT done — a 34→35
+  head-version bump breaks ~16 version assertions + needs promotion-path surgery,
+  too risky to leave MAIN red under budget. Generation is a real tested library
+  call; persistence + call-site wiring is the tracked seam.
