@@ -3233,3 +3233,27 @@ unfinished pair has passed.
 - Gates engineer 845/gateway 461/typecheck/diff. RESIDUAL: F2 restart
   auto-recovery is wired end-to-end but exercised only through fakes — a real
   crash-after-PR-create→restart against live GitHub is [HUMAN] keyed-smoke.
+
+### R5F-2 — historical retirement + operational provenance (Fable-gated, 2026-07-19)
+
+- F1: legacy approve/reject/request-changes/extend/expire routes now throw typed
+  LegacyApprovalLaneRetiredError → honest 410 GONE {code:LEGACY_APPROVAL_RETIRED,
+  action:START_FRESH_RUN_OR_USE_RESOLUTION_DESK, successor} instead of the raw
+  "not configured" 409. OpenAPI + ARCHITECTURE.md:142 corrected (routes [RETIRED],
+  always 410, history read-only). RED-first: a genuinely-PENDING historical run
+  (seeded HUMAN_APPROVAL_PENDING + BASE_BRANCH_STALE) → typed 410 on every write,
+  history still readable; reverting throws → 3 fail. Chose honest-410 over data
+  migration — justified: run_state_events is trigger-immutable append-only and
+  BASE_BRANCH_STALE has no legal terminal transition, so raw-SQL terminalization
+  would bypass the event ledger (integrity hole).
+- F6: production provenance now OPERATIONAL. GitHubGitService.resolveResultTreeHash
+  reads the result commit's tree (git ls-tree -r -t --full-tree <sha>^{tree}) →
+  sha256:<64hex> canonical listing, fail-closed to null on git error/empty.
+  index.ts:900 replaces resultTreeHashFor:()=>null with the real bound source.
+  Fable mutation-verified: reverting to null reds the operational-attestation E2E
+  (a required-attestation approval now persists a v35 attestation whose
+  predicate.result.resultTreeHash = the git-sourced hash and appears in
+  exportRunAuditChain), restore clean. Gates engineer 849/gateway 466/web 571/
+  typecheck/diff. RESIDUAL [HUMAN]: the real happy path needs the verified result
+  commit present in the gateway's local object store at approval time; wired +
+  tested with a trusted git-subprocess stand-in, live-git keyed-smoke open.

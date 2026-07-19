@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +65,14 @@ export interface GitService {
   reconcilePublicationOperation?(input: ReconcilePublicationOperationInput): Promise<PublicationOperationReconciliation>;
   /** Fetches the inspected base commit into the local object store without changing a working tree. */
   synchronizeBaseBranch?(input: { repository: RepositoryReference; expectedCommitSha: string }): Promise<void>;
+  /**
+   * Read-only: derives a deterministic `sha256:<64hex>` commitment to the result
+   * commit's FULL tree from the local object store, for the v35 provenance
+   * attestation's `resultTreeHash`. Returns null (fail closed) when the commit or
+   * tree cannot be read (no git access / unknown commit). Never mutates a ref,
+   * remote, or working tree.
+   */
+  resolveResultTreeHash?(input: { resultCommitSha: string }): string | null;
 }
 
 export interface GitHubGitServiceOptions {
@@ -167,6 +176,29 @@ export class GitHubGitService implements GitService {
     const fetched = this.git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"]).trim();
     if (fetched.toLowerCase() !== input.expectedCommitSha.toLowerCase()) {
       throw new Error("fetched base commit does not match the credentialed remote inspection");
+    }
+  }
+
+  /**
+   * Result-tree-hash source for the v35 provenance attestation. Reads the result
+   * commit's FULL recursive tree listing (`git ls-tree -r -t --full-tree
+   * <sha>^{tree}`) from the local object store — a read-only operation that binds
+   * the exact tree by content (each line carries the child object's git OID, so
+   * the top-level listing is a Merkle commitment to the whole tree). The sha256
+   * of that canonical, text-recomputable listing is returned as `sha256:<64hex>`
+   * — the exact shape the attestation `resultTreeHash` HashSchema requires and
+   * one a verifier with the repo can independently recompute. Any git failure
+   * (unknown commit, no local object store, no git binary) fails CLOSED to null,
+   * so a REQUIRED attestation denies publication rather than emitting a fabricated
+   * hash. The commit-object identity (`^{tree}`) is validated by git itself.
+   */
+  resolveResultTreeHash(input: { resultCommitSha: string }): string | null {
+    try {
+      const listing = this.git(["ls-tree", "-r", "-t", "--full-tree", `${input.resultCommitSha}^{tree}`]);
+      if (!listing.trim()) return null;
+      return `sha256:${createHash("sha256").update(listing, "utf8").digest("hex")}`;
+    } catch {
+      return null;
     }
   }
 

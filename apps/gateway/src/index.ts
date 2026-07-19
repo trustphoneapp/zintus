@@ -267,6 +267,13 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     unavailableReason: "canonical repository, exact base, model, Docker, and image configuration is incomplete",
   });
   let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor, planning: engineerPlanning, artifactStore: engineerArtifactStore, principal: engineerPrincipal, preflight: unavailablePreflight });
+  // F6 (R5F-2): the REAL result-tree-hash source for the v35 provenance
+  // attestation, hoisted so the (separately scoped) P8 publication-authority
+  // facade can feed it. It reads the verified candidate's result commit tree from
+  // the gateway's local object store (`engineerGitService.resolveResultTreeHash`)
+  // and fails closed to null when git cannot source it. Assigned only when the
+  // execution worker (and its git service) is configured.
+  let engineerResolveResultTreeHash: ((input: { runId: string; resultCommitSha: string }) => string | null) | undefined;
   if (engineerRepositoryRoot && engineerRepositoryId && engineerImage && engineerImageDigest && engineerDependenciesReady &&
       (engineerRepositoryProvider === "local" || engineerRepositoryProvider === "github") &&
       engineerRepositoryOwner && engineerRepositoryName && engineerBaseBranch && engineerBaseCommitSha && engineerOriginUrl) {
@@ -475,6 +482,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       token: () => currentGithubToken(false),
       refreshToken: () => currentGithubToken(true),
     });
+    // Bind the REAL result-tree-hash source to this run's git service (fail-closed
+    // to null when the result commit/tree is not in the local object store).
+    engineerResolveResultTreeHash = (input) =>
+      engineerGitService.resolveResultTreeHash?.({ resultCommitSha: input.resultCommitSha }) ?? null;
     engineerRuns = new EngineerRunManager({
       supervisor: engineerSupervisor,
       execution: engineerExecution,
@@ -876,9 +887,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       decideApprove: (record, provenanceContext) => {
         engineerSupervisor.decideApproval(record as never, "APPROVED", provenanceContext);
       },
-      // Fail-closed seam: the verified candidate's git result-tree hash is not
-      // durably recorded and no gateway git-tree read is wired to v33 selections.
-      resultTreeHashFor: () => null,
+      // REAL result-tree-hash source (R5F-2 / F6): derive the v35 attestation's
+      // `resultTreeHash` from the verified candidate's result commit by reading
+      // its full tree from the gateway's local object store (read-only). This is
+      // sourced from durable/trusted git data — never browser input. It fails
+      // CLOSED to null when git cannot source the tree (unknown commit / no local
+      // object store), so a REQUIRED attestation denies publication rather than
+      // emitting a fabricated hash. [HUMAN] live git: the happy path requires the
+      // result commit object to be present in `engineerRepositoryRoot` at approval
+      // time (the builder's verified commit); absent that, attestation stays
+      // fail-closed until the credentialed checkout is wired.
+      resultTreeHashFor: (input) => engineerResolveResultTreeHash?.(input) ?? null,
     });
   }
 

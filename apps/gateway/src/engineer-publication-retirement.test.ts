@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EngineerRun } from "@zintus/engineer";
-import { EngineerRunManager } from "./engineer.js";
+import { EngineerRunManager, LegacyApprovalLaneRetiredError } from "./engineer.js";
 import { deriveEngineerPrincipal } from "./engineer-identity.js";
 
 // R5A: the legacy EngineerPublicationManager is RETIRED from every new-run
@@ -89,10 +89,12 @@ describe("R5A publication authority retirement", () => {
       expectedVerifiedCheckpointHash: `sha256:${"c".repeat(64)}`,
       expectedApprovalRevision: 0,
     };
+    // F1 (R5F-2): the retired legacy lane now fails with an HONEST typed 410
+    // retirement error, not a raw "not configured" throw.
     await expect(manager.approve(principal, run.runId, "approve", expected))
-      .rejects.toThrow(/publication is not configured/);
+      .rejects.toBeInstanceOf(LegacyApprovalLaneRetiredError);
     await expect(manager.reject(principal, run.runId, "reject", expected))
-      .rejects.toThrow(/publication is not configured/);
+      .rejects.toBeInstanceOf(LegacyApprovalLaneRetiredError);
   });
 
   test("historical legacy-lane runs still read back approval/evidence/publication history (compatibility)", () => {
@@ -141,6 +143,82 @@ describe("R5A publication authority retirement", () => {
     expect((artifacts[0] as Record<string, unknown>).storageReference).toBeUndefined();
     expect((artifacts[0] as Record<string, unknown>).artifactId).toBe("art-legacy");
   });
+
+  // F1 (R5F-2): a GENUINELY-PENDING historical run — one that was parked at the
+  // legacy HUMAN_APPROVAL_PENDING / BASE_BRANCH_STALE gate BEFORE the R5A cutover
+  // (never COMPLETED). Existing tests only proved COMPLETED legacy runs read back;
+  // none exercised a still-pending one. On the post-cutover (publication-less)
+  // manager, EVERY legacy write action must be handled DETERMINISTICALLY with an
+  // HONEST typed 410 retirement error (not a raw "not configured" throw), and the
+  // run's durable history must stay fully readable.
+  for (const parkedState of ["HUMAN_APPROVAL_PENDING", "BASE_BRANCH_STALE"] as const) {
+    test(`a historical run parked at ${parkedState} deterministically reports the legacy-lane retirement AND stays readable`, async () => {
+      const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+      const now = "2026-07-16T12:00:00.000Z";
+      const pendingRun: EngineerRun = {
+        runId: "legacy-pending", userId: principal.ownerId, repository,
+        requestOriginal: "old change", requestNormalized: "old change",
+        state: parkedState, stateVersion: 12, manifestHash: `sha256:${"a".repeat(64)}`,
+        riskTier: "MEDIUM", humanGateRequired: true, createdAt: now, updatedAt: now, terminalAt: null,
+      };
+      const pendingApproval = {
+        approvalRequestId: "appr-pending-1", runId: "legacy-pending", status: "PENDING" as const,
+        manifestHash: `sha256:${"a".repeat(64)}`, diffHash: `sha256:${"d".repeat(64)}`,
+        evidenceBundleHash: `sha256:${"e".repeat(64)}`, approvalRevision: 1,
+        verifiedCheckpointId: "checkpoint-pending", verifiedCheckpointHash: `sha256:${"c".repeat(64)}`,
+      };
+      const manager = new EngineerRunManager({
+        supervisor: {
+          getRun: () => pendingRun,
+          isOptionalHardeningChild: () => false,
+          latestApprovalRequest: () => pendingApproval,
+          listEvidenceBundles: () => [{ evidenceBundleId: "bundle-pending" }],
+          listClaimEvidence: () => [{ claimId: "claim-pending", status: "VERIFIED" }],
+          listGitOperations: () => [{ gitOperationId: "op-pending", kind: "BRANCH_CREATED" }],
+          listArtifacts: () => [{ artifactId: "art-pending", type: "FINAL_DIFF", trusted: true, storageReference: "secret-ref" }],
+        } as never,
+        principal,
+        preflight,
+      });
+      const expected = {
+        expectedVerifiedCheckpointId: "checkpoint-pending",
+        expectedVerifiedCheckpointHash: `sha256:${"c".repeat(64)}`,
+        expectedApprovalRevision: 1,
+      };
+
+      // EVERY legacy write action fails closed with the typed 410 retirement error
+      // (deterministic, honest — never the raw "not configured" message, and never
+      // a silent success that fabricates an approval).
+      const assertRetired = async (op: Promise<unknown>) => {
+        await expect(op).rejects.toBeInstanceOf(LegacyApprovalLaneRetiredError);
+        await op.catch((error: unknown) => {
+          expect(error).toBeInstanceOf(LegacyApprovalLaneRetiredError);
+          const typed = error as LegacyApprovalLaneRetiredError;
+          expect(typed.httpStatus).toBe(410);
+          expect(typed.code).toBe("LEGACY_APPROVAL_RETIRED");
+          expect(typed.message).not.toMatch(/not configured/i);
+          expect(typed.message).toMatch(/retired/i);
+        });
+      };
+      await assertRetired(manager.approve(principal, pendingRun.runId, "approve", expected));
+      await assertRetired(manager.requestChanges(principal, pendingRun.runId, "changes", expected));
+      await assertRetired(manager.reject(principal, pendingRun.runId, "reject", expected));
+      await assertRetired(manager.extendApproval(principal, pendingRun.runId, "extend", 3600, expected));
+      await assertRetired(manager.expireApproval(principal, pendingRun.runId, expected));
+
+      // Its durable history stays fully readable through the supervisor ledger —
+      // the retirement closes the WRITE path only.
+      const view = manager.approvalView("legacy-pending");
+      expect(view.approval?.approvalRequestId).toBe("appr-pending-1");
+      expect(view.approval?.status).toBe("PENDING");
+      expect(manager.evidenceBundles("legacy-pending") as unknown).toEqual([{ evidenceBundleId: "bundle-pending" }]);
+      expect(manager.gitOperations("legacy-pending") as unknown).toEqual([{ gitOperationId: "op-pending", kind: "BRANCH_CREATED" }]);
+      const artifacts = manager.artifacts("legacy-pending");
+      expect(artifacts).toHaveLength(1);
+      expect((artifacts[0] as Record<string, unknown>).storageReference).toBeUndefined();
+      expect((artifacts[0] as Record<string, unknown>).artifactId).toBe("art-pending");
+    });
+  }
 
   // Composition-root guard: the production gateway must not re-construct or
   // re-schedule the legacy publication authority. This mirrors the R3 source

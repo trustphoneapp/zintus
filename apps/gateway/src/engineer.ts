@@ -62,6 +62,32 @@ class CancellationStillPendingError extends Error {
   constructor(message:string){super(message);this.name="CancellationStillPendingError";}
 }
 
+/**
+ * F1 (R5F-2): the legacy human-gate approval lane (approve / request-changes /
+ * reject / extend-approval / expire-approval) is RETIRED. R5A removed the legacy
+ * publication authority from every run path, so these routes can no longer
+ * perform an approval for ANY run — including a historical run still parked at
+ * HUMAN_APPROVAL_PENDING or BASE_BRANCH_STALE. Rather than throw a raw, confusing
+ * "publication is not configured" (which the docs implied was a transient
+ * misconfiguration), they now fail with an HONEST, typed 410 GONE that names the
+ * retirement and points at the successor surfaces. The run's history stays fully
+ * readable through every GET (approvalView / evidence / gitOperations / artifacts).
+ */
+export class LegacyApprovalLaneRetiredError extends Error {
+  readonly httpStatus = 410;
+  readonly code = "LEGACY_APPROVAL_RETIRED";
+  readonly action = "START_FRESH_RUN_OR_USE_RESOLUTION_DESK";
+  constructor() {
+    super(
+      "The legacy human-gate approval lane is retired. New runs publish only through the P8 " +
+      "publication surface (select a candidate, then approve the candidate). A historical run " +
+      "parked at the legacy gate can no longer be approved here — start a fresh run or use the " +
+      "Developer Resolution Desk; its evidence remains readable via the run's GET endpoints.",
+    );
+    this.name = "LegacyApprovalLaneRetiredError";
+  }
+}
+
 interface DurableCancellationSupervisor {
   requestRunCancellation(input:{runId:string;actorId:string;artifact:ArtifactRecord}):{run:EngineerRun;applied:boolean};
   finalizeRunCancellation(input:{runId:string;outcome:"CANCELLED"|"FAILED";
@@ -1592,7 +1618,7 @@ export class EngineerRunManager {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     this.assertRequiredLaneAction(runId);
-    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
     this.options.publication.assertApprovalAuthority(runId, expected);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     return this.options.publication.approve(runId, principal.reviewerId, reason, expected);
@@ -1602,7 +1628,7 @@ export class EngineerRunManager {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     this.assertRequiredLaneAction(runId);
-    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
     this.options.publication.assertApprovalAuthority(runId, expected);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     await this.options.publication.requestChanges(runId, principal.reviewerId, reason, expected);
@@ -1611,7 +1637,7 @@ export class EngineerRunManager {
   async reject(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation): Promise<void> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
     this.options.publication.assertApprovalAuthority(runId, expected);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     await this.options.publication.reject(runId, principal.reviewerId, reason, expected);
@@ -1686,7 +1712,7 @@ export class EngineerRunManager {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     this.assertRequiredLaneAction(runId);
-    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
     this.options.publication.assertApprovalAuthority(runId, expected);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     return this.options.publication.extend(runId, principal.reviewerId, reason, extensionSeconds, expected);
@@ -1695,7 +1721,7 @@ export class EngineerRunManager {
   async expireApproval(principal: EngineerPrincipal, runId: string, expected: ApprovalAuthorityExpectation): Promise<void> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
     this.options.publication.assertApprovalAuthority(runId, expected);
     await this.options.publication.expire(runId, expected);
   }

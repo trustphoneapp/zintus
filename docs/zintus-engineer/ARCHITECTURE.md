@@ -118,9 +118,16 @@ cannot self-approve). When v35 provenance attestation is required it is emitted
 and persisted in the SAME transaction as the approval over the shared ledger
 connection — atomic, not compensated: a crash or throw before commit rolls both
 back together, so no consumable approval ever exists without its bound
-attestation. Attestation is formally deferred behind an explicit config flag
-until a real result-tree-hash source is wired; with the flag on it fails closed
-rather than fail open.
+attestation. The result-tree-hash the attestation binds is sourced from real,
+trusted git: the gateway reads the candidate result commit's full tree from the
+local object store (`GitService.resolveResultTreeHash`) and derives a
+`sha256:<64hex>` commitment. Attestation remains gated behind the explicit
+`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` flag (default off); with the flag on
+and the tree hash sourced, a durable APPROVE emits and persists the v35
+attestation. If the tree hash genuinely cannot be sourced (the result commit is
+not in the gateway's local object store), APPROVE fails closed rather than fail
+open. [HUMAN] live git: the happy path requires the builder's verified commit
+object to be present in the gateway's Engineer repository root at approval time.
 
 The credentialed Git mechanics are the authority-free `GitPublicationMechanics`
 that P8 drives after it has decided: protected-base preflight, base-SHA recheck,
@@ -142,8 +149,14 @@ evidence, and v35 attestations, redacted) through the authenticated gateway.
 The legacy `EngineerPublicationManager` is retired to historical-read-only: it is
 never constructed or scheduled on any new-run path (the run manager is wired
 without it), so new runs terminate at `REVIEW_APPROVED` and reach publication only
-through P8. It remains solely to service runs already parked at the legacy
-`HUMAN_APPROVAL_PENDING` gate. Multi-tenant org isolation is a read-side property
+through P8. The legacy human-gate WRITE routes (`approve` / `request-changes` /
+`reject` / `extend-approval` / `expire-approval`) are RETIRED — they can no longer
+act on ANY run, including a historical run still parked at `HUMAN_APPROVAL_PENDING`
+or `BASE_BRANCH_STALE`. They fail with an honest typed `410 GONE`
+(`LEGACY_APPROVAL_RETIRED`, successor: P8 publication / Resolution Desk) rather
+than a raw "not configured" error; a historical run's evidence remains fully
+readable through its GET endpoints, but acting on it means starting a fresh run or
+using the Developer Resolution Desk. Multi-tenant org isolation is a read-side property
 today (the audit-export DAL); the run/approval/publication WRITE path is fixed to
 the single default org per plan, and full multi-org wiring is a Deferred
 integration.

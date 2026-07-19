@@ -29,9 +29,10 @@
  * JOINT seam under test runs with its real triggers intact.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import {
   EngineerSupervisor,
@@ -46,6 +47,7 @@ import {
   type CheckpointAttestor,
   type VerifiedCandidateCheckpointInput,
   PublicationAuthorityService,
+  GitHubGitService,
   type ActuatorOutcome,
   type PublicationActuator,
 } from "@zintus/engineer";
@@ -569,7 +571,8 @@ describe("JOINT GATE — R3 publication + R4 attestation/export/tenant driven to
     const h = await makeHarness();
     const { principal, seed } = h;
     // A properly provisioned approver, but the resultTreeHash cannot be sourced
-    // (production's default posture: resultTreeHashFor → null).
+    // (the fail-closed branch of the REAL source: gitService.resolveResultTreeHash
+    // returns null when the result commit/tree is not in the local object store).
     const facade = h.makeFacade({ resultTreeHashFor: () => null });
     await facade.selectCandidate(principal, seed.runId, { checkpointId: seed.checkpointId });
     expect(() => facade.approve(principal, seed.checkpointId, { checkpointHash: seed.checkpointHash, decision: "APPROVE", policyVersion: POLICY }))
@@ -580,5 +583,86 @@ describe("JOINT GATE — R3 publication + R4 attestation/export/tenant driven to
     expect((db.query("SELECT COUNT(*) n FROM provenance_attestations").get() as { n: number }).n).toBe(0);
     // No live approval ⇒ nothing to publish.
     expect((db.query("SELECT COUNT(*) n FROM publication_git_operations_v33").get() as { n: number }).n).toBe(0);
+  });
+});
+
+// F6 (R5F-2): PRODUCTION PROVENANCE IS NOW OPERATIONAL.
+//
+// The atomic approval+attestation mechanism (R5C) was real, but index.ts wired
+// `resultTreeHashFor: () => null`, so a REQUIRED attestation ALWAYS failed closed
+// and nothing fed it in production. This gate proves BOTH halves are closed:
+//   (1) the composition root now feeds resultTreeHashFor from the REAL
+//       gitService.resolveResultTreeHash (source guard on index.ts), and
+//   (2) a required-attestation approval driven through a REAL GitHubGitService
+//       result-tree-hash source emits + persists a v35 attestation that appears
+//       in exportRunAuditChain — the exact end-to-end that failed closed before.
+const SEEDED_RESULT_COMMIT_SHA = "b".repeat(40); // checkpointInput's resultCommitSha
+describe("F6 — a REAL git-sourced result-tree-hash makes REQUIRED attestation OPERATIONAL", () => {
+  test("production wiring feeds resultTreeHashFor from gitService.resolveResultTreeHash (no more () => null)", () => {
+    const indexSource = readFileSync(join(fileURLToPath(new URL(".", import.meta.url)), "index.ts"), "utf8");
+    // The dead null seam is gone.
+    expect(indexSource).not.toContain("resultTreeHashFor: () => null");
+    // The real durable/trusted git-tree source is wired.
+    expect(indexSource).toContain("engineerGitService.resolveResultTreeHash");
+  });
+
+  test("required attestation over a REAL GitHubGitService tree-hash source persists a v35 attestation that surfaces in the audit export", async () => {
+    const h = await makeHarness();
+    const { principal, seed } = h;
+
+    // The EXACT production result-tree-hash source: a REAL GitHubGitService whose
+    // ls-tree read of the candidate's result commit is served by a git subprocess.
+    // Only the git subprocess is a trusted stand-in (a real object store holding the
+    // builder's verified commit is [HUMAN] live git); resolveResultTreeHash — the code
+    // that binds the exact tree and formats sha256:<64hex> — is REAL and under test.
+    const treeListing =
+      "100644 blob 1111111111111111111111111111111111111111\tsrc/a.ts\n" +
+      "040000 tree 2222222222222222222222222222222222222222\tsrc\n";
+    let treeReadArgs = "";
+    const gitService = new GitHubGitService({
+      repositoryRoot: "/trusted/engineer/workspace",
+      token: () => "unused-for-local-tree-read",
+      spawn: ((_command: string, args?: readonly string[]) => {
+        treeReadArgs = (args ?? []).join(" ");
+        return { status: 0, stdout: treeListing, stderr: "", pid: 1, output: [], signal: null } as unknown as ReturnType<typeof import("node:child_process").spawnSync>;
+      }) as unknown as typeof import("node:child_process").spawnSync,
+    });
+    const expectedTreeHash = gitService.resolveResultTreeHash!({ resultCommitSha: SEEDED_RESULT_COMMIT_SHA });
+    expect(expectedTreeHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(expectedTreeHash).not.toBeNull();
+
+    // Wire the facade EXACTLY as production does: resultTreeHashFor delegates to
+    // gitService.resolveResultTreeHash (never a hardcoded fake).
+    const facade = h.makeFacade({
+      resultTreeHashFor: (input) => gitService.resolveResultTreeHash!({ resultCommitSha: input.resultCommitSha }),
+    });
+
+    await facade.selectCandidate(principal, seed.runId, { checkpointId: seed.checkpointId });
+    const approval = facade.approve(principal, seed.checkpointId, {
+      checkpointHash: seed.checkpointHash, decision: "APPROVE", policyVersion: POLICY,
+    }) as { status: string };
+    expect(approval.status).toBe("APPROVED");
+    // The source actually read the candidate's result commit TREE (read-only).
+    expect(treeReadArgs).toContain(`${SEEDED_RESULT_COMMIT_SHA}^{tree}`);
+
+    // The v35 attestation persisted atomically and its statement carries the
+    // git-sourced result tree hash (not a fabricated or null value).
+    const db = readerDb(h.dbPath);
+    const attestation = db.query("SELECT statement_hash, statement_json, subject_checkpoint_id FROM provenance_attestations").get() as
+      { statement_hash: string; statement_json: string; subject_checkpoint_id: string };
+    expect(attestation).toBeTruthy();
+    expect(attestation.subject_checkpoint_id).toBe(seed.checkpointId);
+    const statement = JSON.parse(attestation.statement_json) as { predicate: { result: { resultTreeHash: string } } };
+    expect(statement.predicate.result.resultTreeHash).toBe(expectedTreeHash!);
+
+    // It APPEARS in the LIVE org-scoped audit export as the ATTESTATION entry —
+    // the end-to-end that failed closed when the source was null now completes.
+    const chain = auditDal(h.supervisor, seed.org).exportRunAuditChain(seed.runId);
+    const entries = chain.pages.flatMap((page) => page.entries);
+    const provenanceEntry = entries.find(
+      (entry) => entry.kind === "ATTESTATION" && entry.payload.statementHash === attestation.statement_hash,
+    );
+    expect(provenanceEntry).toBeTruthy();
+    expect(provenanceEntry?.tenantId).toBe(seed.org);
   });
 });

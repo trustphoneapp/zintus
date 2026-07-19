@@ -53,6 +53,7 @@ import {
   type CreateAgentTaskBody,
 } from "./agents.js";
 import type { EngineerRunManager } from "./engineer.js";
+import { LegacyApprovalLaneRetiredError } from "./engineer.js";
 import {
   mcpToolsToDefinitions,
   mcpToolName,
@@ -3583,6 +3584,15 @@ export function createGatewayHandler(
           return json(request, {
             error: { code: error.code, message: error.message, action: error.action },
           }, 409);
+        }
+        if (error instanceof LegacyApprovalLaneRetiredError) {
+          // F1: the retired legacy human-gate lane reports an honest 410 GONE
+          // (successor: P8 publication / Resolution Desk), never a raw
+          // "not configured" 409. Historical runs stay readable via GET.
+          return json(request, {
+            error: { code: error.code, message: error.message, action: error.action },
+            successor: "p8-publication-or-resolution-desk",
+          }, 410, { "Cache-Control": "no-store" });
         }
         if(error instanceof HardeningGenericOperationForbiddenError||error instanceof HardeningBudgetExtensionRequiresNewRunError){
           return json(request,{error:{code:error.code,message:error.message}},409,{"Cache-Control":"no-store"});

@@ -24,7 +24,7 @@ import {
   type ApprovalRequestRecord,
   type EngineerRun,
 } from "@zintus/engineer";
-import { EngineerRunManager } from "./engineer.js";
+import { EngineerRunManager, LegacyApprovalLaneRetiredError } from "./engineer.js";
 import { deriveEngineerPrincipal } from "./engineer-identity.js";
 import { EngineerCapabilityPreflight } from "./engineer-preflight.js";
 
@@ -3094,6 +3094,41 @@ describe("P7 Developer Resolution Desk HTTP routes", () => {
       error: { code: "GONE", message: "corrected-run is superseded by resolution cases" },
       successor: "resolution-cases",
     });
+  });
+
+  // F1 (R5F-2): the retired legacy human-gate routes report an HONEST typed 410
+  // GONE (LEGACY_APPROVAL_RETIRED), NOT a raw "not configured" 409, so a caller
+  // hitting a historical PENDING run gets an actionable answer.
+  test("the retired legacy approval routes map LegacyApprovalLaneRetiredError to 410 GONE", async () => {
+    const authority = {
+      expectedVerifiedCheckpointId: `sha256:${"c".repeat(64)}`,
+      expectedVerifiedCheckpointHash: `sha256:${"d".repeat(64)}`,
+      expectedApprovalRevision: 3,
+    };
+    const engineerRuns = {
+      readiness: () => ({ state: "READY", error: null }),
+      principal: () => ({ ownerId: "owner-retired", reviewerId: "reviewer-retired" }),
+      get: () => ({ run: { state: "HUMAN_APPROVAL_PENDING" } }),
+      approve: async () => { throw new LegacyApprovalLaneRetiredError(); },
+      requestChanges: async () => { throw new LegacyApprovalLaneRetiredError(); },
+      reject: async () => { throw new LegacyApprovalLaneRetiredError(); },
+      extendApproval: async () => { throw new LegacyApprovalLaneRetiredError(); },
+      expireApproval: async () => { throw new LegacyApprovalLaneRetiredError(); },
+    } as unknown as EngineerRunManager;
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    for (const action of ["approve", "request-changes", "reject", "extend-approval", "expire-approval"]) {
+      const response = await handler(new Request(`http://x/v1/engineer/runs/run-retired/${action}`, {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "attempt legacy action", extensionSeconds: 60, ...authority }),
+      }));
+      expect(response.status).toBe(410);
+      const body = await response.json() as { error: { code: string; action: string; message: string }; successor: string };
+      expect(body.error.code).toBe("LEGACY_APPROVAL_RETIRED");
+      expect(body.error.action).toBe("START_FRESH_RUN_OR_USE_RESOLUTION_DESK");
+      expect(body.error.message).not.toMatch(/not configured/i);
+      expect(body.successor).toBe("p8-publication-or-resolution-desk");
+    }
   });
 });
 

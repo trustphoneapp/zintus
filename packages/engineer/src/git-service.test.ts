@@ -297,3 +297,67 @@ describe("Phase 4 credentialed Git publication", () => {
     })).toEqual({ status: "SUCCEEDED", remoteReference: "https://github.test/pull/12" });
   });
 });
+
+// F6 (R5F-2): a REAL result-tree-hash source for the v35 provenance attestation.
+// index.ts previously wired `resultTreeHashFor: () => null`, so a REQUIRED
+// attestation ALWAYS failed closed and nothing fed the mechanism. This source
+// reads the result commit's full tree from the local object store (read-only)
+// and returns a deterministic `sha256:<64hex>` that the attestation HashSchema
+// accepts, or null (fail closed) when git cannot source it.
+describe("F6 result-tree-hash source for provenance attestation", () => {
+  const resultCommitSha = "b".repeat(40);
+  const listing =
+    "100644 blob 1111111111111111111111111111111111111111\tsrc/a.ts\n" +
+    "040000 tree 2222222222222222222222222222222222222222\tsrc\n";
+
+  test("derives a deterministic sha256:<64hex> tree hash from the local object store", () => {
+    const calls: string[][] = [];
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      spawn: ((_command: string, args?: readonly string[]) => {
+        calls.push([...(args ?? [])]);
+        return { status: 0, stdout: listing, stderr: "", pid: 1, output: [], signal: null } as unknown as SpawnSyncReturns<string>;
+      }) as unknown as typeof import("node:child_process").spawnSync,
+    });
+    const hash = service.resolveResultTreeHash!({ resultCommitSha });
+    expect(hash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    // Deterministic: the same tree listing always yields the same digest.
+    const again = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      spawn: (() => ({ status: 0, stdout: listing, stderr: "", pid: 1, output: [], signal: null }) as unknown as SpawnSyncReturns<string>) as unknown as typeof import("node:child_process").spawnSync,
+    }).resolveResultTreeHash!({ resultCommitSha });
+    expect(again).toBe(hash);
+    // It reads the result commit's TREE (read-only), never a mutation.
+    const readArgs = calls[0]!.join(" ");
+    expect(readArgs).toContain(`${resultCommitSha}^{tree}`);
+    expect(readArgs).not.toMatch(/push|commit|update-ref|write-tree|checkout|reset/);
+  });
+
+  test("a different tree listing yields a different digest (binds the exact result tree)", () => {
+    const base = new GitHubGitService({
+      repositoryRoot: "/r", token: () => "t",
+      spawn: (() => ({ status: 0, stdout: listing, stderr: "", pid: 1, output: [], signal: null }) as unknown as SpawnSyncReturns<string>) as unknown as typeof import("node:child_process").spawnSync,
+    }).resolveResultTreeHash!({ resultCommitSha });
+    const mutated = new GitHubGitService({
+      repositoryRoot: "/r", token: () => "t",
+      spawn: (() => ({ status: 0, stdout: listing + "100644 blob 3333333333333333333333333333333333333333\tsrc/b.ts\n", stderr: "", pid: 1, output: [], signal: null }) as unknown as SpawnSyncReturns<string>) as unknown as typeof import("node:child_process").spawnSync,
+    }).resolveResultTreeHash!({ resultCommitSha });
+    expect(mutated).not.toBe(base);
+  });
+
+  test("fails closed (returns null) when git cannot read the commit/tree", () => {
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      spawn: (() => ({ status: 128, stdout: "", stderr: "fatal: bad object", pid: 1, output: [], signal: null }) as unknown as SpawnSyncReturns<string>) as unknown as typeof import("node:child_process").spawnSync,
+    });
+    expect(service.resolveResultTreeHash!({ resultCommitSha })).toBeNull();
+  });
+
+  test("fails closed (returns null) when the tree listing is empty", () => {
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      spawn: (() => ({ status: 0, stdout: "   \n", stderr: "", pid: 1, output: [], signal: null }) as unknown as SpawnSyncReturns<string>) as unknown as typeof import("node:child_process").spawnSync,
+    });
+    expect(service.resolveResultTreeHash!({ resultCommitSha })).toBeNull();
+  });
+});

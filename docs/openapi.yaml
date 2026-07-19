@@ -808,62 +808,65 @@ paths:
       tags: [Engineer]
       operationId: approveEngineerRun
       deprecated: true
-      summary: "[LEGACY] Approve at the HUMAN_APPROVAL_PENDING gate (historical runs only)"
+      summary: "[RETIRED] Legacy human-gate approval — always 410 GONE"
       description: |
-        LEGACY human-gate approval. The authoritative publication path for NEW runs
-        is the P8 publication surface (select a candidate → approve the candidate →
-        start/dispatch a publication); new runs terminate at REVIEW_APPROVED and never
-        enter HUMAN_APPROVAL_PENDING. This route remains only to service runs that were
-        already parked at the legacy gate.
+        RETIRED. R5A removed the legacy publication authority from every run path,
+        so this route can no longer approve ANY run — including a historical run
+        still parked at HUMAN_APPROVAL_PENDING. It always returns 410 GONE
+        (code LEGACY_APPROVAL_RETIRED). The authoritative publication path for NEW
+        runs is the P8 publication surface (select a candidate → approve the
+        candidate → start/dispatch a publication); new runs terminate at
+        REVIEW_APPROVED and never enter HUMAN_APPROVAL_PENDING. A historical run
+        cannot be approved here — start a fresh run or use the Developer Resolution
+        Desk. The run's evidence stays readable via the run's GET endpoints.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
       responses:
-        "200": { description: Approval recorded and publication result returned. }
-        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "409": { description: Publication is unavailable or the approval no longer matches current evidence. }
+        "410": { $ref: "#/components/responses/LegacyApprovalRetired" }
 
   /v1/engineer/runs/{runId}/request-changes:
     post:
       tags: [Engineer]
       operationId: requestEngineerRunChanges
       deprecated: true
-      summary: "[LEGACY] Request human changes at the legacy gate (historical runs only)"
+      summary: "[RETIRED] Legacy human-gate change request — always 410 GONE"
       description: |
-        LEGACY human-gate action. Superseded by the P8 publication surface; retained
-        only for runs already parked at HUMAN_APPROVAL_PENDING.
+        RETIRED. Superseded by the P8 publication surface; always returns 410 GONE
+        (code LEGACY_APPROVAL_RETIRED). Historical runs stay readable via GET; start
+        a fresh run or use the Developer Resolution Desk to act on them.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
       responses:
-        "200": { description: Run moved to FIX_REQUESTED. }
-        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "410": { $ref: "#/components/responses/LegacyApprovalRetired" }
 
   /v1/engineer/runs/{runId}/reject:
     post:
       tags: [Engineer]
       operationId: rejectEngineerRun
       deprecated: true
-      summary: "[LEGACY] Reject a run at the human gate (historical runs only)"
+      summary: "[RETIRED] Legacy human-gate rejection — always 410 GONE"
       description: |
-        LEGACY human-gate action. Superseded by the P8 publication surface; retained
-        only for runs already parked at HUMAN_APPROVAL_PENDING.
+        RETIRED. Superseded by the P8 publication surface; always returns 410 GONE
+        (code LEGACY_APPROVAL_RETIRED). Historical runs stay readable via GET; start
+        a fresh run or use the Developer Resolution Desk to act on them.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
       responses:
-        "200": { description: Run rejected. }
-        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "410": { $ref: "#/components/responses/LegacyApprovalRetired" }
 
   /v1/engineer/runs/{runId}/extend-approval:
     post:
       tags: [Engineer]
       operationId: extendEngineerRunApproval
       deprecated: true
-      summary: "[LEGACY] Extend a pending legacy approval deadline (historical runs only)"
+      summary: "[RETIRED] Legacy approval-deadline extension — always 410 GONE"
       description: |
-        LEGACY human-gate action. Superseded by the P8 publication surface; retained
-        only for runs already parked at HUMAN_APPROVAL_PENDING.
+        RETIRED. Superseded by the P8 publication surface; always returns 410 GONE
+        (code LEGACY_APPROVAL_RETIRED). Historical runs stay readable via GET; start
+        a fresh run or use the Developer Resolution Desk to act on them.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody:
         required: true
@@ -878,9 +881,8 @@ paths:
                 reason: { type: string, maxLength: 10000 }
                 extensionSeconds: { type: integer, minimum: 60, maximum: 604800 }
       responses:
-        "200": { description: Updated approval deadline. }
-        "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+        "410": { $ref: "#/components/responses/LegacyApprovalRetired" }
 
   /v1/engineer/runs/{runId}/cancel:
     post:
@@ -2242,6 +2244,24 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
           example: { error: { message: "Unauthorized" } }
+    LegacyApprovalRetired:
+      description: |
+        GONE. The legacy human-gate approval lane is retired: these routes can no
+        longer approve, reject, request changes on, or extend ANY run — including a
+        historical run still parked at HUMAN_APPROVAL_PENDING. Use the P8
+        publication surface for new runs, or start a fresh run / the Developer
+        Resolution Desk for a historical one. The run's evidence stays readable via
+        its GET endpoints.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error:
+              code: "LEGACY_APPROVAL_RETIRED"
+              action: "START_FRESH_RUN_OR_USE_RESOLUTION_DESK"
+              message: "The legacy human-gate approval lane is retired. New runs publish only through the P8 publication surface; a historical run parked at the legacy gate can no longer be approved here — start a fresh run or use the Developer Resolution Desk."
+            successor: "p8-publication-or-resolution-desk"
     RequestTimeout:
       description: Upstream did not start streaming within the request timeout.
       content:
