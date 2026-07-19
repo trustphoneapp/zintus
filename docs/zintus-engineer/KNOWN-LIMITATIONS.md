@@ -74,3 +74,43 @@
   client timeout requires provider request-status or billing-export integration.
   Until that exists, the conservative reservation remains visible and continues
   to reduce the run's available allowance.
+
+## P12 release-gate postures (single-tenant GO)
+
+- **Single-tenant only (P12 Finding C — Sol P1-3 / Luna-2).** `EngineerLedger` is
+  single-tenant by design. `tenantOrgId` is fixed to `ENGINEER_DEFAULT_ORG_ID` and
+  the constructor **rejects** any non-default org with `multi-tenant is not yet
+  supported`. The runtime is safe because `deriveEngineerPrincipal` mints exactly
+  one owner per install, and the P7 Resolution Desk read/mutate routes
+  (`getCase`/`listCases`/`issueDirective`/`applyDirective`, not only `createCase`)
+  owner-check every case/directive against that owner. What is NOT wired: real
+  per-tenant isolation — `EngineerLedger` runs ~120 bare `WHERE run_id=?` queries
+  that are not org-scoped, and `TenantScopedLedgerDal` (the isolation-tested
+  multi-tenant DAL) is not the path the ledger/gateway route through. Do not claim
+  tenant isolation.
+- **Provenance attestation formally deferred (P12 Finding A — Sol P1-1 / Luna-1).**
+  The v35 provenance attestation binds a result git *tree* hash for the verified
+  candidate. That tree hash is not durably recorded for an ORIGINAL verified
+  candidate (only `result_commit_sha` is) and deriving it needs a real
+  `git rev-parse <sha>^{tree}` object read that is not wired to the v33 selection
+  at publication time. Posture: attestation is gated behind the explicit env flag
+  `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` (default **unset = not required =
+  deferred**). When unset, publication approval proceeds without an attestation —
+  a documented, deliberate deferral, not a silent fail-open. When set true,
+  attestation is required and, because the tree hash cannot be sourced today,
+  approval **fails closed (503) with no P8 approval written** — absence of a
+  required attestation denies publication, never allows an unattested publish. If
+  the flag is true but no signer authority is configured, the gateway withholds
+  the publication authority entirely. When attestation is required and feasible,
+  the P8 approval and its v35 attestation are made atomic by compensation: if the
+  attestation emission throws after the P8 approval commits, the facade
+  invalidates the just-created P8 approval before rethrowing, so no live approval
+  can exist without its required attestation. To make attestation functional and
+  flip the default to required: durably record/derive the result tree hash at
+  promotion and thread it through `resultTreeHashFor`.
+- **Source freeze now covers the live v33 publication tables (P12 Finding B — Sol
+  P1-2).** Migration **v37** adds `freeze_source_*_v37` triggers on
+  `publication_candidate_selections_v33`, `publication_approvals_v33`, and
+  `publication_git_operations_v33`, so a terminal source run with an open
+  resolution case can no longer be driven selectCandidate → approve → dispatch to
+  publish on a frozen source. (v36 is reserved by contract §1 and skipped.)

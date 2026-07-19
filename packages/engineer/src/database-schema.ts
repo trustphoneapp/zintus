@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 35;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 37;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -3319,4 +3319,33 @@ export const ENGINEER_DATABASE_MIGRATION_35_SQL = `
     SELECT RAISE(ABORT,'provenance attestations are immutable'); END;
   CREATE TRIGGER prevent_provenance_attestations_delete_v35 BEFORE DELETE ON provenance_attestations BEGIN
     SELECT RAISE(ABORT,'provenance attestations are immutable'); END;
+`;
+
+/**
+ * P8/P7 SOURCE-FREEZE completion for the live publication-authority tables
+ * (migration v37). The v31 `freeze_source_*_v31` triggers fenced only the legacy
+ * publication path (approval_requests, approval_decisions, git_operations,
+ * builder_dispatch_claims, …). The LIVE P8 publication path writes to the three
+ * `_v33` tables, which had NO freeze trigger — so a terminal source run with an
+ * OPEN resolution case (freeze installed) plus a live unexpired v33 approval could
+ * still be driven selectCandidate -> approve -> startPublication -> dispatch and
+ * publish on a FROZEN source (Sol P1-2). These three additive triggers close that
+ * hole with the exact v31 idiom: any INSERT on a `_v33` publication table whose
+ * `run_id` is the `source_run_id` of an open resolution case is aborted. The v33
+ * tables are already append-only (update/delete always abort), so INSERT is the
+ * only write surface that needs fencing.
+ *
+ * v36 is RESERVED by contract §1 (standalone checkpoint-v3, deferred); this
+ * completion is allocated the next free version, v37.
+ */
+export const ENGINEER_DATABASE_MIGRATION_37_SQL = `
+  CREATE TRIGGER freeze_source_pub_candidate_selection_v37 BEFORE INSERT ON publication_candidate_selections_v33
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run publication is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_pub_approval_v37 BEFORE INSERT ON publication_approvals_v33
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run publication is frozen by a resolution case'); END;
+  CREATE TRIGGER freeze_source_pub_git_operation_v37 BEFORE INSERT ON publication_git_operations_v33
+    WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
+    BEGIN SELECT RAISE(ABORT,'source run publication is frozen by a resolution case'); END;
 `;

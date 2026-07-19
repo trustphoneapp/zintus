@@ -609,18 +609,49 @@ function enableWalWithBoundedRetry(db: Database): void {
   }
 }
 
+/**
+ * Normalized projection of a `model_calls` row for a stable durable row hash
+ * (`recordedModelCallRowHash`). Hashing the raw `SELECT *` row taints the hash the
+ * moment an ADDITIVE column lands (e.g. the v34 `org_id`): the write side, pre-v34,
+ * and the rehash/verify side, post-v34, would disagree at the migration boundary
+ * even though nothing about the model call changed, spuriously raising
+ * `HardeningBudgetAuthorityInvalidError` on an in-flight AMBIGUOUS reconcile. This
+ * enumerates ONLY the durable model-call columns, so the hash is identical whether
+ * or not additive tenancy columns are present (P12 Finding D). `sha256` sorts keys
+ * canonically, so column order here is irrelevant.
+ */
+export function normalizeModelCallRowForRowHash(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id, run_id: row.run_id, agent_execution_id: row.agent_execution_id,
+    logical_tier: row.logical_tier, resolved_model: row.resolved_model,
+    prompt_template_version: row.prompt_template_version,
+    input_context_refs_json: row.input_context_refs_json,
+    output_schema_version: row.output_schema_version, cache_key: row.cache_key,
+    cache_hit: row.cache_hit, latency_ms: row.latency_ms,
+    input_tokens: row.input_tokens, output_tokens: row.output_tokens,
+    cached_input_tokens: row.cached_input_tokens, cache_write_input_tokens: row.cache_write_input_tokens,
+    retry_count: row.retry_count, budget_reservation_id: row.budget_reservation_id,
+    status: row.status, created_at: row.created_at,
+  };
+}
+
 /** Internal durable ledger. It is deliberately not exported from package index.ts. */
 export class EngineerLedger {
   private readonly db: Database;
   private readonly now: () => Date;
   /**
-   * P10 tenancy: the org context these ledger queries scope to. Today the whole
-   * ledger is a single tenant — every pre/post-v34 row lives in the DEFAULT org,
-   * so scoping the high-traffic owner queries on `org_id = <default>` preserves
-   * behavior exactly while making them tenant-fenced. The multi-tenant path is
-   * `TenantScopedLedgerDal` (org bound at construction, isolation-tested); the
-   * SEAM not closed here is the gateway deriving a per-request org from the
-   * authenticated identity and threading it in place of this constant.
+   * P10 tenancy: the org context these ledger queries scope to.
+   *
+   * SINGLE-TENANT INVARIANT (P12 Finding C, Sol P1-3 / Luna-2): this ledger is
+   * DELIBERATELY single-tenant for this release. `tenantOrgId` is fixed to
+   * `ENGINEER_DEFAULT_ORG_ID` and the constructor REJECTS any attempt to bind a
+   * non-default org (`multi-tenant is not yet supported`). Real multi-tenant
+   * isolation is NOT wired: `EngineerLedger` uses ~120 bare `WHERE run_id=?`
+   * queries (not org-scoped), and `TenantScopedLedgerDal` is a separate,
+   * isolation-tested path that `EngineerLedger` does NOT route through. Do NOT
+   * treat this class as tenant-isolated — the single owner minted per install by
+   * `deriveEngineerPrincipal` is what makes the runtime safe today. See
+   * docs/zintus-engineer/KNOWN-LIMITATIONS.md.
    */
   private readonly tenantOrgId: string = ENGINEER_DEFAULT_ORG_ID;
   private hardeningPromptCacheSecret?: string;
@@ -642,7 +673,14 @@ export class EngineerLedger {
   private provenanceSigningSecret?: string;
   private provenanceSigner?: ProvenanceSigner;
 
-  constructor(dbPath: string, now: () => Date = () => new Date(), hardeningPromptCacheSecret?: string) {
+  constructor(dbPath: string, now: () => Date = () => new Date(), hardeningPromptCacheSecret?: string, orgId: string = ENGINEER_DEFAULT_ORG_ID) {
+    // SINGLE-TENANT INVARIANT (P12 Finding C): reject any non-default org context.
+    // Multi-tenant isolation is not wired in this release; constructing the ledger
+    // for a second tenant must fail loudly rather than silently share one owner's
+    // unscoped queries across tenants.
+    if (orgId !== ENGINEER_DEFAULT_ORG_ID) {
+      throw new Error("multi-tenant is not yet supported: EngineerLedger is single-tenant and only accepts the default org");
+    }
     this.now = now;
     if (hardeningPromptCacheSecret !== undefined) this.configureHardeningPromptCacheSecret(hardeningPromptCacheSecret);
     if (dbPath !== ":memory:") {
@@ -855,10 +893,23 @@ export class EngineerLedger {
    * every P7_REPLACEMENT candidate fails closed (ordinary ORIGINAL candidates are
    * unaffected).
    */
-  createPublicationAuthorityService(deps: Omit<PublicationAuthorityDeps, "lineageVerifier">): PublicationAuthorityService {
+  createPublicationAuthorityService(deps: Omit<PublicationAuthorityDeps, "lineageVerifier" | "checkpointVerifier">): PublicationAuthorityService {
+    const db = this.db;
     return new PublicationAuthorityService(this.db, {
       ...deps,
       lineageVerifier: this.resolutionLineageVerifier,
+      // Defense in depth (P12 Finding F): bind a self-verifier that reads the
+      // real promoted verified-candidate checkpoint from the ledger, so the
+      // service never records a selection over an unpromoted checkpoint even if
+      // the facade pre-check is bypassed.
+      checkpointVerifier: {
+        isPromotedVerifiedCandidate(input): boolean {
+          const row = db
+            .query("SELECT run_id, result_commit_sha FROM verified_candidate_checkpoints WHERE id=? AND checkpoint_hash=?")
+            .get(input.checkpointId, input.checkpointHash) as { run_id: string; result_commit_sha: string } | null;
+          return row !== null && row.run_id === input.candidateRunId && row.result_commit_sha === input.resultCommitSha;
+        },
+      },
     });
   }
 
@@ -5852,7 +5903,7 @@ export class EngineerLedger {
         invalidCallCount.count!==observation.observedModelCallCount||
         invalidReservationCallCount.count!==observation.observedReservationModelCallCount||
         (sourceModelRow===null)!==(observation.recordedModelCallRowHash===null)||
-        (sourceModelRow!==null&&sha256(sourceModelRow)!==observation.recordedModelCallRowHash))
+        (sourceModelRow!==null&&sha256(normalizeModelCallRowForRowHash(sourceModelRow))!==observation.recordedModelCallRowHash))
         throw new HardeningBudgetAuthorityInvalidError();
       const selectedModel=this.hardeningModelCallFromRow(selectedModelRow);
       const expectedPromptVersion=reservation.role==="BUILDER"?"engineer-codex-builder-v3":"engineer-isolated-reviewer-v6";
@@ -6655,7 +6706,7 @@ export class EngineerLedger {
           recoveryIdempotencyKeyHash:sha256(input.recoveryIdempotencyKey),
           recoveryTokenHash:String(recoveryState.recovery_token_hash),
           recoveryClaimedAtMs:Number(recoveryState.recovery_claimed_at_ms),recoveryExpiresAtMs:Number(recoveryState.recovery_expires_at_ms),
-          observedAtMs:input.nowMs,responseRecordedModelCallId,recordedModelCallRowHash:modelRow?sha256(modelRow):null,
+          observedAtMs:input.nowMs,responseRecordedModelCallId,recordedModelCallRowHash:modelRow?sha256(normalizeModelCallRowForRowHash(modelRow)):null,
           modelCallId:ambiguousModel!.modelCallId,modelCallHash:sha256(this.normalizeHardeningModelCall(ambiguousModel!)),
           modelCallKind,observedModelCallCount:afterCallCount.count,
           observedReservationModelCallCount:afterReservationCallCount.count,providerResponseId:row.provider_response_id,

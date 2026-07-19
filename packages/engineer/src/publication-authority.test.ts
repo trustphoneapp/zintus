@@ -440,3 +440,121 @@ describe("v33 migration table immutability", () => {
     expect(() => h.db.query(`DELETE FROM ${table}`).run()).toThrow(/immutable/);
   });
 });
+
+// --- P12 Finding B: SOURCE FREEZE covers the live v33 publication tables -------
+
+/**
+ * Open a real (projection-valid, FK-valid) resolution case on `runId` so the v37
+ * freeze triggers fire. Only existence of a resolution_cases row with
+ * source_run_id=runId matters to the freeze; the row here is minimal but passes
+ * the v31 projection trigger and the (source_run_id, manifest_hash) FK.
+ */
+function openResolutionCase(db: Database, runId: string, ownerUserId: string): void {
+  const MANIFEST = "mh-freeze-1";
+  db.query(`INSERT INTO task_manifest_versions(id, run_id, version, manifest_hash, manifest_json, created_at)
+    VALUES (?,?,?,?,?,?)`).run(`tmv-${runId}`, runId, 1, MANIFEST, "{}", AT);
+  const columns = {
+    caseId: `sha256:${"1".repeat(64)}`, caseHash: `sha256:${"3".repeat(64)}`,
+    schemaVersion: 1, policyVersion: "engineer-resolution-case-v1", sourceRunId: runId,
+    ownerUserId, repositoryId: REPO_ID, sourceState: "FAILED", sourceStateVersion: 0,
+    baseCommitSha: BASE_COMMIT, manifestHash: MANIFEST, requiredLaneContractHash: "rlc-1",
+    blockers: [] as unknown[], blockerCount: 0, correctionEligible: 1, reverifyEligible: 0,
+    reverifyReason: "needs correction", preVerificationCandidatePresent: 0,
+    preVerificationCandidateDigest: null,
+    spendingMicrousd: { sourceActual: 0, priorReplacementActual: 0, ambiguousLiability: 0, cumulativeCeiling: 0 },
+    pricingPolicyDigest: `sha256:${"2".repeat(64)}`, createdAt: AT, expiresAt: "2026-08-01T00:00:00.000Z",
+  };
+  const caseJson = JSON.stringify(columns);
+  db.query(`INSERT INTO resolution_cases
+    (id, case_hash, schema_version, policy_version, source_run_id, owner_user_id, repository_id,
+     source_state, source_state_version, base_commit_sha, manifest_hash, required_lane_contract_hash,
+     blockers_json, blocker_count, correction_eligible, reverify_eligible, reverify_reason,
+     pre_verification_candidate_present, pre_verification_candidate_digest, source_actual_microusd,
+     prior_replacement_actual_microusd, ambiguous_liability_microusd, cumulative_ceiling_microusd,
+     pricing_policy_digest, case_version, state, case_json, created_at, expires_at)
+    VALUES (?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'OPEN',?,?,?)`).run(
+      columns.caseId, columns.caseHash, columns.policyVersion, runId, ownerUserId, REPO_ID,
+      columns.sourceState, columns.sourceStateVersion, columns.baseCommitSha, MANIFEST,
+      columns.requiredLaneContractHash, JSON.stringify(columns.blockers), columns.blockerCount,
+      columns.correctionEligible, columns.reverifyEligible, columns.reverifyReason,
+      columns.preVerificationCandidatePresent, columns.preVerificationCandidateDigest,
+      0, 0, 0, 0, columns.pricingPolicyDigest, caseJson, columns.createdAt, columns.expiresAt);
+}
+
+describe("v33 source freeze — an open resolution case fences the live publication tables (Finding B)", () => {
+  test("with a case open BEFORE selection, selectCandidate on the frozen source is rejected", async () => {
+    const h = harness();
+    openResolutionCase(h.db, RUN_ID, USER_ID);
+    await expect(selectOriginal(h)).rejects.toThrow(/frozen by a resolution case/);
+    const count = (h.db.query("SELECT COUNT(*) c FROM publication_candidate_selections_v33").get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  test("control: a run with NO open case selects + approves + starts a publication fine", async () => {
+    const h = harness();
+    const a = await seedApprovedOriginal(h);
+    const pub = await h.draft.startPublication({ runId: RUN_ID, approvalId: a.approvalId, operation: "BRANCH_PR", idempotencyKey: "k-control" });
+    expect(pub.state).toBe("PREFLIGHT");
+  });
+
+  test("approve on a candidate whose source froze after selection is rejected (RED-without = the v37 approval freeze)", async () => {
+    const h = harness();
+    await selectOriginal(h); // selection recorded BEFORE the case exists
+    openResolutionCase(h.db, RUN_ID, USER_ID);
+    expect(() => h.draft.approve(CK_ID,
+      { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: PUBLICATION_AUTHORITY_POLICY_VERSION }, CTX))
+      .toThrow(/frozen by a resolution case/);
+    const count = (h.db.query("SELECT COUNT(*) c FROM publication_approvals_v33").get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  test("startPublication (the dispatch INSERT) on a source frozen after approval is rejected", async () => {
+    const h = harness();
+    const a = await seedApprovedOriginal(h); // select + approve BEFORE the case
+    openResolutionCase(h.db, RUN_ID, USER_ID);
+    await expect(h.draft.startPublication({ runId: RUN_ID, approvalId: a.approvalId, operation: "BRANCH_PR", idempotencyKey: "k-frozen" }))
+      .rejects.toThrow(/frozen by a resolution case/);
+    const ops = (h.db.query("SELECT COUNT(*) c FROM publication_git_operations_v33").get() as { c: number }).c;
+    expect(ops).toBe(0);
+  });
+});
+
+// --- P12 Finding F: defense-in-depth checkpoint self-verify --------------------
+
+describe("v33 selectCandidate — defense-in-depth promoted-checkpoint self-verify (Finding F)", () => {
+  function serviceWith(db: Database, verifierResult: boolean): PublicationAuthorityService {
+    const actuator: PublicationActuator = {
+      async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "RECEIPT", prUrl: "https://x/pr", commitSha: RESULT_COMMIT }; },
+    };
+    return new PublicationAuthorityService(db, {
+      actuator,
+      preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+      credentialProvider: { getPublicationCredentials: () => ({ token: "t" }) },
+      now: () => new Date(AT), idFactory: deterministicId,
+      checkpointVerifier: { isPromotedVerifiedCandidate: () => verifierResult },
+    });
+  }
+
+  test("a candidate that is NOT a promoted verified checkpoint is rejected before any selection row is written", async () => {
+    const db = scratchDb();
+    const svc = serviceWith(db, false);
+    await expect(svc.selectCandidate({
+      runId: RUN_ID, candidateRunId: RUN_ID, requesterUserId: USER_ID, repositoryId: REPO_ID,
+      checkpointId: CK_ID, checkpointHash: CK_HASH, resultCommitSha: RESULT_COMMIT, lineage: "ORIGINAL", parentSelectionId: null,
+    })).rejects.toThrow(StaleCandidateError);
+    const count = (db.query("SELECT COUNT(*) c FROM publication_candidate_selections_v33").get() as { c: number }).c;
+    expect(count).toBe(0);
+  });
+
+  test("RED-without control: the SAME inputs with the self-verifier returning true DO record the selection (proving the verifier is what blocks it)", async () => {
+    const db = scratchDb();
+    const svc = serviceWith(db, true);
+    const result = await svc.selectCandidate({
+      runId: RUN_ID, candidateRunId: RUN_ID, requesterUserId: USER_ID, repositoryId: REPO_ID,
+      checkpointId: CK_ID, checkpointHash: CK_HASH, resultCommitSha: RESULT_COMMIT, lineage: "ORIGINAL", parentSelectionId: null,
+    });
+    expect(result.lineageVerified).toBe(true);
+    const count = (db.query("SELECT COUNT(*) c FROM publication_candidate_selections_v33").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+});

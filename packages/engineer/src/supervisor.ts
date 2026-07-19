@@ -2057,7 +2057,7 @@ export class EngineerSupervisor {
    * only the credentialed effect seams (actuator/preflight/credentialProvider) —
    * never the verifier, never the db. Composition-root use only.
    */
-  createPublicationAuthorityService(deps: Omit<PublicationAuthorityDeps, "lineageVerifier">): PublicationAuthorityService {
+  createPublicationAuthorityService(deps: Omit<PublicationAuthorityDeps, "lineageVerifier" | "checkpointVerifier">): PublicationAuthorityService {
     return this.ledger.createPublicationAuthorityService(deps);
   }
 

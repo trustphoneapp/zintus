@@ -232,12 +232,32 @@ interface OperationRow {
   checkpoint_id: string; checkpoint_hash: string; state: PublicationState; resolution_type: string | null; detail: string | null;
 }
 
+/**
+ * Defense-in-depth self-verify seam (P12 Finding F). Confirms that a selected
+ * candidate's `(checkpointId, checkpointHash)` really is a PROMOTED verified
+ * candidate in the ledger (`verified_candidate_checkpoints`) for the claimed
+ * `candidateRunId` and `resultCommitSha` — so publication safety does NOT rest
+ * solely on the gateway facade's pre-check. Absent => not enforced (dev/tests
+ * that do not seed real checkpoints); the ledger factory always binds it in prod.
+ */
+export interface VerifiedCheckpointSelfVerifier {
+  isPromotedVerifiedCandidate(input: {
+    readonly runId: string;
+    readonly candidateRunId: string;
+    readonly checkpointId: string;
+    readonly checkpointHash: string;
+    readonly resultCommitSha: string;
+  }): boolean;
+}
+
 export interface PublicationAuthorityDeps {
   readonly actuator: PublicationActuator;
   readonly preflight: RepositoryPreflightProbe;
   readonly credentialProvider: PublicationCredentialProvider;
   /** Absent => every P7_REPLACEMENT candidate is ineligible (fail closed). */
   readonly lineageVerifier?: CompanionLineageVerifier;
+  /** Absent => the promoted-checkpoint self-verify is not enforced (bound in prod by the ledger factory). */
+  readonly checkpointVerifier?: VerifiedCheckpointSelfVerifier;
   readonly now?: () => Date;
   readonly idFactory?: () => string;
 }
@@ -266,6 +286,19 @@ export class PublicationAuthorityService {
     const isChild = input.lineage === "P7_REPLACEMENT";
     if (isChild === (input.parentSelectionId === null)) {
       throw new Error("P7_REPLACEMENT candidates require a parent selection; ORIGINAL candidates forbid one");
+    }
+    // Defense in depth (P12 Finding F): before recording ANY selection, confirm
+    // the candidate checkpoint is a real PROMOTED verified candidate in the
+    // ledger. This does not replace the facade pre-check — it ensures the service
+    // itself never records a selection over a checkpoint that was never promoted,
+    // so safety does not rest solely on the caller.
+    if (this.deps.checkpointVerifier &&
+        !this.deps.checkpointVerifier.isPromotedVerifiedCandidate({
+          runId: input.runId, candidateRunId: input.candidateRunId,
+          checkpointId: input.checkpointId, checkpointHash: input.checkpointHash,
+          resultCommitSha: input.resultCommitSha,
+        })) {
+      throw new StaleCandidateError();
     }
     let lineageVerified: boolean;
     if (input.lineage === "ORIGINAL") {
@@ -612,6 +645,19 @@ export class PublicationAuthorityService {
       try { this.db.exec("ROLLBACK"); } catch { /* preserve reconciliation failure */ }
       throw error;
     }
+  }
+
+  /**
+   * Public compensation seam (P12 Finding A). Invalidate a live P8 approval by id
+   * — used by the gateway facade to roll back an approval whose REQUIRED v35
+   * attestation failed to emit, so a consumable approval never survives without
+   * its attestation. Idempotent: an unknown or already-terminal approval is a
+   * no-op (the private path guards INVALIDATED/CONSUMED).
+   */
+  invalidateApprovalById(approvalId: string, reason: string): void {
+    const current = this.currentApproval(approvalId);
+    if (!current) return;
+    this.invalidateApproval(current, reason);
   }
 
   private invalidateApproval(approval: ApprovalRow, reason: string): void {

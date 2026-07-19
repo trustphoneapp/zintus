@@ -2842,3 +2842,44 @@ unfinished pair has passed.
   already closes the window on the new path; a full gateway cutover needs the
   three unbuilt pieces above + a large publication.test.ts rewrite — not forced).
   Gates: engineer 775, gateway 407, typecheck + diff clean.
+
+### Day 3 — P12 remediation: reconciled Sol+Luna findings closed (2026-07-19)
+
+- Both independent P12 audits (Sol architecture, Luna adversarial) agreed the
+  money/correctness/identity/migration gates HELD; failures were integration
+  seams. All fixed in one coherent pass (v37 allocated; v36 left reserved for
+  checkpoint-v3 per contract §1). Fable-verified each release-blocker by
+  mutation.
+- A (release-blocker, Fable mutation-verified): attestation atomicity +
+  inversion. Facade now COMPENSATES — if decideApprove throws after the P8
+  approve commits, service.invalidateApprovalById() invalidates the approval so
+  it can never authorize a publication, then a fail-closed 503. Removing the
+  invalidate call turns the facade test red (7→6), restore clean. Attestation
+  posture: FORMALLY DEFERRED behind ENGINEER_PROVENANCE_ATTESTATION_REQUIRED
+  (default off, documented) — the result TREE hash is genuinely not durably
+  recorded (only result_commit_sha) and needs a git object read not wired, so
+  when required it fails closed (absence DENIES publication, never allows
+  unattested); the signer-off silent fail-open is gone.
+- B (release-blocker, Fable mutation-verified): v37 adds freeze_source_pub_*
+  triggers on the three _v33 publication tables driven off
+  resolution_cases.source_run_id — a frozen source now rejects
+  selectCandidate/approve/startPublication ("frozen by a resolution case").
+  Neutering a trigger reddens the publication suite (32 fail), restore clean.
+- C (release-blocker): tenant isolation declared SINGLE-TENANT explicitly —
+  EngineerLedger rejects any non-default org ("multi-tenant is not yet
+  supported"), resolution-desk read/mutate routes now owner-checked, and
+  KNOWN-LIMITATIONS documents the inert org_id layer. No multi-tenant claim.
+- D: model_calls row hash now normalized-projection on both write and verify
+  (excludes v34 org_id) — fixes the v34-upgrade-boundary taint. E: v32 standalone
+  ancestry guard added. F: v33 selectCandidate self-verifies the checkpoint is a
+  promoted verified_candidate_checkpoints row (defense-in-depth; prod no longer
+  rests solely on the facade). Gates: engineer 785/1-known-flake (5s timeout on
+  "one canonical executor-authored verification audit", Fable-confirmed
+  environmental), gateway 409, typecheck + diff clean.
+- HONEST residuals: attestation deferred (not functional until result tree hash
+  is durably recorded — the real last mile + [HUMAN] KMS); A's compensation has
+  an inherent crash-window between approve-commit and invalidate (true single-txn
+  would need service.approve + ledger.decideApproval to share one transaction);
+  C's resolution-desk owner-check has no standalone boot-harness test (covered by
+  requireOwner reuse + non-regression). Single-tenant + attestation-deferred +
+  auto-publish-off is the shippable posture.

@@ -199,8 +199,9 @@ describe("P11 v35 forward-install on a populated v34 database", () => {
     db.query("INSERT INTO repository_connections(id,user_id,provider,owner,name,created_at,updated_at,org_id) VALUES (?,?,?,?,?,?,?,?)")
       .run("r-legacy", "u-legacy", "local", "o", "n", now, now, ENGINEER_DEFAULT_ORG_ID);
 
-    // Forward-install v35 onto the populated v34 DB.
-    migrateEngineerDatabase(db, now);
+    // Forward-install v35 onto the populated v34 DB (pinned target; the live head
+    // is now v37 but this test exercises the v35 provenance store specifically).
+    migrateEngineerDatabase(db, now, 35);
     expect((db.query("SELECT MAX(version) v FROM schema_migrations").get() as { v: number }).v).toBe(35);
 
     // Prior rows survive unchanged and remain readable.

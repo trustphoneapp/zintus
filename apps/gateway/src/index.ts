@@ -700,16 +700,47 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         .all(caseId) as Array<{ payload_json: string }>;
       return rows.map((row) => JSON.parse(row.payload_json));
     };
+    // Owner-scope EVERY read/mutate route, not just createCase (P12 Finding C /
+    // Luna-2). The durable case (or the directive's case) records `owner_user_id`;
+    // a caseId/directiveId owned by another user returns the same not-found shape
+    // as an unknown id (no cross-owner oracle) BEFORE any desk read/mutation.
+    const requireCaseOwner = (caseId: string): void => {
+      const row = resolutionConnection
+        .query("SELECT owner_user_id FROM resolution_cases WHERE id=?")
+        .get(caseId) as { owner_user_id: string } | null;
+      requireOwner(row?.owner_user_id ?? "");
+    };
+    const requireDirectiveOwner = (directiveId: string): void => {
+      const row = resolutionConnection
+        .query("SELECT c.owner_user_id AS owner_user_id FROM resolution_directives d JOIN resolution_cases c ON c.id=d.case_id WHERE d.id=?")
+        .get(directiveId) as { owner_user_id: string } | null;
+      requireOwner(row?.owner_user_id ?? "");
+    };
     resolutionDesk = {
       createCase: (_principal, runId) => {
         const input = deriveCaseCreationInput(resolutionConnection, runId, { pricingPolicyDigest: resolutionPricingDigest });
         requireOwner(input.ownerUserId);
         return desk.createCase(input);
       },
-      listCases: (_principal, runId) => desk.listCases(runId),
-      getCase: (_principal, caseId) => ({ case: desk.getCase(caseId), events: readCaseEvents(caseId) }),
-      issueDirective: (_principal, caseId, body, idempotencyKey) => desk.issueDirective(caseId, body, idempotencyKey),
-      applyDirective: (_principal, directiveId, idempotencyKey) => desk.applyDirective(directiveId, idempotencyKey),
+      listCases: (_principal, runId) => {
+        // The source run must be owned by the server principal, else not-found.
+        const run = resolutionConnection.query("SELECT user_id FROM engineer_runs WHERE id=?")
+          .get(runId) as { user_id: string } | null;
+        requireOwner(run?.user_id ?? "");
+        return desk.listCases(runId);
+      },
+      getCase: (_principal, caseId) => {
+        requireCaseOwner(caseId);
+        return { case: desk.getCase(caseId), events: readCaseEvents(caseId) };
+      },
+      issueDirective: (_principal, caseId, body, idempotencyKey) => {
+        requireCaseOwner(caseId);
+        return desk.issueDirective(caseId, body, idempotencyKey);
+      },
+      applyDirective: (_principal, directiveId, idempotencyKey) => {
+        requireDirectiveOwner(directiveId);
+        return desk.applyDirective(directiveId, idempotencyKey);
+      },
     };
   } else {
     log("warn", "engineer.resolution_desk_unavailable", { detail: resolutionSigning.detail });
@@ -717,21 +748,34 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
 
   // P8 publication-authority facade. The routes forward JSON; this facade derives
   // ALL authority server-side (requester from the principal owner, approver from the
-  // principal reviewer, idempotency from the header). Attestation last-mile: when a
-  // provenance signer is configured (resolutionSigning READY, above), a durable
-  // APPROVE must emit a v35 attestation over the ledger approval_decision path or
-  // FAIL CLOSED. The result-tree-hash seam is NOT yet sourced for v33 candidates
-  // (only result_commit_sha is durable; a git tree read is not wired to the v33
-  // selection), so `resultTreeHashFor` returns null and a signer-configured APPROVE
-  // fails closed with a precise 503 — never a silent approve-without-attestation.
+  // principal reviewer, idempotency from the header).
+  //
+  // Attestation posture (P12 Finding A): the v35 attestation binds a result git
+  // TREE hash that is NOT durably recorded for a verified candidate and cannot be
+  // sourced at publication time here, so attestation is FORMALLY DEFERRED behind
+  // the explicit `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` flag (default OFF =
+  // deferred; documented in KNOWN-LIMITATIONS.md). When ON, a durable APPROVE must
+  // emit a v35 attestation or FAIL CLOSED (503, no P8 approval written), and if it
+  // is ON without a configured signer the publication authority is WITHHELD
+  // entirely (never fail-open). `resultTreeHashFor` still returns null (unsourced),
+  // so with the flag ON, APPROVE fails closed until a real tree hash is wired.
+  const provenanceAttestationRequired =
+    /^(1|true)$/i.test(process.env.ENGINEER_PROVENANCE_ATTESTATION_REQUIRED ?? "");
   let publicationAuthority: EngineerPublicationAuthorityFacade | undefined;
-  if (engineerPublicationAuthorityService) {
+  if (engineerPublicationAuthorityService && provenanceAttestationRequired && resolutionSigning.status !== "READY") {
+    // Fail closed: attestation is REQUIRED by config but no signer authority is
+    // available to emit it. Withhold the publication authority rather than run
+    // fail-open; the routes report the configured/not-configured 503.
+    log("error", "engineer.publication_attestation_required_without_signer", {
+      detail: "ENGINEER_PROVENANCE_ATTESTATION_REQUIRED is set but no provenance signer is configured",
+    });
+  } else if (engineerPublicationAuthorityService) {
     publicationAuthority = createEngineerPublicationAuthorityFacade({
       service: engineerPublicationAuthorityService,
       principal: engineerPrincipal,
       connection: engineerSupervisor.resolutionDeskConnection(),
       now: () => new Date(),
-      signerConfigured: resolutionSigning.status === "READY",
+      attestationRequired: provenanceAttestationRequired && resolutionSigning.status === "READY",
       latestApprovalRequest: (runId) => {
         const request = engineerSupervisor.latestApprovalRequest(runId);
         return request ? {

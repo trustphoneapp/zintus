@@ -67,7 +67,7 @@ function makeFacade(db: Database, overrides: Partial<PublicationFacadeDeps> = {}
     principal,
     connection: db,
     now: () => new Date(AT),
-    signerConfigured: false,
+    attestationRequired: false,
     latestApprovalRequest: () => null,
     decideApprove: (record, provenanceContext) => { decideCalls.push({ record, provenanceContext }); },
     resultTreeHashFor: () => null,
@@ -106,9 +106,9 @@ describe("P8 publication facade — server-derived authority", () => {
 });
 
 describe("P8 publication facade — attestation last-mile fails closed", () => {
-  test("with a signer configured but no bound PENDING approval request, APPROVE fails closed (503) and writes NO approval", async () => {
+  test("with attestation required but no bound PENDING approval request, APPROVE fails closed (503) and writes NO approval", async () => {
     const db = scratchDb();
-    const { facade } = makeFacade(db, { signerConfigured: true, latestApprovalRequest: () => null });
+    const { facade } = makeFacade(db, { attestationRequired: true, latestApprovalRequest: () => null });
     await facade.selectCandidate(principal, RUN_ID, selectBody);
     expect(() => facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }))
       .toThrow(PublicationAttestationUnavailableError);
@@ -116,14 +116,67 @@ describe("P8 publication facade — attestation last-mile fails closed", () => {
     expect(count).toBe(0); // fail closed BEFORE any P8 approval row is written
   });
 
-  test("RED-without-fail-closed: the SAME inputs with no signer configured DO write an approval (proving the guard is what blocks it)", async () => {
+  test("RED-without-fail-closed: the SAME inputs with attestation NOT required (deferred default) DO write an approval (proving the flag is what blocks it)", async () => {
     const db = scratchDb();
-    const { facade } = makeFacade(db, { signerConfigured: false, latestApprovalRequest: () => null });
+    const { facade } = makeFacade(db, { attestationRequired: false, latestApprovalRequest: () => null });
     await facade.selectCandidate(principal, RUN_ID, selectBody);
     const result = facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }) as { status: string };
     expect(result.status).toBe("APPROVED");
     const count = (db.query("SELECT COUNT(*) AS n FROM publication_approvals_v33").get() as { n: number }).n;
     expect(count).toBe(1);
+  });
+});
+
+describe("P8 publication facade — attestation atomicity (Finding A compensation)", () => {
+  // A PENDING ledger approval_request bound to this exact candidate, plus a sourced
+  // result tree hash, make attestation FEASIBLE so service.approve() commits the P8
+  // approval; then decideApprove THROWS to simulate a post-commit attestation
+  // failure. The compensation must leave NO live/consumable approval.
+  const boundRequest = {
+    approvalRequestId: "areq-1", status: "PENDING", approvalRevision: 0,
+    deadlineAt: "2026-07-20T12:00:00.000Z", evidenceBundleHash: `sha256:${"c".repeat(64)}`,
+    verifiedCheckpointId: CK_ID, verifiedCheckpointHash: CK_HASH,
+  };
+
+  test("a decideApprove failure AFTER the P8 approve commit leaves NO live approval (invalidated) and surfaces 503", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db, {
+      attestationRequired: true,
+      latestApprovalRequest: () => boundRequest,
+      resultTreeHashFor: () => `sha256:${"9".repeat(64)}`,
+      decideApprove: () => { throw new Error("ledger attestation emission failed"); },
+    });
+    await facade.selectCandidate(principal, RUN_ID, selectBody);
+    expect(() => facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }))
+      .toThrow(PublicationAttestationUnavailableError);
+    // The P8 approval row WAS written (approve committed before decideApprove),
+    // but compensation must have appended an INVALIDATED revision so the live
+    // (highest-revision) status is not APPROVED — no consumable approval survives.
+    const live = db.query(`SELECT status FROM publication_approvals_v33
+      ORDER BY revision DESC LIMIT 1`).get() as { status: string } | null;
+    expect(live?.status).toBe("INVALIDATED");
+    const liveApproved = db.query(`SELECT COUNT(*) AS n FROM publication_approvals_v33 a
+      WHERE a.decision='APPROVE' AND a.status='APPROVED'
+        AND NOT EXISTS(SELECT 1 FROM publication_approvals_v33 b
+          WHERE b.approval_id=a.approval_id AND b.revision>a.revision)`).get() as { n: number };
+    expect(liveApproved.n).toBe(0);
+  });
+
+  test("RED-without-compensation control: the SAME feasible attestation that SUCCEEDS leaves the approval live and APPROVED", async () => {
+    const db = scratchDb();
+    const decideCalls: unknown[] = [];
+    const { facade } = makeFacade(db, {
+      attestationRequired: true,
+      latestApprovalRequest: () => boundRequest,
+      resultTreeHashFor: () => `sha256:${"9".repeat(64)}`,
+      decideApprove: (record) => { decideCalls.push(record); },
+    });
+    await facade.selectCandidate(principal, RUN_ID, selectBody);
+    const result = facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }) as { status: string };
+    expect(result.status).toBe("APPROVED");
+    expect(decideCalls.length).toBe(1);
+    const live = db.query(`SELECT status FROM publication_approvals_v33 ORDER BY revision DESC LIMIT 1`).get() as { status: string };
+    expect(live.status).toBe("APPROVED");
   });
 });
 
