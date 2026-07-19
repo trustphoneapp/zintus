@@ -211,7 +211,7 @@ describe("Approval/publication client (§3) — wired to the live P8 publication
       return jsonResponse({ approvalId: "appr_1", status: "APPROVED" }, 201);
     }) as typeof fetch;
     const result = await createApproval("cp_1", { checkpointHash: `sha256:${"a".repeat(64)}`, decision: "APPROVE", rationale: "Looks correct" });
-    expect(Object.keys(captured as object).sort()).toEqual(["checkpointHash", "decision", "policyVersion", "rationale"].sort());
+    expect(Object.keys(captured!).sort()).toEqual(["checkpointHash", "decision", "policyVersion", "rationale"].sort());
     expect(captured!.policyVersion).toBe("engineer-publication-authority-v33");
     expect(captured!).not.toHaveProperty("idempotencyKey");
     // The bare response is returned directly (no unwrap of a non-existent envelope).
@@ -225,7 +225,7 @@ describe("Approval/publication client (§3) — wired to the live P8 publication
       return jsonResponse({ approvalId: "appr_2", status: "APPROVED" }, 201);
     }) as typeof fetch;
     await createApproval("cp_1", { checkpointHash: `sha256:${"a".repeat(64)}`, decision: "APPROVE" });
-    expect(Object.keys(captured as object).sort()).toEqual(["checkpointHash", "decision", "policyVersion"].sort());
+    expect(Object.keys(captured!).sort()).toEqual(["checkpointHash", "decision", "policyVersion"].sort());
   });
 
   test("self-approval 403 SELF_APPROVAL surfaces with its code from the live nested {error:{code,message}} envelope (mapPublicationAuthorityError)", async () => {

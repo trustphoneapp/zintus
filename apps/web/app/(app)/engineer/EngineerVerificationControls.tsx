@@ -61,3 +61,24 @@ export function PublicationUnavailableNotice() {
     <p>The signed candidate passed deterministic verification; no human approval or publication has occurred.</p>
   </section>;
 }
+
+/**
+ * R3 (Blocker 3): the primary-run entry point into the authoritative P8
+ * publication lane. A REVIEW_APPROVED run's machine-verified candidate is
+ * publishable; this hands the human off to the Approval and publication screen
+ * scoped to the run (select candidate → approve → publish → dispatch). It
+ * replaces the old dead-end "not configured" notice, which was reachable only
+ * by typing the URL.
+ */
+export function PublicationEntryNotice({ runId }: { runId: string }) {
+  return <section className="engineer-card engineer-gate" aria-labelledby="publication-entry-heading">
+    <div>
+      <span className="engineer-kicker">Machine verified · ready for approval</span>
+      <h2 id="publication-entry-heading">Approve and publish this verified candidate</h2>
+      <p>The signed candidate passed deterministic verification. Open the Approval and publication screen to record the human approval and dispatch the credentialed branch and pull request.</p>
+    </div>
+    <div className="engineer-actions">
+      <a className="engineer-primary" href={`/engineer/publication?run=${encodeURIComponent(runId)}`}>Open Approval and publication</a>
+    </div>
+  </section>;
+}
