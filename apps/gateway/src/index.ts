@@ -55,6 +55,10 @@ import {
   OfflineDependencyBundle,
   NO_LOCKFILE_HASH,
   resolveEngineerModel,
+  ResolutionDesk,
+  ResolutionReplacementRunFactory,
+  deriveCaseCreationInput,
+  serverPricingPolicyDigest,
   WarmSandboxPool,
 } from "@zintus/engineer";
 import { homedir } from "node:os";
@@ -68,6 +72,8 @@ import { canEnableEngineerPublication, loadOrCreateEngineerPrincipal, loadOrCrea
 import { recoverHardeningPaidCallsOnce, recoverOptionalHardeningAfterPaidReconciliation,
   type HardeningPaidCallRecoverySweepResult } from "./hardening-recovery.js";
 import { loadEngineerPromptCacheAuthority } from "./engineer-prompt-cache-authority.js";
+import { loadEngineerResolutionSigningAuthority } from "./engineer-resolution-authority.js";
+import type { EngineerResolutionDeskFacade } from "./handler.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -628,6 +634,57 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // errors continue to flow only to the structured JSON log).
   const onError = createErrorSink(process.env, log);
 
+  // P7 Developer Resolution Desk. Constructed on the ledger's SINGLE live
+  // connection (so case/directive/apply transactions and the executable
+  // replacement-run inserts are atomic with ledger writes and see the freeze
+  // triggers in-transaction). The directive-signing secret is owner-only and
+  // confined to this process — never handed to a model or sandbox. When the
+  // secret authority is unavailable the desk is omitted and the routes report a
+  // configured/not-configured 503 (never a wrong classification). The facade
+  // derives the FULL CaseCreationInput from the durable terminal run server-side
+  // (deriveCaseCreationInput) — the browser supplies no authority.
+  let resolutionDesk: EngineerResolutionDeskFacade | undefined;
+  const resolutionSigning = loadEngineerResolutionSigningAuthority({
+    secretPath: join(engineerRoot, "resolution-directive-signing.secret"),
+  });
+  if (resolutionSigning.status === "READY") {
+    const resolutionConnection = engineerSupervisor.resolutionDeskConnection();
+    const resolutionPricingDigest = serverPricingPolicyDigest();
+    const desk = new ResolutionDesk(
+      resolutionConnection,
+      resolutionSigning.secret,
+      resolutionSigning.keyId,
+      () => new Date(),
+      new ResolutionReplacementRunFactory(),
+    );
+    const requireOwner = (ownerUserId: string): void => {
+      // Owner-scoped: the durable run's owner must be the server engineer
+      // principal. Cross-owner ids return the same not-found shape (no oracle).
+      if (ownerUserId !== engineerPrincipal.ownerId) {
+        throw Object.assign(new Error("resolution case not found"), { code: "CASE_NOT_FOUND", status: 404 });
+      }
+    };
+    const readCaseEvents = (caseId: string): unknown[] => {
+      const rows = resolutionConnection
+        .query("SELECT payload_json FROM resolution_events WHERE case_id=? ORDER BY sequence")
+        .all(caseId) as Array<{ payload_json: string }>;
+      return rows.map((row) => JSON.parse(row.payload_json));
+    };
+    resolutionDesk = {
+      createCase: (_principal, runId) => {
+        const input = deriveCaseCreationInput(resolutionConnection, runId, { pricingPolicyDigest: resolutionPricingDigest });
+        requireOwner(input.ownerUserId);
+        return desk.createCase(input);
+      },
+      listCases: (_principal, runId) => desk.listCases(runId),
+      getCase: (_principal, caseId) => ({ case: desk.getCase(caseId), events: readCaseEvents(caseId) }),
+      issueDirective: (_principal, caseId, body, idempotencyKey) => desk.issueDirective(caseId, body, idempotencyKey),
+      applyDirective: (_principal, directiveId, idempotencyKey) => desk.applyDirective(directiveId, idempotencyKey),
+    };
+  } else {
+    log("warn", "engineer.resolution_desk_unavailable", { detail: resolutionSigning.detail });
+  }
+
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
@@ -641,6 +698,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       activityStore,
       mcpRegistry,
       engineerRuns,
+      resolutionDesk,
       getDraining: () => draining,
       // Real, in-flight-aware free-tier quota signal for Tokzen's quota-aware
       // compression dial (was always the hardcoded 1.0 default before wiring).

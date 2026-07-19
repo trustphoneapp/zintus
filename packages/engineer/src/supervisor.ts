@@ -1,3 +1,4 @@
+import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -2023,6 +2024,15 @@ export class EngineerSupervisor {
 
   close(): void {
     this.ledger.close();
+  }
+
+  /**
+   * The ledger's single live SQLite connection, for constructing the P7
+   * Resolution Desk on the SAME connection as the ledger (see
+   * `EngineerLedger.resolutionDeskConnection`). Composition-root use only.
+   */
+  resolutionDeskConnection(): Database {
+    return this.ledger.resolutionDeskConnection();
   }
 
   private applyDecisionSideEffect(decision: DecisionRecord, expectedStateVersion: number): void {

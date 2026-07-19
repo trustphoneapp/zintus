@@ -14,7 +14,11 @@ import {
   EngineerSupervisor,
   IdempotencyConflictError,
   LocalArtifactStore,
+  ResolutionDesk,
+  ResolutionReplacementRunFactory,
   VerifiedCandidateIntegrityError,
+  deriveCaseCreationInput,
+  serverPricingPolicyDigest,
   type ApprovalRequestRecord,
   type EngineerRun,
 } from "@zintus/engineer";
@@ -3073,5 +3077,108 @@ describe("P7 Developer Resolution Desk HTTP routes", () => {
     const { handler } = makeResolutionHandler();
     const response = await handler(new Request("http://x/v1/engineer/resolution-cases/case-1/bogus", { method: "POST", headers: { ...authorized, "Idempotency-Key": "k" } }));
     expect(response.status).toBe(404);
+  });
+});
+
+describe("P7 Resolution Desk — REAL create -> issue -> apply end-to-end (no 503)", () => {
+  const authorized = { Authorization: "Bearer secret", "Content-Type": "application/json" } as Record<string, string>;
+
+  function realHandler() {
+    const root = mkdtempSync(join(tmpdir(), "zintus-resolution-e2e-"));
+    const dbPath = join(root, "engineer.db");
+    const supervisor = new EngineerSupervisor({ dbPath });
+    const db = supervisor.resolutionDeskConnection();
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "resolution-e2e-owner" });
+    const now = "2026-07-19T00:00:00.000Z";
+    // Durable terminal source run with a correctable required-test failure.
+    db.query("INSERT INTO users(id,email,created_at,updated_at) VALUES (?,NULL,?,?)").run(principal.ownerId, now, now);
+    db.query("INSERT INTO repository_connections(id,user_id,provider,owner,name,created_at,updated_at) VALUES ('repo-1',?,'local','local','repo',?,?)").run(principal.ownerId, now, now);
+    db.query(`INSERT INTO engineer_runs(id,user_id,repository_id,base_branch,base_commit_sha,request_original,request_normalized,state,state_version,manifest_hash,risk_tier,human_gate_required,created_at,updated_at)
+      VALUES ('src-run',?,'repo-1','main',?,'build the thing','build the thing','VERIFICATION_INCOMPLETE',4,?,'MEDIUM',1,?,?)`)
+      .run(principal.ownerId, "a".repeat(40), `sha256:${"1".repeat(64)}`, now, now);
+    db.query(`INSERT INTO run_budgets(run_id,cost_limit_usd,token_limit,time_limit_seconds,lifetime_cost_limit_usd,lifetime_token_limit,lifetime_time_limit_seconds,status,created_at,updated_at)
+      VALUES ('src-run',5,50000,3600,20,1000000,86400,'ACTIVE',?,?)`).run(now, now);
+    db.query("INSERT INTO task_manifest_versions(id,run_id,version,manifest_hash,manifest_json,created_at) VALUES ('tmv-src','src-run',1,?,'{}',?)")
+      .run(`sha256:${"1".repeat(64)}`, now);
+    db.query(`INSERT INTO failure_records(id,run_id,failure_class,reason_code,fingerprint,evidence_ids_json,retryable,created_at)
+      VALUES ('fail-1','src-run','TEST_FAILURE','REQUIRED_TEST_FAILED',?, '[]',0,?)`).run(`sha256:${"2".repeat(64)}`, now);
+
+    const pricingDigest = serverPricingPolicyDigest();
+    const desk = new ResolutionDesk(db, "e2e-signing-secret", "sha256:" + "3".repeat(64), () => new Date(), new ResolutionReplacementRunFactory());
+    const resolutionDesk = {
+      createCase: (_p: unknown, runId: string) => desk.createCase(deriveCaseCreationInput(db, runId, { pricingPolicyDigest: pricingDigest })),
+      listCases: (_p: unknown, runId: string) => desk.listCases(runId),
+      getCase: (_p: unknown, caseId: string) => ({ case: desk.getCase(caseId), events: [] }),
+      issueDirective: (_p: unknown, caseId: string, body: unknown, key: string) => desk.issueDirective(caseId, body, key),
+      applyDirective: (_p: unknown, directiveId: string, key: string) => desk.applyDirective(directiveId, key),
+    } as unknown as GatewayHandlerDeps["resolutionDesk"];
+    const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns, resolutionDesk });
+    return { handler, db, root, supervisor, pricingDigest };
+  }
+
+  test("create (201) -> issue corrected (201) -> apply (200) creates a real replacement run, no 503", async () => {
+    const { handler, db, root, supervisor, pricingDigest } = realHandler();
+    try {
+      // 1. Create the case from the durable terminal run.
+      const createRes = await handler(new Request("http://x/v1/engineer/runs/src-run/resolution-cases", { method: "POST", headers: authorized }));
+      expect(createRes.status).toBe(201);
+      const created = await createRes.json() as { case: { caseId: string; caseVersion: number; correctionEligible: boolean; pricingPolicyDigest: string } };
+      expect(created.case.correctionEligible).toBe(true);
+      expect(created.case.pricingPolicyDigest).toBe(pricingDigest);
+      const caseId = created.case.caseId;
+
+      // 2. Issue a CREATE_CORRECTED_RUN directive with a fresh budget (Idempotency-Key required).
+      const directiveBody = { type: "CREATE_CORRECTED_RUN", caseVersion: 0, sourceRunVersion: 4, budget: { maxCostUsd: 1, maxTokens: 5000, maxActiveSeconds: 1200, pricingPolicyDigest: pricingDigest } };
+      const issueRes = await handler(new Request(`http://x/v1/engineer/resolution-cases/${caseId}/directives`, {
+        method: "POST", headers: { ...authorized, "Idempotency-Key": "issue-1" }, body: JSON.stringify(directiveBody),
+      }));
+      expect(issueRes.status).toBe(201);
+      const issued = await issueRes.json() as { directive: { directiveId: string } };
+      const directiveId = issued.directive.directiveId;
+
+      // 3. Apply the directive — the real factory creates the replacement run.
+      const applyRes = await handler(new Request(`http://x/v1/engineer/resolution-directives/${directiveId}/apply`, {
+        method: "POST", headers: { ...authorized, "Idempotency-Key": "apply-1" },
+      }));
+      expect(applyRes.status).toBe(200);
+      const applied = await applyRes.json() as { replacementRunId: string; state: string };
+      expect(applied.state).toBe("READY");
+
+      // A REAL engineer_runs row now exists at the start state with ZERO inherited evidence.
+      const replacement = db.query("SELECT id,state,state_version FROM engineer_runs WHERE id=?").get(applied.replacementRunId) as { id: string; state: string; state_version: number } | null;
+      expect(replacement).not.toBeNull();
+      expect(replacement!.state).toBe("REQUEST_RECEIVED");
+      const inheritedFailures = db.query("SELECT COUNT(*) AS n FROM failure_records WHERE run_id=?").get(applied.replacementRunId) as { n: number };
+      expect(Number(inheritedFailures.n)).toBe(0);
+
+      // Idempotent apply replay returns the same replacement, still 200.
+      const applyReplay = await handler(new Request(`http://x/v1/engineer/resolution-directives/${directiveId}/apply`, {
+        method: "POST", headers: { ...authorized, "Idempotency-Key": "apply-1" },
+      }));
+      expect(applyReplay.status).toBe(200);
+      expect((await applyReplay.json() as { replacementRunId: string }).replacementRunId).toBe(applied.replacementRunId);
+    } finally {
+      supervisor.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("apply without an Idempotency-Key is a typed 400 (not a 503)", async () => {
+    const { handler, root, supervisor } = realHandler();
+    try {
+      const createRes = await handler(new Request("http://x/v1/engineer/runs/src-run/resolution-cases", { method: "POST", headers: authorized }));
+      const caseId = (await createRes.json() as { case: { caseId: string } }).case.caseId;
+      const issueRes = await handler(new Request(`http://x/v1/engineer/resolution-cases/${caseId}/directives`, {
+        method: "POST", headers: { ...authorized, "Idempotency-Key": "issue-1" },
+        body: JSON.stringify({ type: "CREATE_CORRECTED_RUN", caseVersion: 0, sourceRunVersion: 4, budget: { maxCostUsd: 1, maxTokens: 5000, maxActiveSeconds: 1200, pricingPolicyDigest: serverPricingPolicyDigest() } }),
+      }));
+      const directiveId = (await issueRes.json() as { directive: { directiveId: string } }).directive.directiveId;
+      const applyRes = await handler(new Request(`http://x/v1/engineer/resolution-directives/${directiveId}/apply`, { method: "POST", headers: authorized }));
+      expect(applyRes.status).toBe(400);
+    } finally {
+      supervisor.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -934,6 +934,18 @@ export class EngineerLedger {
     return this.getRun(input.runId);
   }
 
+  /**
+   * The single live SQLite connection this ledger writes on. Exposed ONLY so the
+   * P7 Resolution Desk (and its server-side case-creation derivation + fenced
+   * replacement factory) run on the SAME connection: their case/directive/apply
+   * transactions and the executable-run inserts must be atomic with the ledger's
+   * writes and see the freeze triggers in-transaction. Never a second connection
+   * (cross-connection breaks the fence). Not for general callers.
+   */
+  resolutionDeskConnection(): Database {
+    return this.db;
+  }
+
   getRun(runId: string): EngineerRun {
     const row = this.db.query(`${RUN_SELECT} WHERE r.id = ?`).get(runId) as RunRow | null;
     if (!row) throw new EngineerNotFoundError("run", runId);

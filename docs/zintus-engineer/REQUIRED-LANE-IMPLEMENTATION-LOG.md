@@ -2618,3 +2618,34 @@ unfinished pair has passed.
   facade was correctly refused — wrong blocker classification would authorize
   wrong correction/reverify. That derivation adapter is the sole remaining gate
   before the merge sequence. Gates: engineer 630, gateway 386, typecheck clean.
+
+### Day 3 — P7 gateway derivation adapter: the spine is complete (2026-07-19)
+
+- The last integration blocker (P1-B wiring) is closed. deriveCaseCreationInput
+  builds the full CaseCreationInput from a durable terminal run over the desk's
+  shared connection: canonical classified blockers, chain-aware spend (source +
+  ancestor settled/ambiguous), root ceiling, S1 pricing digest, source-class
+  exclusion, pre-verification candidate digest. ResolutionDesk is now
+  constructed in index.ts on the ledger's single connection (fence atomicity
+  preserved) with the owner-confined directive-signing secret and the real
+  ResolutionReplacementRunFactory injected; the 5 routes run create→issue→apply
+  end-to-end instead of 503, owner-scoped with cross-owner returning the safe
+  not-found shape.
+- Blocker classification (the safety-critical mapping) is fail-closed: every
+  failure_record is BLOCKING; a security/review finding that is not provably
+  LOW/INFO is BLOCKING; an unrecognized severity is BLOCKING; a terminal
+  non-success run with no durable blocker gets a synthetic BLOCKING floor; only
+  a durably-typed transient cause is ever transient. Fable mutation-verified the
+  dangerous direction directly: widening ADVISORY_SEVERITIES to include
+  MEDIUM/HIGH/CRITICAL turned three derivation tests red, restore clean — a
+  security mis-downgrade cannot pass. Gates: engineer 645, gateway 391,
+  typecheck + diff-check clean.
+- P7 spine COMPLETE: all seven Day-2C go/no-go invariants now met in code
+  (append-only cases/3 directives; separate replacement with real executable run
+  + zero inheritance; CAS/TTL/signing/replay/ceiling; B-prime signed candidate
+  with mandatory byte re-read on the authority path; companion lineage verifier
+  gating replacement-run existence + state, no legacy fallback; corrected-selects-
+  all-blockers + typed reverify allowlist with PHASE3 cause typed; four-table
+  additive schema + fenced protocol + ledger-wide freeze + legacy 410). The
+  integration merge sequence (P8 real-verifier swap, then P9/P10, then full
+  P11/P12) is now unblocked.
