@@ -2649,3 +2649,23 @@ unfinished pair has passed.
   additive schema + fenced protocol + ledger-wide freeze + legacy 410). The
   integration merge sequence (P8 real-verifier swap, then P9/P10, then full
   P11/P12) is now unblocked.
+
+### Day 3 — Integration step 1: lineage verifier wired at all authority sites (2026-07-19)
+
+- The last P7 fail-open is closed. ResolutionLineageVerifier is now invoked at
+  the three authority-granting call sites in ledger.ts via
+  assertReplacementLineageAuthority: promoteVerifiedCandidate (REVIEW_APPROVED
+  grant, :4163), recordApprovalRequest (:7074 — a decision cannot exist without
+  a request, so this closes the whole approval path), and getPublicationEvidence
+  (publication-selection preflight, :7263). A run owning a resolution_replacements
+  row MUST verify (verified===true) or throw ReplacementLineageUnverifiedError;
+  a non-replacement run returns immediately (ordinary path unchanged). No legacy
+  same-run fallback; unavailable secret fails closed. Secret threaded via
+  configureResolutionSigningSecret on the ledger's own connection, wired in
+  index.ts from the gateway-held secret, never in model/sandbox.
+- Fable mutation-verified the promotion gate directly: neutering the :4163 gate
+  turned two lineage-gate tests red (a broken-lineage replacement run falls
+  through to promotion), restore clean. Load-bearing, not decorative.
+  promoteVerifiedHardeningCandidate is intentionally not gated (hardening
+  children bind via engineer_run_lineage, not resolution_replacements — not
+  replacement runs). Gates: engineer 656, gateway 391, typecheck + diff clean.

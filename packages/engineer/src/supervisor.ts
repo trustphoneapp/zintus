@@ -890,6 +890,13 @@ export class EngineerSupervisor {
   }
 
   configureCheckpointAttestor(attestor:CheckpointAttestor):void{this.checkpointAttestor=attestor;}
+  /**
+   * Bind the gateway-held resolution directive-signing secret so replacement-run
+   * promotion / approval / publication authority is gated on verified lineage
+   * (fail closed until configured). Composition-root use only; the secret is
+   * confined to this process and never handed to a model or sandbox.
+   */
+  configureResolutionSigningSecret(secret:string):void{this.ledger.configureResolutionSigningSecret(secret);}
   private advisoryAttestor():CheckpointAttestor{if(!this.checkpointAttestor)throw new AdvisoryIntegrityError();return this.checkpointAttestor;}
   listAdvisoryBacklogForOwner(ownerId:string,runId:string,options:{limit?:number;cursor?:string;status?:"OPEN"|"DEFERRED"|"DISMISSED";actionability?:"ACTIONABLE"|"AUDIT_ONLY"}={}):Promise<AdvisoryBacklogPage>{return this.ledger.listAdvisoryBacklogForOwner(ownerId,runId,options,this.advisoryAttestor());}
   deferAdvisoryForOwner(ownerId:string,runId:string,advisoryId:string,command:AdvisoryOwnerCommand){return this.ledger.applyAdvisoryOwnerAction(ownerId,runId,advisoryId,"DEFER",command,this.advisoryAttestor());}

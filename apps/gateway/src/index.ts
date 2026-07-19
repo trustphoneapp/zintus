@@ -648,6 +648,11 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     secretPath: join(engineerRoot, "resolution-directive-signing.secret"),
   });
   if (resolutionSigning.status === "READY") {
+    // Bind the same gateway-held signing secret to the ledger so replacement-run
+    // promotion / approval / publication authority is gated on verified lineage
+    // (fail closed). The verifier reads the ledger's own connection — the same
+    // one the desk writes replacement rows on.
+    engineerSupervisor.configureResolutionSigningSecret(resolutionSigning.secret);
     const resolutionConnection = engineerSupervisor.resolutionDeskConnection();
     const resolutionPricingDigest = serverPricingPolicyDigest();
     const desk = new ResolutionDesk(

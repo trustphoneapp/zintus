@@ -91,9 +91,11 @@ import {
   HardeningQuoteInputTooLargeError, HardeningQuoteVersionStaleError,
   IdempotencyConflictError,
   InvalidTransitionError,
+  ReplacementLineageUnverifiedError,
   StateVersionConflictError,
   VerifiedCandidateIntegrityError,
 } from "./errors.js";
+import { ResolutionLineageVerifier } from "./resolution-lineage.js";
 import {
   AdvisoryBacklogEventSchema, AdvisoryBacklogItemSchema, AdvisoryBacklogPageSchema, AdvisoryBacklogViewSchema, AdvisoryOwnerCommandSchema,
   HardeningConsentRequestSchema, HardeningConsentSchema, HardeningQuoteRequestSchema, HardeningQuoteSchema, HardeningQuoteViewSchema,
@@ -594,6 +596,13 @@ export class EngineerLedger {
   private readonly now: () => Date;
   private hardeningPromptCacheSecret?: string;
   private hardeningArtifactReader?: ArtifactByteReader;
+  // P7 replacement-lineage authority. Injected at composition time via
+  // configureResolutionSigningSecret with the gateway-held directive-signing
+  // secret (never present in any model or sandbox). When unset, replacement runs
+  // cannot be granted promotion / approval / publication authority (fail closed);
+  // ordinary runs never consult it.
+  private resolutionSigningSecret?: string;
+  private resolutionLineageVerifier?: ResolutionLineageVerifier;
 
   constructor(dbPath: string, now: () => Date = () => new Date(), hardeningPromptCacheSecret?: string) {
     this.now = now;
@@ -734,6 +743,48 @@ export class EngineerLedger {
       throw new HardeningPromptCacheAuthorityMismatchError();
     }
     this.hardeningPromptCacheSecret = secret;
+  }
+
+  /**
+   * P7 verifier-injection seam. Binds the gateway-held resolution directive-
+   * signing secret so the ledger can construct its ResolutionLineageVerifier on
+   * its OWN durable connection (the same connection the desk writes replacement
+   * rows on — see resolutionDeskConnection). The secret is owner-only and confined
+   * to this process; it is never handed to a model or sandbox. Idempotent for the
+   * same secret; a mismatched re-configure is rejected. Until this is called,
+   * every replacement run fails closed at the promotion / approval / publication
+   * authority gate (no legacy same-run fallback).
+   */
+  configureResolutionSigningSecret(secret: string): void {
+    if (secret.length < 32) throw new TypeError("resolution signing secret must contain at least 32 characters");
+    if (this.resolutionSigningSecret !== undefined && this.resolutionSigningSecret !== secret) {
+      throw new Error("Engineer resolution signing authority is already configured with a different secret");
+    }
+    this.resolutionSigningSecret = secret;
+    this.resolutionLineageVerifier = new ResolutionLineageVerifier(this.db, secret);
+  }
+
+  /**
+   * P7 fail-closed authority gate. A run created by applying a
+   * CREATE_CORRECTED_RUN / CREATE_REVERIFY_RUN directive is a "replacement run":
+   * it owns a resolution_replacements row keyed by replacement_run_id. Such a run
+   * must not be granted promotion, approval, or publication authority unless its
+   * COMPLETE durable lineage verifies through ResolutionLineageVerifier. A run
+   * with no such row is an ordinary run and keeps its existing path unchanged.
+   * There is NO legacy same-run fallback: if the run is a replacement but the
+   * signing authority (verifier) is unavailable, or any lineage link fails,
+   * authority is refused.
+   */
+  private assertReplacementLineageAuthority(runId: string): void {
+    const replacement = this.db.query(
+      "SELECT 1 AS present FROM resolution_replacements WHERE replacement_run_id=? LIMIT 1",
+    ).get(runId) as { present: number } | null;
+    if (!replacement) return; // not a replacement run — ordinary authority path unchanged
+    if (!this.resolutionLineageVerifier) {
+      throw new ReplacementLineageUnverifiedError(runId, "SIGNING_AUTHORITY_UNAVAILABLE");
+    }
+    const verdict = this.resolutionLineageVerifier.verify(runId);
+    if (!verdict.verified) throw new ReplacementLineageUnverifiedError(runId, verdict.reason);
   }
 
   atomic<T>(operation: () => T): T {
@@ -4107,6 +4158,9 @@ export class EngineerLedger {
     input: PromoteVerifiedCandidateInput,
     expectedStateVersion: number,
   ): Promise<VerifiedCandidatePromotionResult> {
+    // P7 fail-closed gate: a replacement run may never be promoted to
+    // REVIEW_APPROVED unless its complete resolution lineage verifies.
+    this.assertReplacementLineageAuthority(input.runId);
     const priorEvents = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ?
       AND reason_code = 'VERIFIED_CANDIDATE_PROMOTED' AND next_state = 'REVIEW_APPROVED'`).all(input.runId) as EventRow[];
     if (priorEvents.length > 0) {
@@ -7013,6 +7067,11 @@ export class EngineerLedger {
   async recordApprovalRequest(record: NewApprovalRequestRecord, attestor: CheckpointAttestor): Promise<NewApprovalRequestRecord> {
     const parsed = ApprovalRequestRecordSchema.parse(record);
     this.getRun(parsed.runId);
+    // P7 fail-closed gate: a replacement run may never receive a human-approval
+    // request (the approval-authority grant) unless its complete lineage verifies.
+    // A decision cannot exist without a request, so gating the request closes the
+    // whole approval path for an unverified replacement.
+    this.assertReplacementLineageAuthority(parsed.runId);
     if (!parsed.reviewerSessionId || !parsed.classificationHash || !parsed.classificationResult) {
       throw new Error("new approval requests require classified Reviewer authority");
     }
@@ -7198,6 +7257,10 @@ export class EngineerLedger {
 
   getPublicationEvidence(runId: string): PublicationEvidence {
     const run = this.getRun(runId);
+    // P7 fail-closed gate: the publication-selection preflight may never surface
+    // publishable evidence for a replacement run whose complete lineage does not
+    // verify (no legacy same-run fallback).
+    this.assertReplacementLineageAuthority(runId);
     const reviewer = this.db.query(`SELECT id, decision, input_hash, manifest_hash, diff_hash,
       evidence_bundle_hash, isolation_verified, completed_at
       FROM reviewer_sessions WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`).get(runId) as Record<string, unknown> | null;

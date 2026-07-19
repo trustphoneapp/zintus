@@ -116,6 +116,14 @@ export class HardeningPromptCacheAuthorityMismatchError extends Error {
     this.name = "HardeningPromptCacheAuthorityMismatchError";
   }
 }
+export class ReplacementLineageUnverifiedError extends Error {
+  readonly code = "ENGINEER_REPLACEMENT_LINEAGE_UNVERIFIED";
+  readonly retryable = false;
+  constructor(readonly runId: string, readonly reason: string) {
+    super(`Replacement run ${runId} cannot be granted promotion, approval, or publication authority because its resolution lineage did not verify (${reason}).`);
+    this.name = "ReplacementLineageUnverifiedError";
+  }
+}
 export class HardeningGenericOperationForbiddenError extends Error {
   readonly code = "HARDENING_GENERIC_OPERATION_FORBIDDEN";
   readonly retryable = false;
