@@ -201,7 +201,13 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     engineerSupervisor,
     join(engineerRoot, "artifacts"),
   );
-  const engineerPrincipal = loadOrCreateEngineerPrincipal(join(engineerRoot, "identity.json"));
+  // B4: the P8 two-person approver identity is derived from a SEPARATELY provisioned
+  // credential. An operator provisions a second party by pointing
+  // ENGINEER_APPROVER_IDENTITY_PATH at a distinct owner-only identity file; absent it,
+  // `approverId` is null and the P8 approve path fails closed (a single install cannot
+  // self-approve).
+  const engineerApproverIdentityPath = process.env.ENGINEER_APPROVER_IDENTITY_PATH?.trim() || undefined;
+  const engineerPrincipal = loadOrCreateEngineerPrincipal(join(engineerRoot, "identity.json"), engineerApproverIdentityPath);
   const transportForRole = async () => {
     const apiKey = await getProviderKey("openai");
     if (!apiKey) throw new Error("OpenAI BYOK key is required for Zintus Engineer");
