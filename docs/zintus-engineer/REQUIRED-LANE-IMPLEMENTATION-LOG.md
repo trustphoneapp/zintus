@@ -3028,3 +3028,38 @@ unfinished pair has passed.
   identity is FORMAT-frozen not fixed (R4 B4); v35 resultTreeHash unsourced
   (attestation stays deferred/fail-closed). Gates: engineer 795, gateway 418,
   web 569, typecheck + diff clean.
+
+### Joint integration gate (R3+R4 together) — Fable-verified (2026-07-19)
+
+- The gate the rebaseline mandated: cross-tenant publication + restart +
+  reconciliation + audit-export driven TOGETHER through ONE migrated DB over the
+  REAL units (facade, P8 PublicationAuthorityService, ledger APPROVE+v35
+  attestation, org-scoped exportRunAuditChain, two-person deriveEngineerPrincipal).
+  engineer-publication-joint-integration.test.ts, 6 tests / 51 asserts. Fable
+  re-ran it (6/0) and independently confirmed both findings below.
+- ALL 5 assertions PASS with evidence: (1) HAPPY PATH — distinct provisioned
+  approver APPROVEs → v35 attestation persists → APPEARS in exportRunAuditChain
+  (the facade→ledger→export seam no isolated suite exercised) → dispatch →
+  RECEIPTED with receipt row; (2) RESTART — durable DISPATCHED, fresh service,
+  listResumablePublications→resume parks RECONCILING, actuator never re-invoked,
+  idempotent; (3) RECONCILIATION — AMBIGUOUS→RECONCILING requires_human, only
+  resolveReconciliation drives terminal; (4) CROSS-TENANT — default-org export
+  excludes foreign-org attestation (byte-identical not-found), cross-owner
+  collapses to CandidateNotFoundError; (5) FAIL-CLOSED — no approver→403 zero
+  rows, no resultTreeHash+REQUIRED→PublicationAttestationUnavailableError before
+  any write.
+- TWO JOINT FINDINGS the isolated suites obscured (Fable-confirmed): (A) the
+  run/approval/publication WRITE path is SINGLE-TENANT by construction
+  (EngineerLedger rejects non-default org, ledger.ts:683). So "cross-tenant
+  publication" is satisfied as cross-tenant audit-export READ isolation over a
+  tenancy-ready schema, NOT multi-org write isolation. Consistent with the
+  R2/P12 single-tenant declaration but a material scope boundary — multi-org
+  write would need the ~120 bare run_id queries converted (large, out of current
+  scope). (B) exportRunAuditChain (B1) is correct but NOT wired into any gateway
+  route (was not even barrel-exported; additive re-export added). Routing the
+  audit export is R5 product work.
+- VERDICT: R3+R4 jointly production-ready FOR THE SINGLE-TENANT install prod
+  ships. Remaining [HUMAN]: real approver ceremony (ENGINEER_APPROVER_IDENTITY_PATH),
+  real resultTreeHash source (git rev-parse tree; prod wires ()=>null so REQUIRED
+  attestation fails closed until built), real GitHub actuator creds. R5 next:
+  wire audit-export route, retire legacy publication lane (§0), align OpenAPI/UI.
