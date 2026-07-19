@@ -2669,3 +2669,33 @@ unfinished pair has passed.
   promoteVerifiedHardeningCandidate is intentionally not gated (hardening
   children bind via engineer_run_lineage, not resolution_replacements — not
   replacement runs). Gates: engineer 656, gateway 391, typecheck + diff clean.
+
+### Day 3 — Integration step 2: P8 publication authority live (v33) (2026-07-19)
+
+- v33 is in the live migration chain: five publication-authority tables with
+  additive+immutability idiom, version 32→33, ancestry + 29-object exact-shape
+  startup validation, every v14-v32 byte preserved (forward-install on a
+  populated v32 DB proven, foreign_key_check clean). PublicationAuthorityService
+  (publication-authority.ts) is the real authority, bound to the ledger's real
+  ResolutionLineageVerifier via createPublicationAuthorityService — callers
+  supply only credentialed-effect seams, never the verifier or db.
+- All four cross-verified guarantees survived integration, each RED-confirmed:
+  single-use approval P0 (partial unique index uq_pub_git_operation_approval_v33
+  + APPROVED→CONSUMED CAS; removing both → actuatorCalls=2 double-publish;
+  Fable re-confirmed the guards are physically in the live schema at
+  database-schema.ts:2869/2824), RECONCILING-not-redispatch, requester-bound
+  approval, fail-closed lineage with the real verifier (broken-lineage
+  P7_REPLACEMENT → StaleCandidateError). Gates: engineer 683, gateway 391,
+  typecheck + diff clean.
+- TRACKED SEAMS (honest, → integration steps / P12): (1) gateway HTTP routes for
+  publications/approvals not wired — authority exposed at ledger layer, HTTP
+  context derivation deferred; (2) LEGACY CUTOVER: publication-manager.ts
+  publish()/publishFenced() still run the old git_operations flow — the new v33
+  authority is the clean replacement path but the manager is not yet routed
+  through it, so the :497-512 double-PR window code is unchanged. Ruling: an
+  acceptable interim seam because that legacy path is already defended by
+  lease-based reconcileUncertainOperation (STALE state, no remote retry), but a
+  full manager reroute is a required P12 cutover slice, not silently closed.
+  (3) Positive real-verifier publish path proven only with a mock=true; a
+  fully-signed resolved P7 chain being publishable is unproven; (4) real
+  concurrency and real GitHub actuator injected as fakes.

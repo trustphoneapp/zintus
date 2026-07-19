@@ -96,6 +96,7 @@ import {
   VerifiedCandidateIntegrityError,
 } from "./errors.js";
 import { ResolutionLineageVerifier } from "./resolution-lineage.js";
+import { PublicationAuthorityService, type PublicationAuthorityDeps } from "./publication-authority.js";
 import {
   AdvisoryBacklogEventSchema, AdvisoryBacklogItemSchema, AdvisoryBacklogPageSchema, AdvisoryBacklogViewSchema, AdvisoryOwnerCommandSchema,
   HardeningConsentRequestSchema, HardeningConsentSchema, HardeningQuoteRequestSchema, HardeningQuoteSchema, HardeningQuoteViewSchema,
@@ -785,6 +786,23 @@ export class EngineerLedger {
     }
     const verdict = this.resolutionLineageVerifier.verify(runId);
     if (!verdict.verified) throw new ReplacementLineageUnverifiedError(runId, verdict.reason);
+  }
+
+  /**
+   * P8 publication-authority (v33) construction site. Binds the live database
+   * carrying the v33 slice and the REAL companion-aware replacement-lineage
+   * verifier (P7) so a P7_REPLACEMENT candidate is never publishable without
+   * verified lineage. The caller supplies only the credentialed effect seams
+   * (actuator/preflight/credentialProvider) — never the verifier, never the db.
+   * When resolution signing is not configured, `lineageVerifier` is absent and
+   * every P7_REPLACEMENT candidate fails closed (ordinary ORIGINAL candidates are
+   * unaffected).
+   */
+  createPublicationAuthorityService(deps: Omit<PublicationAuthorityDeps, "lineageVerifier">): PublicationAuthorityService {
+    return new PublicationAuthorityService(this.db, {
+      ...deps,
+      lineageVerifier: this.resolutionLineageVerifier,
+    });
   }
 
   atomic<T>(operation: () => T): T {

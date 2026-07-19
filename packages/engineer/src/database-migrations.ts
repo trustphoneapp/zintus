@@ -25,6 +25,7 @@ import {
   ENGINEER_DATABASE_MIGRATION_30_SQL,
   ENGINEER_DATABASE_MIGRATION_31_SQL,
   ENGINEER_DATABASE_MIGRATION_32_SQL,
+  ENGINEER_DATABASE_MIGRATION_33_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
 } from "./database-schema.js";
 
@@ -52,6 +53,7 @@ const MIGRATIONS: readonly Migration[] = [
   { version: 30, sql: ENGINEER_DATABASE_MIGRATION_30_SQL },
   { version: 31, sql: ENGINEER_DATABASE_MIGRATION_31_SQL },
   { version: 32, sql: ENGINEER_DATABASE_MIGRATION_32_SQL },
+  { version: 33, sql: ENGINEER_DATABASE_MIGRATION_33_SQL },
 ];
 
 function assertHardeningBudgetShape(db: Database): void {
@@ -936,6 +938,29 @@ function assertFailureUnderlyingCauseShape(db: Database): void {
   assertForeignKeys(db);
 }
 
+function assertPublicationAuthorityShape(db: Database): void {
+  const expected = new Map<string, string>();
+  const pattern = /CREATE (?:UNIQUE )?(?:TABLE|INDEX|TRIGGER)\s+([A-Za-z0-9_]+)[\s\S]*?;\s*(?=CREATE |$)/g;
+  for (const match of ENGINEER_DATABASE_MIGRATION_33_SQL.matchAll(pattern)) expected.set(match[1]!, normalizeSchemaSql(match[0]!));
+  const names = [
+    "publication_candidate_selections_v33", "uq_pub_candidate_selection_pair_v33", "idx_pub_candidate_selection_run_v33",
+    "require_pub_candidate_selection_projection_v33", "prevent_pub_candidate_selection_update_v33", "prevent_pub_candidate_selection_delete_v33",
+    "publication_approvals_v33", "uq_pub_approval_decision_candidate_v33", "idx_pub_approval_run_v33",
+    "require_pub_approval_binding_v33", "prevent_pub_approval_update_v33", "prevent_pub_approval_delete_v33",
+    "publication_git_operations_v33", "uq_pub_git_operation_idempotency_v33", "uq_pub_git_operation_approval_v33",
+    "idx_pub_git_operation_run_v33", "require_pub_git_operation_dispatch_authority_v33", "require_pub_git_operation_transition_v33",
+    "require_pub_git_operation_reconcile_resolution_v33", "prevent_pub_git_operation_update_v33", "prevent_pub_git_operation_delete_v33",
+    "publication_remote_receipts_v33", "require_pub_remote_receipt_state_v33", "prevent_pub_remote_receipt_update_v33", "prevent_pub_remote_receipt_delete_v33",
+    "publication_reconciliations_v33", "require_pub_reconciliation_state_v33", "prevent_pub_reconciliation_update_v33", "prevent_pub_reconciliation_delete_v33",
+  ];
+  if (expected.size !== names.length) throw new Error("Engineer schema v33 validator is missing exact definitions");
+  for (const name of names) {
+    const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as { sql: string } | null;
+    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== expected.get(name)) throw new Error(`Engineer schema v33 has invalid ${name}`);
+  }
+  assertForeignKeys(db);
+}
+
 /** Apply ordered migrations after the legacy bootstrap/shape repairs finish. */
 export function migrateEngineerDatabase(db: Database, now = new Date().toISOString()): void {
   assertEngineerDatabaseVersionSupported(db);
@@ -993,6 +1018,9 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
   if (appliedVersions.has(31) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30].every((version) => appliedVersions.has(version)))) {
     throw new Error("Engineer schema v31 is missing required migration ancestry");
   }
+  if (appliedVersions.has(33) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32].every((version) => appliedVersions.has(version)))) {
+    throw new Error("Engineer schema v33 is missing required migration ancestry");
+  }
 
   for (const migration of MIGRATIONS) {
     if (maximumAppliedVersion(db) >= migration.version) continue;
@@ -1034,6 +1062,7 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
       if (migration.version === 30) assertHardeningRecoveryWorkerFenceShape(db);
       if (migration.version === 31) assertResolutionDeskShape(db);
       if (migration.version === 32) assertFailureUnderlyingCauseShape(db);
+      if (migration.version === 33) assertPublicationAuthorityShape(db);
       db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(migration.version, now);
       db.exec("COMMIT");
@@ -1065,4 +1094,5 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
   if (finalVersion >= 30) assertHardeningRecoveryWorkerFenceShape(db);
   if (finalVersion >= 31) assertResolutionDeskShape(db);
   if (finalVersion >= 32) assertFailureUnderlyingCauseShape(db);
+  if (finalVersion >= 33) assertPublicationAuthorityShape(db);
 }

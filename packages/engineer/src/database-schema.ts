@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 32;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 33;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -2743,4 +2743,178 @@ export const ENGINEER_DATABASE_MIGRATION_31_SQL = `
  */
 export const ENGINEER_DATABASE_MIGRATION_32_SQL = `
   ALTER TABLE failure_records ADD COLUMN underlying_cause TEXT;
+`;
+
+/**
+ * P8 Phase publication-authority slice (migration v33). Five additive,
+ * append-only, immutability-triggered record families that make the credentialed
+ * publication path a durable authority rather than an in-memory state machine:
+ *
+ *   1. publication candidate selections  -> publication_candidate_selections_v33
+ *   2. publication approvals             -> publication_approvals_v33
+ *   3. publication git operations        -> publication_git_operations_v33
+ *   4. remote receipts                   -> publication_remote_receipts_v33
+ *   5. reconciliation records            -> publication_reconciliations_v33
+ *
+ * Structural guarantees frozen at the storage layer:
+ *   - Single-use approvals: partial UNIQUE index uq_pub_git_operation_approval_v33
+ *     over approval_id (rev-0 rows) makes one-publication-per-approval a storage
+ *     invariant; the APPROVED->CONSUMED append is written in the same txn.
+ *   - Server-derived requester: the approval-binding trigger requires
+ *     requester_actor_id == selection.requester_user_id, so a forged actor is
+ *     rejected at the DB layer.
+ *   - RECONCILING is durable and never silently succeeded: the only legal
+ *     successor is an explicit typed resolution transition.
+ *
+ * Additive-only: no v14-v32 object is touched. Every table is newly named with a
+ * _v33 suffix (distinct from the pre-existing publication_candidate_selections
+ * v23 table) so no prior byte changes.
+ */
+export const ENGINEER_DATABASE_MIGRATION_33_SQL = `
+  CREATE TABLE publication_candidate_selections_v33 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=71 AND substr(id,1,7)='sha256:' AND substr(id,8) NOT GLOB '*[^0-9a-f]*'),
+    selection_hash TEXT NOT NULL UNIQUE CHECK(length(selection_hash)=71 AND substr(selection_hash,1,7)='sha256:' AND substr(selection_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    schema_version INTEGER NOT NULL CHECK(schema_version=1),
+    policy_version TEXT NOT NULL CHECK(policy_version='engineer-publication-authority-v33'),
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    candidate_run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    requester_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    repository_id TEXT NOT NULL REFERENCES repository_connections(id) ON DELETE RESTRICT,
+    checkpoint_id TEXT NOT NULL CHECK(length(checkpoint_id)=71 AND substr(checkpoint_id,1,7)='sha256:' AND substr(checkpoint_id,8) NOT GLOB '*[^0-9a-f]*'),
+    checkpoint_hash TEXT NOT NULL CHECK(length(checkpoint_hash)=71 AND substr(checkpoint_hash,1,7)='sha256:' AND substr(checkpoint_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    result_commit_sha TEXT NOT NULL CHECK(length(result_commit_sha) IN (40,64) AND result_commit_sha NOT GLOB '*[^0-9a-f]*'),
+    lineage TEXT NOT NULL CHECK(lineage IN ('ORIGINAL','P7_REPLACEMENT')),
+    lineage_verified INTEGER NOT NULL CHECK(lineage_verified IN (0,1)),
+    is_hardening_child INTEGER NOT NULL CHECK(is_hardening_child IN (0,1)),
+    parent_selection_id TEXT REFERENCES publication_candidate_selections_v33(id) ON DELETE RESTRICT,
+    selection_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, checkpoint_id, checkpoint_hash),
+    CHECK(NOT (lineage='ORIGINAL' AND lineage_verified=0)),
+    CHECK((is_hardening_child=1) = (parent_selection_id IS NOT NULL)),
+    CHECK((lineage='P7_REPLACEMENT') = (is_hardening_child=1))
+  );
+  CREATE UNIQUE INDEX uq_pub_candidate_selection_pair_v33 ON publication_candidate_selections_v33(id,selection_hash);
+  CREATE INDEX idx_pub_candidate_selection_run_v33 ON publication_candidate_selections_v33(run_id,created_at,id);
+  CREATE TRIGGER require_pub_candidate_selection_projection_v33 BEFORE INSERT ON publication_candidate_selections_v33 BEGIN
+    SELECT CASE WHEN json_extract(NEW.selection_json,'$.selectionId') IS NOT NEW.id OR json_extract(NEW.selection_json,'$.selectionHash') IS NOT NEW.selection_hash OR json_extract(NEW.selection_json,'$.runId') IS NOT NEW.run_id OR json_extract(NEW.selection_json,'$.checkpointId') IS NOT NEW.checkpoint_id OR json_extract(NEW.selection_json,'$.checkpointHash') IS NOT NEW.checkpoint_hash OR json_extract(NEW.selection_json,'$.lineage') IS NOT NEW.lineage OR json_extract(NEW.selection_json,'$.lineageVerified') IS NOT NEW.lineage_verified THEN RAISE(ABORT,'publication candidate selection projection mismatch') END;
+    SELECT CASE WHEN NEW.parent_selection_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM publication_candidate_selections_v33 p WHERE p.id=NEW.parent_selection_id AND p.run_id=NEW.run_id AND p.is_hardening_child=0) THEN RAISE(ABORT,'hardening child must link to a parent original candidate') END;
+  END;
+  CREATE TRIGGER prevent_pub_candidate_selection_update_v33 BEFORE UPDATE ON publication_candidate_selections_v33 BEGIN SELECT RAISE(ABORT,'publication candidate selections are immutable'); END;
+  CREATE TRIGGER prevent_pub_candidate_selection_delete_v33 BEFORE DELETE ON publication_candidate_selections_v33 BEGIN SELECT RAISE(ABORT,'publication candidate selections are immutable'); END;
+
+  CREATE TABLE publication_approvals_v33 (
+    approval_id TEXT NOT NULL CHECK(length(approval_id) BETWEEN 1 AND 200),
+    revision INTEGER NOT NULL CHECK(revision >= 0),
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    selection_id TEXT NOT NULL REFERENCES publication_candidate_selections_v33(id) ON DELETE RESTRICT,
+    checkpoint_id TEXT NOT NULL CHECK(length(checkpoint_id)=71 AND substr(checkpoint_id,1,7)='sha256:' AND substr(checkpoint_id,8) NOT GLOB '*[^0-9a-f]*'),
+    checkpoint_hash TEXT NOT NULL CHECK(length(checkpoint_hash)=71 AND substr(checkpoint_hash,1,7)='sha256:' AND substr(checkpoint_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    requester_actor_id TEXT NOT NULL CHECK(length(requester_actor_id) BETWEEN 1 AND 200),
+    requester_actor_kind TEXT NOT NULL CHECK(requester_actor_kind='HUMAN'),
+    approver_actor_id TEXT NOT NULL CHECK(length(approver_actor_id) BETWEEN 1 AND 200),
+    approver_actor_kind TEXT NOT NULL CHECK(approver_actor_kind='HUMAN'),
+    implementation_actor_id TEXT NOT NULL CHECK(length(implementation_actor_id) BETWEEN 1 AND 200),
+    implementation_actor_kind TEXT NOT NULL CHECK(implementation_actor_kind='NON_HUMAN'),
+    evidence_root TEXT NOT NULL CHECK(length(evidence_root)=71 AND substr(evidence_root,1,7)='sha256:' AND substr(evidence_root,8) NOT GLOB '*[^0-9a-f]*'),
+    repository_id TEXT NOT NULL REFERENCES repository_connections(id) ON DELETE RESTRICT,
+    base_commit_sha TEXT NOT NULL CHECK(length(base_commit_sha) IN (40,64) AND base_commit_sha NOT GLOB '*[^0-9a-f]*'),
+    policy_version TEXT NOT NULL CHECK(policy_version='engineer-publication-authority-v33'),
+    decision TEXT NOT NULL CHECK(decision IN ('APPROVE','REJECT')),
+    status TEXT NOT NULL CHECK(status IN ('APPROVED','REJECTED','INVALIDATED','CONSUMED')),
+    invalidation_reason TEXT,
+    rationale TEXT,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    approval_json TEXT NOT NULL,
+    PRIMARY KEY(approval_id, revision),
+    CHECK(requester_actor_id <> approver_actor_id),
+    CHECK(implementation_actor_id <> approver_actor_id AND implementation_actor_id <> requester_actor_id),
+    CHECK((revision=0 AND status IN ('APPROVED','REJECTED') AND invalidation_reason IS NULL) OR (revision>0 AND status IN ('INVALIDATED','CONSUMED') AND invalidation_reason IS NOT NULL)),
+    CHECK((decision='APPROVE') = (status IN ('APPROVED','INVALIDATED','CONSUMED')))
+  );
+  CREATE UNIQUE INDEX uq_pub_approval_decision_candidate_v33 ON publication_approvals_v33(checkpoint_id,checkpoint_hash) WHERE revision=0 AND decision='APPROVE';
+  CREATE INDEX idx_pub_approval_run_v33 ON publication_approvals_v33(run_id,approval_id,revision);
+  CREATE TRIGGER require_pub_approval_binding_v33 BEFORE INSERT ON publication_approvals_v33 BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM publication_candidate_selections_v33 s WHERE s.id=NEW.selection_id AND s.run_id=NEW.run_id AND s.checkpoint_id=NEW.checkpoint_id AND s.checkpoint_hash=NEW.checkpoint_hash AND s.repository_id=NEW.repository_id AND s.requester_user_id=NEW.requester_actor_id AND s.lineage_verified=1) THEN RAISE(ABORT,'approval must bind an eligible verified candidate and its recorded requester') END;
+    SELECT CASE WHEN NEW.revision>0 AND NOT EXISTS(SELECT 1 FROM publication_approvals_v33 a WHERE a.approval_id=NEW.approval_id AND a.revision=NEW.revision-1 AND a.checkpoint_id=NEW.checkpoint_id AND a.checkpoint_hash=NEW.checkpoint_hash AND a.status<>'INVALIDATED') THEN RAISE(ABORT,'approval revision authority mismatch') END;
+    SELECT CASE WHEN json_extract(NEW.approval_json,'$.approvalId') IS NOT NEW.approval_id OR json_extract(NEW.approval_json,'$.revision') IS NOT NEW.revision OR json_extract(NEW.approval_json,'$.checkpointId') IS NOT NEW.checkpoint_id OR json_extract(NEW.approval_json,'$.checkpointHash') IS NOT NEW.checkpoint_hash OR json_extract(NEW.approval_json,'$.approver') IS NOT NEW.approver_actor_id OR json_extract(NEW.approval_json,'$.requester') IS NOT NEW.requester_actor_id THEN RAISE(ABORT,'approval projection mismatch') END;
+  END;
+  CREATE TRIGGER prevent_pub_approval_update_v33 BEFORE UPDATE ON publication_approvals_v33 BEGIN SELECT RAISE(ABORT,'publication approvals are immutable'); END;
+  CREATE TRIGGER prevent_pub_approval_delete_v33 BEFORE DELETE ON publication_approvals_v33 BEGIN SELECT RAISE(ABORT,'publication approvals are immutable'); END;
+
+  CREATE TABLE publication_git_operations_v33 (
+    publication_id TEXT NOT NULL CHECK(length(publication_id) BETWEEN 1 AND 200),
+    revision INTEGER NOT NULL CHECK(revision >= 0),
+    run_id TEXT NOT NULL REFERENCES engineer_runs(id) ON DELETE RESTRICT,
+    approval_id TEXT NOT NULL,
+    operation_type TEXT NOT NULL CHECK(operation_type='BRANCH_PR'),
+    idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) BETWEEN 1 AND 200),
+    requester_actor_id TEXT NOT NULL CHECK(length(requester_actor_id) BETWEEN 1 AND 200),
+    implementation_actor_id TEXT NOT NULL CHECK(length(implementation_actor_id) BETWEEN 1 AND 200),
+    repository_id TEXT NOT NULL REFERENCES repository_connections(id) ON DELETE RESTRICT,
+    base_commit_sha TEXT NOT NULL CHECK(length(base_commit_sha) IN (40,64) AND base_commit_sha NOT GLOB '*[^0-9a-f]*'),
+    checkpoint_id TEXT NOT NULL CHECK(length(checkpoint_id)=71 AND substr(checkpoint_id,1,7)='sha256:' AND substr(checkpoint_id,8) NOT GLOB '*[^0-9a-f]*'),
+    checkpoint_hash TEXT NOT NULL CHECK(length(checkpoint_hash)=71 AND substr(checkpoint_hash,1,7)='sha256:' AND substr(checkpoint_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    state TEXT NOT NULL CHECK(state IN ('PREFLIGHT','DISPATCHED','RECEIPTED','RECONCILING','FAILED')),
+    prev_state TEXT CHECK(prev_state IS NULL OR prev_state IN ('PREFLIGHT','DISPATCHED','RECEIPTED','RECONCILING','FAILED')),
+    resolution_type TEXT CHECK(resolution_type IS NULL OR resolution_type IN ('RESOLVED_RECEIPTED','RESOLVED_FAILED')),
+    detail TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(publication_id, revision),
+    CHECK((revision=0 AND state='PREFLIGHT' AND prev_state IS NULL) OR (revision>0 AND prev_state IS NOT NULL)),
+    CHECK(resolution_type IS NULL OR prev_state='RECONCILING')
+  );
+  CREATE UNIQUE INDEX uq_pub_git_operation_idempotency_v33 ON publication_git_operations_v33(run_id,idempotency_key) WHERE revision=0;
+  CREATE UNIQUE INDEX uq_pub_git_operation_approval_v33 ON publication_git_operations_v33(approval_id) WHERE revision=0;
+  CREATE INDEX idx_pub_git_operation_run_v33 ON publication_git_operations_v33(run_id,publication_id,revision);
+  CREATE TRIGGER require_pub_git_operation_dispatch_authority_v33 BEFORE INSERT ON publication_git_operations_v33 WHEN NEW.revision=0 BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM publication_approvals_v33 a WHERE a.approval_id=NEW.approval_id AND a.revision=0 AND a.decision='APPROVE' AND a.status='APPROVED' AND a.run_id=NEW.run_id AND a.checkpoint_id=NEW.checkpoint_id AND a.checkpoint_hash=NEW.checkpoint_hash AND a.repository_id=NEW.repository_id AND a.base_commit_sha=NEW.base_commit_sha) THEN RAISE(ABORT,'publication requires a matching approved approval') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM publication_approvals_v33 a WHERE a.approval_id=NEW.approval_id AND a.status IN ('INVALIDATED','CONSUMED')) THEN RAISE(ABORT,'publication approval is invalidated or already consumed') END;
+    SELECT CASE WHEN NEW.resolution_type IS NOT NULL THEN RAISE(ABORT,'a new publication cannot carry a reconciliation resolution') END;
+  END;
+  CREATE TRIGGER require_pub_git_operation_transition_v33 BEFORE INSERT ON publication_git_operations_v33 WHEN NEW.revision>0 BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM publication_git_operations_v33 p WHERE p.publication_id=NEW.publication_id AND p.revision=NEW.revision-1 AND p.state=NEW.prev_state AND p.run_id=NEW.run_id AND p.idempotency_key=NEW.idempotency_key AND p.approval_id=NEW.approval_id AND p.checkpoint_id=NEW.checkpoint_id AND p.checkpoint_hash=NEW.checkpoint_hash AND p.state NOT IN ('RECEIPTED','FAILED')) THEN RAISE(ABORT,'publication transition authority mismatch') END;
+  END;
+  CREATE TRIGGER require_pub_git_operation_reconcile_resolution_v33 BEFORE INSERT ON publication_git_operations_v33 WHEN NEW.revision>0 AND NEW.prev_state='RECONCILING' BEGIN
+    SELECT CASE WHEN NEW.resolution_type IS NULL OR (NEW.resolution_type='RESOLVED_RECEIPTED' AND NEW.state<>'RECEIPTED') OR (NEW.resolution_type='RESOLVED_FAILED' AND NEW.state<>'FAILED') THEN RAISE(ABORT,'RECONCILING accepts only an explicit typed resolution transition') END;
+  END;
+  CREATE TRIGGER prevent_pub_git_operation_update_v33 BEFORE UPDATE ON publication_git_operations_v33 BEGIN SELECT RAISE(ABORT,'publication git operations are immutable'); END;
+  CREATE TRIGGER prevent_pub_git_operation_delete_v33 BEFORE DELETE ON publication_git_operations_v33 BEGIN SELECT RAISE(ABORT,'publication git operations are immutable'); END;
+
+  CREATE TABLE publication_remote_receipts_v33 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
+    publication_id TEXT NOT NULL,
+    publication_revision INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) BETWEEN 1 AND 200),
+    pr_url TEXT NOT NULL CHECK(length(pr_url) BETWEEN 1 AND 2000),
+    commit_sha TEXT NOT NULL CHECK(length(commit_sha) IN (40,64) AND commit_sha NOT GLOB '*[^0-9a-f]*'),
+    observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(publication_id),
+    FOREIGN KEY(publication_id,publication_revision) REFERENCES publication_git_operations_v33(publication_id,revision) ON DELETE RESTRICT
+  );
+  CREATE TRIGGER require_pub_remote_receipt_state_v33 BEFORE INSERT ON publication_remote_receipts_v33 BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM publication_git_operations_v33 p WHERE p.publication_id=NEW.publication_id AND p.revision=NEW.publication_revision AND p.state='RECEIPTED' AND p.idempotency_key=NEW.idempotency_key) THEN RAISE(ABORT,'remote receipt must bind a RECEIPTED publication revision') END;
+  END;
+  CREATE TRIGGER prevent_pub_remote_receipt_update_v33 BEFORE UPDATE ON publication_remote_receipts_v33 BEGIN SELECT RAISE(ABORT,'publication remote receipts are immutable'); END;
+  CREATE TRIGGER prevent_pub_remote_receipt_delete_v33 BEFORE DELETE ON publication_remote_receipts_v33 BEGIN SELECT RAISE(ABORT,'publication remote receipts are immutable'); END;
+
+  CREATE TABLE publication_reconciliations_v33 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
+    publication_id TEXT NOT NULL,
+    publication_revision INTEGER NOT NULL,
+    reason TEXT NOT NULL CHECK(reason IN ('EXECUTION_RESULT_UNKNOWN','AMBIGUOUS_REMOTE_OUTCOME','RESTART_UNCERTAIN_DISPATCH')),
+    observed_remote_state TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    requires_human INTEGER NOT NULL CHECK(requires_human=1),
+    created_at TEXT NOT NULL,
+    UNIQUE(publication_id),
+    FOREIGN KEY(publication_id,publication_revision) REFERENCES publication_git_operations_v33(publication_id,revision) ON DELETE RESTRICT
+  );
+  CREATE TRIGGER require_pub_reconciliation_state_v33 BEFORE INSERT ON publication_reconciliations_v33 BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM publication_git_operations_v33 p WHERE p.publication_id=NEW.publication_id AND p.revision=NEW.publication_revision AND p.state='RECONCILING') THEN RAISE(ABORT,'reconciliation must bind a RECONCILING publication revision') END;
+  END;
+  CREATE TRIGGER prevent_pub_reconciliation_update_v33 BEFORE UPDATE ON publication_reconciliations_v33 BEGIN SELECT RAISE(ABORT,'publication reconciliations are immutable'); END;
+  CREATE TRIGGER prevent_pub_reconciliation_delete_v33 BEFORE DELETE ON publication_reconciliations_v33 BEGIN SELECT RAISE(ABORT,'publication reconciliations are immutable'); END;
 `;
