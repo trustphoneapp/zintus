@@ -3152,7 +3152,7 @@ function authorityActorSql(table: string): string {
  * style mirrors v29/v30: RAISE(ABORT) guards, an update fence pinning immutable
  * identity columns, monotonic status transitions, and a durable posture.
  */
-const TENANCY_AUTHORITY_TABLES_SQL = `
+export const TENANCY_AUTHORITY_TABLES_SQL = `
   CREATE TABLE orgs (
     id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 200),
     display_name TEXT NOT NULL,

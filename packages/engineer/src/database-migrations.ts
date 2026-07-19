@@ -34,7 +34,9 @@ import {
   AUTHORITY_ACTOR_TABLES,
   CONNECTOR_IDENTITY_TABLES,
   RETENTION_CLASS_TABLES,
+  TENANCY_AUTHORITY_TABLES_SQL,
   TENANT_OWNED_TABLES,
+  ENGINEER_DATABASE_BASE_SCHEMA_VERSION,
   V34_AUGMENTED_V31_TABLES,
   V34_AUGMENTED_V33_TABLES,
   V34_ADDITIVE_COLUMN_DDLS,
@@ -425,13 +427,39 @@ function assertAdvisoryHardeningShape(db: Database): void {
   if (quick.length !== 1 || quick[0]?.quick_check !== "ok") throw new Error("Engineer database failed v23 quick_check");
 }
 
+/**
+ * The complete set of schema_migrations versions a legitimate Engineer database can
+ * carry: the base schema version plus every ordered migration version. v36 is
+ * RESERVED (contract §1) and NEVER applied, so it is intentionally absent. Any row
+ * outside this set — the reserved v36 sentinel, an unknown gap, or a future version
+ * — is a tampered/unrecognized database and must be rejected (B2b).
+ */
+const KNOWN_ENGINEER_MIGRATION_VERSIONS: ReadonlySet<number> = new Set<number>([
+  ENGINEER_DATABASE_BASE_SCHEMA_VERSION,
+  ...MIGRATIONS.map((migration) => migration.version),
+]);
+
 export function assertEngineerDatabaseVersionSupported(db: Database): void {
   const migrationsTable = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
     .get() as { name: string } | null;
   if (!migrationsTable) return;
-  const maximum = maximumAppliedVersion(db);
-  if (maximum > ENGINEER_DATABASE_SCHEMA_VERSION) {
-    throw new Error(`Engineer database schema ${maximum} is newer than supported ${ENGINEER_DATABASE_SCHEMA_VERSION}`);
+  // Reject any recorded version that is newer than supported OR not a known-applied
+  // migration version. The upper-bound-only guard accepted the reserved v36 sentinel
+  // (36 <= head) and any other unknown/gap version below the head; both are now
+  // rejected so a v36 (or forged) marker can never masquerade as a valid schema.
+  const versions = (db.query("SELECT DISTINCT version FROM schema_migrations").all() as Array<{ version: number }>)
+    .map((row) => row.version);
+  for (const version of versions) {
+    if (version > ENGINEER_DATABASE_SCHEMA_VERSION) {
+      throw new Error(`Engineer database schema ${version} is newer than supported ${ENGINEER_DATABASE_SCHEMA_VERSION}`);
+    }
+    // Within the MANAGED range [base .. head] every version must be a real applied
+    // migration. This rejects the reserved v36 sentinel and any in-range unknown/gap
+    // while tolerating pre-base legacy history (e.g. v13) that the bootstrap repairs
+    // to the v14 base and the ancestry checks still police.
+    if (version >= ENGINEER_DATABASE_BASE_SCHEMA_VERSION && !KNOWN_ENGINEER_MIGRATION_VERSIONS.has(version)) {
+      throw new Error(`Engineer database schema records an unknown or reserved migration version ${version}`);
+    }
   }
 }
 
@@ -1028,8 +1056,6 @@ function assertPublicationAuthorityShape(db: Database): void {
 function assertTenancyShape(db: Database): void {
   const tableExists = (name: string): boolean =>
     db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name) != null;
-  const objectExists = (name: string): boolean =>
-    db.query("SELECT 1 FROM sqlite_master WHERE name=?").get(name) != null;
   const columnsOf = (table: string): Map<string, { notnull: number }> =>
     new Map((db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string; notnull: number }>)
       .map((c) => [c.name, { notnull: c.notnull }]));
@@ -1048,13 +1074,25 @@ function assertTenancyShape(db: Database): void {
     for (const c of cols) if (!actual.has(c)) throw new Error(`Engineer schema v34 ${table} is missing column ${c}`);
   }
 
-  // Immutability / fence triggers (v29/v30 style) must exist.
+  // Immutability / fence triggers (v29/v30 style): byte-match each stored trigger
+  // body against the single source of truth in TENANCY_AUTHORITY_TABLES_SQL (the
+  // v33/v35/v37 idiom). Existence-only validation let a counterfeit no-op body pass
+  // and neuter an immutability fence (B2a); the exact-shape match closes that.
+  const expectedV34Triggers = new Map<string, string>();
+  const triggerPattern = /CREATE (?:UNIQUE )?(?:TABLE|INDEX|TRIGGER)\s+([A-Za-z0-9_]+)[\s\S]*?;\s*(?=CREATE |$)/g;
+  for (const match of TENANCY_AUTHORITY_TABLES_SQL.matchAll(triggerPattern)) {
+    expectedV34Triggers.set(match[1]!, normalizeSchemaSql(match[0]!));
+  }
   for (const trigger of [
     "fence_orgs_update_v34", "prevent_orgs_delete_v34",
     "fence_org_memberships_update_v34", "prevent_org_memberships_delete_v34",
     "fence_non_human_actors_update_v34", "prevent_non_human_actors_delete_v34",
   ]) {
-    if (!objectExists(trigger)) throw new Error(`Engineer schema v34 is missing trigger ${trigger}`);
+    const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type='trigger'").get(trigger) as { sql: string } | null;
+    if (!actual?.sql) throw new Error(`Engineer schema v34 is missing trigger ${trigger}`);
+    if (normalizeSchemaSql(actual.sql) !== expectedV34Triggers.get(trigger)) {
+      throw new Error(`Engineer schema v34 has invalid ${trigger}`);
+    }
   }
 
   // Sponsor CHECKs on both membership-bearing tables (B2 regression guard).

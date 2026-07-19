@@ -28,10 +28,11 @@ import type { EngineerPublicationAuthorityFacade } from "./handler.js";
  *     keyed by checkpointId — NEVER read from the request body. The
  *     `ApproverAuthContext` (approverActorId / implementationActorId / evidenceRoot /
  *     expiresAt) is built from the server principal + run-derived facts, NEVER from
- *     the request body. `approverActorId` is the principal's `reviewerId`, distinct
- *     from the selection's requester (`ownerId`), so the service's self-approval
- *     control is a structural backstop, never tripped by the normal single-owner
- *     flow. The strict §3 body carries only the browser's choice
+ *     the request body. `approverActorId` is the principal's independent `approverId`
+ *     (derived from a SEPARATELY provisioned second-party credential, never the
+ *     requester's own secret), distinct from the selection's requester (`ownerId`); a
+ *     single install has no such approver and the approve path fails closed (B4). The
+ *     strict §3 body carries only the browser's choice
  *     (decision/policyVersion/rationale); the service `.parse`s it (a ZodError
  *     surfaces as a typed 400).
  *   - startPublication: the browser names the approval only by opaque `approvalId`.
@@ -67,6 +68,22 @@ import type { EngineerPublicationAuthorityFacade } from "./handler.js";
  * revision) before rethrowing, so a live/consumable approval can never exist
  * without its required attestation.
  */
+
+/**
+ * Fail-closed error when the P8 approve path has no independent, provisioned approver
+ * identity (B4). A single install derives NO usable `approverId`, so it cannot act as
+ * its own approver; an explicitly provisioned second-party credential is required. This
+ * is the self-approval control enforced on ACTOR IDENTITY (frozen contract §3), surfaced
+ * before any durable write.
+ */
+export class PublicationApproverNotProvisionedError extends Error {
+  readonly httpStatus = 403;
+  readonly code = "APPROVER_NOT_PROVISIONED";
+  constructor() {
+    super("publication approval requires an independently provisioned approver; a single install cannot self-approve");
+    this.name = "PublicationApproverNotProvisionedError";
+  }
+}
 
 /** Fail-closed error surfaced when a signer-configured APPROVE cannot emit its v35 attestation. */
 export class PublicationAttestationUnavailableError extends Error {
@@ -280,13 +297,23 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
       const selection = readOwnedSelection(checkpointId);
       if (!selection) throw new CandidateNotFoundError();
       const checkpointHash = selection.checkpoint_hash;
+
+      // B4: the approver MUST be an independently provisioned second party. `approverId`
+      // is derived from a SEPARATE credential (never the requester's own secret); a
+      // single install has none (null) and can never self-approve. A null/owner-equal
+      // approver fails closed BEFORE any durable write.
+      const approverActorId = principal.approverId;
+      if (!approverActorId || approverActorId === principal.ownerId) {
+        throw new PublicationApproverNotProvisionedError();
+      }
       // Rebuild the strict body with the SERVER-DERIVED checkpointHash so a client
       // cannot name a foreign checkpoint hash; decision/policyVersion/rationale (the
       // browser's choice) still flow through and still surface a ZodError as a 400.
       const derivedBody = { ...record, checkpointHash };
 
       // Server-derived approval context — NEVER the request body. Approver is the
-      // principal's reviewerId (distinct from the selection's requester = ownerId).
+      // principal's independent approverId (a SEPARATELY provisioned second party,
+      // distinct from the selection's requester = ownerId).
       const expiresAt = new Date(deps.now().getTime() + 24 * 60 * 60_000).toISOString();
 
       // Attestation feasibility is checked BEFORE any write so a signer-configured
@@ -310,7 +337,7 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
       }
 
       const context = {
-        approverActorId: principal.reviewerId,
+        approverActorId,
         implementationActorId: principal.safetyIdentifier,
         // evidenceRoot: the bound approval request's evidence bundle when we have a
         // request, else a deterministic candidate-derived root (still a valid
@@ -337,7 +364,7 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
             {
               approvalDecisionId: randomUUID(),
               approvalRequestId: attestationPlan.request.approvalRequestId,
-              actorId: principal.reviewerId,
+              actorId: approverActorId,
               decision: "APPROVE",
               reason,
               decidedAt: deps.now().toISOString(),

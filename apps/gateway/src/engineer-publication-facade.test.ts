@@ -16,6 +16,7 @@ import { deriveEngineerPrincipal } from "./engineer-identity.js";
 import {
   createEngineerPublicationAuthorityFacade,
   CandidateNotFoundError,
+  PublicationApproverNotProvisionedError,
   PublicationAttestationUnavailableError,
   type PublicationFacadeDeps,
 } from "./engineer-publication-facade.js";
@@ -28,7 +29,13 @@ const BASE_COMMIT = "0".repeat(40);
 const RUN_ID = "run-1";
 const REPO_ID = "repo-1";
 const POLICY = PUBLICATION_AUTHORITY_POLICY_VERSION;
-const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "publication-facade-owner" });
+// B4: the P8 approver is derived from a SEPARATELY provisioned credential, distinct
+// from the requester's own secret. A single-install principal (no approver secret) has
+// no usable approver and cannot self-approve.
+const principal = deriveEngineerPrincipal({
+  gatewayIdentitySecret: "publication-facade-owner",
+  approverIdentitySecret: "publication-facade-independent-approver",
+});
 
 /** Deterministic `sha256:<64hex>` authority tag for seeding format-checked columns. */
 function hx(seed: string): string {
@@ -146,8 +153,48 @@ describe("P8 publication facade — server-derived authority", () => {
     expect(result.status).toBe("APPROVED");
     const row = db.query("SELECT requester_actor_id, approver_actor_id, status FROM publication_approvals_v33 WHERE approval_id=?").get(result.approvalId) as { requester_actor_id: string; approver_actor_id: string; status: string };
     expect(row.requester_actor_id).toBe(principal.ownerId);   // requester bound to the selection
-    expect(row.approver_actor_id).toBe(principal.reviewerId);  // approver server-derived, distinct
+    expect(principal.approverId).toBeTruthy();
+    expect(row.approver_actor_id).toBe(principal.approverId as string);  // independent approver, distinct
+    expect(row.approver_actor_id).not.toBe(principal.ownerId);
     expect(row.status).toBe("APPROVED");
+  });
+});
+
+describe("B4 — the P8 approver is an independently provisioned second party", () => {
+  test("deriveEngineerPrincipal with ONLY the requester secret yields NO usable approver (approverId=null)", () => {
+    const single = deriveEngineerPrincipal({ gatewayIdentitySecret: "single-install-secret" });
+    expect(single.approverId ?? null).toBeNull();
+  });
+
+  test("configuring the approver from the requester's OWN secret is rejected", () => {
+    expect(() => deriveEngineerPrincipal({
+      gatewayIdentitySecret: "same-secret",
+      approverIdentitySecret: "same-secret",
+    })).toThrow(/independent of the requester/);
+  });
+
+  test("a distinct approver secret yields an approver distinct from the owner", () => {
+    const two = deriveEngineerPrincipal({
+      gatewayIdentitySecret: "requester-secret",
+      approverIdentitySecret: "independent-approver-secret",
+    });
+    expect(two.approverId).toBeTruthy();
+    expect(two.approverId).not.toBe(two.ownerId);
+  });
+
+  test("RED-without-fix: a single-install principal (no approver) CANNOT self-approve — approve fails closed, NOTHING persisted", async () => {
+    const db = scratchDb();
+    // A single-install principal derives the SAME ownerId as `principal` (same
+    // gateway secret) so it owns the seeded run/selection, but has NO approver.
+    const singleInstall = deriveEngineerPrincipal({ gatewayIdentitySecret: "publication-facade-owner" });
+    expect(singleInstall.ownerId).toBe(principal.ownerId);
+    expect(singleInstall.approverId ?? null).toBeNull();
+    const { facade } = makeFacade(db, { principal: singleInstall });
+    await facade.selectCandidate(singleInstall, RUN_ID, selectBody);
+    expect(() => facade.approve(singleInstall, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }))
+      .toThrow(PublicationApproverNotProvisionedError);
+    const count = (db.query("SELECT COUNT(*) AS n FROM publication_approvals_v33").get() as { n: number }).n;
+    expect(count).toBe(0);
   });
 });
 

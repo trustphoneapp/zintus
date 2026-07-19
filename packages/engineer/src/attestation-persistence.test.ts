@@ -13,6 +13,8 @@ import {
   verifyProvenanceAttestation,
 } from "./attestation.js";
 import { exportAuditChain, type AuditEntry } from "./audit-export.js";
+import { TenantScopedLedgerDal } from "./tenant-dal.js";
+import { defineHumanActor } from "./tenant-roles.js";
 import {
   createVerifiedCandidateCheckpoint,
   type CheckpointAttestor,
@@ -119,9 +121,9 @@ async function approvableFixture(options: { withRoles?: boolean; withSigner?: bo
     .run("repo", REQUESTER, "local", "o", "n", NOW, NOW);
   seed.query(
     "INSERT INTO engineer_runs(id,user_id,repository_id,base_branch,base_commit_sha,request_original," +
-      "request_normalized,state,state_version,risk_tier,human_gate_required,created_at,updated_at)" +
-      " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-  ).run(runId, REQUESTER, "repo", "main", "a".repeat(40), "req", "req", "REVIEW_APPROVED", 1, "HIGH", 1, NOW, NOW);
+      "request_normalized,state,state_version,risk_tier,human_gate_required,created_at,updated_at,org_id)" +
+      " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  ).run(runId, REQUESTER, "repo", "main", "a".repeat(40), "req", "req", "REVIEW_APPROVED", 1, "HIGH", 1, NOW, NOW, ORG);
   seed.query(
     "INSERT INTO verified_candidate_checkpoints(id,checkpoint_hash,parent_checkpoint_id,run_id,requester_user_id," +
       "repository_id,required_lane_contract_hash,manifest_hash,base_commit_sha,result_commit_sha,diff_hash," +
@@ -266,6 +268,32 @@ describe("P11 durable APPROVE atomically emits + persists a verifiable attestati
     const attestationEntry = flattened.find((entry) => entry.kind === "ATTESTATION");
     expect(attestationEntry?.tenantId).toBe(ORG);
     expect(attestationEntry?.id).toBe(row.statement_hash);
+  });
+
+  test("B1: the LIVE org-scoped audit export (TenantScopedLedgerDal) surfaces the persisted provenance attestation's statement_hash", async () => {
+    const fixture = await approvableFixture();
+    fixture.ledger.decideApproval(decisionRecord(fixture), "APPROVED", DECIDED_AT, { resultTreeHash: hash("tree") });
+
+    const db = readerDb(fixture);
+    const persisted = db.query("SELECT statement_hash FROM provenance_attestations").get() as { statement_hash: string };
+    expect(persisted.statement_hash).toBeTruthy();
+
+    // The real audit export DAL (org-scoped to the run's tenancy) must fold the v35
+    // provenance_attestations row into the chain. Before the B1 fix the DAL queried a
+    // table that is NEVER created (promotion_provenance_attestations), so the export
+    // NEVER carried a provenance attestation — this find returns undefined (RED).
+    const dal = new TenantScopedLedgerDal(db, { orgId: ORG, actor: defineHumanActor("auditor") });
+    const chain = dal.exportRunAuditChain(fixture.runId);
+    const entries = chain.pages.flatMap((page) => page.entries);
+    const provenance = entries.find(
+      (entry) => entry.kind === "ATTESTATION" && entry.payload.statementHash === persisted.statement_hash,
+    );
+    expect(provenance).toBeTruthy();
+    expect(provenance?.id).toBe(persisted.statement_hash);
+    expect(provenance?.tenantId).toBe(ORG);
+    // The checkpoint-derived ATTESTATION entry (a DIFFERENT statement_hash) must not be
+    // mistaken for the provenance one — the provenance statement_hash is distinct.
+    expect(entries.some((e) => e.kind === "ATTESTATION" && e.id === fixture.checkpointId)).toBe(true);
   });
 
   test("approver == requester is rejected and NOTHING is persisted (fail closed)", async () => {

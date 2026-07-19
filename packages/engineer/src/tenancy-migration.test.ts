@@ -141,6 +141,75 @@ describe("v34 immutability / fence triggers (v29/v30 style)", () => {
   });
 });
 
+describe("B2a — v34 fence/prevent trigger BODIES are byte-validated (not existence-only)", () => {
+  // Each entry: [trigger name, table, event] — a counterfeit no-op body on the SAME
+  // name/table/event that a name-existence check would wave through.
+  const V34_TRIGGERS: Array<[string, string, string]> = [
+    ["fence_orgs_update_v34", "orgs", "UPDATE"],
+    ["prevent_orgs_delete_v34", "orgs", "DELETE"],
+    ["fence_org_memberships_update_v34", "org_memberships", "UPDATE"],
+    ["prevent_org_memberships_delete_v34", "org_memberships", "DELETE"],
+    ["fence_non_human_actors_update_v34", "non_human_actors", "UPDATE"],
+    ["prevent_non_human_actors_delete_v34", "non_human_actors", "DELETE"],
+  ];
+
+  for (const [name, table, event] of V34_TRIGGERS) {
+    test(`a counterfeit ${name} body is REJECTED by re-migration`, () => {
+      const db = scratchLive();
+      // Swap the real guard for a no-op with the identical name/table/event. An
+      // existence-only validator accepts this; the byte-match fix throws.
+      db.exec(`DROP TRIGGER ${name}; CREATE TRIGGER ${name} BEFORE ${event} ON ${table} BEGIN SELECT 1; END;`);
+      expect(() => migrateEngineerDatabase(db, NOW)).toThrow(new RegExp(`invalid ${name}`));
+      db.close();
+    });
+  }
+
+  test("the exploit is real: neutering fence_orgs_update_v34 lets the immutability fence be bypassed", () => {
+    const db = scratchLive();
+    // Baseline: the real fence blocks a mutation of the immutable created_at.
+    expect(() => db.query("UPDATE orgs SET created_at=? WHERE id=?").run("2000-01-01T00:00:00.000Z", ENGINEER_DEFAULT_ORG_ID))
+      .toThrow(/immutable/);
+    // Counterfeit the guard to a no-op: the fence is neutered and the UPDATE succeeds.
+    db.exec("DROP TRIGGER fence_orgs_update_v34; CREATE TRIGGER fence_orgs_update_v34 BEFORE UPDATE ON orgs BEGIN SELECT 1; END;");
+    expect(() => db.query("UPDATE orgs SET created_at=? WHERE id=?").run("2000-01-01T00:00:00.000Z", ENGINEER_DEFAULT_ORG_ID))
+      .not.toThrow();
+    // And the byte-match validator now catches the tampered schema.
+    expect(() => migrateEngineerDatabase(db, NOW)).toThrow(/invalid fence_orgs_update_v34/);
+    db.close();
+  });
+});
+
+describe("B2b — reserved/unknown schema_migrations versions are rejected", () => {
+  test("a DB carrying the RESERVED v36 sentinel is rejected", () => {
+    const db = scratchLive();
+    // v36 is reserved by contract and NEVER applied. Injecting the marker used to
+    // pass the upper-bound-only guard (36 <= 37). It must now be rejected.
+    db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (36, ?)").run(NOW);
+    expect(() => migrateEngineerDatabase(db, NOW)).toThrow(/36/);
+    db.close();
+  });
+
+  test("a version ABOVE the supported head is rejected", () => {
+    const db = scratchLive();
+    db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (99, ?)").run(NOW);
+    expect(() => migrateEngineerDatabase(db, NOW)).toThrow(/newer than supported|99/);
+    db.close();
+  });
+
+  test("pre-base legacy history (e.g. v13) is TOLERATED — the check must not over-reach", () => {
+    const db = scratchLive();
+    db.query("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, ?)").run(NOW);
+    expect(() => migrateEngineerDatabase(db, NOW)).not.toThrow();
+    db.close();
+  });
+
+  test("a clean head DB (only known versions) still migrates without error", () => {
+    const db = scratchLive();
+    expect(() => migrateEngineerDatabase(db, NOW)).not.toThrow();
+    db.close();
+  });
+});
+
 describe("v34 sponsor CHECKs match the code guard (B2 regression)", () => {
   const insertMembership = (db: Database, actorId: string, sponsor: string | null) =>
     db.query(

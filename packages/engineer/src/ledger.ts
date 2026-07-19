@@ -402,7 +402,7 @@ function rowToRepositoryAdmission(row: RepositoryAdmissionRow): RepositoryAdmiss
 const REPOSITORY_ADMISSION_SELECT = `
   SELECT a.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
   FROM repository_admissions a
-  JOIN repository_connections rc ON rc.id = a.repository_id
+  JOIN repository_connections rc ON rc.id = a.repository_id AND rc.org_id = a.org_id
 `;
 
 export interface LedgerTransitionCommand {
@@ -525,7 +525,7 @@ export interface ActiveOptionalHardeningStartFence {
 const RUN_SELECT = `
   SELECT r.*, rc.provider, rc.owner, rc.name AS repository_name, rc.url AS repository_url
   FROM engineer_runs r
-  JOIN repository_connections rc ON rc.id = r.repository_id
+  JOIN repository_connections rc ON rc.id = r.repository_id AND rc.org_id = r.org_id
 `;
 
 const DIRECT_RUN_EXPORT_TABLES = [
