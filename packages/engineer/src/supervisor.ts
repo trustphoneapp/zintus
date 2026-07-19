@@ -73,6 +73,7 @@ import {
   type ClassifiedReviewerAuthority,
   type ArtifactByteReader,
   type OptionalHardeningStartPreparation,
+  type ProvenanceEmissionContext,
 } from "./ledger.js";
 import { buildOptionalHardeningManifest } from "./hardening-manifest.js";
 import { HardeningBudgetExtensionRequiresNewRunError } from "./hardening-budget-contracts.js";
@@ -897,6 +898,12 @@ export class EngineerSupervisor {
    * confined to this process and never handed to a model or sandbox.
    */
   configureResolutionSigningSecret(secret:string):void{this.ledger.configureResolutionSigningSecret(secret);}
+  /**
+   * P11: bind the gateway-held confined signing secret so a durable APPROVE
+   * atomically emits + persists a signed provenance attestation. Composition-root
+   * use only; the secret is never handed to a model or sandbox.
+   */
+  configureProvenanceAttestationSigner(secret:string,keyId:string):void{this.ledger.configureProvenanceAttestationSigner(secret,keyId);}
   private advisoryAttestor():CheckpointAttestor{if(!this.checkpointAttestor)throw new AdvisoryIntegrityError();return this.checkpointAttestor;}
   listAdvisoryBacklogForOwner(ownerId:string,runId:string,options:{limit?:number;cursor?:string;status?:"OPEN"|"DEFERRED"|"DISMISSED";actionability?:"ACTIONABLE"|"AUDIT_ONLY"}={}):Promise<AdvisoryBacklogPage>{return this.ledger.listAdvisoryBacklogForOwner(ownerId,runId,options,this.advisoryAttestor());}
   deferAdvisoryForOwner(ownerId:string,runId:string,advisoryId:string,command:AdvisoryOwnerCommand){return this.ledger.applyAdvisoryOwnerAction(ownerId,runId,advisoryId,"DEFER",command,this.advisoryAttestor());}
@@ -1969,13 +1976,13 @@ export class EngineerSupervisor {
     return this.ledger.listApprovalDecisions(approvalRequestId);
   }
 
-  decideApproval(record: NewApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): NewApprovalDecisionRecord;
-  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): ApprovalDecisionRecord;
-  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): ApprovalDecisionRecord {
+  decideApproval(record: NewApprovalDecisionRecord, status: ApprovalRequestRecord["status"], provenanceContext?: ProvenanceEmissionContext): NewApprovalDecisionRecord;
+  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"], provenanceContext?: ProvenanceEmissionContext): ApprovalDecisionRecord;
+  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"], provenanceContext?: ProvenanceEmissionContext): ApprovalDecisionRecord {
     if (!record.expectedVerifiedCheckpointId || !record.expectedVerifiedCheckpointHash) {
       throw new Error("approval decisions require expected verified checkpoint authority");
     }
-    return this.ledger.decideApproval(record as NewApprovalDecisionRecord, status, this.timestamp());
+    return this.ledger.decideApproval(record as NewApprovalDecisionRecord, status, this.timestamp(), provenanceContext);
   }
 
   extendApproval(record: NewApprovalDecisionRecord, deadlineAt: string, reminders: string[]): ApprovalRequestRecord;

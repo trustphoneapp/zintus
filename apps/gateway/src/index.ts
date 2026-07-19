@@ -653,6 +653,10 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     // (fail closed). The verifier reads the ledger's own connection — the same
     // one the desk writes replacement rows on.
     engineerSupervisor.configureResolutionSigningSecret(resolutionSigning.secret);
+    // P11: bind the same gateway-held confined secret (distinct keyId) so a
+    // durable APPROVE atomically emits + persists a signed provenance attestation
+    // (see EngineerLedger.decideApproval). The secret never leaves this process.
+    engineerSupervisor.configureProvenanceAttestationSigner(resolutionSigning.secret, `${resolutionSigning.keyId}:provenance`);
     const resolutionConnection = engineerSupervisor.resolutionDeskConnection();
     const resolutionPricingDigest = serverPricingPolicyDigest();
     const desk = new ResolutionDesk(

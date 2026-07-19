@@ -2785,3 +2785,32 @@ unfinished pair has passed.
   confirmed absent from the handler). Gates: web 568 (baseline 478), web
   typecheck clean. Committed apps/web scoped (v35 persistence concurrently in
   flight on packages/engineer — not in this commit).
+
+### Day 3 — Integration step 5a: v35 attestation persistence, atomic at approval (2026-07-19)
+
+- The P11 persistence seam is closed. v35 adds provenance_attestations to the
+  live chain (PK statement_hash; REAL org_id FK → orgs(id), stronger than v34's
+  ALTER-added column; composite FK to the verified-candidate checkpoint; FK to
+  approval_decisions; unique 1:1 with the approval decision; projection trigger
+  binding stored DSSE payloadType+keyid; UPDATE/DELETE immutability triggers),
+  version 34→35, ancestry + assertAttestationStorageShape, every v14-v34 byte
+  preserved (forward-install on a populated v34 DB proven). Correctly excluded
+  from TENANT_OWNED_TABLES (no ownership column — the subject checkpoint binds
+  the run; tripwire ignores it). All ~16 head-version assertions updated.
+- Auto-emit wired at decideApproval (the correct call-site): on a durable APPROVE
+  bound to a distinct approver (parsed.actorId, predicate-enforced != requester)
+  and its exact verified-candidate subject, the signed DSSE envelope is emitted
+  and INSERTed IN THE SAME db.transaction() as the approval decision. approverUserId
+  is now REAL. Fail-closed: signer configured + APPROVE but missing subject or
+  resultTreeHash throws → whole approval rolls back. Signer threaded from the
+  gateway-held confined secret (distinct :provenance keyId), never in model/sandbox.
+- Fable mutation-verified atomicity directly: swallowing the persist error (so a
+  failed attestation no longer rolls back the approval) turned three persistence
+  tests red, restore clean — "approval and attestation commit together or not at
+  all" is load-bearing. Immutability likewise (dropping the triggers lets
+  UPDATE/DELETE succeed). Gates: engineer 775, gateway 391, typecheck + diff clean.
+- REMAINING last-mile seam: the gateway human-approve ROUTE uses the v33
+  publication manager, not ledger.decideApproval; the signer wiring is
+  threaded-but-dormant on that route until it supplies resultTreeHash and calls
+  decideApproval. Generation+persistence+atomicity are proven in-process/tests.
+  resultTreeHash (not durably recorded) and real KMS/Sigstore ([HUMAN]) remain.

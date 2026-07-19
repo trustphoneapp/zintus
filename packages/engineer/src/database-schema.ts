@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 34;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 35;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -3260,3 +3260,63 @@ export function buildTenancyMigration34Sql(now: string): string {
  * the live migration chain (database-migrations.ts).
  */
 export const ENGINEER_DATABASE_MIGRATION_34_SQL = buildTenancyMigration34Sql("2026-07-19T00:00:00.000Z");
+
+/**
+ * P11 provenance-attestation persistence — migration v35.
+ *
+ * Additive-only. Introduces the durable, org-scoped, IMMUTABLE store for the
+ * signed DSSE provenance attestation emitted when a verified candidate is
+ * APPROVED (the ledger's HUMAN_APPROVAL lane; see decideApproval). The
+ * attestation GENERATION (attestation.ts / attestation-assembly.ts) already
+ * exists; this table is where the signed envelope lands, atomically with the
+ * approval decision that produced it.
+ *
+ * Design (mirrors the v29/v30/v33 idiom):
+ *  - born at v35 with `org_id` in its own CREATE TABLE (a real FK to orgs(id),
+ *    which is stronger than the v34 ALTER-added org_id that could not carry an
+ *    FK); it is NOT in TENANT_OWNED_TABLES (that frozen list drives the v34
+ *    ALTER loop and would try to ALTER a table that does not yet exist at v34);
+ *  - the subject is the exact verified-candidate checkpoint: a composite FK to
+ *    verified_candidate_checkpoints(id, checkpoint_hash) binds the attestation
+ *    to the precise authority its statement's subject digest recomputes to;
+ *  - exactly one attestation per approval decision (unique index) — a durable
+ *    APPROVE and its attestation are 1:1;
+ *  - a projection trigger binds the stored DSSE envelope's payloadType and
+ *    signer keyid to their columns (teeth, v33-style);
+ *  - UPDATE/DELETE are hard-rejected (immutable, like every attestation record).
+ *
+ * No ownership-shaped column (user_id/run_id/owner_user_id/requester_user_id):
+ * the subject checkpoint already binds the run, so the table is checkpoint-keyed,
+ * not run-keyed, and the tenancy completeness tripwire (which requires every
+ * run-shaped table to be in TENANT_OWNED_TABLES) does not apply to it.
+ */
+export const ENGINEER_DATABASE_MIGRATION_35_SQL = `
+  CREATE TABLE provenance_attestations (
+    statement_hash TEXT PRIMARY KEY NOT NULL CHECK(length(statement_hash)=71 AND substr(statement_hash,1,7)='sha256:' AND substr(statement_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    org_id TEXT NOT NULL DEFAULT '${ENGINEER_DEFAULT_ORG_ID}' REFERENCES orgs(id) ON DELETE RESTRICT,
+    subject_checkpoint_id TEXT NOT NULL CHECK(length(subject_checkpoint_id)=71 AND substr(subject_checkpoint_id,1,7)='sha256:' AND substr(subject_checkpoint_id,8) NOT GLOB '*[^0-9a-f]*'),
+    subject_checkpoint_hash TEXT NOT NULL CHECK(length(subject_checkpoint_hash)=71 AND substr(subject_checkpoint_hash,1,7)='sha256:' AND substr(subject_checkpoint_hash,8) NOT GLOB '*[^0-9a-f]*'),
+    approval_decision_id TEXT NOT NULL REFERENCES approval_decisions(id) ON DELETE RESTRICT,
+    approver_actor_id TEXT NOT NULL CHECK(length(approver_actor_id) BETWEEN 1 AND 500),
+    signature_key_id TEXT NOT NULL CHECK(length(signature_key_id) BETWEEN 1 AND 500),
+    signature_algorithm TEXT NOT NULL CHECK(length(signature_algorithm) BETWEEN 1 AND 100),
+    payload_type TEXT NOT NULL CHECK(payload_type='application/vnd.in-toto+json'),
+    envelope_json TEXT NOT NULL,
+    statement_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(subject_checkpoint_id, subject_checkpoint_hash)
+      REFERENCES verified_candidate_checkpoints(id, checkpoint_hash) ON DELETE RESTRICT
+  );
+  CREATE UNIQUE INDEX uq_provenance_attestation_approval_v35 ON provenance_attestations(approval_decision_id);
+  CREATE INDEX idx_provenance_attestations_org_created_v35 ON provenance_attestations(org_id, created_at, statement_hash);
+  CREATE INDEX idx_provenance_attestations_subject_v35 ON provenance_attestations(subject_checkpoint_id, subject_checkpoint_hash);
+  CREATE TRIGGER require_provenance_attestation_binding_v35 BEFORE INSERT ON provenance_attestations BEGIN
+    SELECT CASE WHEN json_extract(NEW.envelope_json,'$.payloadType') IS NOT NEW.payload_type
+      OR json_extract(NEW.envelope_json,'$.signatures[0].keyid') IS NOT NEW.signature_key_id
+      THEN RAISE(ABORT,'provenance attestation envelope projection mismatch') END;
+  END;
+  CREATE TRIGGER prevent_provenance_attestations_update_v35 BEFORE UPDATE ON provenance_attestations BEGIN
+    SELECT RAISE(ABORT,'provenance attestations are immutable'); END;
+  CREATE TRIGGER prevent_provenance_attestations_delete_v35 BEFORE DELETE ON provenance_attestations BEGIN
+    SELECT RAISE(ABORT,'provenance attestations are immutable'); END;
+`;

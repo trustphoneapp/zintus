@@ -79,6 +79,22 @@ import {
   V34_ADDITIVE_COLUMN_NAMES,
 } from "./database-schema.js";
 import { assertEngineerDatabaseVersionSupported, migrateEngineerDatabase } from "./database-migrations.js";
+import { createHmacProvenanceSigner, DSSE_PAYLOAD_TYPE, type ProvenanceSigner } from "./attestation.js";
+import {
+  emitPromotionProvenanceAttestationSync,
+  type PromotionProvenanceOptions,
+} from "./attestation-assembly.js";
+
+/**
+ * P11 caller-supplied seams for the approval-time attestation. `approverUserId`
+ * is NOT here — it is the approval's own actorId (real, distinct from the
+ * requester). `resultTreeHash` and `publicationReceipt` remain seams: neither is
+ * durably recorded for the verified candidate, so the approve caller threads them.
+ */
+export interface ProvenanceEmissionContext {
+  resultTreeHash: string;
+  publicationReceipt?: PromotionProvenanceOptions["publicationReceipt"];
+}
 import {
   AdvisoryChangedError, AdvisoryCursorInvalidError, AdvisoryIntegrityError, AdvisoryMaterializationRequiredError,
   AdvisoryTransitionInvalidError,
@@ -616,6 +632,15 @@ export class EngineerLedger {
   // ordinary runs never consult it.
   private resolutionSigningSecret?: string;
   private resolutionLineageVerifier?: ResolutionLineageVerifier;
+  // P11 provenance-attestation signing authority. Injected at composition time
+  // via configureProvenanceAttestationSigner with the gateway-held confined
+  // secret (never present in any model or sandbox). When set, a durable APPROVE
+  // decision MUST atomically emit + persist a signed DSSE provenance attestation
+  // for its verified-candidate subject (fail closed). When unset, no attestation
+  // is emitted at approval time (the generation capability is opt-in; the gateway
+  // wiring threads the secret to make it required in the live lifecycle).
+  private provenanceSigningSecret?: string;
+  private provenanceSigner?: ProvenanceSigner;
 
   constructor(dbPath: string, now: () => Date = () => new Date(), hardeningPromptCacheSecret?: string) {
     this.now = now;
@@ -775,6 +800,26 @@ export class EngineerLedger {
     }
     this.resolutionSigningSecret = secret;
     this.resolutionLineageVerifier = new ResolutionLineageVerifier(this.db, secret);
+  }
+
+  /**
+   * P11 provenance-attestation signing seam. Binds the gateway-held confined
+   * signing secret so a durable APPROVE atomically emits + persists a signed DSSE
+   * provenance attestation for the approved verified candidate (see decideApproval).
+   * The secret is captured in the HMAC signer's closure and is never a field of
+   * the signer object, so a context holding only the signer cannot exfiltrate the
+   * key; it is never handed to a model or sandbox. Idempotent for the same secret;
+   * a mismatched re-configure is rejected. Until this is called, no attestation is
+   * emitted at approval time.
+   */
+  configureProvenanceAttestationSigner(secret: string, keyId: string): void {
+    if (secret.length < 32) throw new TypeError("provenance attestation signing secret must contain at least 32 characters");
+    if (keyId.length < 1) throw new TypeError("provenance attestation signing keyId is required");
+    if (this.provenanceSigningSecret !== undefined && this.provenanceSigningSecret !== secret) {
+      throw new Error("Engineer provenance attestation signing authority is already configured with a different secret");
+    }
+    this.provenanceSigningSecret = secret;
+    this.provenanceSigner = createHmacProvenanceSigner({ secret, keyId });
   }
 
   /**
@@ -7208,7 +7253,12 @@ export class EngineerLedger {
     }));
   }
 
-  decideApproval(record: NewApprovalDecisionRecord, requestStatus: ApprovalRequestRecord["status"], now: string): NewApprovalDecisionRecord {
+  decideApproval(
+    record: NewApprovalDecisionRecord,
+    requestStatus: ApprovalRequestRecord["status"],
+    now: string,
+    provenanceContext?: ProvenanceEmissionContext,
+  ): NewApprovalDecisionRecord {
     const parsed = ApprovalDecisionRecordSchema.parse(record);
     const validStatus = (parsed.decision === "APPROVE" && requestStatus === "APPROVED") ||
       (parsed.decision === "REQUEST_CHANGES" && requestStatus === "CHANGES_REQUESTED") ||
@@ -7258,9 +7308,66 @@ export class EngineerLedger {
         approvalRequestId: parsed.approvalRequestId, approvalDecisionId: parsed.approvalDecisionId, reason: parsed.reason,
         verifiedCheckpointId: parsed.expectedVerifiedCheckpointId,
       }, parsed.decidedAt);
+      // P11: on a durable APPROVE bound to a distinct human approver
+      // (parsed.actorId, enforced != requester by the predicate schema) and its
+      // exact verified-candidate subject, atomically emit + persist the signed
+      // provenance attestation IN THIS SAME TRANSACTION. Any failure here (missing
+      // seam, bad subject, signer error) throws and rolls back the approval too —
+      // an approval and its required attestation commit together or not at all.
+      if (parsed.decision === "APPROVE" && this.provenanceSigner) {
+        this.persistPromotionAttestation(parsed, provenanceContext);
+      }
       return parsed;
     });
     return transact();
+  }
+
+  /**
+   * Emit + persist the P11 provenance attestation for an APPROVED verified
+   * candidate. Runs only inside decideApproval's transaction (its writes are part
+   * of that atomic unit). Fail closed: when the signer is configured, the
+   * resultTreeHash seam MUST be supplied, and the subject checkpoint MUST exist —
+   * otherwise this throws and the surrounding approval rolls back. resultTreeHash
+   * and publicationReceipt remain caller-supplied SEAMS (not durably recorded for
+   * the verified candidate); approverUserId is now REAL (the approval's actorId).
+   */
+  private persistPromotionAttestation(
+    parsed: NewApprovalDecisionRecord,
+    provenanceContext: ProvenanceEmissionContext | undefined,
+  ): void {
+    const signer = this.provenanceSigner!;
+    if (!parsed.expectedVerifiedCheckpointId || !parsed.expectedVerifiedCheckpointHash) {
+      throw new Error("provenance attestation requires a verified-candidate subject on the approval");
+    }
+    if (!provenanceContext?.resultTreeHash) {
+      throw new Error("provenance attestation is required but the resultTreeHash seam was not supplied");
+    }
+    const checkpointRow = this.db
+      .query("SELECT org_id FROM verified_candidate_checkpoints WHERE id=? AND checkpoint_hash=?")
+      .get(parsed.expectedVerifiedCheckpointId, parsed.expectedVerifiedCheckpointHash) as { org_id: string } | null;
+    if (!checkpointRow) {
+      throw new EngineerNotFoundError("verified candidate checkpoint", parsed.expectedVerifiedCheckpointId);
+    }
+    const emitted = emitPromotionProvenanceAttestationSync(
+      this.db,
+      parsed.expectedVerifiedCheckpointId,
+      {
+        approverUserId: parsed.actorId,
+        resultTreeHash: provenanceContext.resultTreeHash,
+        createdAt: parsed.decidedAt,
+        publicationReceipt: provenanceContext.publicationReceipt ?? null,
+      },
+      signer,
+    );
+    this.db.query(`INSERT INTO provenance_attestations
+      (statement_hash, org_id, subject_checkpoint_id, subject_checkpoint_hash, approval_decision_id,
+       approver_actor_id, signature_key_id, signature_algorithm, payload_type, envelope_json, statement_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      emitted.statementHash, checkpointRow.org_id, parsed.expectedVerifiedCheckpointId,
+      parsed.expectedVerifiedCheckpointHash, parsed.approvalDecisionId, parsed.actorId,
+      signer.keyId, signer.algorithm, DSSE_PAYLOAD_TYPE,
+      canonicalJson(emitted.envelope), emitted.statementJson, parsed.decidedAt,
+    );
   }
 
   extendApproval(record: NewApprovalDecisionRecord, deadlineAt: string, reminders: string[], now: string): ApprovalRequestRecord {

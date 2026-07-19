@@ -56,7 +56,7 @@ describe("v34 forward-install on a populated v33 database", () => {
 
     // Forward-install v34 onto the populated v33 DB.
     migrateEngineerDatabase(db, NOW);
-    expect((db.query("SELECT MAX(version) v FROM schema_migrations").get() as { v: number }).v).toBe(34);
+    expect((db.query("SELECT MAX(version) v FROM schema_migrations").get() as { v: number }).v).toBe(35);
 
     const run = db.query("SELECT org_id, retention_class, user_id FROM engineer_runs WHERE id=?").get("run-legacy") as {
       org_id: string; retention_class: string; user_id: string;
@@ -116,7 +116,7 @@ describe("v34 preserves every prior schema object (additive only)", () => {
     // assertResolutionDeskShape / assertPublicationAuthorityShape / assertTenancyShape;
     // reaching v34 without throwing IS the proof the prior bytes are intact modulo org_id.
     const db = scratchLive();
-    expect((db.query("SELECT MAX(version) v FROM schema_migrations").get() as { v: number }).v).toBe(34);
+    expect((db.query("SELECT MAX(version) v FROM schema_migrations").get() as { v: number }).v).toBe(35);
   });
 });
 

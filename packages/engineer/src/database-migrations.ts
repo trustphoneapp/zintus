@@ -27,6 +27,7 @@ import {
   ENGINEER_DATABASE_MIGRATION_32_SQL,
   ENGINEER_DATABASE_MIGRATION_33_SQL,
   ENGINEER_DATABASE_MIGRATION_34_SQL,
+  ENGINEER_DATABASE_MIGRATION_35_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
   ENGINEER_DEFAULT_ORG_ID,
   AUTHORITY_ACTOR_TABLES,
@@ -65,6 +66,7 @@ const MIGRATIONS: readonly Migration[] = [
   { version: 32, sql: ENGINEER_DATABASE_MIGRATION_32_SQL },
   { version: 33, sql: ENGINEER_DATABASE_MIGRATION_33_SQL },
   { version: 34, sql: ENGINEER_DATABASE_MIGRATION_34_SQL },
+  { version: 35, sql: ENGINEER_DATABASE_MIGRATION_35_SQL },
 ];
 
 function assertHardeningBudgetShape(db: Database): void {
@@ -1091,6 +1093,36 @@ function assertTenancyShape(db: Database): void {
   assertForeignKeys(db);
 }
 
+/**
+ * v35 exact-shape validator for the P11 provenance-attestation store. Follows the
+ * v29/v30/v33 idiom: every table/index/trigger's stored `sql` must byte-match
+ * (modulo whitespace/case) the single source of truth in the migration constant,
+ * and the org_id tenancy column must be NOT NULL.
+ */
+function assertAttestationStorageShape(db: Database): void {
+  const expected = new Map<string, string>();
+  const pattern = /CREATE (?:UNIQUE )?(?:TABLE|INDEX|TRIGGER)\s+([A-Za-z0-9_]+)[\s\S]*?;\s*(?=CREATE |$)/g;
+  for (const match of ENGINEER_DATABASE_MIGRATION_35_SQL.matchAll(pattern)) expected.set(match[1]!, normalizeSchemaSql(match[0]!));
+  const names = [
+    "provenance_attestations",
+    "uq_provenance_attestation_approval_v35",
+    "idx_provenance_attestations_org_created_v35",
+    "idx_provenance_attestations_subject_v35",
+    "require_provenance_attestation_binding_v35",
+    "prevent_provenance_attestations_update_v35",
+    "prevent_provenance_attestations_delete_v35",
+  ];
+  if (expected.size !== names.length) throw new Error("Engineer schema v35 validator is missing exact definitions");
+  for (const name of names) {
+    const actual = db.query("SELECT sql FROM sqlite_master WHERE name=? AND type IN('table','index','trigger')").get(name) as { sql: string } | null;
+    if (!actual?.sql || normalizeSchemaSql(actual.sql) !== expected.get(name)) throw new Error(`Engineer schema v35 has invalid ${name}`);
+  }
+  const org = (db.query("PRAGMA table_info(provenance_attestations)").all() as Array<{ name: string; notnull: number }>)
+    .find((column) => column.name === "org_id");
+  if (!org || org.notnull !== 1) throw new Error("Engineer schema v35 provenance_attestations is missing a NOT NULL org_id");
+  assertForeignKeys(db);
+}
+
 /** Apply ordered migrations after the legacy bootstrap/shape repairs finish. */
 export function migrateEngineerDatabase(
   db: Database,
@@ -1158,6 +1190,9 @@ export function migrateEngineerDatabase(
   if (appliedVersions.has(34) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33].every((version) => appliedVersions.has(version)))) {
     throw new Error("Engineer schema v34 is missing required migration ancestry");
   }
+  if (appliedVersions.has(35) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34].every((version) => appliedVersions.has(version)))) {
+    throw new Error("Engineer schema v35 is missing required migration ancestry");
+  }
 
   for (const migration of MIGRATIONS) {
     if (migration.version > targetVersion) break;
@@ -1204,6 +1239,7 @@ export function migrateEngineerDatabase(
       // v34 tenancy shape validated pre-commit; the v31/v33 exact-shape validators
       // (which tolerate exactly the additive org_id column) re-run in the end block.
       if (migration.version === 34) assertTenancyShape(db);
+      if (migration.version === 35) assertAttestationStorageShape(db);
       db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(migration.version, now);
       db.exec("COMMIT");
@@ -1237,4 +1273,5 @@ export function migrateEngineerDatabase(
   if (finalVersion >= 32) assertFailureUnderlyingCauseShape(db);
   if (finalVersion >= 33) assertPublicationAuthorityShape(db);
   if (finalVersion >= 34) assertTenancyShape(db);
+  if (finalVersion >= 35) assertAttestationStorageShape(db);
 }

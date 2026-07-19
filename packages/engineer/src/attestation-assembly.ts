@@ -1,7 +1,11 @@
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
 import {
+  buildProvenanceStatement,
   createProvenanceAttestation,
+  DSSE_PAYLOAD_TYPE,
+  DsseEnvelopeSchema,
+  preAuthEncoding,
   type DsseEnvelope,
   type ProvenanceAttestationInput,
   type ProvenanceSigner,
@@ -148,4 +152,36 @@ export async function emitPromotionProvenanceAttestation(
 ): Promise<{ statement: ProvenanceStatement; statementJson: string; envelope: DsseEnvelope }> {
   const input = assemblePromotionProvenanceInput(db, checkpointId, options);
   return createProvenanceAttestation(input, signer);
+}
+
+/**
+ * SYNCHRONOUS assemble+sign, for atomic persistence inside a bun:sqlite
+ * transaction (which cannot await). The signer's `sign` MUST return a string
+ * synchronously (the gateway-held HMAC signer does); a Promise-returning signer
+ * throws rather than silently persisting an unsigned/partial envelope. Semantics
+ * are otherwise identical to `emitPromotionProvenanceAttestation`, including the
+ * predicate-schema safety controls (distinct approver, P7 lineage) that throw at
+ * construction so a bad input aborts the surrounding transaction (fail closed).
+ */
+export function emitPromotionProvenanceAttestationSync(
+  db: Database,
+  checkpointId: string,
+  options: PromotionProvenanceOptions,
+  signer: ProvenanceSigner,
+): { statement: ProvenanceStatement; statementJson: string; statementHash: `sha256:${string}`; envelope: DsseEnvelope } {
+  const input = assemblePromotionProvenanceInput(db, checkpointId, options);
+  const built = buildProvenanceStatement(input);
+  const payloadBytes = new TextEncoder().encode(built.statementJson);
+  const pae = preAuthEncoding(DSSE_PAYLOAD_TYPE, payloadBytes);
+  const sig = signer.sign(pae);
+  if (typeof (sig as { then?: unknown }).then === "function") {
+    throw new Error("synchronous provenance emission requires a synchronous signer");
+  }
+  if (!sig) throw new Error("provenance signer produced an empty signature");
+  const envelope = DsseEnvelopeSchema.parse({
+    payloadType: DSSE_PAYLOAD_TYPE,
+    payload: Buffer.from(payloadBytes).toString("base64"),
+    signatures: [{ keyid: signer.keyId, sig }],
+  });
+  return { statement: built.statement, statementJson: built.statementJson, statementHash: built.statementHash, envelope };
 }
