@@ -71,10 +71,18 @@ export interface SignedSourceCandidate extends SourceCandidateContent {
   readonly signature: { algorithm: typeof RESOLUTION_SOURCE_CANDIDATE_SIGNATURE_ALGORITHM; keyId: string; value: string };
 }
 
-function canonicalContent(content: SourceCandidateContent): Record<string, unknown> {
+// The signing keyId is bound INTO the hashed canonical content (P2): a
+// single-secret deployment today, but under future key rotation the keyId
+// selects which secret verifies. Leaving it out of the signed surface (the prior
+// shape signed only recordHash, with keyId living unauthenticated in recordId)
+// would let a rotation-era attacker swap the keyId without breaking the HMAC.
+// Binding it means any keyId edit re-derives a different recordHash and fails the
+// integrity check.
+function canonicalContent(content: SourceCandidateContent, keyId: string): Record<string, unknown> {
   return {
     schemaVersion: RESOLUTION_SOURCE_CANDIDATE_SCHEMA_VERSION,
     policyVersion: RESOLUTION_SOURCE_CANDIDATE_POLICY_VERSION,
+    keyId,
     ...SourceCandidateContentSchema.parse(content),
   };
 }
@@ -82,11 +90,12 @@ function canonicalContent(content: SourceCandidateContent): Record<string, unkno
 /**
  * Server-side canonicalization + signing with the gateway-held HMAC authority.
  * The secret never leaves this call; callers receive only the signed record.
- * The signature binds the canonical record hash, so any byte change breaks it.
+ * The signature binds the canonical record hash (which now covers the keyId), so
+ * any byte change — including a keyId swap — breaks it.
  */
 export function signSourceCandidate(content: SourceCandidateContent, secret: string, keyId: string): SignedSourceCandidate {
   if (!secret) throw new Error("source-candidate signing authority is unavailable");
-  const canonical = canonicalContent(content);
+  const canonical = canonicalContent(content, keyId);
   const recordHash = sha256(canonical);
   const recordId = sha256({ recordHash, keyId });
   const value = createHmac("sha256", secret).update(recordHash, "utf8").digest("hex");
@@ -102,6 +111,7 @@ export function signSourceCandidate(content: SourceCandidateContent, secret: str
 
 export type SourceCandidateRejectReason =
   | "SIGNING_AUTHORITY_UNAVAILABLE"
+  | "BYTE_READER_REQUIRED"
   | "RECORD_TAMPERED"
   | "SIGNATURE_INVALID"
   | "SOURCE_RUN_MISSING"
@@ -126,13 +136,35 @@ export interface ArtifactByteReader {
 
 interface ArtifactRow { id: string; run_id: string; sha256: string; storage_reference: string }
 
+export interface VerifySourceCandidateOptions {
+  /**
+   * Marks an AUTHORITY verification — the reverify APPLY path that inherits this
+   * signed Builder summary into a real replacement run. On this path a real
+   * `byteReader` is MANDATORY (P1-C): every referenced artifact's durable bytes
+   * are re-hashed, so a same-length byte rewrite that leaves the `artifacts.sha256`
+   * row intact is caught. Omitting a reader on an authority verification fails
+   * closed (`BYTE_READER_REQUIRED`) rather than trusting the content-address row.
+   *
+   * When `false` (an informational / preview read, never an inheritance decision)
+   * the durable content-address rows are the re-read surface and a reader is
+   * optional.
+   */
+  readonly authority: boolean;
+  readonly byteReader?: ArtifactByteReader;
+}
+
 /**
  * Re-verify a signed source candidate against the live source rows. Verifies the
  * gateway signature, then re-reads every referenced durable byte and rejects on
- * any drift. When an `ArtifactByteReader` is supplied, the output and seed
- * artifact bytes are re-hashed and compared to the recorded content address
- * (true byte re-read); without one, the durable content-address rows are the
- * re-read surface.
+ * any drift.
+ *
+ * On the AUTHORITY path (`{ authority: true }`, the reverify apply) a real
+ * `byteReader` is required: the output and seed artifact bytes are re-hashed and
+ * compared to the recorded content address (true byte re-read). Trusting the
+ * `artifacts.sha256` row alone would let a same-length byte rewrite pass, so an
+ * authority verification without a reader fails closed (`BYTE_READER_REQUIRED`).
+ * On a non-authority read the durable content-address rows are the re-read
+ * surface and a reader is optional.
  *
  * Quiescence: the record pins the source `runEventHead`; any new source
  * `run_state_events` row since the snapshot changes the head and fails
@@ -146,9 +178,14 @@ export function verifySourceCandidate(
   db: Database,
   signed: SignedSourceCandidate,
   secret: string,
-  byteReader?: ArtifactByteReader,
+  options: VerifySourceCandidateOptions = { authority: false },
 ): SourceCandidateVerdict {
   if (!secret) return { ok: false, reason: "SIGNING_AUTHORITY_UNAVAILABLE" };
+  const { authority, byteReader } = options;
+  // Authority (inheritance) verifications MUST re-read the real bytes. Fail
+  // closed if the caller did not supply a reader rather than falling back to
+  // trusting the content-address row.
+  if (authority && !byteReader) return { ok: false, reason: "BYTE_READER_REQUIRED" };
 
   // 1. Signature + record integrity.
   let content: SourceCandidateContent;
@@ -158,7 +195,7 @@ export function verifySourceCandidate(
   } catch {
     return { ok: false, reason: "RECORD_TAMPERED" };
   }
-  const recomputedHash = sha256(canonicalContent(content));
+  const recomputedHash = sha256(canonicalContent(content, signed.signature.keyId));
   if (recomputedHash !== signed.recordHash) return { ok: false, reason: "RECORD_TAMPERED" };
   const expectedSignature = createHmac("sha256", secret).update(signed.recordHash, "utf8").digest("hex");
   if (!constantTimeEquals(expectedSignature, signed.signature.value)) return { ok: false, reason: "SIGNATURE_INVALID" };

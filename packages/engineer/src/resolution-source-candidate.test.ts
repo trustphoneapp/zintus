@@ -82,7 +82,40 @@ describe("B-prime signed pre-verification source candidate", () => {
 
   test("accepts the good record with a true byte re-read of output and seed", () => {
     const signed = signSourceCandidate(content(), SECRET, KEY_ID);
-    expect(verifySourceCandidate(fixture.db, signed, SECRET, byteReader)).toEqual({ ok: true });
+    expect(verifySourceCandidate(fixture.db, signed, SECRET, { authority: true, byteReader })).toEqual({ ok: true });
+  });
+
+  test("SIGNING_AUTHORITY_UNAVAILABLE when the verification secret is empty", () => {
+    const signed = signSourceCandidate(content(), SECRET, KEY_ID);
+    expect(verifySourceCandidate(fixture.db, signed, "")).toEqual({ ok: false, reason: "SIGNING_AUTHORITY_UNAVAILABLE" });
+  });
+
+  test("authority path fails closed when no byteReader is supplied (BYTE_READER_REQUIRED)", () => {
+    const signed = signSourceCandidate(content(), SECRET, KEY_ID);
+    // The apply/reverify authority path may NOT trust the content-address row: a
+    // missing reader is a hard reject, not a fall-through to row trust.
+    expect(verifySourceCandidate(fixture.db, signed, SECRET, { authority: true })).toEqual({ ok: false, reason: "BYTE_READER_REQUIRED" });
+  });
+
+  test("authority path rejects a same-length byte rewrite that leaves the content-address row intact", () => {
+    const signed = signSourceCandidate(content(), SECRET, KEY_ID);
+    // Attacker rewrites the STORED output bytes to different same-length content
+    // but does NOT touch the artifacts.sha256 row. A row-only re-read trusts it;
+    // the authority path re-hashes the real bytes and rejects.
+    const rewritten = new TextEncoder().encode("builder OUTPUT result DIFF"); // same length as OUT_BYTES, different bytes
+    expect(rewritten.length).toBe(OUT_BYTES.length);
+    const rewriteReader: ArtifactByteReader = { read: ({ artifactId }) => (artifactId === "art-out" ? rewritten : SEED_BYTES) };
+    // The row-only (non-authority) read still returns ok — the row is untouched,
+    // which is exactly why authority verifications must not trust it.
+    expect(verifySourceCandidate(fixture.db, signed, SECRET, { authority: false })).toEqual({ ok: true });
+    // The authority path with a real reader catches the byte drift.
+    expect(verifySourceCandidate(fixture.db, signed, SECRET, { authority: true, byteReader: rewriteReader })).toEqual({ ok: false, reason: "OUTPUT_BYTES_DRIFT" });
+  });
+
+  test("a keyId swap breaks record integrity (keyId is bound into the signed content)", () => {
+    const signed = signSourceCandidate(content(), SECRET, KEY_ID);
+    const tampered = { ...signed, signature: { ...signed.signature, keyId: "attacker-key-id" } };
+    expect(verifySourceCandidate(fixture.db, tampered, SECRET)).toEqual({ ok: false, reason: "RECORD_TAMPERED" });
   });
 
   test("rejects a record signed under a different secret", () => {
@@ -128,7 +161,7 @@ describe("B-prime signed pre-verification source candidate", () => {
   test("rejects when the actual output bytes no longer match the content address", () => {
     const signed = signSourceCandidate(content(), SECRET, KEY_ID);
     const driftReader: ArtifactByteReader = { read: ({ artifactId }) => (artifactId === "art-out" ? new TextEncoder().encode("swapped bytes") : SEED_BYTES) };
-    expect(verifySourceCandidate(fixture.db, signed, SECRET, driftReader)).toEqual({ ok: false, reason: "OUTPUT_BYTES_DRIFT" });
+    expect(verifySourceCandidate(fixture.db, signed, SECRET, { authority: true, byteReader: driftReader })).toEqual({ ok: false, reason: "OUTPUT_BYTES_DRIFT" });
   });
 
   test("rejects when the seed artifact is gone", () => {

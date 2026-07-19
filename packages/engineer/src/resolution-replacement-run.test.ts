@@ -13,38 +13,16 @@ import {
   type ReplacementRunFactory,
   ResolutionDesk,
 } from "./resolution-desk.js";
+import {
+  deriveReplacementManifestHash,
+  ResolutionReplacementRunFactory,
+} from "./resolution-replacement-run-factory.js";
 
 const SECRET = "resolution-signing-secret";
 const KEY_ID = "engineer-resolution-signing-v1";
 const PRICING = sha256({ pricing: "policy-v1" });
 const SOURCE_MANIFEST = sha256({ m: 1 });
 const correctable: CanonicalBlocker = { blockerId: "b-1", kind: "BLOCKING", reasonCode: "REQUIRED_TEST_FAILED", description: "unit test failed" };
-
-/**
- * A real executable-replacement factory: creates the run at its REQUEST_RECEIVED
- * start state on the desk's own connection, with a fresh budget from the
- * directive and a fresh manifest freeze derived from the source manifest + open
- * blockers. It inherits nothing else — no evidence, review, approval, or
- * publication rows exist for a brand-new run id.
- */
-class RealReplacementRunFactory implements ReplacementRunFactory {
-  freshManifestHashes: string[] = [];
-  createReplacementRun(db: Database, plan: ReplacementRunCreationPlan): void {
-    const at = "2026-07-19T00:00:00.000Z";
-    const source = db.query("SELECT request_original,base_branch FROM engineer_runs WHERE id=?").get(plan.sourceRunId) as { request_original: string; base_branch: string };
-    db.query(`INSERT INTO engineer_runs(id,user_id,repository_id,base_branch,base_commit_sha,request_original,request_normalized,state,state_version,manifest_hash,risk_tier,human_gate_required,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,'','REQUEST_RECEIVED',0,NULL,'MEDIUM',1,?,?)`).run(
-      plan.replacementRunId, plan.ownerUserId, plan.repositoryId, source.base_branch, plan.baseCommitSha, source.request_original, at, at);
-    const costUsd = plan.budget.maxCostMicrousd / 1_000_000;
-    db.query(`INSERT INTO run_budgets(run_id,cost_limit_usd,token_limit,time_limit_seconds,lifetime_cost_limit_usd,lifetime_token_limit,lifetime_time_limit_seconds,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,'ACTIVE',?,?)`).run(
-      plan.replacementRunId, costUsd, plan.budget.maxTokens, plan.budget.maxActiveSeconds, costUsd, plan.budget.maxTokens, plan.budget.maxActiveSeconds, at, at);
-    const freshManifestHash = sha256({ replacementOf: plan.sourceManifestHash, directive: plan.directiveId, blockers: plan.blockers });
-    this.freshManifestHashes.push(freshManifestHash);
-    db.query("INSERT INTO task_manifest_versions(id,run_id,version,manifest_hash,manifest_json,created_at) VALUES (?,?,1,?,'{}',?)")
-      .run(`tmv-${plan.replacementRunId}`, plan.replacementRunId, freshManifestHash, at);
-  }
-}
 
 interface Fixture { root: string; db: Database; clock: { current: Date } }
 let fixture: Fixture;
@@ -96,7 +74,7 @@ const count = (sql: string, ...args: (string | number)[]): number => (fixture.db
 
 describe("executable replacement dispatch (fenced factory)", () => {
   test("creates a real replacement run at its start state with fresh manifest + budget and zero inherited evidence", () => {
-    const factory = new RealReplacementRunFactory();
+    const factory = new ResolutionReplacementRunFactory({ now: () => fixture.clock.current });
     const desk = deskWith(factory);
     const { directiveId } = issueCorrected(desk);
     const { replacementRunId, state } = desk.applyDirective(directiveId, "apply-1");
@@ -112,8 +90,12 @@ describe("executable replacement dispatch (fenced factory)", () => {
 
     // Fresh manifest freeze derived from the source manifest + open blockers, and NOT equal to the source manifest.
     const manifest = fixture.db.query("SELECT manifest_hash FROM task_manifest_versions WHERE run_id=?").get(replacementRunId) as { manifest_hash: string };
-    expect(manifest.manifest_hash).toBe(factory.freshManifestHashes[0]!);
+    const expectedManifest = deriveReplacementManifestHash(
+      { sourceManifestHash: SOURCE_MANIFEST, directiveId, kind: "CORRECTED", blockers: [correctable] } as ReplacementRunCreationPlan,
+    );
+    expect(manifest.manifest_hash).toBe(expectedManifest);
     expect(manifest.manifest_hash).not.toBe(SOURCE_MANIFEST);
+    expect(manifest.manifest_hash).toMatch(/^sha256:[a-f0-9]{64}$/);
 
     // Nothing inherited: no evidence / review / approval / publication rows carry over.
     expect(count("SELECT COUNT(*) AS c FROM agent_executions WHERE run_id=?", replacementRunId)).toBe(0);
@@ -121,6 +103,8 @@ describe("executable replacement dispatch (fenced factory)", () => {
     expect(count("SELECT COUNT(*) AS c FROM approval_requests WHERE run_id=?", replacementRunId)).toBe(0);
     expect(count("SELECT COUNT(*) AS c FROM git_operations WHERE run_id=?", replacementRunId)).toBe(0);
     expect(count("SELECT COUNT(*) AS c FROM verified_candidate_checkpoints WHERE run_id=?", replacementRunId)).toBe(0);
+    expect(count("SELECT COUNT(*) AS c FROM evidence_bundles WHERE run_id=?", replacementRunId)).toBe(0);
+    expect(count("SELECT COUNT(*) AS c FROM cost_records WHERE run_id=?", replacementRunId)).toBe(0);
 
     // The linked replacement is READY and the lineage verifier accepts the chain.
     expect(fixture.db.query("SELECT state FROM resolution_replacements WHERE replacement_run_id=?").get(replacementRunId)).toEqual({ state: "READY" });
@@ -141,7 +125,7 @@ describe("executable replacement dispatch (fenced factory)", () => {
   });
 
   test("recovery resolves a committed PREPARING orphan to FAILED and terminalizes its run (never executable)", () => {
-    const factory = new RealReplacementRunFactory();
+    const factory = new ResolutionReplacementRunFactory({ now: () => fixture.clock.current });
     const desk = deskWith(factory);
     const { directiveId } = issueCorrected(desk);
     const { replacementRunId } = desk.applyDirective(directiveId, "apply-1");
@@ -157,6 +141,28 @@ describe("executable replacement dispatch (fenced factory)", () => {
     const run = fixture.db.query("SELECT state,terminal_at FROM engineer_runs WHERE id=?").get(replacementRunId) as { state: string; terminal_at: string | null };
     expect(run.state).toBe("FAILED");
     expect(run.terminal_at).not.toBeNull();
+  });
+
+  test("recovery leaves an already-terminal (COMPLETED) linked run untouched (non-terminal guard)", () => {
+    const factory = new ResolutionReplacementRunFactory({ now: () => fixture.clock.current });
+    const desk = deskWith(factory);
+    const { directiveId } = issueCorrected(desk);
+    const { replacementRunId } = desk.applyDirective(directiveId, "apply-1");
+
+    // A future partially-committed path could leave a PREPARING scaffold whose
+    // linked run already reached a legitimate terminal. Recovery must NOT clobber
+    // it to FAILED (the old state!=="FAILED" guard would).
+    fixture.db.exec("DROP TRIGGER fence_resolution_replacement_update_v31");
+    fixture.db.query("UPDATE resolution_replacements SET state='PREPARING' WHERE replacement_run_id=?").run(replacementRunId);
+    fixture.db.query("UPDATE engineer_runs SET state='COMPLETED' WHERE id=?").run(replacementRunId);
+
+    const { resolved } = desk.recoverPreparingReplacements();
+    expect(resolved).toEqual([replacementRunId]);
+    // The scaffold is failed closed, but the terminal run is preserved as-is.
+    expect(fixture.db.query("SELECT state FROM resolution_replacements WHERE replacement_run_id=?").get(replacementRunId)).toEqual({ state: "FAILED" });
+    const run = fixture.db.query("SELECT state,terminal_at FROM engineer_runs WHERE id=?").get(replacementRunId) as { state: string; terminal_at: string | null };
+    expect(run.state).toBe("COMPLETED");
+    expect(run.terminal_at).toBeNull();
   });
 
   test("without a factory the desk keeps the pair-1 scaffold-only behavior (no engineer run created)", () => {

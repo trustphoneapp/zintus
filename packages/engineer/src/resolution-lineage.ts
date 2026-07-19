@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { createHmac } from "node:crypto";
+import { TERMINAL_STATES } from "./contracts.js";
 import { sha256 } from "./hash.js";
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,8 @@ export type LineageRejectReason =
   | "SIGNING_AUTHORITY_UNAVAILABLE"
   | "NOT_A_REPLACEMENT"
   | "REPLACEMENT_NOT_READY"
+  | "REPLACEMENT_RUN_MISSING"
+  | "REPLACEMENT_RUN_INVALID_STATE"
   | "DIRECTIVE_MISSING"
   | "DIRECTIVE_LINK_MISMATCH"
   | "DIRECTIVE_TAMPERED"
@@ -89,6 +92,14 @@ const DIRECTIVE_TYPE_TO_KIND: Record<string, ReplacementKind | undefined> = {
 
 const RESOLVED_CASE_STATES: ReadonlySet<string> = new Set(["RESOLVED_CORRECTED", "RESOLVED_REVERIFIED"]);
 
+// A READY replacement whose executable engineer run reached a failure/abort
+// terminal (including the FAILED that orphan recovery stamps on a PREPARING
+// scaffold) must never verify: its checkpoints are not trustworthy authority.
+// Only COMPLETED among the terminal states is a legitimate finished replacement.
+const INVALID_REPLACEMENT_RUN_STATES: ReadonlySet<string> = new Set(
+  TERMINAL_STATES.filter((state) => state !== "COMPLETED"),
+);
+
 export class ResolutionLineageVerifier {
   constructor(private readonly db: Database, private readonly signingSecret: string) {}
 
@@ -107,6 +118,20 @@ export class ResolutionLineageVerifier {
     ).get(candidateRunId) as ReplacementRow | null;
     if (!replacement) return { verified: false, reason: "NOT_A_REPLACEMENT" };
     if (replacement.state !== "READY") return { verified: false, reason: "REPLACEMENT_NOT_READY" };
+
+    // The candidate must be a REAL executable replacement run — not a phantom.
+    // A READY `resolution_replacements` row is only half the authority; the
+    // legacy same-run verifier (which this replaces) implicitly required the run
+    // to exist, so verifying against the source alone (the prior code) fails open
+    // for a scaffold whose engineer_runs row was never created (factory unwired)
+    // or was failed-closed by orphan recovery. Re-derive the replacement run's
+    // own existence + state and fail closed on either.
+    const replacementRun = this.db.query("SELECT id,state FROM engineer_runs WHERE id=?")
+      .get(candidateRunId) as { id: string; state: string } | null;
+    if (!replacementRun) return { verified: false, reason: "REPLACEMENT_RUN_MISSING" };
+    if (INVALID_REPLACEMENT_RUN_STATES.has(replacementRun.state)) {
+      return { verified: false, reason: "REPLACEMENT_RUN_INVALID_STATE" };
+    }
 
     const directive = this.db.query(
       "SELECT id,case_id,case_hash,type,signature,directive_json,created_at,expires_at FROM resolution_directives WHERE id=?",

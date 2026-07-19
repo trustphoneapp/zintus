@@ -1,5 +1,7 @@
 import type { Database } from "bun:sqlite";
+import type { RunState } from "./contracts.js";
 import { canonicalJson, sha256 } from "./hash.js";
+import { isTerminalState } from "./state-machine.js";
 import {
   buildCaseAuthority,
   budgetMaxCostMicrousd,
@@ -458,7 +460,12 @@ export class ResolutionDesk {
         if (flipped.changes !== 1) { this.db.exec("ROLLBACK"); continue; }
         const run = this.db.query("SELECT id,state FROM engineer_runs WHERE id=?")
           .get(row.replacement_run_id) as { id: string; state: string } | null;
-        if (run && run.state !== "FAILED") {
+        // Guard on NON-TERMINAL only: a run already in any terminal state (a
+        // future partially-committed path could leave a SUCCEEDED/COMPLETED or
+        // otherwise-terminal run linked) can no longer execute, so double-
+        // terminalizing it to FAILED would clobber a legitimate terminal. Only a
+        // still-runnable (non-terminal) orphan is failed closed.
+        if (run && !isTerminalState(run.state as RunState)) {
           this.db.query("UPDATE engineer_runs SET state='FAILED', last_error='resolution replacement recovery: PREPARING orphan failed closed', terminal_at=?, updated_at=? WHERE id=?")
             .run(at, at, run.id);
         }

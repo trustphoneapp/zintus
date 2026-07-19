@@ -75,4 +75,5 @@ export * from "./supervisor.js";
 export * from "./resolution-case.js";
 export * from "./resolution-desk.js";
 export * from "./resolution-lineage.js";
+export * from "./resolution-replacement-run-factory.js";
 export * from "./resolution-source-candidate.js";

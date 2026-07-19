@@ -2592,3 +2592,29 @@ unfinished pair has passed.
 - Numbering ruling S2 (contract doc): v32 reallocated to the typed-cause column;
   checkpoint-v3 renumbered to v36 reserved. POST publications success body
   frozen as {publicationId, state}.
+
+### Day 3 — P7 pair 3: three of four integration blockers closed (2026-07-19)
+
+- P1-A (fail-open) CLOSED + Fable mutation-verified: verify() now re-derives the
+  replacement run's own existence and state — REPLACEMENT_RUN_MISSING for a
+  phantom scaffold, REPLACEMENT_RUN_INVALID_STATE for any failure-terminal
+  (only COMPLETED is a legitimate finished replacement). Neutering the missing
+  guard in the real tree turned exactly one lineage test red (20→19), restore
+  clean — the guard is load-bearing and covered.
+- P1-C CLOSED: verifySourceCandidate authority path requires a real byteReader
+  (BYTE_READER_REQUIRED); a same-length byte rewrite passes a non-authority read
+  but fails the authority path with OUTPUT_BYTES_DRIFT.
+- P1-D CLOSED: seven lineage rejection tests + SIGNING_AUTHORITY_UNAVAILABLE,
+  each neuter-verified red. Two P2s closed: keyId bound into signed content
+  (swap → RECORD_TAMPERED); recoverPreparingReplacements guards on non-terminal
+  state so a COMPLETED linked run is not clobbered to FAILED.
+- P1-B PARTIAL: the production ResolutionReplacementRunFactory is implemented,
+  tested and proven (raw inserts on the desk's own connection so run creation is
+  atomic inside the fence; zero-inheritance enumerated across all evidence
+  surfaces; no-op neuter turns the real-run test red). It is NOT yet wired in
+  index.ts because the gateway needs a server-side CaseCreationInput derivation
+  adapter (build canonical classified blockers + spend + ceiling + pricing +
+  candidate from a durable terminal run) that does NOT exist anywhere. A fake
+  facade was correctly refused — wrong blocker classification would authorize
+  wrong correction/reverify. That derivation adapter is the sole remaining gate
+  before the merge sequence. Gates: engineer 630, gateway 386, typecheck clean.
