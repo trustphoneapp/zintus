@@ -3142,3 +3142,29 @@ unfinished pair has passed.
   migration) — acceptable for a not-yet-shipped product with no real in-flight
   runs, but a deployment checklist item; (3) recoverStaleBase throws for
   historical BASE_BRANCH_STALE (new runs use P8 base-SHA recheck).
+
+### R5D — docs/UI/OpenAPI/audit-route reconciled to P8-sole-owner (Fable-gated, 2026-07-19)
+
+- AUDIT-EXPORT ROUTE wired + Fable-driven: GET /v1/engineer/runs/:runId/audit-export
+  (owner-fenced, Cache-Control:no-store) drives the real org-scoped
+  exportRunAuditChain (R4 B1). 4/4 route test: approved run → 200 with EVENT
+  chain + a v35 provenance ATTESTATION entry (the B1 fix now both correct AND
+  reachable), no-attestation run → event chain, cross-owner/unknown → identical
+  404 (no oracle). Agent-verified RED (remove route → 404). This closes the R4
+  B1 loop (fix was unrouted; now routed + driven end-to-end).
+- OPENAPI: full P8 surface added (candidate list/select, approvals, publication
+  start/get/dispatch/resume/reconcile, audit-export) + schemas; legacy
+  approve/reject/request-changes/extend-approval marked deprecated [LEGACY]
+  (cancel intact). Spec test green.
+- UI coherence verified: new runs → REVIEW_APPROVED → PublicationEntryNotice →
+  /engineer/publication (P8 vertical); legacy ApprovalDecisionControls render
+  only under HUMAN_APPROVAL_PENDING (unreachable for new runs). Removed the dead
+  PublicationUnavailableNotice.
+- ARCHITECTURE.md Phase-4 RECONCILED (line 108): "Publication is owned by a
+  single authority: the P8 PublicationAuthorityService" + GitPublicationMechanics
+  authority-free + legacy retired to historical-read-only + single-tenant
+  per-plan. The design-vs-doc gap (Fable arch analysis) is CLOSED — code and
+  docs tell one story. Gates engineer 831/gateway 454/web 571/typecheck/diff.
+- Residuals (declared): audit-export UI view DEFERRED (API-only, no web
+  consumer); multi-org write path unchanged (per-plan single-tenant);
+  legacy approve routes intact-but-deprecated (serve historical runs).

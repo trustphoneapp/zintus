@@ -718,6 +718,29 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: Run not found. }
 
+  /v1/engineer/runs/{runId}/audit-export:
+    get:
+      tags: [Engineer]
+      operationId: exportEngineerRunAuditChain
+      summary: Export the owner-scoped, org-scoped audit chain for a run
+      description: |
+        Returns the run's deterministic, redacted, org-scoped audit chain — its
+        ordered event, evidence, and v35 provenance ATTESTATION entries — in the
+        frozen AuditExport shape (per-page checksums + a page-size-independent
+        content digest). Secrets, tokens, filesystem paths, and storage references
+        are scrubbed. Owner-scoped: an unknown or cross-owner run collapses to an
+        identical not-found. A run with no attestation still returns its
+        event/evidence chain (the ATTESTATION entries are simply absent).
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200":
+          description: The redacted, paginated, checksum-bound audit export.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EngineerAuditExport" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Run not found (also returned for a cross-owner run — no ownership oracle). }
+
   /v1/engineer/runs/{runId}/decisions:
     get:
       tags: [Engineer]
@@ -784,7 +807,14 @@ paths:
     post:
       tags: [Engineer]
       operationId: approveEngineerRun
-      summary: Approve the exact reviewed diff and continue Supervisor publication
+      deprecated: true
+      summary: "[LEGACY] Approve at the HUMAN_APPROVAL_PENDING gate (historical runs only)"
+      description: |
+        LEGACY human-gate approval. The authoritative publication path for NEW runs
+        is the P8 publication surface (select a candidate → approve the candidate →
+        start/dispatch a publication); new runs terminate at REVIEW_APPROVED and never
+        enter HUMAN_APPROVAL_PENDING. This route remains only to service runs that were
+        already parked at the legacy gate.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
       responses:
@@ -797,7 +827,11 @@ paths:
     post:
       tags: [Engineer]
       operationId: requestEngineerRunChanges
-      summary: Request human changes without granting publication authority
+      deprecated: true
+      summary: "[LEGACY] Request human changes at the legacy gate (historical runs only)"
+      description: |
+        LEGACY human-gate action. Superseded by the P8 publication surface; retained
+        only for runs already parked at HUMAN_APPROVAL_PENDING.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
       responses:
@@ -809,7 +843,11 @@ paths:
     post:
       tags: [Engineer]
       operationId: rejectEngineerRun
-      summary: Reject a run at the human gate
+      deprecated: true
+      summary: "[LEGACY] Reject a run at the human gate (historical runs only)"
+      description: |
+        LEGACY human-gate action. Superseded by the P8 publication surface; retained
+        only for runs already parked at HUMAN_APPROVAL_PENDING.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody: { $ref: "#/components/requestBodies/EngineerHumanDecision" }
       responses:
@@ -821,7 +859,11 @@ paths:
     post:
       tags: [Engineer]
       operationId: extendEngineerRunApproval
-      summary: Extend a pending approval deadline within policy bounds
+      deprecated: true
+      summary: "[LEGACY] Extend a pending legacy approval deadline (historical runs only)"
+      description: |
+        LEGACY human-gate action. Superseded by the P8 publication surface; retained
+        only for runs already parked at HUMAN_APPROVAL_PENDING.
       parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
       requestBody:
         required: true
@@ -851,6 +893,195 @@ paths:
         "200": { description: Run cancellation and cleanup completed. }
         "400": { $ref: "#/components/responses/BadRequest" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # ── P8 Publication Authority (the authoritative publication surface) ────────
+  # The single owner of publication for NEW runs: candidate selection → single-use
+  # approval → publication start → dispatch (credentialed branch/PR effect) →
+  # restart-recovery resume → operator reconciliation. All routes are owner-scoped;
+  # the browser references a candidate/approval/publication ONLY by opaque id and
+  # every authority field is server-derived. An unknown or cross-owner reference
+  # collapses to a single not-found shape (no ownership oracle).
+  /v1/engineer/runs/{runId}/publication-candidates:
+    get:
+      tags: [Engineer]
+      operationId: listEngineerPublicationCandidates
+      summary: List the run's promoted verified-candidate checkpoints eligible for publication
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Owner-scoped candidate list. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Publication authority is not configured. }
+    post:
+      tags: [Engineer]
+      operationId: selectEngineerPublicationCandidate
+      summary: Select a verified candidate by opaque checkpointId (authority is server-derived)
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [checkpointId]
+              properties:
+                checkpointId: { type: string }
+      responses:
+        "201": { description: Candidate selected. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No such candidate for this principal. }
+        "503": { description: Publication authority is not configured. }
+
+  /v1/engineer/publication-candidates/{checkpointId}/approvals:
+    post:
+      tags: [Engineer]
+      operationId: approveEngineerPublicationCandidate
+      summary: Approve a selected candidate as the independently provisioned approver
+      description: |
+        The authoritative approval for NEW runs. The checkpointHash and approver
+        identity are server-derived (never the request body); the approver MUST be a
+        separately provisioned second party (a single install cannot self-approve).
+        The approval is single-use; when v35 attestation is required it is persisted
+        atomically with the approval or fails closed.
+      parameters:
+        - name: checkpointId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: { type: string, enum: [APPROVE, REJECT] }
+                policyVersion: { type: string }
+                rationale: { type: string }
+      responses:
+        "201": { description: Approval recorded. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: Approver is not an independently provisioned second party. }
+        "404": { description: No such candidate for this principal. }
+        "409": { description: Approval already consumed or candidate changed. }
+        "503": { description: Required attestation could not be emitted (fail closed), or authority not configured. }
+
+  /v1/engineer/runs/{runId}/publications:
+    post:
+      tags: [Engineer]
+      operationId: startEngineerPublication
+      summary: Start a publication from a single-use approval (Idempotency-Key header)
+      description: |
+        Names the approval ONLY by opaque approvalId; the runId is server-derived
+        from the approval's durable row. The Idempotency-Key is read from the HTTP
+        header. Operation is fixed to BRANCH_PR.
+      parameters:
+        - $ref: "#/components/parameters/EngineerRunId"
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approvalId]
+              properties:
+                approvalId: { type: string }
+      responses:
+        "201": { description: Publication created in PREFLIGHT. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No such approval for this principal. }
+        "409": { description: Idempotency conflict. }
+        "503": { description: Publication authority is not configured. }
+
+  /v1/engineer/publications/{publicationId}:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerPublication
+      summary: Get an owner-scoped publication's current state
+      parameters:
+        - name: publicationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Publication state. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No such publication for this principal. }
+        "503": { description: Publication authority is not configured. }
+
+  /v1/engineer/publications/{publicationId}/dispatch:
+    post:
+      tags: [Engineer]
+      operationId: dispatchEngineerPublication
+      summary: Dispatch the credentialed branch/PR effect (idempotent)
+      description: |
+        The credentialed remote effect. Without a configured GitHub credential the
+        dispatch is withheld and the publication stays in PREFLIGHT (re-driveable).
+        An ambiguous remote outcome parks the publication in RECONCILING.
+      parameters:
+        - name: publicationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Publication dispatched (RECEIPTED) or parked (RECONCILING). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No such publication for this principal. }
+        "503": { description: GitHub publication credentials are not configured. }
+
+  /v1/engineer/publications/{publicationId}/resume:
+    post:
+      tags: [Engineer]
+      operationId: resumeEngineerPublication
+      summary: Resume a durable publication after a restart (idempotent recovery)
+      description: |
+        Boot-recovery seam: a DISPATCHED publication whose remote effect was
+        interrupted parks RECONCILING on resume without ever re-issuing the remote
+        effect (exactly one PR path).
+      parameters:
+        - name: publicationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Publication resumed / parked RECONCILING. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No such publication for this principal. }
+        "503": { description: Publication authority is not configured. }
+
+  /v1/engineer/publications/{publicationId}/reconcile:
+    post:
+      tags: [Engineer]
+      operationId: reconcileEngineerPublication
+      summary: Resolve a RECONCILING publication with an explicit operator decision
+      parameters:
+        - name: publicationId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution]
+              properties:
+                resolution: { type: string, enum: [RECEIPTED, FAILED] }
+                detail: { type: string }
+      responses:
+        "200": { description: Publication driven to a terminal state. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No such publication for this principal. }
+        "503": { description: Publication authority is not configured. }
 
   /v1/agents:
     post:
@@ -2152,6 +2383,56 @@ components:
         startedAt: { type: string, format: date-time }
         completedAt: { type: [string, "null"], format: date-time }
         errorCode: { type: [string, "null"] }
+
+    EngineerAuditEntry:
+      type: object
+      required: [kind, id, sequence, tenantId, runId, recordedAt, payload]
+      additionalProperties: false
+      properties:
+        kind: { type: string, enum: [EVENT, EVIDENCE, ATTESTATION] }
+        id: { type: string }
+        sequence: { type: integer, minimum: 0 }
+        tenantId: { type: string }
+        runId: { type: string }
+        recordedAt: { type: string, format: date-time }
+        payload:
+          type: object
+          description: Redacted entry payload (secrets, tokens, paths, storage references scrubbed).
+          additionalProperties: true
+
+    EngineerAuditExportPage:
+      type: object
+      required: [pageNumber, pageCount, entryOffset, entries, pageChecksum, previousPageChecksum]
+      additionalProperties: false
+      properties:
+        pageNumber: { type: integer, minimum: 1 }
+        pageCount: { type: integer, minimum: 1 }
+        entryOffset: { type: integer, minimum: 0 }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/EngineerAuditEntry" }
+        pageChecksum: { type: string }
+        previousPageChecksum: { type: [string, "null"] }
+
+    EngineerAuditExport:
+      type: object
+      required: [schemaVersion, policyVersion, tenantId, runId, entryCount, pageSize, pageCount, contentDigest, pages]
+      additionalProperties: false
+      description: |
+        Deterministic, redacted, org-scoped audit export. Each page carries its own
+        checksum and the whole export carries a page-size-independent content digest.
+      properties:
+        schemaVersion: { type: integer, const: 1 }
+        policyVersion: { type: string }
+        tenantId: { type: string }
+        runId: { type: string }
+        entryCount: { type: integer, minimum: 0 }
+        pageSize: { type: integer, minimum: 1 }
+        pageCount: { type: integer, minimum: 1 }
+        contentDigest: { type: string }
+        pages:
+          type: array
+          items: { $ref: "#/components/schemas/EngineerAuditExportPage" }
 
     EngineerRun:
       type: object

@@ -105,17 +105,48 @@ still match. A gateway sweep converts expired requests into a fail-closed termin
 state. Cancellation passes through `CANCELLATION_PENDING`, destroys the retained
 single-use sandbox, and records cleanup failure separately from code failure.
 
-Publication is owned by `EngineerPublicationManager` and a narrow `GitService`.
-The Supervisor signs the exact PR command with an internal HMAC key, persists it
-as trusted evidence, checks the remote base before mutation, and records every
-inspect/branch/push/PR operation under an idempotency key. PR text is synthesized
-from the normalized request, frozen criteria, exact diff, claims, risk, and
-evidence bundle. The base must enforce reviews, fresh approval, strict status
-checks, admin coverage, and immutable protected history. A stale base cannot
-publish. Controlled recovery synchronizes the credentialed current base and
-creates a replacement immutable run; the old hash-bound approval is superseded.
-Restart recovery replays durable publication states, re-inspects the base, and
-finds the deterministic head/base PR before attempting creation.
+Publication is owned by a single authority: the P8 `PublicationAuthorityService`.
+For new runs it is the SOLE authoritative publication system and drives the whole
+lane — candidate selection, a single-use approval, publication start, the
+credentialed dispatch, restart-recovery resume, and operator reconciliation.
+Every authority field is server-derived from durable records keyed by the
+server-owned principal; the browser references a candidate, approval, or
+publication only by opaque id, and an unknown or cross-owner reference collapses
+to one not-found shape (no ownership oracle). Approvals are single-use, and the
+approver must be an independently provisioned second party (a single install
+cannot self-approve). When v35 provenance attestation is required it is emitted
+and persisted in the SAME transaction as the approval over the shared ledger
+connection — atomic, not compensated: a crash or throw before commit rolls both
+back together, so no consumable approval ever exists without its bound
+attestation. Attestation is formally deferred behind an explicit config flag
+until a real result-tree-hash source is wired; with the flag on it fails closed
+rather than fail open.
+
+The credentialed Git mechanics are the authority-free `GitPublicationMechanics`
+that P8 drives after it has decided: protected-base preflight, base-SHA recheck,
+rich PR-body synthesis from trusted server records (never Builder text),
+deterministic branch/push/PR, existing-PR discovery, and remote reconciliation of
+an ambiguous outcome. It owns no approval, state-machine, attestation, or
+authority logic and never reads or writes run state; it touches only the narrow
+`GitService` credential boundary and two pure server-record resolver seams. The
+base must enforce reviews, fresh approval, strict status checks, admin coverage,
+and immutable protected history; a stale base cannot publish. Whether a GitHub
+token exists at all is enforced upstream in the gateway facade — a missing
+credential withholds dispatch with a 503 and leaves the publication in PREFLIGHT
+(re-driveable), never committing a remote effect that cannot land. Restart
+recovery replays durable publication states and parks a DISPATCHED-but-unconfirmed
+publication in RECONCILING without ever re-issuing the remote effect (exactly one
+PR path). The read side exposes an owner-scoped, org-scoped audit export (events,
+evidence, and v35 attestations, redacted) through the authenticated gateway.
+
+The legacy `EngineerPublicationManager` is retired to historical-read-only: it is
+never constructed or scheduled on any new-run path (the run manager is wired
+without it), so new runs terminate at `REVIEW_APPROVED` and reach publication only
+through P8. It remains solely to service runs already parked at the legacy
+`HUMAN_APPROVAL_PENDING` gate. Multi-tenant org isolation is a read-side property
+today (the audit-export DAL); the run/approval/publication WRITE path is fixed to
+the single default org per plan, and full multi-org wiring is a Deferred
+integration.
 
 Phase 5 adds a structured TERRA planner ahead of manifest freeze. The model proposes
 criteria, test commands, and scope through one strict forced function call; the

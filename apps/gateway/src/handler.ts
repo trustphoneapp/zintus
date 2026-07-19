@@ -3521,6 +3521,12 @@ export function createGatewayHandler(
         if (action === "git-operations" && request.method === "GET") {
           return json(request, { gitOperations: engineerRuns.gitOperations(runId) });
         }
+        // GET /v1/engineer/runs/:runId/audit-export — the owner-scoped, org-scoped
+        // audit chain (events + evidence + v35 attestations) in the frozen,
+        // redacted AuditExport shape. Unknown/cross-owner collapse to 404.
+        if (action === "audit-export" && request.method === "GET") {
+          return json(request, engineerRuns.auditExport(engineerPrincipal!, runId), 200, { "Cache-Control": "no-store" });
+        }
         if (action === "decisions" && !decisionId && request.method === "GET") {
           return json(request, { decisions: engineerRuns.decisions(engineerPrincipal!, runId) });
         }

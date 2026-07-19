@@ -54,14 +54,6 @@ export function ApprovalDecisionControls({ disabled, candidateChanged, pendingAc
   </>;
 }
 
-export function PublicationUnavailableNotice() {
-  return <section className="engineer-card engineer-gate">
-    <span className="engineer-kicker">Machine verified</span>
-    <h2>Publication is not configured locally</h2>
-    <p>The signed candidate passed deterministic verification; no human approval or publication has occurred.</p>
-  </section>;
-}
-
 /**
  * R3 (Blocker 3): the primary-run entry point into the authoritative P8
  * publication lane. A REVIEW_APPROVED run's machine-verified candidate is

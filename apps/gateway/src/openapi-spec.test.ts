@@ -141,6 +141,7 @@ describe("docs/openapi.yaml", () => {
     "/v1/engineer/runs/{runId}/security": '"/v1/engineer/runs/"',
     "/v1/engineer/runs/{runId}/failures": '"/v1/engineer/runs/"',
     "/v1/engineer/runs/{runId}/git-operations": '"/v1/engineer/runs/"',
+    "/v1/engineer/runs/{runId}/audit-export": '"/v1/engineer/runs/"',
     "/v1/engineer/runs/{runId}/decisions": '"/v1/engineer/runs/"',
     "/v1/engineer/runs/{runId}/decisions/{decisionId}/resolve": '"/v1/engineer/runs/"',
     "/v1/engineer/runs/{runId}/diff": '"/v1/engineer/runs/"',
@@ -150,6 +151,15 @@ describe("docs/openapi.yaml", () => {
     "/v1/engineer/runs/{runId}/reject": '"/v1/engineer/runs/"',
     "/v1/engineer/runs/{runId}/extend-approval": '"/v1/engineer/runs/"',
     "/v1/engineer/runs/{runId}/cancel": '"/v1/engineer/runs/"',
+    // P8 Publication Authority (handler.ts publication block:
+    // `.includes("/publication-candidates")` / `.includes("/publications")`).
+    "/v1/engineer/runs/{runId}/publication-candidates": '"/publication-candidates"',
+    "/v1/engineer/publication-candidates/{checkpointId}/approvals": '"/publication-candidates"',
+    "/v1/engineer/runs/{runId}/publications": '"/publications"',
+    "/v1/engineer/publications/{publicationId}": '"/publications"',
+    "/v1/engineer/publications/{publicationId}/dispatch": '"/publications"',
+    "/v1/engineer/publications/{publicationId}/resume": '"/publications"',
+    "/v1/engineer/publications/{publicationId}/reconcile": '"/publications"',
     // P7 Developer Resolution Desk (handler.ts resolution block: `.includes("/resolution-cases")`
     // + `startsWith("/v1/engineer/resolution-directives/")`).
     "/v1/engineer/runs/{runId}/resolution-cases": '"/resolution-cases"',

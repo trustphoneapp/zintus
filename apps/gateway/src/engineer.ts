@@ -45,6 +45,11 @@ import {
   HardeningBudgetExtensionRequiresNewRunError,
   WorkerLeaseCapacityError,
   WorkerLeaseConflictError,
+  TenantScopedLedgerDal,
+  defineHumanActor,
+  ENGINEER_DEFAULT_ORG_ID,
+  EngineerNotFoundError,
+  type AuditExport,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
 import { previewEngineerArtifact } from "./engineer-artifact-preview.js";
@@ -1437,6 +1442,32 @@ export class EngineerRunManager {
   failures(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listFailures(runId); }
 
   gitOperations(runId: string) { this.assertOwner(runId, this.options.principal); return this.options.supervisor.listGitOperations(runId); }
+
+  /**
+   * Owner-scoped org audit export (R5D item 1). Returns the run's DETERMINISTIC,
+   * REDACTED, org-scoped event/evidence/attestation chain in the frozen
+   * AuditExport shape, sourced from the REAL `TenantScopedLedgerDal`
+   * `exportRunAuditChain` (the R4 B1 org fence: every read carries `AND org_id=?`,
+   * secrets/tokens/paths/storage-references are scrubbed). A single install is
+   * fixed to `ENGINEER_DEFAULT_ORG_ID`, so the org fence and the owner fence
+   * coincide here: an UNKNOWN run (getRun throws) AND a run owned by a DIFFERENT
+   * principal both collapse to the SAME `EngineerNotFoundError` (no ownership
+   * oracle), which the handler maps to 404. A run with NO v35 attestation still
+   * returns its event/evidence chain (the ATTESTATION entries are simply absent).
+   */
+  auditExport(principal: EngineerPrincipal, runId: string): AuditExport {
+    this.assertPrincipal(principal);
+    // Unknown run → EngineerNotFoundError (getRun, org-scoped). A cross-owner run
+    // exists in the single-tenant store, so fence it to the byte-identical
+    // not-found shape rather than leaking an ownership oracle.
+    const run = this.options.supervisor.getRun(runId);
+    if (run.userId !== principal.ownerId) throw new EngineerNotFoundError("run", runId);
+    const dal = new TenantScopedLedgerDal(this.options.supervisor.resolutionDeskConnection(), {
+      orgId: ENGINEER_DEFAULT_ORG_ID,
+      actor: defineHumanActor(principal.ownerId),
+    });
+    return dal.exportRunAuditChain(runId);
+  }
 
   decisions(principal: EngineerPrincipal, runId: string) {
     this.assertPrincipal(principal);
