@@ -2883,3 +2883,35 @@ unfinished pair has passed.
   C's resolution-desk owner-check has no standalone boot-harness test (covered by
   requireOwner reuse + non-regression). Single-tenant + attestation-deferred +
   auto-publish-off is the shippable posture.
+
+### Day 3 — P12 RELEASE RULING (Sol): GO for single-tenant / attestation-deferred (2026-07-19)
+
+- Independent re-audit (refute mode, @496661d2) confirmed all remediated findings
+  CLOSED with no regression. Release-blockers A (attestation atomicity: INVALIDATED
+  provably blocks startPublication/dispatch; flag-off = explicit documented
+  deferral not silent open; flag-on denies with nothing written), B (v37 freeze
+  triggers reject all three v33 publish paths on a frozen source — stricter than
+  spec, fires on any resolution_cases row; the two unfenced receipt/reconciliation
+  tables are only reachable after a fenced git_operations write, no practical
+  hole), and C (ledger rejects non-default org; all five desk routes owner-checked;
+  KNOWN-LIMITATIONS says do-not-claim-isolation) all CLOSED. D (normalized
+  model_calls row hash, org_id excluded, both sides) CLOSED. F (selectCandidate
+  self-verifies promoted checkpoint) CLOSED.
+- Finding E cross-checked by Fable: the re-audit called it a mislabel, but the
+  v32 migration-runner ancestry guard IS present exactly where Sol's P2-1 pointed
+  (database-migrations.ts:1214, "v32 is missing required migration ancestry") —
+  the re-audit looked at schema triggers, not the runner. E is genuinely CLOSED;
+  the re-audit's correction was itself off-target.
+- Both audits agree the money/correctness/identity/migration gates HELD under
+  adversarial attack: no double-spend/duplicate dispatch, no provider call before
+  authority, no publication without distinct approval (wired path), no
+  UI-self-authorization, clean v14→v37 forward-install. Final stacked gates:
+  engineer 785/1-known-flake, gateway 409, web 568, typecheck + diff clean.
+- RULING: **GO for a SINGLE-TENANT release with provenance attestation formally
+  deferred (ENGINEER_PROVENANCE_ATTESTATION_REQUIRED off) and
+  ZINTUS_ENGINEER_AUTO_PUBLISH_LOW_RISK off.** Carry-forward (non-blocking, revisit
+  when attestation is enabled): the compensation crash-window and the two unfenced
+  v33 receipt/reconciliation tables both become live only once resultTreeHashFor
+  is wired to a real git tree source. [HUMAN] tail unchanged: KMS/Sigstore, GitHub
+  App creds, real result-tree-hash recording, 2nd identity for SoD E2E, final
+  human sign-off. P7-P12 build reaches a defensible release boundary.
