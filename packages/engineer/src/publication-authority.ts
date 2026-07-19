@@ -374,6 +374,30 @@ export class PublicationAuthorityService {
    * requester, so a hostile caller cannot forge a mismatch.
    */
   approve(checkpointId: string, rawBody: ApprovalDecisionBody, rawContext: ApproverAuthContext): { approvalId: string; status: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = this.approveWithinTx(checkpointId, rawBody, rawContext);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* preserve approval failure */ }
+      throw error;
+    }
+  }
+
+  /**
+   * The APPROVE body WITHOUT opening its own transaction — the caller MUST
+   * already hold an open write transaction on THIS SAME connection. This is the
+   * atomicity seam (Sol P1-1): the gateway facade drives `approveWithinTx` AND
+   * the ledger's v35 attestation persistence inside ONE transaction over the
+   * shared ledger connection, so the P8 approval and its REQUIRED attestation
+   * commit together or NOT AT ALL. A crash/throw between the two rolls BOTH back
+   * (nested savepoints unwind with the outer transaction), so there is NO durable
+   * state where a consumable P8 approval exists without its bound required
+   * attestation. All validation, the self-approval fail-closed, and the
+   * live-approval CAS run here; a second live APPROVE still fails closed.
+   */
+  approveWithinTx(checkpointId: string, rawBody: ApprovalDecisionBody, rawContext: ApproverAuthContext): { approvalId: string; status: string } {
     const body = ApprovalDecisionBodySchema.parse(rawBody);
     const context = ApproverAuthContextSchema.parse(rawContext);
 
@@ -405,32 +429,25 @@ export class PublicationAuthorityService {
       approvalId, revision: 0, checkpointId, checkpointHash: body.checkpointHash,
       approver: context.approverActorId, requester: requesterActorId,
     });
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      // CAS on (status, checkpointId, checkpointHash, revision): a live APPROVE
-      // for this candidate blocks a second one (partial unique index also
-      // enforces this at the storage layer).
-      const live = this.db.query(`SELECT status FROM publication_approvals_v33
-        WHERE checkpoint_id=? AND checkpoint_hash=? AND revision=0 AND decision='APPROVE'`)
-        .get(checkpointId, body.checkpointHash) as { status: string } | null;
-      if (body.decision === "APPROVE" && live) {
-        throw new ApprovalAuthorityInvalidError("candidate already has a live approval decision");
-      }
-      this.db.query(`INSERT INTO publication_approvals_v33
-        (approval_id, revision, run_id, selection_id, checkpoint_id, checkpoint_hash, requester_actor_id,
-         requester_actor_kind, approver_actor_id, approver_actor_kind, implementation_actor_id,
-         implementation_actor_kind, evidence_root, repository_id, base_commit_sha, policy_version, decision,
-         status, invalidation_reason, rationale, expires_at, created_at, approval_json)
-        VALUES (?,0,?,?,?,?,?,'HUMAN',?,'HUMAN',?,'NON_HUMAN',?,?,?,?,?,?,NULL,?,?,?,?)`).run(
-          approvalId, selection.run_id, selection.id, checkpointId, body.checkpointHash,
-          requesterActorId, context.approverActorId, context.implementationActorId, context.evidenceRoot,
-          selection.repository_id, runRow.base_commit_sha, PUBLICATION_AUTHORITY_POLICY_VERSION, body.decision,
-          status, body.rationale ?? null, context.expiresAt, createdAt, approvalJson);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      try { this.db.exec("ROLLBACK"); } catch { /* preserve approval failure */ }
-      throw error;
+    // CAS on (status, checkpointId, checkpointHash, revision): a live APPROVE
+    // for this candidate blocks a second one (partial unique index also
+    // enforces this at the storage layer). Runs under the caller's write lock.
+    const live = this.db.query(`SELECT status FROM publication_approvals_v33
+      WHERE checkpoint_id=? AND checkpoint_hash=? AND revision=0 AND decision='APPROVE'`)
+      .get(checkpointId, body.checkpointHash) as { status: string } | null;
+    if (body.decision === "APPROVE" && live) {
+      throw new ApprovalAuthorityInvalidError("candidate already has a live approval decision");
     }
+    this.db.query(`INSERT INTO publication_approvals_v33
+      (approval_id, revision, run_id, selection_id, checkpoint_id, checkpoint_hash, requester_actor_id,
+       requester_actor_kind, approver_actor_id, approver_actor_kind, implementation_actor_id,
+       implementation_actor_kind, evidence_root, repository_id, base_commit_sha, policy_version, decision,
+       status, invalidation_reason, rationale, expires_at, created_at, approval_json)
+      VALUES (?,0,?,?,?,?,?,'HUMAN',?,'HUMAN',?,'NON_HUMAN',?,?,?,?,?,?,NULL,?,?,?,?)`).run(
+        approvalId, selection.run_id, selection.id, checkpointId, body.checkpointHash,
+        requesterActorId, context.approverActorId, context.implementationActorId, context.evidenceRoot,
+        selection.repository_id, runRow.base_commit_sha, PUBLICATION_AUTHORITY_POLICY_VERSION, body.decision,
+        status, body.rationale ?? null, context.expiresAt, createdAt, approvalJson);
     return { approvalId, status };
   }
 
@@ -648,18 +665,13 @@ export class PublicationAuthorityService {
   }
 
   /**
-   * Public compensation seam (P12 Finding A). Invalidate a live P8 approval by id
-   * — used by the gateway facade to roll back an approval whose REQUIRED v35
-   * attestation failed to emit, so a consumable approval never survives without
-   * its attestation. Idempotent: an unknown or already-terminal approval is a
-   * no-op (the private path guards INVALIDATED/CONSUMED).
+   * Supersede a live P8 approval (append an INVALIDATED revision). Used for
+   * stale-base recovery: `startPublication`'s preflight, run immediately before
+   * any Git effect, invalidates the old hash-bound approval when the base has
+   * moved (`PREFLIGHT_MISMATCH`), so no dangling consumable approval survives
+   * against a stale base — the replacement path is a fresh selection+approval
+   * against the new base. Idempotent: an already-terminal approval is a no-op.
    */
-  invalidateApprovalById(approvalId: string, reason: string): void {
-    const current = this.currentApproval(approvalId);
-    if (!current) return;
-    this.invalidateApproval(current, reason);
-  }
-
   private invalidateApproval(approval: ApprovalRow, reason: string): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {

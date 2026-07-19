@@ -3088,3 +3088,30 @@ unfinished pair has passed.
   attestation unchanged (R5C); the joint-integration test still uses its own echo
   preflight (R5E must drive the real mechanics); real GitHub API end-to-end is
   [HUMAN] keyed-smoke unverified (mechanics driven with a fake GitService).
+
+### R5C — atomic P8 approval+attestation (Fable-gated, 2026-07-19)
+
+- The facade:401 crash window is CLOSED by a TRUE single transaction. The agent
+  found service.db, ledger.decideApproval's this.db, and the facade connection
+  are the SAME Database instance, so approveWithinTx (P8 approval INSERT) +
+  decideApprove (approval_decision + provenance_attestation) now run inside ONE
+  connection.transaction() — both commit or neither does. INVARIANT enforced by
+  construction: no durable state where a consumable P8 approval exists without
+  its bound required attestation. (Option-a single-txn chosen; schema
+  CHECK(status IN APPROVED/REJECTED/INVALIDATED/CONSUMED) hard-forbids a
+  PENDING_ATTESTATION state without a table rebuild, so the safe-state protocol
+  was neither needed nor used.)
+- Fable mutation-verified: committing the approval in its own separate
+  transaction (the two-txn bug form) turns 2 crash-injection tests red (a
+  decideApprove throw would leave count=1 approval), restore clean. The
+  crash-injection test asserts count==0 approvals + no consumable + 503 when the
+  attestation phase throws; joint-integration drives it through the real ledger
+  on the shared connection (6/6). Gates engineer 831/gateway 445/typecheck/diff.
+- Stale-base: startPublication preflight (immediately before any Git effect)
+  supersedes the hash-bound approval on a moved base (invalidateApproval →
+  durable INVALIDATED, dispatch trigger blocks); replacement = fresh
+  selection+approval against the new base. Residual (SAFE, declared): a crash
+  between preflight-mismatch detection and the invalidation-commit can leave an
+  approval APPROVED-but-stale — non-publishable because every startPublication
+  re-runs preflight; no proactive reconciler added (cleaned on next attempt).
+  resultTreeHash null [HUMAN] unchanged.

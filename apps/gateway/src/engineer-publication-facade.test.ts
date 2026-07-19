@@ -97,13 +97,17 @@ function scratchDb(): Database {
 }
 
 let counter = 0;
-function makeService(db: Database, lineageVerifier?: CompanionLineageVerifier): PublicationAuthorityService {
+function makeService(
+  db: Database,
+  lineageVerifier?: CompanionLineageVerifier,
+  preflight?: PublicationAuthorityDeps["preflight"],
+): PublicationAuthorityService {
   const actuator: PublicationActuator = {
     async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "RECEIPT", prUrl: "https://x/pr/1", commitSha: RESULT_COMMIT }; },
   };
   const deps: PublicationAuthorityDeps = {
     actuator,
-    preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+    preflight: preflight ?? { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
     credentialProvider: { getPublicationCredentials: () => ({ token: "ghp_x" }) },
     lineageVerifier,
     now: () => new Date(AT),
@@ -357,42 +361,73 @@ describe("P8 publication facade — attestation last-mile fails closed", () => {
   });
 });
 
-describe("P8 publication facade — attestation atomicity (Finding A compensation)", () => {
+describe("P8 publication facade — approval+attestation are GENUINELY ATOMIC (R5C)", () => {
   // A PENDING ledger approval_request bound to this exact candidate, plus a sourced
-  // result tree hash, make attestation FEASIBLE so service.approve() commits the P8
-  // approval; then decideApprove THROWS to simulate a post-commit attestation
-  // failure. The compensation must leave NO live/consumable approval.
+  // result tree hash, make attestation FEASIBLE so the P8 approval INSERT runs;
+  // decideApprove then THROWS to model a CRASH between the approval write and the
+  // attestation commit. Because both writes share ONE transaction on the shared
+  // connection, the rollback leaves NOTHING durable — no consumable approval AND
+  // no invalidated tombstone. (Under the OLD two-transaction compensation form the
+  // approval row would already be committed and only invalidated after the fact,
+  // so these count===0 assertions go RED without the single-transaction fix.)
   const boundRequest = {
     approvalRequestId: "areq-1", status: "PENDING", approvalRevision: 0,
     deadlineAt: "2026-07-20T12:00:00.000Z", evidenceBundleHash: `sha256:${"c".repeat(64)}`,
     verifiedCheckpointId: CK_ID, verifiedCheckpointHash: CK_HASH,
   };
 
-  test("a decideApprove failure AFTER the P8 approve commit leaves NO live approval (invalidated) and surfaces 503", async () => {
+  test("CRASH injected between the approval write and the attestation write leaves NO approval row at all (atomic rollback) and surfaces 503", async () => {
     const db = scratchDb();
     const { facade } = makeFacade(db, {
       attestationRequired: true,
       latestApprovalRequest: () => boundRequest,
       resultTreeHashFor: () => `sha256:${"9".repeat(64)}`,
-      decideApprove: () => { throw new Error("ledger attestation emission failed"); },
+      // Models a process crash / ledger failure AFTER the P8 approval INSERT but
+      // BEFORE the attestation commits.
+      decideApprove: () => { throw new Error("ledger attestation emission crashed"); },
     });
     await facade.selectCandidate(principal, RUN_ID, selectBody);
     expect(() => facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }))
       .toThrow(PublicationAttestationUnavailableError);
-    // The P8 approval row WAS written (approve committed before decideApprove),
-    // but compensation must have appended an INVALIDATED revision so the live
-    // (highest-revision) status is not APPROVED — no consumable approval survives.
-    const live = db.query(`SELECT status FROM publication_approvals_v33
-      ORDER BY revision DESC LIMIT 1`).get() as { status: string } | null;
-    expect(live?.status).toBe("INVALIDATED");
-    const liveApproved = db.query(`SELECT COUNT(*) AS n FROM publication_approvals_v33 a
-      WHERE a.decision='APPROVE' AND a.status='APPROVED'
+    // The ENTIRE transaction rolled back: ZERO approval rows of ANY revision/status.
+    // This is strictly stronger than "invalidated after the fact" — the approval
+    // INSERT itself was undone. RED under the two-transaction compensation form.
+    const total = (db.query("SELECT COUNT(*) AS n FROM publication_approvals_v33").get() as { n: number }).n;
+    expect(total).toBe(0);
+    // No consumable approval survives => no publication is possible.
+    const consumable = (db.query(`SELECT COUNT(*) AS n FROM publication_approvals_v33 a
+      WHERE a.revision=0 AND a.decision='APPROVE' AND a.status='APPROVED'
         AND NOT EXISTS(SELECT 1 FROM publication_approvals_v33 b
-          WHERE b.approval_id=a.approval_id AND b.revision>a.revision)`).get() as { n: number };
-    expect(liveApproved.n).toBe(0);
+          WHERE b.approval_id=a.approval_id AND b.status IN ('INVALIDATED','CONSUMED'))`).get() as { n: number }).n;
+    expect(consumable).toBe(0);
   });
 
-  test("RED-without-compensation control: the SAME feasible attestation that SUCCEEDS leaves the approval live and APPROVED", async () => {
+  test("no attestation write was committed either: a crash rolls back BOTH sides (nothing persists without the other)", async () => {
+    const db = scratchDb();
+    let decideAttempts = 0;
+    const { facade } = makeFacade(db, {
+      attestationRequired: true,
+      latestApprovalRequest: () => boundRequest,
+      resultTreeHashFor: () => `sha256:${"9".repeat(64)}`,
+      // Write a REAL sentinel row inside the attestation phase, then crash: the
+      // rollback must undo the sentinel too (proving the attestation shares the
+      // approval's transaction, not a separate committed one).
+      decideApprove: () => {
+        decideAttempts += 1;
+        db.query("INSERT INTO users(id, created_at, updated_at) VALUES ('attestation-sentinel', ?, ?)").run(AT, AT);
+        throw new Error("crash after the attestation-phase write");
+      },
+    });
+    await facade.selectCandidate(principal, RUN_ID, selectBody);
+    expect(() => facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }))
+      .toThrow(PublicationAttestationUnavailableError);
+    expect(decideAttempts).toBe(1);
+    // Both the approval AND the attestation-phase sentinel are gone.
+    expect((db.query("SELECT COUNT(*) AS n FROM publication_approvals_v33").get() as { n: number }).n).toBe(0);
+    expect((db.query("SELECT COUNT(*) AS n FROM users WHERE id='attestation-sentinel'").get() as { n: number }).n).toBe(0);
+  });
+
+  test("happy path: the P8 approval and its v35 attestation commit together — a consumable APPROVED approval WITH its attestation call", async () => {
     const db = scratchDb();
     const decideCalls: unknown[] = [];
     const { facade } = makeFacade(db, {
@@ -402,11 +437,64 @@ describe("P8 publication facade — attestation atomicity (Finding A compensatio
       decideApprove: (record) => { decideCalls.push(record); },
     });
     await facade.selectCandidate(principal, RUN_ID, selectBody);
-    const result = facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }) as { status: string };
+    const result = facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }) as { approvalId: string; status: string };
     expect(result.status).toBe("APPROVED");
+    // The attestation was emitted exactly once, bound to this approval's candidate.
     expect(decideCalls.length).toBe(1);
-    const live = db.query(`SELECT status FROM publication_approvals_v33 ORDER BY revision DESC LIMIT 1`).get() as { status: string };
+    // The approval is durably consumable (revision-0 APPROVED, no terminal revision).
+    const live = db.query(`SELECT status FROM publication_approvals_v33 WHERE approval_id=? ORDER BY revision DESC LIMIT 1`).get(result.approvalId) as { status: string };
     expect(live.status).toBe("APPROVED");
+    // And it can actually drive a publication (proves consumability end-to-end).
+    const pub = await facade.startPublication(principal, RUN_ID, { approvalId: result.approvalId }, "hk-atomic") as { state: string };
+    expect(pub.state).toBe("PREFLIGHT");
+  });
+
+  test("an approval-phase failure (self-approval / stale) surfaces with its OWN status, NOT the attestation 503", async () => {
+    const db = scratchDb();
+    // No selection recorded => approveWithinTx throws CandidateNotFound BEFORE the
+    // attestation phase; the facade must NOT mis-wrap it as a 503.
+    const { facade } = makeFacade(db, {
+      attestationRequired: true,
+      latestApprovalRequest: () => boundRequest,
+      resultTreeHashFor: () => `sha256:${"9".repeat(64)}`,
+      decideApprove: () => { throw new Error("attestation should never be reached"); },
+    });
+    // selectCandidate deliberately NOT called for CK_ID's owned selection... actually
+    // approve derives the selection first; without it the facade throws CandidateNotFound
+    // before any transaction. Use a checkpoint with no selection.
+    expect(() => facade.approve(principal, `sha256:${"7".repeat(64)}`, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }))
+      .toThrow(CandidateNotFoundError);
+    expect((db.query("SELECT COUNT(*) AS n FROM publication_approvals_v33").get() as { n: number }).n).toBe(0);
+  });
+});
+
+describe("P8 publication facade — stale-base at preflight supersedes the approval (R5C item 2)", () => {
+  test("when the base has moved, startPublication invalidates the hash-bound approval (non-consumable) and blocks the publish; a retry stays blocked", async () => {
+    const db = scratchDb();
+    // A preflight that reports a DIFFERENT base than the approval's => stale base.
+    const movedBase = "e".repeat(40);
+    const stalePreflight = { probe: (input: { repositoryId: string }) => ({ repositoryId: input.repositoryId, baseCommitSha: movedBase }) };
+    const { facade } = makeFacade(db, { service: makeService(db, undefined, stalePreflight) });
+    await facade.selectCandidate(principal, RUN_ID, selectBody);
+    const approval = facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }) as { approvalId: string };
+    // First publish attempt: preflight detects the moved base and fails closed.
+    await expect(facade.startPublication(principal, RUN_ID, { approvalId: approval.approvalId }, "hk-stale-1"))
+      .rejects.toThrow();
+    // The old hash-bound approval is SUPERSEDED: an INVALIDATED revision is durable,
+    // so no dangling consumable approval survives against the stale base.
+    const live = db.query(`SELECT status FROM publication_approvals_v33 WHERE approval_id=? ORDER BY revision DESC LIMIT 1`).get(approval.approvalId) as { status: string };
+    expect(live.status).toBe("INVALIDATED");
+    const consumable = (db.query(`SELECT COUNT(*) AS n FROM publication_approvals_v33 a
+      WHERE a.approval_id=? AND a.revision=0 AND a.decision='APPROVE' AND a.status='APPROVED'
+        AND NOT EXISTS(SELECT 1 FROM publication_approvals_v33 b
+          WHERE b.approval_id=a.approval_id AND b.status IN ('INVALIDATED','CONSUMED'))`).get(approval.approvalId) as { n: number }).n;
+    expect(consumable).toBe(0);
+    // No publication row was created.
+    expect((db.query("SELECT COUNT(*) AS n FROM publication_git_operations_v33").get() as { n: number }).n).toBe(0);
+    // A retry with the SAME (now superseded) approval stays blocked — never publishes.
+    await expect(facade.startPublication(principal, RUN_ID, { approvalId: approval.approvalId }, "hk-stale-2"))
+      .rejects.toThrow();
+    expect((db.query("SELECT COUNT(*) AS n FROM publication_git_operations_v33").get() as { n: number }).n).toBe(0);
   });
 });
 

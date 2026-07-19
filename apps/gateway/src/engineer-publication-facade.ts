@@ -61,12 +61,17 @@ import type { EngineerPublicationAuthorityFacade } from "./handler.js";
  *     Absence of a required attestation DENIES publication; it never allows an
  *     unattested publish.
  *
- * ATOMICITY (Sol P1-1): the P8 approval (service.approve, its own txn) and its
- * v35 attestation (ledger decideApproval, a separate txn) are made atomic by
- * COMPENSATION — if `decideApprove` throws after `service.approve` commits, the
- * facade invalidates the just-created P8 approval (appends an INVALIDATED
- * revision) before rethrowing, so a live/consumable approval can never exist
- * without its required attestation.
+ * ATOMICITY (Sol P1-1 / R5C): the P8 approval and its REQUIRED v35 attestation
+ * are made GENUINELY ATOMIC — not compensated. The service, the ledger, and this
+ * facade all share the SAME `Database` connection (`resolutionDeskConnection()`),
+ * so when attestation is required the facade drives BOTH writes inside ONE
+ * transaction over that connection: `service.approveWithinTx` inserts the P8
+ * approval and `deps.decideApprove` emits+persists the v35 attestation as a
+ * nested savepoint on the same connection. A throw or a process CRASH before the
+ * outer COMMIT rolls BOTH back together (the approval INSERT is undone with the
+ * attestation), so there is NO durable state where a consumable P8 approval
+ * exists without its bound required attestation. The INVARIANT is enforced by
+ * construction, not by best-effort compensation.
  */
 
 /**
@@ -116,8 +121,12 @@ interface PublicationAuthorityServiceLike {
   listPublicationCandidates(runId: string): unknown;
   selectCandidate(input: unknown): Promise<unknown>;
   approve(checkpointId: string, body: unknown, context: unknown): { approvalId: string; status: string };
-  /** Compensation seam: invalidate a just-created P8 approval when its required attestation failed. */
-  invalidateApprovalById(approvalId: string, reason: string): void;
+  /**
+   * Atomicity seam: approve WITHOUT opening a transaction — the caller MUST hold
+   * an open write transaction on the shared connection. Lets the facade persist
+   * the P8 approval and its REQUIRED v35 attestation in ONE transaction.
+   */
+  approveWithinTx(checkpointId: string, body: unknown, context: unknown): { approvalId: string; status: string };
   startPublication(input: unknown): Promise<{ publicationId: string; state: string }>;
   getPublication(publicationId: string): { publicationId: string; state: string };
   // R3 dispatch/reconcile/restart seams.
@@ -178,10 +187,11 @@ export interface PublicationFacadeDeps {
   /**
    * True when v35 provenance attestation is REQUIRED for a durable APPROVE
    * (`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` true AND a signer is configured).
-   * When true, an APPROVE that cannot emit its v35 attestation fails closed and,
-   * if emission throws post-approval, the P8 approval is compensated (invalidated).
-   * When false (default), attestation is formally deferred and the pure P8
-   * approval path runs unchanged.
+   * When true, the P8 approval and its v35 attestation are persisted in ONE
+   * transaction over the shared connection (atomic): an APPROVE that cannot emit
+   * its attestation fails closed with NOTHING persisted (the approval INSERT is
+   * rolled back with the attestation). When false (default), attestation is
+   * formally deferred and the pure P8 approval path runs unchanged.
    */
   attestationRequired: boolean;
   /** Reads the run's latest ledger approval_request (the bridge target for the attestation). */
@@ -396,51 +406,67 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
         expiresAt: attestationPlan ? attestationPlan.request.deadlineAt : expiresAt,
       };
 
-      const result = service.approve(checkpointId, derivedBody, context);
+      // Pure P8 approval path (attestation deferred / not an APPROVE): the
+      // service opens its own transaction, unchanged.
+      if (!attestationPlan || decision !== "APPROVE") {
+        return service.approve(checkpointId, derivedBody, context);
+      }
 
-      // Emit + persist the v35 attestation over the ledger approval_decision path.
-      // This is a SEPARATE ledger transaction from the P8 approve above; to keep
-      // the pair atomic we COMPENSATE — if it throws, invalidate the P8 approval
-      // just written so no live/consumable approval survives without its required
-      // attestation (Sol P1-1).
-      if (attestationPlan && decision === "APPROVE") {
-        const reason = typeof record.rationale === "string" && record.rationale.trim()
-          ? record.rationale
-          : "Approved via publication authority";
-        try {
-          deps.decideApprove(
-            {
-              approvalDecisionId: randomUUID(),
-              approvalRequestId: attestationPlan.request.approvalRequestId,
-              actorId: approverActorId,
-              decision: "APPROVE",
-              reason,
-              decidedAt: deps.now().toISOString(),
-              expectedApprovalRevision: attestationPlan.request.approvalRevision,
-              expectedVerifiedCheckpointId: checkpointId,
-              expectedVerifiedCheckpointHash: checkpointHash,
-            },
-            { resultTreeHash: attestationPlan.resultTreeHash },
-          );
-        } catch (attestationError) {
-          // Compensate: the required attestation failed after the P8 approval
-          // committed. Invalidate that approval so it can never authorize a
-          // publication, then surface a fail-closed 503.
-          try {
-            service.invalidateApprovalById(result.approvalId, "ATTESTATION_UNAVAILABLE");
-          } catch {
-            // Preserve the original attestation failure; invalidation is best-effort
-            // but the approval will additionally fail live-approval revalidation at
-            // startPublication/dispatch if this ever races.
-          }
+      // ATTESTATION REQUIRED: the P8 approval and its v35 attestation are
+      // persisted in ONE transaction over the shared ledger connection.
+      // `service.approveWithinTx` inserts the approval and `deps.decideApprove`
+      // emits+persists the attestation as a nested savepoint on the SAME
+      // connection — a throw or a process crash before COMMIT rolls BOTH back
+      // together. INVARIANT: no durable state has a consumable P8 approval
+      // without its bound required attestation. This replaces the old
+      // best-effort compensation (which could leave a live approval on a crash
+      // between the two separate transactions).
+      const reason = typeof record.rationale === "string" && record.rationale.trim()
+        ? record.rationale
+        : "Approved via publication authority";
+      // `attestationPhase` distinguishes an approval-phase failure (self-approval
+      // 403, stale candidate, duplicate — surfaced with its own status) from an
+      // attestation-phase failure (→ fail-closed 503). It flips only after the
+      // approval INSERT succeeds, and survives the transaction rollback (it is a
+      // JS flag, not DB state).
+      let attestationPhase = false;
+      const runAtomic = connection.transaction(() => {
+        const approved = service.approveWithinTx(checkpointId, derivedBody, context);
+        attestationPhase = true;
+        deps.decideApprove(
+          {
+            approvalDecisionId: randomUUID(),
+            approvalRequestId: attestationPlan.request.approvalRequestId,
+            actorId: approverActorId,
+            decision: "APPROVE",
+            reason,
+            decidedAt: deps.now().toISOString(),
+            expectedApprovalRevision: attestationPlan.request.approvalRevision,
+            expectedVerifiedCheckpointId: checkpointId,
+            expectedVerifiedCheckpointHash: checkpointHash,
+          },
+          { resultTreeHash: attestationPlan.resultTreeHash },
+        );
+        return approved;
+      });
+      try {
+        return runAtomic();
+      } catch (error) {
+        if (attestationPhase) {
+          // The attestation failed; the ENTIRE transaction — including the P8
+          // approval INSERT — rolled back atomically, so NOTHING was persisted.
+          // Fail closed: absence of the required attestation denies the approval
+          // rather than leaving a consumable one behind.
           throw new PublicationAttestationUnavailableError(
-            `the v35 attestation could not be emitted for an approved candidate; the approval was invalidated (${
-              attestationError instanceof Error ? attestationError.message : String(attestationError)
+            `the v35 attestation could not be emitted for an approved candidate; the approval was not committed (${
+              error instanceof Error ? error.message : String(error)
             })`,
           );
         }
+        // An approval-phase error (self-approval, stale candidate, duplicate live
+        // approval, ZodError) surfaces with its own status — unchanged.
+        throw error;
       }
-      return result;
     },
 
     async startPublication(_p, _runId, body, idempotencyKey) {
