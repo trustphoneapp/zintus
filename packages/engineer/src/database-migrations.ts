@@ -24,6 +24,7 @@ import {
   ENGINEER_DATABASE_MIGRATION_29_SQL,
   ENGINEER_DATABASE_MIGRATION_30_SQL,
   ENGINEER_DATABASE_MIGRATION_31_SQL,
+  ENGINEER_DATABASE_MIGRATION_32_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
 } from "./database-schema.js";
 
@@ -50,6 +51,7 @@ const MIGRATIONS: readonly Migration[] = [
   { version: 29, sql: ENGINEER_DATABASE_MIGRATION_29_SQL },
   { version: 30, sql: ENGINEER_DATABASE_MIGRATION_30_SQL },
   { version: 31, sql: ENGINEER_DATABASE_MIGRATION_31_SQL },
+  { version: 32, sql: ENGINEER_DATABASE_MIGRATION_32_SQL },
 ];
 
 function assertHardeningBudgetShape(db: Database): void {
@@ -926,6 +928,14 @@ function assertResolutionDeskShape(db: Database): void {
   assertForeignKeys(db);
 }
 
+function assertFailureUnderlyingCauseShape(db: Database): void {
+  const columns = db.query("PRAGMA table_info(failure_records)").all() as Array<{ name: string; type: string; notnull: number }>;
+  const column = columns.find((entry) => entry.name === "underlying_cause");
+  if (!column) throw new Error("Engineer schema v32 is missing failure_records.underlying_cause");
+  if (column.notnull !== 0) throw new Error("Engineer schema v32 failure_records.underlying_cause must be nullable");
+  assertForeignKeys(db);
+}
+
 /** Apply ordered migrations after the legacy bootstrap/shape repairs finish. */
 export function migrateEngineerDatabase(db: Database, now = new Date().toISOString()): void {
   assertEngineerDatabaseVersionSupported(db);
@@ -1023,6 +1033,7 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
       if (migration.version === 30) assertHardeningBudgetShape(db);
       if (migration.version === 30) assertHardeningRecoveryWorkerFenceShape(db);
       if (migration.version === 31) assertResolutionDeskShape(db);
+      if (migration.version === 32) assertFailureUnderlyingCauseShape(db);
       db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(migration.version, now);
       db.exec("COMMIT");
@@ -1053,4 +1064,5 @@ export function migrateEngineerDatabase(db: Database, now = new Date().toISOStri
   if (finalVersion >= 29) assertHardeningBudgetShape(db);
   if (finalVersion >= 30) assertHardeningRecoveryWorkerFenceShape(db);
   if (finalVersion >= 31) assertResolutionDeskShape(db);
+  if (finalVersion >= 32) assertFailureUnderlyingCauseShape(db);
 }

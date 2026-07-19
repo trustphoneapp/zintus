@@ -7317,10 +7317,10 @@ export class EngineerLedger {
     const parsed = FailureRecordSchema.parse(record);
     this.getRun(parsed.runId);
     this.db.query(`INSERT INTO failure_records
-      (id, run_id, failure_class, reason_code, fingerprint, evidence_ids_json, retryable, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      (id, run_id, failure_class, reason_code, fingerprint, evidence_ids_json, retryable, underlying_cause, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       parsed.failureId, parsed.runId, parsed.failureClass, parsed.reasonCode, parsed.fingerprint,
-      canonicalJson(parsed.evidenceIds), parsed.retryable ? 1 : 0, parsed.createdAt,
+      canonicalJson(parsed.evidenceIds), parsed.retryable ? 1 : 0, parsed.underlyingCause ?? null, parsed.createdAt,
     );
     return parsed;
   }
@@ -7331,7 +7331,9 @@ export class EngineerLedger {
     return rows.map((row) => FailureRecordSchema.parse({
       failureId: row.id, runId: row.run_id, failureClass: row.failure_class, reasonCode: row.reason_code,
       fingerprint: row.fingerprint, evidenceIds: JSON.parse(String(row.evidence_ids_json)),
-      retryable: row.retryable === 1, createdAt: row.created_at,
+      retryable: row.retryable === 1,
+      ...(row.underlying_cause != null ? { underlyingCause: String(row.underlying_cause) } : {}),
+      createdAt: row.created_at,
     }));
   }
 

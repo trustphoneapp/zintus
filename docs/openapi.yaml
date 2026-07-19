@@ -467,6 +467,85 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "409": { description: Stale recovery or a required capability is not configured. }
 
+  /v1/engineer/runs/{runId}/resolution-cases:
+    post:
+      tags: [Engineer]
+      operationId: createEngineerResolutionCase
+      summary: Open a P7 resolution case for a terminal run (installs the ledger-wide source freeze)
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "201": { description: Canonical resolution case created; source freeze installed. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: The run is ineligible for a case or one already exists. }
+        "503": { description: Resolution desk is not configured. }
+    get:
+      tags: [Engineer]
+      operationId: listEngineerResolutionCases
+      summary: List resolution cases for a run (newest first)
+      parameters: [{ $ref: "#/components/parameters/EngineerRunId" }]
+      responses:
+        "200": { description: Resolution cases for the run. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Resolution desk is not configured. }
+
+  /v1/engineer/resolution-cases/{caseId}:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerResolutionCase
+      summary: Get a resolution case and its immutable event chain
+      parameters:
+        - { name: caseId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Resolution case and events. }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Case not found. }
+
+  /v1/engineer/resolution-cases/{caseId}/directives:
+    post:
+      tags: [Engineer]
+      operationId: issueEngineerResolutionDirective
+      summary: Issue a signed resolution directive under case + source compare-and-swap versions
+      parameters:
+        - { name: caseId, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, caseVersion, sourceRunVersion]
+              properties:
+                type: { type: string, enum: [CREATE_CORRECTED_RUN, CREATE_REVERIFY_RUN, REJECT_AND_CLOSE] }
+                caseVersion: { type: integer }
+                sourceRunVersion: { type: integer }
+                budget:
+                  type: object
+                  properties:
+                    maxCostUsd: { type: number }
+                    maxTokens: { type: integer }
+                    maxActiveSeconds: { type: integer }
+                    pricingPolicyDigest: { type: string }
+      responses:
+        "201": { description: Signed directive issued; case advanced to DIRECTIVE_ISSUED. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: CAS conflict, cumulative-ceiling breach, pricing drift, or an ineligible directive type. }
+
+  /v1/engineer/resolution-directives/{directiveId}/apply:
+    post:
+      tags: [Engineer]
+      operationId: applyEngineerResolutionDirective
+      summary: Apply a directive via the fenced PREPARING to READY replacement-run protocol
+      parameters:
+        - { name: directiveId, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Replacement created and linked (replacementRunId, state). }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { description: Case is not in a directive-issued state, or a conflicting concurrent apply. }
+        "410": { description: The directive has expired. }
+
   /v1/engineer/runs/{runId}/events:
     get:
       tags: [Engineer]

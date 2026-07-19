@@ -287,6 +287,33 @@ function classifyEngineerHardeningError(error: unknown): { code: EngineerHardeni
 }
 
 /**
+ * Map a P7 Resolution Desk error to an HTTP response. A ZodError from the
+ * service-seam schema `.parse` becomes a typed `400` with field-level issues
+ * (pair-1 P2); a `ResolutionDeskError` (duck-typed by its numeric `status` +
+ * string `code`, no barrel import needed) surfaces its exact status/code/detail;
+ * anything else is a redacted `400`.
+ */
+function mapResolutionDeskError(error: unknown): { status: number; body: unknown } {
+  const candidate = error as { name?: string; status?: unknown; code?: unknown; detail?: unknown; issues?: unknown };
+  if (error instanceof Error && candidate.name === "ZodError" && Array.isArray(candidate.issues)) {
+    return { status: 400, body: { error: { message: "Invalid request body", issues: formatIssues(error as unknown as Parameters<typeof formatIssues>[0]) } } };
+  }
+  if (typeof candidate.status === "number" && typeof candidate.code === "string") {
+    return {
+      status: candidate.status,
+      body: {
+        error: {
+          code: candidate.code,
+          message: redactSecrets(error instanceof Error ? error.message : String(error)),
+          ...(candidate.detail !== undefined ? { detail: candidate.detail } : {}),
+        },
+      },
+    };
+  }
+  return { status: 400, body: { error: { message: redactSecrets(error instanceof Error ? error.message : String(error)) } } };
+}
+
+/**
  * Normalize a routing trace into an OpenRouter-style `/activity` entry. Built
  * ONLY from data the gateway already records (the same `RequestTrace` exposed
  * by `/v1/traces`), plus any optional usage fields the trace happens to carry.
@@ -748,6 +775,24 @@ export interface GatewayHandlerDeps {
   mcpRegistry?: MCPRegistry;
   /** Zintus Engineer run facade. Omitted when the local execution feature is disabled. */
   engineerRuns?: EngineerRunManager;
+  /**
+   * P7 Developer Resolution Desk facade. Owner-scoped like every other engineer
+   * route (the server-owned engineer principal is the owner; request bodies never
+   * select an owner). The gateway forwards JSON and maps errors; the real adapter
+   * — deriving case authority from the durable terminal run and wiring the
+   * ReplacementRunFactory — lives in index.ts. Omitted when the engineer feature
+   * is disabled.
+   */
+  resolutionDesk?: EngineerResolutionDeskFacade;
+}
+
+/** P7 Resolution Desk gateway facade (loosely typed; the routes forward JSON). */
+export interface EngineerResolutionDeskFacade {
+  createCase(principal: unknown, runId: string): unknown | Promise<unknown>;
+  listCases(principal: unknown, runId: string): unknown | Promise<unknown>;
+  getCase(principal: unknown, caseId: string): unknown | Promise<unknown>;
+  issueDirective(principal: unknown, caseId: string, body: unknown, idempotencyKey: string): unknown | Promise<unknown>;
+  applyDirective(principal: unknown, directiveId: string, idempotencyKey: string): unknown | Promise<unknown>;
 }
 
 /** Hard cap on SERVER-SIDE MCP tool-loop rounds (model calls) per request. Each
@@ -785,6 +830,7 @@ export function createGatewayHandler(
   const activityStore = deps.activityStore;
   const mcpRegistry = deps.mcpRegistry ?? new MCPRegistry();
   const engineerRuns = deps.engineerRuns;
+  const resolutionDesk = deps.resolutionDesk;
   // P2: gateway-hosted agent runtime (one manager per handler; tasks live for
   // the life of the process, finished runs persist to ~/.zintus/agents).
   const agents = new AgentTaskManager(engine as unknown as AgentEngine);
@@ -2880,6 +2926,52 @@ export function createGatewayHandler(
         return json(request, { readiness: engineerRuns.readiness(), hardening: engineerRuns.hardeningReadiness() });
       } catch (error) {
         return json(request, { readiness: engineerRuns.readiness(), error: { message: redactSecrets(error instanceof Error ? error.message : String(error)) } }, 503);
+      }
+    }
+
+    // P7 Developer Resolution Desk routes. Handled here — before the engineerRuns
+    // readiness gate below — because the desk is a separate facade with its own
+    // configured/not-configured 503. All mutating routes are owner-scoped (server
+    // principal; request bodies never select an owner) and require an
+    // Idempotency-Key; errors map through mapResolutionDeskError (service-seam
+    // ZodError -> typed 400 with issues, ResolutionDeskError -> its status/code).
+    if ((url.pathname.includes("/resolution-cases") || url.pathname.startsWith("/v1/engineer/resolution-directives/"))
+      && url.pathname.startsWith("/v1/engineer/")) {
+      if (!resolutionDesk) return json(request, { error: { message: "Engineer resolution desk is not configured" } }, 503);
+      const parts = url.pathname.split("/");
+      const idempotencyKey = request.headers.get("Idempotency-Key") ?? "";
+      try {
+        // POST/GET /v1/engineer/runs/:runId/resolution-cases
+        if (parts[3] === "runs" && parts[5] === "resolution-cases" && !parts[6]) {
+          const runId = parts[4] ?? "";
+          if (request.method === "POST") {
+            const limited = enforceRateLimit(request, requestId, url.pathname);
+            if (limited) return limited;
+            return json(request, { case: await resolutionDesk.createCase(engineerPrincipal!, runId) }, 201);
+          }
+          if (request.method === "GET") return json(request, { cases: await resolutionDesk.listCases(engineerPrincipal!, runId) });
+        }
+        // GET /v1/engineer/resolution-cases/:caseId  (case + events)
+        if (parts[3] === "resolution-cases" && parts[4] && !parts[5] && request.method === "GET") {
+          return json(request, await resolutionDesk.getCase(engineerPrincipal!, parts[4]));
+        }
+        // POST /v1/engineer/resolution-cases/:caseId/directives
+        if (parts[3] === "resolution-cases" && parts[4] && parts[5] === "directives" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          const body = await request.json().catch(() => ({}));
+          return json(request, await resolutionDesk.issueDirective(engineerPrincipal!, parts[4], body, idempotencyKey), 201);
+        }
+        // POST /v1/engineer/resolution-directives/:directiveId/apply
+        if (parts[3] === "resolution-directives" && parts[4] && parts[5] === "apply" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          return json(request, await resolutionDesk.applyDirective(engineerPrincipal!, parts[4], idempotencyKey), 200);
+        }
+        return json(request, { error: { message: "Resolution resource not found" } }, 404);
+      } catch (error) {
+        const mapped = mapResolutionDeskError(error);
+        return json(request, mapped.body, mapped.status, { "Cache-Control": "no-store" });
       }
     }
 

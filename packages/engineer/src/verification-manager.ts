@@ -12,6 +12,7 @@ import {
   type TrustedEvidence,
 } from "./contracts.js";
 import { FailureRecordSchema } from "./control-contracts.js";
+import { classifyPhase3UnderlyingCause } from "./resolution-case.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import { BuilderContinuationSchema, BuilderNoProgressError, CODEX_BUILDER_PROMPT_VERSION, CodexBuilder, isProviderModelTimeout, type ResponsesTransport } from "./codex-builder.js";
 import { ArtifactRecordSchema, BuilderResultSchema, ModelCallRecordSchema, type AgentExecutionRecord, type ArtifactRecord, type ModelCallRecord, type SandboxRecord } from "./execution-contracts.js";
@@ -2372,6 +2373,13 @@ export class EngineerVerificationManager {
             : "RETRY_BUDGET_EXHAUSTED";
     if (!canTransition(run.state, preferred)) return;
     const message = error instanceof Error ? error.message : String(error);
+    // P7 (Day 3 pair 2): deterministically type the underlying cause BEFORE the
+    // raw message is erased into the fingerprint. The generic reasonCode and
+    // transition reason are unchanged (a Phase-3 failure is still non-recoverable
+    // by default); the typed cause is carried in the additive `underlyingCause`
+    // slot so the reverify law can honestly unlock only the closed transient
+    // allowlist. Untypeable messages leave it absent (still PHASE3_CAUSE_UNTYPED).
+    const underlyingCause = classifyPhase3UnderlyingCause(message);
     this.options.supervisor.recordFailure(FailureRecordSchema.parse({
       failureId: this.id(),
       runId,
@@ -2380,6 +2388,7 @@ export class EngineerVerificationManager {
       fingerprint: sha256({ failureClass: "WORKFLOW_FAILURE", reasonCode: "PHASE3_UNEXPECTED_FAILURE", state: run.state, message }),
       evidenceIds: [],
       retryable: false,
+      ...(underlyingCause ? { underlyingCause } : {}),
       createdAt: this.timestamp(),
     }));
     this.transition(runId, preferred, "PHASE3_UNEXPECTED_FAILURE");

@@ -2969,3 +2969,109 @@ describe("chat provider routing (OpenRouter-style body → strategy/weights/forc
     expect(get()?.provider).toBe("groq");
   });
 });
+
+describe("P7 Developer Resolution Desk HTTP routes", () => {
+  const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "resolution-handler-owner" });
+  const authorized = { Authorization: "Bearer secret", "Content-Type": "application/json" } as Record<string, string>;
+
+  const makeResolutionHandler = (results: Record<string, unknown> = {}) => {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    // Every method records its call FIRST, then returns the configured result
+    // (a function is invoked with the args, so error cases still record).
+    const method = (name: string, fallback: unknown) => (...args: unknown[]) => {
+      calls.push({ method: name, args });
+      const configured = results[name];
+      if (typeof configured === "function") return (configured as (...a: unknown[]) => unknown)(...args);
+      return configured !== undefined ? configured : fallback;
+    };
+    const desk = {
+      createCase: method("createCase", { caseId: "case-1" }),
+      listCases: method("listCases", []),
+      getCase: method("getCase", { case: {}, events: [] }),
+      issueDirective: method("issueDirective", {}),
+      applyDirective: method("applyDirective", {}),
+    } as unknown as GatewayHandlerDeps["resolutionDesk"];
+    const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
+    return { handler: makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns, resolutionDesk: desk }), calls };
+  };
+
+  test("creates a case owner-scoped and returns 201 { case }", async () => {
+    const { handler, calls } = makeResolutionHandler({ createCase: (_p: unknown, runId: string) => ({ caseId: "case-1", runId, state: "OPEN" }) });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/resolution-cases", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ case: { caseId: "case-1", runId: "run-1", state: "OPEN" } });
+    expect(calls[0]).toEqual({ method: "createCase", args: [principal, "run-1"] });
+  });
+
+  test("lists cases for a run (newest first) as 200 { cases }", async () => {
+    const { handler, calls } = makeResolutionHandler({ listCases: () => [{ caseId: "case-1" }] });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/resolution-cases", { headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ cases: [{ caseId: "case-1" }] });
+    expect(calls[0]!.args).toEqual([principal, "run-1"]);
+  });
+
+  test("gets a single case + events", async () => {
+    const { handler, calls } = makeResolutionHandler({ getCase: () => ({ case: { caseId: "case-1" }, events: [] }) });
+    const response = await handler(new Request("http://x/v1/engineer/resolution-cases/case-1", { headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ case: { caseId: "case-1" }, events: [] });
+    expect(calls[0]!.args).toEqual([principal, "case-1"]);
+  });
+
+  test("issues a directive, forwarding the Idempotency-Key and body", async () => {
+    const { handler, calls } = makeResolutionHandler({ issueDirective: () => ({ directive: { directiveId: "d-1" }, case: { state: "DIRECTIVE_ISSUED" } }) });
+    const body = { type: "CREATE_REVERIFY_RUN", caseVersion: 0, sourceRunVersion: 4 };
+    const response = await handler(new Request("http://x/v1/engineer/resolution-cases/case-1/directives", {
+      method: "POST", headers: { ...authorized, "Idempotency-Key": "idem-abc" }, body: JSON.stringify(body),
+    }));
+    expect(response.status).toBe(201);
+    expect(calls[0]).toEqual({ method: "issueDirective", args: [principal, "case-1", body, "idem-abc"] });
+  });
+
+  test("applies a directive and returns { replacementRunId, state }", async () => {
+    const { handler, calls } = makeResolutionHandler({ applyDirective: () => ({ replacementRunId: "resolution-x", state: "READY" }) });
+    const response = await handler(new Request("http://x/v1/engineer/resolution-directives/d-1/apply", {
+      method: "POST", headers: { ...authorized, "Idempotency-Key": "apply-1" },
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ replacementRunId: "resolution-x", state: "READY" });
+    expect(calls[0]).toEqual({ method: "applyDirective", args: [principal, "d-1", "apply-1"] });
+  });
+
+  test("maps a ResolutionDeskError to its exact status + code + detail", async () => {
+    const { handler } = makeResolutionHandler({
+      issueDirective: () => { throw Object.assign(new Error("case version compare-and-swap failed"), { name: "ResolutionDeskError", code: "CASE_VERSION_CONFLICT", status: 409, detail: { expected: 0, actual: 1 } }); },
+    });
+    const response = await handler(new Request("http://x/v1/engineer/resolution-cases/case-1/directives", {
+      method: "POST", headers: { ...authorized, "Idempotency-Key": "k" }, body: "{}",
+    }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "CASE_VERSION_CONFLICT", message: "case version compare-and-swap failed", detail: { expected: 0, actual: 1 } } });
+  });
+
+  test("maps a ZodError from the service seam to a typed 400 with issues", async () => {
+    // A ZodError-like the service seam's `.parse` throws (formatIssues reads only issues[].path/message).
+    const zodError = Object.assign(new Error("Invalid input"), { name: "ZodError", issues: [{ path: ["type"], message: "Required" }] });
+    const { handler } = makeResolutionHandler({ issueDirective: () => { throw zodError; } });
+    const response = await handler(new Request("http://x/v1/engineer/resolution-cases/case-1/directives", {
+      method: "POST", headers: { ...authorized, "Idempotency-Key": "k" }, body: "{}",
+    }));
+    expect(response.status).toBe(400);
+    const payload = await response.json() as { error: { message: string; issues: unknown[] } };
+    expect(payload.error.message).toBe("Invalid request body");
+    expect(Array.isArray(payload.error.issues)).toBe(true);
+  });
+
+  test("returns 503 when the resolution desk is not configured", async () => {
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), {});
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/resolution-cases", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(503);
+  });
+
+  test("unknown resolution sub-path is 404", async () => {
+    const { handler } = makeResolutionHandler();
+    const response = await handler(new Request("http://x/v1/engineer/resolution-cases/case-1/bogus", { method: "POST", headers: { ...authorized, "Idempotency-Key": "k" } }));
+    expect(response.status).toBe(404);
+  });
+});

@@ -150,6 +150,27 @@ export function evaluateReverifyEligibility(inputs: ReverifyInputs): ReverifyEli
   return { eligible: true, reason: [...causes][0] as TypedTransientCause };
 }
 
+export interface FailureCauseInput {
+  readonly reasonCode: string;
+  readonly underlyingCause?: string;
+}
+
+/**
+ * P7 (Day 3 pair 2) reverify consumption bridge. Resolve the blocker reasonCode
+ * the reverify law consumes from a durable failure record. A generic
+ * `PHASE3_UNEXPECTED_FAILURE` that carries a typed transient `underlyingCause`
+ * from the closed allowlist surfaces AS that typed cause, so reverify can be
+ * honestly unlocked; an absent or non-allowlisted cause stays
+ * `PHASE3_UNEXPECTED_FAILURE` (reverify refused with `PHASE3_CAUSE_UNTYPED`).
+ * Every other failure passes through unchanged — this bridge only types the
+ * erased Phase-3 catch-all and never downgrades a real defect.
+ */
+export function reverifyBlockerReasonCode(input: FailureCauseInput): string {
+  if (input.reasonCode !== "PHASE3_UNEXPECTED_FAILURE") return input.reasonCode;
+  if (input.underlyingCause && TRANSIENT_CAUSES.has(input.underlyingCause)) return input.underlyingCause;
+  return "PHASE3_UNEXPECTED_FAILURE";
+}
+
 export function isCorrectionEligible(blockers: readonly CanonicalBlocker[]): boolean {
   return blockers.some((blocker) => blocker.kind === "BLOCKING" && classifyReason(blocker.reasonCode) === "CORRECTABLE");
 }

@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 31;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 32;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -2731,4 +2731,16 @@ export const ENGINEER_DATABASE_MIGRATION_31_SQL = `
   CREATE TRIGGER freeze_source_hardening_lineage_v31 BEFORE INSERT ON engineer_run_lineage
     WHEN NEW.relation='OPTIONAL_HARDENING' AND EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.parent_run_id)
     BEGIN SELECT RAISE(ABORT,'source run hardening is frozen by a resolution case'); END;
+`;
+
+/**
+ * P7 Phase-3 typed-cause slot (Day 3 pair 2). A single additive, nullable
+ * column that carries the deterministically classified transient cause a
+ * Phase-3 failure had *before* its raw message was erased. Migration-safe: the
+ * column is nullable and every existing / non-Phase-3 failure record leaves it
+ * NULL, so no prior byte changes and the reverify law only reads it when a
+ * generic `PHASE3_UNEXPECTED_FAILURE` also carries a typed cause.
+ */
+export const ENGINEER_DATABASE_MIGRATION_32_SQL = `
+  ALTER TABLE failure_records ADD COLUMN underlying_cause TEXT;
 `;

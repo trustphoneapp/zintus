@@ -14,7 +14,8 @@ The v14–v30 chain is applied and byte-immutable. Allocation:
 | Version | Owner | Content |
 |---|---|---|
 | v31 | P7 | The four frozen resolution authority tables (cases, directives, events, replacements) + indexes + immutability/projection triggers, exactly as Day 2C freezes them. No fifth table. |
-| v32 | reserved | Standalone checkpoint-v3 (explicitly deferred by Day 2C; no lane may claim it) |
+| v32 | P7 | `failure_records.underlying_cause` typed-cause column (reallocated from checkpoint-v3 by supersession S2; see §5a) |
+| v36 | reserved | Standalone checkpoint-v3 (explicitly deferred by Day 2C; renumbered from v32 by S2) |
 | v33 | P8 | Publication-authority additions layered on the existing v24 lifecycle slice: approval records, publication candidate selections, git operation records, remote receipts, reconciliation records |
 | v34 | P10 | Tenancy: org/actor/connector identity, retention, tenant budget authority columns + tables (additive only; no legacy-row rewrite; backfill = explicit DEFAULT single-tenant org) |
 | v35 | P11 | Attestation storage (provisional; P11 confirms need before claiming) |
@@ -144,6 +145,16 @@ by the UI lane; a missing need is a contract-change request, not a workaround.
 5. §4 correction: spend fields are `used/reserved/ambiguous/remaining` (the
    real `EngineerBudgetSnapshot`); "released" folds into settled/used and is
    not a separate field. The UI renders the four real fields.
+
+**S2 (2026-07-19, Sol, from P7 pair-2 cross-verification):**
+1. v32 is reallocated from the deferred checkpoint-v3 to P7's
+   `failure_records.underlying_cause` typed-cause column (already landed in
+   pair 2 as an additive nullable ALTER, migration-verified safe). Checkpoint-v3
+   moves to v36 reserved. Rationale: checkpoint-v3 is deferred and undesigned,
+   nothing binds the literal v32, and renumbering a landed migration is risk for
+   zero behavioral gain. No lane may claim v36.
+2. `POST .../publications` success response body (P9 open item): frozen as
+   `{publicationId, state}` (the GET state shape plus the id).
 
 ## 6. Lane and integration rules
 

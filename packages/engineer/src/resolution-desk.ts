@@ -57,6 +57,43 @@ export interface CaseCreationInput {
   readonly sourceClassExcluded: boolean;
 }
 
+/**
+ * The immutable plan handed to the executable-replacement factory. The factory
+ * must create a real engineer run at its start state with a fresh manifest
+ * freeze derived from the source manifest + these open blockers, a fresh budget
+ * from the directive's ReplacementBudget, and nothing inherited from the source
+ * (no prior evidence, review, approval, or publication row). Lineage is durably
+ * captured by the `resolution_replacements` row (case -> directive ->
+ * replacementRunId) plus the source binding on the case.
+ */
+export interface ReplacementRunCreationPlan {
+  readonly replacementRunId: string;
+  readonly sourceRunId: string;
+  readonly caseId: string;
+  readonly directiveId: string;
+  readonly kind: "CORRECTED" | "REVERIFY";
+  readonly ownerUserId: string;
+  readonly repositoryId: string;
+  readonly baseCommitSha: string;
+  readonly sourceManifestHash: string;
+  readonly requiredLaneContractHash: string;
+  readonly blockers: CanonicalBlocker[];
+  readonly budget: { maxCostMicrousd: number; maxTokens: number; maxActiveSeconds: number; pricingPolicyDigest: string };
+}
+
+/**
+ * The executable-replacement dispatch seam. The desk calls
+ * `createReplacementRun` on ITS OWN open connection/transaction, strictly
+ * between the fenced `PREPARING` insert and the `READY` flip, so run creation is
+ * atomic with the scaffold: a crash before commit rolls back the run, the
+ * scaffold, and the case transition together — no executable orphan can outlive
+ * it. The factory must be idempotent on `plan.replacementRunId` and must throw
+ * to abort the whole apply.
+ */
+export interface ReplacementRunFactory {
+  createReplacementRun(db: Database, plan: ReplacementRunCreationPlan): void;
+}
+
 export interface ResolutionCaseView {
   caseId: string;
   runId: string;
@@ -96,6 +133,7 @@ export class ResolutionDesk {
     private readonly signingSecret: string,
     private readonly signingKeyId: string,
     private readonly now: () => Date = () => new Date(),
+    private readonly replacementRunFactory?: ReplacementRunFactory,
   ) {
     if (!signingSecret) throw new ResolutionDeskError("SIGNING_AUTHORITY_UNAVAILABLE", "resolution directive signing authority is unavailable", 500);
   }
@@ -352,13 +390,35 @@ export class ResolutionDesk {
         budget.maxCostMicrousd, budget.maxTokens, budget.maxActiveSeconds, budget.pricingPolicyDigest,
         replacementJson, createdAt, createdAt);
 
-      // 3. Fence PREPARING -> READY (the executable-run creation seam runs here
-      //    in the integrated build; the scaffold flips READY only once linked).
+      // 3. Executable replacement dispatch (atomic with the fence). When a
+      //    factory is wired, create the REAL replacement engineer run here —
+      //    between the PREPARING insert and the READY flip, on this same open
+      //    transaction — with a fresh manifest freeze derived from the source
+      //    manifest + open blockers, a fresh budget from the directive, and zero
+      //    inherited evidence/review/approval/publication rows. A crash before
+      //    commit rolls the run + scaffold + case transition back together, so no
+      //    executable orphan can outlive a PREPARING row.
+      if (this.replacementRunFactory) {
+        const planRow = this.db.query(
+          "SELECT source_run_id,owner_user_id,repository_id,base_commit_sha,manifest_hash,required_lane_contract_hash,blockers_json FROM resolution_cases WHERE id=?",
+        ).get(directiveRow.case_id) as {
+          source_run_id: string; owner_user_id: string; repository_id: string; base_commit_sha: string;
+          manifest_hash: string; required_lane_contract_hash: string; blockers_json: string;
+        };
+        this.replacementRunFactory.createReplacementRun(this.db, {
+          replacementRunId, sourceRunId: planRow.source_run_id, caseId: directiveRow.case_id, directiveId, kind,
+          ownerUserId: planRow.owner_user_id, repositoryId: planRow.repository_id, baseCommitSha: planRow.base_commit_sha,
+          sourceManifestHash: planRow.manifest_hash, requiredLaneContractHash: planRow.required_lane_contract_hash,
+          blockers: JSON.parse(planRow.blockers_json) as CanonicalBlocker[], budget,
+        });
+      }
+
+      // 4. Fence PREPARING -> READY (only once the run above is linked).
       const readyAt = this.now().toISOString();
       this.db.query("UPDATE resolution_replacements SET state='READY', updated_at=? WHERE id=? AND state='PREPARING'")
         .run(readyAt, replacementId);
 
-      // 4. Resolve the case APPLYING -> RESOLVED_*.
+      // 5. Resolve the case APPLYING -> RESOLVED_*.
       const resolvedState = kind === "CORRECTED" ? "RESOLVED_CORRECTED" : "RESOLVED_REVERIFIED";
       const resolvedVersion = applyingVersion + 1;
       const applyingRow = this.requireCaseRow(directiveRow.case_id);
@@ -371,6 +431,45 @@ export class ResolutionDesk {
       try { this.db.exec("ROLLBACK"); } catch { /* preserve the original failure */ }
       throw error;
     }
+  }
+
+  // --- Crash recovery (fenced PREPARING orphan resolution) -----------------
+
+  /**
+   * Resolve any committed `PREPARING` replacement to `FAILED` (fail closed) and
+   * mark its linked engineer run terminal so it can never execute. The happy
+   * apply path is a single atomic transaction, so a crash mid-apply rolls back
+   * with no committed PREPARING row; this sweep is the deterministic backstop for
+   * any PREPARING scaffold that did become durable (e.g. a partially-committed
+   * multi-phase future, or a manual/partial state) — it never resurrects a run
+   * or completes an unverified replacement. Returns the replacement run ids it
+   * resolved.
+   */
+  recoverPreparingReplacements(): { resolved: string[] } {
+    const rows = this.db.query("SELECT id,replacement_run_id FROM resolution_replacements WHERE state='PREPARING'")
+      .all() as Array<{ id: string; replacement_run_id: string }>;
+    const resolved: string[] = [];
+    for (const row of rows) {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        const at = this.now().toISOString();
+        const flipped = this.db.query("UPDATE resolution_replacements SET state='FAILED', updated_at=? WHERE id=? AND state='PREPARING'")
+          .run(at, row.id);
+        if (flipped.changes !== 1) { this.db.exec("ROLLBACK"); continue; }
+        const run = this.db.query("SELECT id,state FROM engineer_runs WHERE id=?")
+          .get(row.replacement_run_id) as { id: string; state: string } | null;
+        if (run && run.state !== "FAILED") {
+          this.db.query("UPDATE engineer_runs SET state='FAILED', last_error='resolution replacement recovery: PREPARING orphan failed closed', terminal_at=?, updated_at=? WHERE id=?")
+            .run(at, at, run.id);
+        }
+        this.db.exec("COMMIT");
+        resolved.push(row.replacement_run_id);
+      } catch (error) {
+        try { this.db.exec("ROLLBACK"); } catch { /* preserve the original failure */ }
+        throw error;
+      }
+    }
+    return { resolved };
   }
 
   // --- Reads ---------------------------------------------------------------

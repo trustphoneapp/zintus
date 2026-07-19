@@ -2551,3 +2551,44 @@ unfinished pair has passed.
   untrusted input); companion-aware lineage verifier with no legacy fallback;
   gateway HTTP routes for cases/directives/apply; typed-cause column wiring;
   evidence-export inclusion of the v31 tables.
+
+### Day 3 — P7 pair 2 committed as WIP; four P1 integration blockers tracked (2026-07-19)
+
+- Pair 2 delivered the lineage verifier, B-prime signed source candidate, typed
+  Phase-3 cause (v32, additive nullable — migration-verified safe), and the five
+  gateway routes. Gates green and Fable-reverified (engineer 615, gateway 386,
+  typecheck clean). Committed as WIP because the independent cross-verifier
+  confirmed no P0 (code runs, nothing safety-breaking blocks the commit) — but
+  it is NO-GO FOR INTEGRATION until the four P1 blockers below are closed. These
+  are the integration-ladder entry gate; the merge sequence does not start until
+  they are fixed and Fable-reverified.
+- P1-A (fail-open): `ResolutionLineageVerifier.verify()` returns verified:true
+  for a replacement run that has NO engineer_runs row — it checks only the
+  SOURCE run exists (resolution-lineage.ts:146), never the replacement run's
+  existence/state. Must validate the replacement run exists and is at its own
+  legitimate start/READY state.
+- P1-B (unimplemented seam): `ReplacementRunFactory` has no implementation and
+  is not wired in index.ts; apply creates no real engineer_runs row, so the
+  "real run at start, fresh budget, ZERO inherited evidence" guarantee is
+  undelivered and untestable. Must implement the factory over
+  supervisor.receiveRequest sharing ONE db connection (cross-connection breaks
+  the fenced atomicity), with the zero-inheritance assertion test.
+- P1-C (default-path weakening): `verifySourceCandidate` trusts the
+  artifacts.sha256 row when no byteReader is passed — a same-length byte rewrite
+  returns ok. Reverify apply must pass a byteReader so "re-read every referenced
+  durable byte" holds; make the byte re-hash non-optional on the authority path.
+- P1-D (coverage): seven lineage checks (SOURCE_RUN_MISSING, CASE_HASH_MISMATCH,
+  DIRECTIVE_LINK_MISMATCH, KIND_MISMATCH, CASE_MISSING, DIRECTIVE_MISSING,
+  CASE_NOT_RESOLVED) have zero tests — neutering any turns no test red. Plus
+  source-candidate SIGNING_AUTHORITY_UNAVAILABLE. Add targeted rejection tests.
+- P2 notes carried: signature.keyId is unauthenticated (single-secret today,
+  silent hole under future rotation — bind keyId into the signed content);
+  recoverPreparingReplacements guards on state!=="FAILED" and would
+  double-terminalize a SUCCEEDED run in a future partially-committed path (guard
+  on non-terminal only); applyDirective idempotency-key is validated but dedup
+  is by directive_id. Refuted (verifier holds): cross-case swap, canonical-JSON
+  collision, TTL boundary, quiescence-vs-Day-2C consistency, v32 mechanical
+  migration safety.
+- Numbering ruling S2 (contract doc): v32 reallocated to the typed-cause column;
+  checkpoint-v3 renumbered to v36 reserved. POST publications success body
+  frozen as {publicationId, state}.

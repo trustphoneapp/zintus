@@ -137,6 +137,13 @@ export const FailureRecordSchema = z.object({
   fingerprint: HashSchema,
   evidenceIds: z.array(IdentifierSchema),
   retryable: z.boolean(),
+  // P7 (v32): the typed underlying cause deterministically classified *before*
+  // the raw Phase-3 message is erased. Optional and migration-safe — legacy and
+  // non-Phase-3 records omit it, so their canonical bytes are unchanged. When
+  // present it carries the closed transient-cause vocabulary the reverify law
+  // consumes; a generic `PHASE3_UNEXPECTED_FAILURE` with no typed cause stays
+  // reverify-ineligible (`PHASE3_CAUSE_UNTYPED`).
+  underlyingCause: z.string().regex(/^[A-Z][A-Z0-9_]{1,127}$/).optional(),
   createdAt: TimestampSchema,
 }).strict();
 

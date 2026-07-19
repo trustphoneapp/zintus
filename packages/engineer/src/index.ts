@@ -71,3 +71,8 @@ export * from "./runtime-budget.js";
 export * from "./post-verification-risk.js";
 export * from "./state-machine.js";
 export * from "./supervisor.js";
+// P7 Developer Resolution Desk (v31/v32).
+export * from "./resolution-case.js";
+export * from "./resolution-desk.js";
+export * from "./resolution-lineage.js";
+export * from "./resolution-source-candidate.js";
