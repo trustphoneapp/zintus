@@ -50,6 +50,7 @@ import {
   EngineerSupervisor,
   GitWorkspaceManager,
   GitHubGitService,
+  GitPublicationMechanics,
   gitCommitLockfileHash,
   OpenAIResponsesTransport,
   OfflineDependencyBundle,
@@ -76,7 +77,6 @@ import { loadEngineerPromptCacheAuthority } from "./engineer-prompt-cache-author
 import { loadEngineerResolutionSigningAuthority } from "./engineer-resolution-authority.js";
 import type { EngineerResolutionDeskFacade, EngineerPublicationAuthorityFacade } from "./handler.js";
 import { createEngineerPublicationAuthorityFacade } from "./engineer-publication-facade.js";
-import { createBranchPrActuator } from "./engineer-publication-actuator.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -516,32 +516,74 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     // P8 publication-authority service, constructed on the ledger's live
     // connection with the REAL replacement-lineage verifier (bound inside
     // createPublicationAuthorityService). The credentialed effect seams
-    // (preflight / credentialProvider / actuator) are supplied here. The actuator
-    // is the REAL credentialed GitHub branch/PR effect (createBranchPrActuator
-    // over the shared engineerGitService); DISPATCH is committed durably before
-    // the remote call, so a crash never re-issues it (boot recovery parks
-    // RECONCILING). The [HUMAN] credential boundary is enforced in the facade:
-    // when no GitHub token is configured, dispatch is withheld with a 503 and the
-    // publication stays PREFLIGHT (re-driveable once GitHub is connected).
+    // (preflight / credentialProvider / actuator) are supplied here by the
+    // AUTHORITY-FREE GitPublicationMechanics (packages/engineer): P8 owns the
+    // approval/state/attestation authority and drives these pure Git mechanics
+    // for the effect — REAL protected-base preflight, base-SHA recheck, rich PR
+    // body, deterministic branch/push/PR, existing-PR discovery, and remote
+    // reconciliation. It NEVER invokes the legacy EngineerPublicationManager.
+    // DISPATCH is committed durably before the remote call, so a crash never
+    // re-issues it (boot recovery parks RECONCILING). The [HUMAN] credential
+    // boundary is enforced in the facade: when no GitHub token is configured,
+    // dispatch is withheld with a 503 and the publication stays PREFLIGHT
+    // (re-driveable once GitHub is connected).
     if (publicationAuthorityReady) {
+      const publicationDiffForRun = (runId: string): string => {
+        const sandbox = engineerExecution?.getSandbox(runId);
+        if (!sandbox) {
+          const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF" && item.trusted).at(-1);
+          if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
+          return (engineerSupervisor.isOptionalHardeningChild(runId)
+            ? engineerArtifactStore.readVerifiedExact(artifact) : engineerArtifactStore.read(artifact)).toString("utf8");
+        }
+        return workspaceManager.diff(sandbox.workspace);
+      };
+      const publicationDeskConnection = engineerSupervisor.resolutionDeskConnection();
+      const gitPublicationMechanics = new GitPublicationMechanics({
+        gitService: engineerGitService,
+        // repositoryId -> durable repository reference (owner/name/provider/base
+        // branch) via the latest run bound to it. Preflight overrides the base
+        // commit with the approval's and reads the live remote head itself.
+        resolveRepository: (repositoryId) => {
+          try {
+            const row = publicationDeskConnection
+              .query("SELECT id FROM engineer_runs WHERE repository_id=? ORDER BY created_at DESC, id DESC LIMIT 1")
+              .get(repositoryId) as { id: string } | null;
+            if (!row) return null;
+            return engineerSupervisor.getRun(row.id).repository;
+          } catch {
+            return null;
+          }
+        },
+        // Server-derived run context + rich PR-body narrative from trusted
+        // records only (never Builder text).
+        resolvePublicationContext: (runId) => {
+          try {
+            const run = engineerSupervisor.getRun(runId);
+            const manifest = engineerSupervisor.getManifest(runId);
+            const evidence = engineerSupervisor.getPublicationEvidence(runId);
+            return {
+              repository: run.repository,
+              title: run.requestNormalized || run.requestOriginal,
+              narrative: {
+                requestNormalized: run.requestNormalized ?? "",
+                requestOriginal: run.requestOriginal,
+                riskTier: run.riskTier,
+                evidenceBundleHash: evidence.evidenceBundleHash,
+                acceptanceCriteria: manifest?.acceptanceCriteria.map((item) => ({ statement: item.statement })) ?? [],
+                diff: publicationDiffForRun(runId),
+                claims: engineerSupervisor.listClaimEvidence(runId).map((claim) => ({ status: claim.status, claim: claim.claim })),
+              },
+            };
+          } catch {
+            return null;
+          }
+        },
+      });
       engineerPublicationAuthorityService = engineerSupervisor.createPublicationAuthorityService({
-        preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+        preflight: gitPublicationMechanics.preflightProbe,
         credentialProvider: { getPublicationCredentials: async () => ({ token: await currentGithubToken(false) }) },
-        actuator: createBranchPrActuator({
-          gitService: engineerGitService,
-          resolveRunContext: (runId) => {
-            try {
-              const run = engineerSupervisor.getRun(runId);
-              return {
-                repository: run.repository,
-                title: run.requestNormalized || run.requestOriginal,
-                body: `Zintus Engineer verified publication for run ${runId}.`,
-              };
-            } catch {
-              return null;
-            }
-          },
-        }),
+        actuator: gitPublicationMechanics.createActuator(),
       });
     }
     recoverHardeningPaidCalls = () => {

@@ -3063,3 +3063,28 @@ unfinished pair has passed.
   real resultTreeHash source (git rev-parse tree; prod wires ()=>null so REQUIRED
   attestation fails closed until built), real GitHub actuator creds. R5 next:
   wire audit-export route, retire legacy publication lane (§0), align OpenAPI/UI.
+
+### R5B — GitPublicationMechanics extracted under P8 (Fable-gated, 2026-07-19)
+
+- Authority-free git-publication-mechanics.ts (packages/engineer) ports the legacy
+  manager's Git mechanics with ZERO approval/state/attestation/authority (Fable
+  confirmed: no EngineerPublicationManager import/call, only descriptive comments).
+  Wired UNDER P8's actuator at index.ts:542, replacing the echo-stub preflight
+  (was `probe:(input)=>({repositoryId,baseCommitSha})`) and the simple-string PR body.
+- Ported + Fable-mutation-verified: (1) REAL protected-base preflight
+  (evaluateBranchProtection: protected/required-reviews/approving-count/
+  stale-approval-invalidation/status-checks/strict-checks/admin-enforcement) —
+  neutering it (return [] always) turns 13 tests red, restore clean; a paired
+  test proves the echo-stub ACCEPTS an unprotected base while the mechanics
+  REJECTS with zero publication rows; (2) base-SHA recheck → PreflightMismatch +
+  approval invalidated + actuator FAILED pre-git; (3) rich PR body
+  (synthesizePublicationPrBody: request/risk/evidence-hash/criteria/files/claims/
+  diff) not the old simple string; (4) existing-PR discovery → deterministic PR on
+  re-dispatch, createPullRequest never called (no duplicate); (5) ambiguous
+  reconciliation never auto-redispatches. Gates engineer 831/gateway 442/typecheck/
+  diff. [HUMAN] boundary intact (dispatch 503 without token).
+- HONEST residuals → later slices: legacy manager still exists+wired (R5A);
+  createBranchPrActuator now dead-in-prod (kept, cleanup); P8 authority/approval/
+  attestation unchanged (R5C); the joint-integration test still uses its own echo
+  preflight (R5E must drive the real mechanics); real GitHub API end-to-end is
+  [HUMAN] keyed-smoke unverified (mechanics driven with a fake GitService).
