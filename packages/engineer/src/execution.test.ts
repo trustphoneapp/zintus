@@ -165,6 +165,28 @@ function records(root: string, runId: string, sha: string): {
 }
 
 describe("Phase 2 immutable artifacts", () => {
+  test("rejects tampered Resolution Desk lineage before queue state or provider transport", () => {
+    let runReads = 0;
+    let transitions = 0;
+    let transports = 0;
+    const supervisor = {
+      isOptionalHardeningChild: () => false,
+      listArtifacts: () => [],
+      resolutionCorrectedRunDirective: () => { throw new Error("replacement lineage is tampered"); },
+      getRun: () => { runReads += 1; throw new Error("run must not be read after failed authority"); },
+      transition: () => { transitions += 1; throw new Error("transition must not be reached"); },
+    };
+    const manager = new EngineerExecutionManager({
+      supervisor: supervisor as never,
+      sandboxManager: {} as never,
+      artifactStore: {} as never,
+      repositoryRootFor: () => "",
+      transportForRun: () => { transports += 1; throw new Error("provider must not be reached"); },
+    });
+    expect(() => manager.enqueue("tampered-corrected-run")).toThrow("replacement lineage is tampered");
+    expect({ runReads, transitions, transports }).toEqual({ runReads: 0, transitions: 0, transports: 0 });
+  });
+
   test("stores content-addressed bytes and detects later tampering", () => {
     const root = temporaryRoot();
     const store = new LocalArtifactStore({ root: join(root, "artifacts"), idFactory: () => "artifact-1" });

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  createCorrectedEngineerRun,
   createEngineerRun,
   engineerDecision,
   resolveHumanEngineerReview,
@@ -646,16 +645,9 @@ export default function EngineerPage() {
     });
   };
 
-  const createCorrectedRun = async () => {
+  const openResolutionDesk = () => {
     if (!run || correctionRecovery !== "corrected-run") return;
-    await withRunMutation("create-corrected-run", async () => {
-      setError(null);
-      try {
-        const corrected = await createCorrectedEngineerRun(run.runId);
-        await openRun(corrected.replacementRun.runId);
-        setPlan(corrected.plan);
-      } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create a corrected run"); }
-    });
+    window.location.assign(`/engineer/resolution?run=${encodeURIComponent(run.runId)}`);
   };
 
   const prepareNewBoundedRun = () => {
@@ -952,7 +944,7 @@ export default function EngineerPage() {
       {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human approval</span><h2>Approve the exact machine-verified result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><ApprovalDecisionControls disabled={approvalControlsDisabled} candidateChanged={!candidateMatchesApproval || candidateStale} pendingAction={pendingAction} onApprove={() => void decide("approve")} onRequestChanges={() => void decide("request-changes")} onExtend={() => void extendApproval()} onReject={() => void decide("reject")} /></section> : null}
       {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Reviewer evidence needs recovery</h2><p>This run has not produced an authorized verified candidate. Retry only an already-recorded failed verification or Reviewer attempt, or reject the run. Human review cannot bypass machine verification.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions">{humanReviewCanRetry ? <button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("retry")}>{pendingAction === "human-review:retry" ? "Retrying review…" : "Retry reviewer from checkpoint"}</button> : null}<button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>{pendingAction === "human-review:reject" ? "Rejecting…" : "Reject candidate"}</button></div></section> : null}
       {latestState === "REVIEW_APPROVED" && !approval ? <PublicationUnavailableNotice /> : null}
-      {correctionRecovery === "corrected-run" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{pendingAction === "create-corrected-run" ? "Creating…" : "Create corrected run"}</button></div></section> : null}
+      {correctionRecovery === "corrected-run" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Resolve this run</h2><p>Open the Resolution Desk to inspect canonical blockers, choose a bounded correction budget, and preserve this immutable audit record.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={openResolutionDesk}>Open Resolution Desk</button></div></section> : null}
       {correctionRecovery === "new-bounded-run" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">New bounded request required</span><h2>Revise and start a fresh run</h2><p>This failure has no safe structured patch to carry forward automatically. Zintus will preload the original request so you can narrow its scope and review a new budget before any model call.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={prepareNewBoundedRun}>Prepare new bounded request</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}

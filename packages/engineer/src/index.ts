@@ -77,6 +77,7 @@ export * from "./state-machine.js";
 export * from "./supervisor.js";
 // P7 Developer Resolution Desk (v31/v32).
 export * from "./resolution-case.js";
+export * from "./resolution-planning-context.js";
 export * from "./resolution-case-derivation.js";
 export * from "./resolution-desk.js";
 export * from "./resolution-lineage.js";

@@ -287,7 +287,7 @@ export function ResolutionDecisions(props: ResolutionDecisionsProps) {
   const { resolutionCase, pendingAction, disabled, correctedEstimate, budgetValue, onBudgetChange, pricingPolicyDigestAvailable, onCorrected, onReverify, onRejectClose } = props;
   const withinCeiling = projectsWithinCumulativeCeiling(resolutionCase.spending, budgetValue.maxCostUsd);
   const correctedBlocked = disabled || !resolutionCase.correctionEligible || !withinCeiling || !pricingPolicyDigestAvailable;
-  const reverifyBlocked = disabled || !resolutionCase.reverifyEligibility.eligible;
+  const reverifyBlocked = true;
 
   return (
     <section className="engineer-card engineer-resolution-decisions" aria-labelledby="resolution-decisions-heading">
@@ -309,6 +309,7 @@ export function ResolutionDecisions(props: ResolutionDecisionsProps) {
           <div className="engineer-decision-option-title"><strong>Reverify</strong></div>
           <p>Re-runs verification only, from the closed typed-transient allowlist. No corrective changes are made and no new budget is required.</p>
           <ReverifyEligibilityNotice eligibility={resolutionCase.reverifyEligibility} />
+          <p className="engineer-muted">Coming next: reverify remains disabled until the retained candidate checkpoint is cryptographically bound to the replacement run.</p>
           <button type="button" disabled={reverifyBlocked} onClick={onReverify}>
             {pendingAction === "resolution:reverify" ? "Applying…" : "Create reverify run"}
           </button>

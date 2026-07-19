@@ -198,7 +198,7 @@ describe("directive creation (signed, CAS, replay / conflict)", () => {
   test("refuses a reverify directive for an ineligible case", () => {
     const view = openCase([correctable]);
     expect(() => fixture.desk.issueDirective(view.caseId, { type: "CREATE_REVERIFY_RUN", caseVersion: 0, sourceRunVersion: 4 }, "idem-rv"))
-      .toThrow(/reverify is ineligible/);
+      .toThrow(/retained candidate authority/);
   });
 });
 
@@ -216,13 +216,14 @@ describe("directive application (fenced replacement scaffold)", () => {
     expect(fixture.desk.getCase(view.caseId).state).toBe("RESOLVED_CORRECTED");
   });
 
-  test("a reverify directive resolves as RESOLVED_REVERIFIED", () => {
+  test("an otherwise eligible reverify remains unavailable without retained candidate authority", () => {
     const view = fixture.desk.createCase(baseCaseInput(fixture, [transient], { preVerificationCandidateDigest: sha256({ candidate: 1 }) }));
     expect(view.reverifyEligibility).toEqual({ eligible: true, reason: "PROVIDER_REQUEST_TIMEOUT" });
-    const { directive } = fixture.desk.issueDirective(view.caseId, { type: "CREATE_REVERIFY_RUN", caseVersion: 0, sourceRunVersion: 4 }, "idem-rv");
-    const applied = fixture.desk.applyDirective(directive.directiveId, "apply-rv");
-    expect(applied.state).toBe("READY");
-    expect(fixture.desk.getCase(view.caseId).state).toBe("RESOLVED_REVERIFIED");
+    expect(() => fixture.desk.issueDirective(view.caseId, {
+      type: "CREATE_REVERIFY_RUN", caseVersion: 0, sourceRunVersion: 4,
+    }, "idem-rv")).toThrow(/retained candidate authority/);
+    expect(fixture.db.query("SELECT COUNT(*) AS c FROM resolution_replacements").get()).toEqual({ c: 0 });
+    expect(fixture.desk.getCase(view.caseId).state).toBe("OPEN");
   });
 
   test("concurrent applies resolve to exactly one replacement (the loser replays)", () => {

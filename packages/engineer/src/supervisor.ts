@@ -512,6 +512,21 @@ export class EngineerSupervisor {
     if (proposal && sha256(proposal.manifest) !== sha256(content)) {
       throw new ManifestIntegrityError("manifest does not match the persisted plan proposal");
     }
+    // Corrected replacements inherit immutable authority from the source
+    // manifest. Reconstruct that authority from the signed Resolution Desk
+    // lineage immediately before the first durable freeze; the Planner's
+    // proposal is evidence, never authority to broaden or weaken the source.
+    const correction = this.ledger.resolutionCorrectedRunDirective(run.runId);
+    if (correction && (
+      content.request.normalized !== correction.requestNormalized ||
+      sha256(content.acceptanceCriteria) !== correction.acceptanceCriteriaHash ||
+      sha256(content.testPlan) !== sha256(correction.testPlan) ||
+      sha256(content.allowedPaths) !== sha256(correction.allowedPaths) ||
+      !correction.deniedPaths.every((path) => content.deniedPaths.includes(path)) ||
+      sha256(content.allowedCommands) !== sha256(correction.allowedCommands)
+    )) {
+      throw new ManifestIntegrityError("corrected manifest does not preserve the signed source contract");
+    }
     if (content.riskTier !== "LOW" && !content.humanGateRequired) {
       throw new ManifestIntegrityError("medium, high, and critical manifests require a human gate");
     }
@@ -899,6 +914,7 @@ export class EngineerSupervisor {
    * confined to this process and never handed to a model or sandbox.
    */
   configureResolutionSigningSecret(secret:string):void{this.ledger.configureResolutionSigningSecret(secret);}
+  resolutionCorrectedRunDirective(runId:string){return this.ledger.resolutionCorrectedRunDirective(runId);}
   /**
    * P11: bind the gateway-held confined signing secret so a durable APPROVE
    * atomically emits + persists a signed provenance attestation. Composition-root

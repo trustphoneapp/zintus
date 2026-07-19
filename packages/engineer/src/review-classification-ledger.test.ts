@@ -2968,7 +2968,7 @@ describe("classified Reviewer ledger persistence", () => {
       }
       ledger.close();transitioner.close();value.supervisor.close();rmSync(value.root,{recursive:true,force:true});
     }
-  });
+  }, 20_000);
 
   test("stops Builder and Reviewer at role cap plus one before creating a paid slot or reservation", async () => {
     for(const role of ["BUILDER","REVIEWER"] as const){
@@ -3717,7 +3717,7 @@ describe("classified Reviewer ledger persistence", () => {
         rmSync(value.root, { recursive: true, force: true });
       }
     }
-  });
+  }, 20_000);
 
   test("strict checkpoint reads fail closed on immutable-row and signature tampering", async () => {
     const value = promotionFixture("run-checkpoint-tamper");

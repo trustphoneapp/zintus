@@ -16,9 +16,11 @@ import {
   LocalArtifactStore,
   ResolutionDesk,
   ResolutionReplacementRunFactory,
+  TaskManifestSchema,
   VerifiedCandidateIntegrityError,
   deriveCaseCreationInput,
   serverPricingPolicyDigest,
+  sha256,
   type ApprovalRequestRecord,
   type EngineerRun,
 } from "@zintus/engineer";
@@ -2995,7 +2997,10 @@ describe("P7 Developer Resolution Desk HTTP routes", () => {
       issueDirective: method("issueDirective", {}),
       applyDirective: method("applyDirective", {}),
     } as unknown as GatewayHandlerDeps["resolutionDesk"];
-    const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
+    const engineerRuns = {
+      principal: () => principal,
+      readiness: () => ({ state: "READY" }),
+    } as unknown as GatewayHandlerDeps["engineerRuns"];
     return { handler: makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns, resolutionDesk: desk }), calls };
   };
 
@@ -3078,6 +3083,18 @@ describe("P7 Developer Resolution Desk HTTP routes", () => {
     const response = await handler(new Request("http://x/v1/engineer/resolution-cases/case-1/bogus", { method: "POST", headers: { ...authorized, "Idempotency-Key": "k" } }));
     expect(response.status).toBe(404);
   });
+
+  test("the superseded direct corrected-run endpoint is permanently 410", async () => {
+    const { handler } = makeResolutionHandler();
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/corrected-run", {
+      method: "POST", headers: authorized,
+    }));
+    expect(response.status).toBe(410);
+    expect(await response.json()).toEqual({
+      error: { code: "GONE", message: "corrected-run is superseded by resolution cases" },
+      successor: "resolution-cases",
+    });
+  });
 });
 
 describe("P7 Resolution Desk — REAL create -> issue -> apply end-to-end (no 503)", () => {
@@ -3090,21 +3107,36 @@ describe("P7 Resolution Desk — REAL create -> issue -> apply end-to-end (no 50
     const db = supervisor.resolutionDeskConnection();
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "resolution-e2e-owner" });
     const now = "2026-07-19T00:00:00.000Z";
+    const sourceManifestContent = {
+      manifestVersion: 1 as const,
+      runId: "src-run",
+      repository: { repositoryId: "repo-1", provider: "local" as const, owner: "local", name: "repo", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: { original: "build the thing", normalized: "build the thing" },
+      acceptanceCriteria: [{ criterionId: "source-test", statement: "The source test passes.", verificationMethod: "Run the frozen source test.", priority: "MUST" as const }],
+      testPlan: [{ testId: "source-test", criterionIds: ["source-test"], type: "REGRESSION" as const, description: "Run the source test.", command: "bun test" }],
+      allowedPaths: ["packages/engineer/**"], deniedPaths: [".env*"], allowedCommands: ["bun test"], prohibitedCommands: ["git push"],
+      riskTier: "MEDIUM" as const, humanGateRequired: true,
+      retryBudgets: { sameFailureAttempts: 2, builderRepairAttempts: 4, reviewerFixAttempts: 2, plannerRestarts: 1, sandboxProvisioningAttempts: 3, transientModelAttempts: 3 },
+      timeBudgetSeconds: 1_200, tokenBudget: 50_000, costBudgetUsd: 5, createdAt: now,
+    };
+    const sourceManifest = TaskManifestSchema.parse({ ...sourceManifestContent, manifestHash: sha256(sourceManifestContent) });
     // Durable terminal source run with a correctable required-test failure.
     db.query("INSERT INTO users(id,email,created_at,updated_at) VALUES (?,NULL,?,?)").run(principal.ownerId, now, now);
     db.query("INSERT INTO repository_connections(id,user_id,provider,owner,name,created_at,updated_at) VALUES ('repo-1',?,'local','local','repo',?,?)").run(principal.ownerId, now, now);
     db.query(`INSERT INTO engineer_runs(id,user_id,repository_id,base_branch,base_commit_sha,request_original,request_normalized,state,state_version,manifest_hash,risk_tier,human_gate_required,created_at,updated_at)
       VALUES ('src-run',?,'repo-1','main',?,'build the thing','build the thing','VERIFICATION_INCOMPLETE',4,?,'MEDIUM',1,?,?)`)
-      .run(principal.ownerId, "a".repeat(40), `sha256:${"1".repeat(64)}`, now, now);
+      .run(principal.ownerId, "a".repeat(40), sourceManifest.manifestHash, now, now);
     db.query(`INSERT INTO run_budgets(run_id,cost_limit_usd,token_limit,time_limit_seconds,lifetime_cost_limit_usd,lifetime_token_limit,lifetime_time_limit_seconds,status,created_at,updated_at)
       VALUES ('src-run',5,50000,3600,20,1000000,86400,'ACTIVE',?,?)`).run(now, now);
-    db.query("INSERT INTO task_manifest_versions(id,run_id,version,manifest_hash,manifest_json,created_at) VALUES ('tmv-src','src-run',1,?,'{}',?)")
-      .run(`sha256:${"1".repeat(64)}`, now);
+    db.query("INSERT INTO task_manifest_versions(id,run_id,version,manifest_hash,manifest_json,created_at) VALUES ('tmv-src','src-run',1,?,?,?)")
+      .run(sourceManifest.manifestHash, JSON.stringify(sourceManifest), now);
     db.query(`INSERT INTO failure_records(id,run_id,failure_class,reason_code,fingerprint,evidence_ids_json,retryable,created_at)
       VALUES ('fail-1','src-run','TEST_FAILURE','REQUIRED_TEST_FAILED',?, '[]',0,?)`).run(`sha256:${"2".repeat(64)}`, now);
 
     const pricingDigest = serverPricingPolicyDigest();
-    const desk = new ResolutionDesk(db, "e2e-signing-secret", "sha256:" + "3".repeat(64), () => new Date(), new ResolutionReplacementRunFactory());
+    const signingSecret = "resolution-e2e-signing-secret-at-least-32-bytes";
+    const desk = new ResolutionDesk(db, signingSecret, "sha256:" + "3".repeat(64), () => new Date(), new ResolutionReplacementRunFactory());
+    supervisor.configureResolutionSigningSecret(signingSecret);
     const resolutionDesk = {
       createCase: (_p: unknown, runId: string) => desk.createCase(deriveCaseCreationInput(db, runId, { pricingPolicyDigest: pricingDigest })),
       listCases: (_p: unknown, runId: string) => desk.listCases(runId),
@@ -3114,11 +3146,11 @@ describe("P7 Resolution Desk — REAL create -> issue -> apply end-to-end (no 50
     } as unknown as GatewayHandlerDeps["resolutionDesk"];
     const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
     const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns, resolutionDesk });
-    return { handler, db, root, supervisor, pricingDigest };
+    return { handler, db, root, supervisor, pricingDigest, sourceManifest };
   }
 
   test("create (201) -> issue corrected (201) -> apply (200) creates a real replacement run, no 503", async () => {
-    const { handler, db, root, supervisor, pricingDigest } = realHandler();
+    const { handler, db, root, supervisor, pricingDigest, sourceManifest } = realHandler();
     try {
       // 1. Create the case from the durable terminal run.
       const createRes = await handler(new Request("http://x/v1/engineer/runs/src-run/resolution-cases", { method: "POST", headers: authorized }));
@@ -3151,6 +3183,17 @@ describe("P7 Resolution Desk — REAL create -> issue -> apply end-to-end (no 50
       expect(replacement!.state).toBe("REQUEST_RECEIVED");
       const inheritedFailures = db.query("SELECT COUNT(*) AS n FROM failure_records WHERE run_id=?").get(applied.replacementRunId) as { n: number };
       expect(Number(inheritedFailures.n)).toBe(0);
+      expect(db.query("SELECT COUNT(*) AS n FROM task_manifest_versions WHERE run_id=?").get(applied.replacementRunId)).toEqual({ n: 0 });
+      const correctedAuthority = (supervisor as EngineerSupervisor & {
+        resolutionCorrectedRunDirective(runId: string): unknown;
+      }).resolutionCorrectedRunDirective(applied.replacementRunId);
+      expect(correctedAuthority).toMatchObject({
+        sourceRunId: "src-run",
+        replacementRunId: applied.replacementRunId,
+        sourceManifestHash: sourceManifest.manifestHash,
+        acceptanceCriteria: sourceManifest.acceptanceCriteria,
+        testPlan: sourceManifest.testPlan,
+      });
 
       // Idempotent apply replay returns the same replacement, still 200.
       const applyReplay = await handler(new Request(`http://x/v1/engineer/resolution-directives/${directiveId}/apply`, {

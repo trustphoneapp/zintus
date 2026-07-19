@@ -2915,3 +2915,87 @@ unfinished pair has passed.
   is wired to a real git tree source. [HUMAN] tail unchanged: KMS/Sigstore, GitHub
   App creds, real result-tree-hash recording, 2nd identity for SoD E2E, final
   human sign-off. P7-P12 build reaches a defensible release boundary.
+
+### R0 rebaseline — P12 GO revoked / remediation reopened (2026-07-19)
+
+- This entry supersedes the release posture above without rewriting the historical
+  audit record. Current ruling: **BLOCK / development and testing only** until the
+  R1-R6 remediation plan completes and receives a fresh independent release audit.
+- Fresh full-suite evidence at `babeef70` was 784 pass / 2 fail. Both failures were
+  deterministic integration matrices whose real runtimes (approximately 5.4s and
+  5.8s) exceeded Bun's default 5s per-test timeout; labeling either one a known
+  environmental flake was inaccurate. R0 assigns the same explicit 20s bound used
+  by adjacent exhaustive matrices and retains every assertion and mutation case.
+- Release-blocking rebaseline findings remain outside R0: the replacement-run
+  manifest lifecycle is not executable end to end; the live approval client and
+  gateway schemas disagree; publication candidate repository/lineage authority is
+  not fully server-derived; publication dispatch/reconciliation and durable UI
+  recovery are incomplete; multi-tenant DAL/migration/attestation export integrity
+  has open findings; and the primary Engineer UI does not expose a truthful complete
+  Resolution/Publication journey. Those are tracked in dependency order as R1-R6.
+- No publication, production-readiness, separation-of-duties, multi-tenant
+  isolation, or provenance-attestation completion claim may rely on the superseded
+  P12 GO. A new GO requires green complete suites, adversarial restart/authority
+  tests, independent review, and live browser traversal.
+- R0 verification after assigning explicit bounds to the two exhaustive matrices:
+  **786/786 Engineer tests passed, 0 failed, 5,662 assertions** in 217.66s. Focused
+  facade tests passed 7/7; Engineer and Gateway TypeScript checks passed. This
+  closes only the R0 test-reliability and release-truth slice; it does not alter the
+  R1-R6 BLOCK ruling.
+
+### R1 corrected replacement vertical — executable; reverify superseded closed (2026-07-19)
+
+- This entry supersedes the older broad statement that both corrected and
+  reverify directives create executable replacement runs. R1 wires only
+  `CREATE_CORRECTED_RUN` end to end: signed Resolution Desk directive, one
+  durable REQUEST_RECEIVED child, real Supervisor normalize/PlanningManager
+  proposal, valid TaskManifest v1 freeze, Required Lane contract, restart, and
+  execution admission. The direct `/corrected-run` endpoint remains 410.
+- Planning reconstructs its immutable correction from the signed lineage,
+  hash-bound replacement planning context, and source TaskManifest. Freeze and
+  execution revalidate that authority. Adversarial tests cover directive-field
+  tampering, mutation between planning and freeze with zero manifest/contract
+  writes, mutation before execution with zero transport/state writes, and
+  duplicate/post-restart apply replaying exactly one replacement.
+- `CREATE_REVERIFY_RUN` is deliberately unavailable in R1, even when the case's
+  classification says the transient cause is otherwise eligible. The product
+  does not yet bind the retained pre-verification B-prime candidate/checkpoint
+  to a reverify child. Issue fails with `NO_PRE_VERIFICATION_CANDIDATE`, creates
+  no directive/replacement/run/budget/model rows, and the UI renders the action
+  disabled with this limitation. It may be reopened only with cryptographically
+  bound retained-candidate authority and restart/tamper coverage.
+- Focused evidence: Resolution/lineage/replacement 58/58, web Resolution client
+  and UI 57/57, Planning 15/15, Execution 59/59, real Gateway P7 vertical and
+  retired-endpoint regressions pass; Engineer, Gateway, and Web typechecks pass.
+  R1 does not restore the revoked release GO; R2-R6 remain open.
+
+### R0+R1 — truthful baseline + corrected-run recovery (Fable-gated, 2026-07-19)
+
+- Prior P12 "GO" REVOKED (rebaseline found real browser-to-gateway breaks the
+  internal audits did not cover). Fable re-verified the rebaseline claims
+  read-only and confirmed them substantially true (invalid replacement manifest,
+  browser-supplied selection authority, retired-endpoint UI call, attestation
+  export table-name mismatch, single-secret reviewer identity).
+- R0: two full-suite timeouts were test-design (12- and 20-fixture matrices under
+  Bun's 5s default) — given explicit per-test bounds, ZERO assertions weakened.
+  Full engineer suite now 795/0 with no timeout. Doc-truth corrections applied.
+  The facade "binary" git flag is a false positive (0 NUL bytes, 23 UTF-8 chars,
+  typechecks clean).
+- R1: the corrected-run lane is repaired at the ROOT — the factory no longer
+  writes a fake manifest_json; it stops inserting task_manifest_versions and lets
+  the ordinary normalize->plan->freeze lifecycle own the first schema-valid
+  TaskManifest v1. Restart rehydrates the valid v1 + verified lineage; apply is
+  idempotent post-restart. Directive integrity (canonical JSON + hash + HMAC +
+  type + budget) is revalidated before any replacement write — Fable
+  mutation-verified: neutering the DIRECTIVE_INTEGRITY_FAILED guard turns 5
+  tamper variants red, restore clean. Reverify is honestly fail-closed (409
+  NO_PRE_VERIFICATION_CANDIDATE) until B-prime authority is wired. Main UI now
+  opens the Resolution Desk (/engineer/resolution) instead of the retired
+  corrected-run 410 endpoint. Gates: engineer 795, gateway 410, web 569,
+  typecheck + diff clean. Lineage + immutable source contract revalidated at
+  planning, freeze, and execution boundaries before money/tools.
+- NEXT: R2 freezes the publication-authority contract (org/repo ownership,
+  candidate/checkpoint ids, approval identity, publication/attestation event
+  schemas, audit-export) AND closes the R2 security blocker — candidate,
+  repository, SHA, lineage and ownership must derive from durable server records,
+  never the browser (facade selectCandidate spreads the client body today).

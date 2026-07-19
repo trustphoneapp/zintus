@@ -756,7 +756,12 @@ export class EngineerExecutionManager {
     const directives = this.options.supervisor.listArtifacts(runId)
       .filter((artifact) => artifact.type === "CORRECTED_RUN_DIRECTIVE" && artifact.trusted &&
         artifact.producerType === "SYSTEM" && artifact.producerId === "engineer-correction-policy");
-    if (directives.length === 0) return [];
+    if (directives.length === 0) {
+      // Resolution Desk replacements do not mint a parallel pseudo-manifest
+      // or legacy artifact. Reconstruct their correction authority from the
+      // signed lineage and hash-bound planning context on every trust boundary.
+      return this.options.supervisor.resolutionCorrectedRunDirective(runId)?.actions ?? [];
+    }
     if (directives.length !== 1) throw new Error("corrected run must have exactly one trusted correction directive");
     const directive = CorrectedRunDirectiveSchema.parse(JSON.parse(this.options.artifactStore.read(directives[0]!).toString("utf8")));
     if (directive.replacementRunId !== runId) throw new Error("corrected-run directive is bound to another run");
@@ -778,6 +783,10 @@ export class EngineerExecutionManager {
 
   enqueue(runId: string) {
     this.assertOptionalHardeningPromptAuthority(runId);
+    // Verify corrected-run lineage before mutating state or admitting any paid
+    // work. A tampered replacement therefore remains PLAN_FROZEN with zero
+    // provider, sandbox, or tool activity.
+    this.correctionActionsForRun(runId);
     const run = this.options.supervisor.getRun(runId);
     if (run.state === "QUEUED") return run;
     if (run.state !== "PLAN_FROZEN" || !run.manifestHash) {
@@ -795,6 +804,8 @@ export class EngineerExecutionManager {
 
   runQueued(runId: string): Promise<BuilderResult> {
     this.assertOptionalHardeningPromptAuthority(runId);
+    // A process restart or queued-run delay is another authority boundary.
+    this.correctionActionsForRun(runId);
     const existing = this.active.get(runId);
     if (existing) return existing;
     const controller = new AbortController();

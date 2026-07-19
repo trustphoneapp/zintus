@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { RunState } from "./contracts.js";
 import { canonicalJson, sha256 } from "./hash.js";
+import { createResolutionPlanningContext } from "./resolution-planning-context.js";
 import { isTerminalState } from "./state-machine.js";
 import {
   buildCaseAuthority,
@@ -10,14 +11,18 @@ import {
   type CaseAuthorityInput,
   type DirectiveRequest,
   DirectiveRequestSchema,
+  DirectiveTypeSchema,
   isWithinCumulativeCeiling,
+  RESOLUTION_DIRECTIVE_POLICY_VERSION,
   RESOLUTION_DIRECTIVE_TTL_SECONDS,
   RESOLUTION_EVENT_POLICY_VERSION,
   RESOLUTION_REPLACEMENT_POLICY_VERSION,
   RESOLUTION_SCHEMA_VERSION,
+  RESOLUTION_SIGNATURE_ALGORITHM,
   type ReverifyEligibility,
   signDirective,
   type SignedDirective,
+  verifyDirectiveSignature,
 } from "./resolution-case.js";
 
 // ---------------------------------------------------------------------------
@@ -61,12 +66,10 @@ export interface CaseCreationInput {
 
 /**
  * The immutable plan handed to the executable-replacement factory. The factory
- * must create a real engineer run at its start state with a fresh manifest
- * freeze derived from the source manifest + these open blockers, a fresh budget
- * from the directive's ReplacementBudget, and nothing inherited from the source
- * (no prior evidence, review, approval, or publication row). Lineage is durably
- * captured by the `resolution_replacements` row (case -> directive ->
- * replacementRunId) plus the source binding on the case.
+ * creates a real engineer run at its start state with a fresh budget from the
+ * directive and no inherited evidence. It deliberately leaves manifest v1 free:
+ * the ordinary Supervisor normalize -> plan -> freeze lifecycle consumes the
+ * hash-bound planning context and owns the first valid TaskManifest.
  */
 export interface ReplacementRunCreationPlan {
   readonly replacementRunId: string;
@@ -125,6 +128,16 @@ interface CaseRow {
   ambiguous_liability_microusd: number; cumulative_ceiling_microusd: number;
   pricing_policy_digest: string;
   created_at: string; expires_at: string;
+}
+
+interface DirectiveAuthorityRow {
+  id: string; directive_hash: string; schema_version: number; policy_version: string;
+  case_id: string; case_hash: string; type: string; expected_case_version: number;
+  expected_source_run_version: number; selected_blockers_json: string;
+  budget_max_cost_microusd: number | null; budget_max_tokens: number | null;
+  budget_max_active_seconds: number | null; budget_pricing_policy_digest: string | null;
+  signature_algorithm: string; signature_key_id: string; signature: string;
+  directive_json: string; ttl_seconds: number; created_at: string; expires_at: string;
 }
 
 const MICRO = 1_000_000;
@@ -255,8 +268,16 @@ export class ResolutionDesk {
       if (request.type === "CREATE_CORRECTED_RUN" && caseRow.correction_eligible !== 1) {
         throw new ResolutionDeskError("NOT_CORRECTION_ELIGIBLE", "case has no correction-eligible blockers", 409);
       }
-      if (request.type === "CREATE_REVERIFY_RUN" && caseRow.reverify_eligible !== 1) {
-        throw new ResolutionDeskError("NOT_REVERIFY_ELIGIBLE", `reverify is ineligible: ${caseRow.reverify_reason}`, 409, { reason: caseRow.reverify_reason });
+      // R1 intentionally ships only the corrected-run executable lane.
+      // A reverify child needs retained B-prime candidate authority; creating a
+      // REQUEST_RECEIVED child without that binding would be executable but
+      // unable to prove what exact candidate it is allowed to reverify.
+      if (request.type === "CREATE_REVERIFY_RUN") {
+        throw new ResolutionDeskError(
+          "NO_PRE_VERIFICATION_CANDIDATE",
+          "reverify replacement runs are unavailable until retained candidate authority is wired",
+          409,
+        );
       }
       if (request.type === "CREATE_CORRECTED_RUN" && request.budget) {
         if (request.budget.pricingPolicyDigest !== caseRow.pricing_policy_digest) {
@@ -327,7 +348,7 @@ export class ResolutionDesk {
   // --- Directive application (fenced replacement scaffold) ------------------
 
   /**
-   * Apply a corrected / reverify directive: scaffold the replacement through the
+   * Apply a corrected directive: scaffold the replacement through the
    * fenced PREPARING -> READY protocol, atomically link the replacement run id,
    * and resolve the case. Concurrent applies resolve to exactly one replacement
    * (UNIQUE(case_id)); the loser replays the winner's result. Reject directives
@@ -337,14 +358,15 @@ export class ResolutionDesk {
     if (!idempotencyKey || idempotencyKey.length > 200) throw new ResolutionDeskError("IDEMPOTENCY_KEY_INVALID", "an Idempotency-Key is required", 400);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const directiveRow = this.db.query("SELECT id,case_id,directive_hash,type,expires_at,budget_max_cost_microusd,budget_max_tokens,budget_max_active_seconds,budget_pricing_policy_digest FROM resolution_directives WHERE id=?")
-        .get(directiveId) as {
-          id: string; case_id: string; directive_hash: string; type: string; expires_at: string;
-          budget_max_cost_microusd: number | null; budget_max_tokens: number | null;
-          budget_max_active_seconds: number | null; budget_pricing_policy_digest: string | null;
-        } | null;
-      if (!directiveRow) throw new ResolutionDeskError("DIRECTIVE_NOT_FOUND", "directive not found", 404);
+      const directiveRow = this.requireVerifiedDirective(directiveId);
       if (directiveRow.type === "REJECT_AND_CLOSE") throw new ResolutionDeskError("DIRECTIVE_NOT_APPLICABLE", "reject directives have no replacement to apply", 409);
+      if (directiveRow.type === "CREATE_REVERIFY_RUN") {
+        throw new ResolutionDeskError(
+          "NO_PRE_VERIFICATION_CANDIDATE",
+          "reverify replacement runs are unavailable until retained candidate authority is wired",
+          409,
+        );
+      }
 
       const existing = this.db.query("SELECT replacement_run_id,state FROM resolution_replacements WHERE directive_id=?")
         .get(directiveId) as { replacement_run_id: string; state: string } | null;
@@ -356,9 +378,11 @@ export class ResolutionDesk {
         throw new ResolutionDeskError("DIRECTIVE_EXPIRED", "the directive has expired", 410);
       }
 
-      const kind = directiveRow.type === "CREATE_CORRECTED_RUN" ? "CORRECTED" : "REVERIFY";
-      // Fresh replacement budget: corrected directives carry it; reverify inherits
-      // no allowance and runs under a zero-cost verification-only ceiling.
+      // CREATE_REVERIFY_RUN is rejected at issue time until retained-candidate
+      // authority is implemented. Persisted directives are cryptographically
+      // revalidated above, so the only executable kind here is CORRECTED.
+      const kind = "CORRECTED" as const;
+      // Fresh replacement budget comes only from the signed corrected directive.
       const budget = {
         maxCostMicrousd: directiveRow.budget_max_cost_microusd ?? 0,
         maxTokens: directiveRow.budget_max_tokens ?? 0,
@@ -368,8 +392,29 @@ export class ResolutionDesk {
       const replacementRunId = `resolution-${sha256({ directiveId, kind }).slice("sha256:".length, "sha256:".length + 24)}`;
       const replacementId = sha256({ replacement: directiveId });
       const createdAt = this.now().toISOString();
+      const planRow = this.db.query(
+        "SELECT source_run_id,owner_user_id,repository_id,base_commit_sha,manifest_hash,required_lane_contract_hash,blockers_json FROM resolution_cases WHERE id=?",
+      ).get(directiveRow.case_id) as {
+        source_run_id: string; owner_user_id: string; repository_id: string; base_commit_sha: string;
+        manifest_hash: string; required_lane_contract_hash: string; blockers_json: string;
+      };
+      const blockers = (JSON.parse(planRow.blockers_json) as unknown[]).map((blocker) => CanonicalBlockerSchema.parse(blocker));
+      const planningContext = createResolutionPlanningContext({
+        policyVersion: "engineer-resolution-planning-context-v1",
+        replacementRunId,
+        sourceRunId: planRow.source_run_id,
+        caseId: directiveRow.case_id,
+        directiveId,
+        directiveHash: directiveRow.directive_hash,
+        kind,
+        sourceManifestHash: planRow.manifest_hash,
+        sourceRequiredLaneContractHash: planRow.required_lane_contract_hash,
+        blockers,
+        createdAt,
+      });
       const replacementJson = canonicalJson({
         replacementId, caseId: directiveRow.case_id, directiveId, kind, replacementRunId, budget,
+        planningContext,
         policyVersion: RESOLUTION_REPLACEMENT_POLICY_VERSION, schemaVersion: RESOLUTION_SCHEMA_VERSION,
       });
       const replacementHash = sha256({ replacementJson });
@@ -395,23 +440,17 @@ export class ResolutionDesk {
       // 3. Executable replacement dispatch (atomic with the fence). When a
       //    factory is wired, create the REAL replacement engineer run here —
       //    between the PREPARING insert and the READY flip, on this same open
-      //    transaction — with a fresh manifest freeze derived from the source
-      //    manifest + open blockers, a fresh budget from the directive, and zero
-      //    inherited evidence/review/approval/publication rows. A crash before
+      //    transaction — at REQUEST_RECEIVED with a free manifest-v1 slot, a
+      //    fresh budget, and zero inherited evidence/review/approval/publication
+      //    rows. The ordinary planner owns the first manifest freeze. A crash before
       //    commit rolls the run + scaffold + case transition back together, so no
       //    executable orphan can outlive a PREPARING row.
       if (this.replacementRunFactory) {
-        const planRow = this.db.query(
-          "SELECT source_run_id,owner_user_id,repository_id,base_commit_sha,manifest_hash,required_lane_contract_hash,blockers_json FROM resolution_cases WHERE id=?",
-        ).get(directiveRow.case_id) as {
-          source_run_id: string; owner_user_id: string; repository_id: string; base_commit_sha: string;
-          manifest_hash: string; required_lane_contract_hash: string; blockers_json: string;
-        };
         this.replacementRunFactory.createReplacementRun(this.db, {
           replacementRunId, sourceRunId: planRow.source_run_id, caseId: directiveRow.case_id, directiveId, kind,
           ownerUserId: planRow.owner_user_id, repositoryId: planRow.repository_id, baseCommitSha: planRow.base_commit_sha,
           sourceManifestHash: planRow.manifest_hash, requiredLaneContractHash: planRow.required_lane_contract_hash,
-          blockers: JSON.parse(planRow.blockers_json) as CanonicalBlocker[], budget,
+          blockers, budget,
         });
       }
 
@@ -518,6 +557,83 @@ export class ResolutionDesk {
       view.preVerificationCandidate = { present: true, digest: row.pre_verification_candidate_digest };
     }
     return view;
+  }
+
+  /** Rehydrate and cryptographically re-verify every directive byte before use. */
+  private requireVerifiedDirective(directiveId: string): DirectiveAuthorityRow {
+    const row = this.db.query(`SELECT id,directive_hash,schema_version,policy_version,case_id,case_hash,type,
+      expected_case_version,expected_source_run_version,selected_blockers_json,budget_max_cost_microusd,
+      budget_max_tokens,budget_max_active_seconds,budget_pricing_policy_digest,signature_algorithm,
+      signature_key_id,signature,directive_json,ttl_seconds,created_at,expires_at
+      FROM resolution_directives WHERE id=?`).get(directiveId) as DirectiveAuthorityRow | null;
+    if (!row) throw new ResolutionDeskError("DIRECTIVE_NOT_FOUND", "directive not found", 404);
+    try {
+      const stored = JSON.parse(row.directive_json) as Record<string, unknown>;
+      const type = DirectiveTypeSchema.parse(stored.type);
+      if (!Array.isArray(stored.selectedBlockers)) throw new Error("selected blockers are not an array");
+      const selectedBlockers = stored.selectedBlockers.map((blocker) => CanonicalBlockerSchema.parse(blocker));
+      const storedBudget = stored.budget;
+      let budget: { maxCostUsd: number; maxTokens: number; maxActiveSeconds: number; pricingPolicyDigest: `sha256:${string}` } | null = null;
+      if (storedBudget !== null) {
+        if (!storedBudget || typeof storedBudget !== "object") throw new Error("directive budget is malformed");
+        const value = storedBudget as Record<string, unknown>;
+        if (!Number.isSafeInteger(value.maxCostMicrousd) || (value.maxCostMicrousd as number) < 0 ||
+            !Number.isSafeInteger(value.maxTokens) || (value.maxTokens as number) < 0 ||
+            !Number.isSafeInteger(value.maxActiveSeconds) || (value.maxActiveSeconds as number) <= 0 ||
+            typeof value.pricingPolicyDigest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.pricingPolicyDigest)) {
+          throw new Error("directive budget is malformed");
+        }
+        budget = {
+          maxCostUsd: (value.maxCostMicrousd as number) / 1_000_000,
+          maxTokens: value.maxTokens as number,
+          maxActiveSeconds: value.maxActiveSeconds as number,
+          pricingPolicyDigest: value.pricingPolicyDigest as `sha256:${string}`,
+        };
+      }
+      const expected = signDirective({
+        caseId: String(stored.caseId),
+        caseHash: String(stored.caseHash) as `sha256:${string}`,
+        type,
+        expectedCaseVersion: Number(stored.expectedCaseVersion),
+        expectedSourceRunVersion: Number(stored.expectedSourceRunVersion),
+        selectedBlockers,
+        budget,
+        createdAt: String(stored.createdAt),
+        expiresAt: String(stored.expiresAt),
+      }, this.signingSecret, this.signingKeyId);
+      const actual: SignedDirective = {
+        ...expected,
+        directiveId: row.id as `sha256:${string}`,
+        directiveHash: row.directive_hash as `sha256:${string}`,
+        signature: {
+          algorithm: row.signature_algorithm as typeof RESOLUTION_SIGNATURE_ALGORITHM,
+          keyId: row.signature_key_id,
+          value: row.signature,
+        },
+      };
+      const projectionMatches =
+        row.id === expected.directiveId && row.directive_hash === expected.directiveHash &&
+        row.schema_version === RESOLUTION_SCHEMA_VERSION && row.policy_version === RESOLUTION_DIRECTIVE_POLICY_VERSION &&
+        row.case_id === expected.caseId && row.case_hash === expected.caseHash && row.type === expected.type &&
+        row.expected_case_version === expected.expectedCaseVersion &&
+        row.expected_source_run_version === expected.expectedSourceRunVersion &&
+        row.selected_blockers_json === canonicalJson(expected.selectedBlockers) &&
+        row.budget_max_cost_microusd === (expected.budget?.maxCostMicrousd ?? null) &&
+        row.budget_max_tokens === (expected.budget?.maxTokens ?? null) &&
+        row.budget_max_active_seconds === (expected.budget?.maxActiveSeconds ?? null) &&
+        row.budget_pricing_policy_digest === (expected.budget?.pricingPolicyDigest ?? null) &&
+        row.signature_algorithm === RESOLUTION_SIGNATURE_ALGORITHM && row.signature_key_id === this.signingKeyId &&
+        row.signature === expected.signature.value && row.ttl_seconds === RESOLUTION_DIRECTIVE_TTL_SECONDS &&
+        row.created_at === expected.createdAt && row.expires_at === expected.expiresAt &&
+        row.directive_json === this.directiveJson(expected);
+      if (!projectionMatches || !verifyDirectiveSignature(actual, this.signingSecret)) {
+        throw new Error("directive authority mismatch");
+      }
+      return row;
+    } catch (error) {
+      if (error instanceof ResolutionDeskError) throw error;
+      throw new ResolutionDeskError("DIRECTIVE_INTEGRITY_FAILED", "resolution directive failed cryptographic integrity verification", 500);
+    }
   }
 
   private requireCaseRow(caseId: string): CaseRow {

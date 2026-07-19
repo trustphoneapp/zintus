@@ -95,13 +95,6 @@ function applyCorrected(): { replacementRunId: string; caseId: string; directive
   return { replacementRunId: applied.replacementRunId, caseId: view.caseId, directiveId: directive.directiveId };
 }
 
-function applyReverify(): { replacementRunId: string } {
-  const view = fixture.desk.createCase(baseCaseInput([transient], { preVerificationCandidateDigest: sha256({ candidate: 1 }) }));
-  const { directive } = fixture.desk.issueDirective(view.caseId, { type: "CREATE_REVERIFY_RUN", caseVersion: 0, sourceRunVersion: 4 }, "idem-rv");
-  const applied = fixture.desk.applyDirective(directive.directiveId, "apply-rv");
-  return { replacementRunId: applied.replacementRunId };
-}
-
 describe("companion-aware replacement-lineage verifier", () => {
   test("accepts the complete good chain for a corrected replacement", () => {
     const { replacementRunId, caseId, directiveId } = applyCorrected();
@@ -116,10 +109,13 @@ describe("companion-aware replacement-lineage verifier", () => {
     }
   });
 
-  test("accepts the good chain for a reverify replacement", () => {
-    const { replacementRunId } = applyReverify();
-    const verdict = new ResolutionLineageVerifier(fixture.db, SECRET).verify(replacementRunId);
-    expect(verdict).toMatchObject({ verified: true, kind: "REVERIFY", sourceRunId: "run-1" });
+  test("does not mint a reverify lineage before retained candidate authority is wired", () => {
+    const view = fixture.desk.createCase(baseCaseInput([transient], { preVerificationCandidateDigest: sha256({ candidate: 1 }) }));
+    expect(() => fixture.desk.issueDirective(view.caseId, {
+      type: "CREATE_REVERIFY_RUN", caseVersion: 0, sourceRunVersion: 4,
+    }, "idem-rv")).toThrow("retained candidate authority");
+    expect(fixture.db.query("SELECT COUNT(*) AS c FROM resolution_directives").get()).toEqual({ c: 0 });
+    expect(fixture.db.query("SELECT COUNT(*) AS c FROM resolution_replacements").get()).toEqual({ c: 0 });
   });
 
   test("fails closed when the candidate is not a replacement at all (foreign checkpoint)", () => {

@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
-import { canonicalJson, sha256 } from "./hash.js";
+import { canonicalJson } from "./hash.js";
 import type { ReplacementRunCreationPlan, ReplacementRunFactory } from "./resolution-desk.js";
 
 // ---------------------------------------------------------------------------
@@ -18,8 +18,9 @@ import type { ReplacementRunCreationPlan, ReplacementRunFactory } from "./resolu
 //
 // The row shape is the ledger `createRun` equivalent (engineer_runs at the
 // REQUEST_RECEIVED start state, an ACTIVE run_budgets row, a RUN_CREATED audit
-// event) plus a FRESH manifest freeze derived from the source manifest hash and
-// the directive's open blockers. Nothing is inherited from the source run: the
+// event). It deliberately does NOT insert task_manifest_versions: the ordinary
+// Supervisor normalize -> plan -> freeze lifecycle owns manifest v1 and its
+// Required Lane contract. Nothing is inherited from the source run: the
 // replacement run id is brand new, so it has zero agent_executions, failures,
 // approvals, git operations, checkpoints, evidence, or reservations. Lineage is
 // carried entirely by the `resolution_replacements` row the desk writes
@@ -36,21 +37,6 @@ interface SourceRunRow {
   request_original: string;
   risk_tier: string;
   human_gate_required: number;
-}
-
-/**
- * Deterministically derive the replacement run's fresh manifest hash from the
- * source manifest and the directive's open blockers. It is a NEW freeze (never
- * equal to the source manifest for a non-empty correction), so the replacement
- * plans against its own corrected scope rather than rehydrating the source's.
- */
-export function deriveReplacementManifestHash(plan: ReplacementRunCreationPlan): `sha256:${string}` {
-  return sha256({
-    replacementManifestOf: plan.sourceManifestHash,
-    directiveId: plan.directiveId,
-    kind: plan.kind,
-    blockers: plan.blockers,
-  });
 }
 
 export class ResolutionReplacementRunFactory implements ReplacementRunFactory {
@@ -76,7 +62,7 @@ export class ResolutionReplacementRunFactory implements ReplacementRunFactory {
     if (!source) throw new Error(`resolution replacement factory: source run ${plan.sourceRunId} is missing`);
 
     // engineer_runs at the state-machine start (REQUEST_RECEIVED, version 0). No
-    // manifest_hash yet on the run row (freeze lives in task_manifest_versions).
+    // manifest exists until the ordinary planner freezes a valid TaskManifest v1.
     db.query(`INSERT INTO engineer_runs
         (id, user_id, repository_id, base_branch, base_commit_sha,
          request_original, request_normalized, state, state_version,
@@ -101,19 +87,6 @@ export class ResolutionReplacementRunFactory implements ReplacementRunFactory {
         costLimitUsd, tokenLimit, timeLimit, at, at, at,
       );
 
-    // Fresh manifest freeze derived from the source manifest + open blockers.
-    const manifestHash = deriveReplacementManifestHash(plan);
-    const manifestJson = canonicalJson({
-      derivedFromSourceManifest: plan.sourceManifestHash,
-      requiredLaneContractHash: plan.requiredLaneContractHash,
-      directiveId: plan.directiveId,
-      kind: plan.kind,
-      blockers: plan.blockers,
-    });
-    db.query(`INSERT INTO task_manifest_versions (id, run_id, version, manifest_hash, manifest_json, created_at)
-        VALUES (?, ?, 1, ?, ?, ?)`)
-      .run(`tmv-${plan.replacementRunId}`, plan.replacementRunId, manifestHash, manifestJson, at);
-
     // Audit trail, mirroring ledger.createRun's RUN_CREATED row so the durable
     // history shows a real run-creation, tagged with its resolution lineage.
     db.query(`INSERT INTO audit_events (id, run_id, action, actor_type, actor_id, details_json, created_at)
@@ -124,7 +97,10 @@ export class ResolutionReplacementRunFactory implements ReplacementRunFactory {
         resolutionCaseId: plan.caseId,
         resolutionDirectiveId: plan.directiveId,
         resolutionKind: plan.kind,
-        manifestHash,
+        sourceManifestHash: plan.sourceManifestHash,
+        sourceRequiredLaneContractHash: plan.requiredLaneContractHash,
+        correctionBlockerIds: plan.blockers.map((blocker) => blocker.blockerId),
+        manifestLifecycle: "SUPERVISOR_PLAN_FREEZE_V1",
       }), at);
   }
 }

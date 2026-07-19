@@ -664,7 +664,7 @@ export class EngineerPlanningManager {
   private correctedRunDirective(runId: string): CorrectedRunDirective | null {
     const artifacts = this.options.supervisor.listArtifacts(runId)
       .filter((artifact) => artifact.type === "CORRECTED_RUN_DIRECTIVE");
-    if (artifacts.length === 0) return null;
+    if (artifacts.length === 0) return this.options.supervisor.resolutionCorrectedRunDirective(runId);
     if (artifacts.length !== 1) throw new Error("corrected run must have exactly one trusted correction directive");
     const artifact = artifacts[0]!;
     if (!artifact.trusted || artifact.producerType !== "SYSTEM" || artifact.producerId !== "engineer-correction-policy") {

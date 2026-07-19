@@ -114,6 +114,8 @@ import {
   VerifiedCandidateIntegrityError,
 } from "./errors.js";
 import { ResolutionLineageVerifier } from "./resolution-lineage.js";
+import { createCorrectedRunDirective, type CorrectedRunDirective } from "./corrected-run.js";
+import { ResolutionPlanningContextSchema } from "./resolution-planning-context.js";
 import { PublicationAuthorityService, type PublicationAuthorityDeps } from "./publication-authority.js";
 import {
   AdvisoryBacklogEventSchema, AdvisoryBacklogItemSchema, AdvisoryBacklogPageSchema, AdvisoryBacklogViewSchema, AdvisoryOwnerCommandSchema,
@@ -881,6 +883,82 @@ export class EngineerLedger {
     }
     const verdict = this.resolutionLineageVerifier.verify(runId);
     if (!verdict.verified) throw new ReplacementLineageUnverifiedError(runId, verdict.reason);
+  }
+
+  /**
+   * Reconstruct the trusted planner correction for a P7 corrected replacement
+   * from its hash-bound replacement projection and immutable source manifest.
+   * No browser or model field participates in this authority.
+   */
+  resolutionCorrectedRunDirective(runId: string): CorrectedRunDirective | null {
+    const row = this.db.query(`SELECT replacement_hash,replacement_json,case_id,directive_id,directive_hash,kind,state
+      FROM resolution_replacements WHERE replacement_run_id=?`).get(runId) as {
+        replacement_hash: string; replacement_json: string; case_id: string; directive_id: string;
+        directive_hash: string; kind: string; state: string;
+      } | null;
+    if (!row) return null;
+    this.assertReplacementLineageAuthority(runId);
+    if (row.kind !== "CORRECTED") return null;
+    if (row.state !== "READY" || sha256({ replacementJson: row.replacement_json }) !== row.replacement_hash) {
+      throw new ReplacementLineageUnverifiedError(runId, "REPLACEMENT_TAMPERED");
+    }
+    let projection: Record<string, unknown>;
+    try {
+      projection = JSON.parse(row.replacement_json) as Record<string, unknown>;
+    } catch {
+      throw new ReplacementLineageUnverifiedError(runId, "REPLACEMENT_TAMPERED");
+    }
+    const context = ResolutionPlanningContextSchema.parse(projection.planningContext);
+    const caseRow = this.db.query(`SELECT source_run_id,owner_user_id,repository_id,base_commit_sha,manifest_hash,
+      required_lane_contract_hash,blockers_json FROM resolution_cases WHERE id=?`).get(row.case_id) as {
+        source_run_id: string; owner_user_id: string; repository_id: string; base_commit_sha: string;
+        manifest_hash: string; required_lane_contract_hash: string; blockers_json: string;
+      } | null;
+    const directiveRow = this.db.query("SELECT selected_blockers_json FROM resolution_directives WHERE id=? AND directive_hash=?")
+      .get(row.directive_id, row.directive_hash) as { selected_blockers_json: string } | null;
+    if (!caseRow || !directiveRow || context.replacementRunId !== runId || context.sourceRunId !== caseRow.source_run_id ||
+        context.caseId !== row.case_id || context.directiveId !== row.directive_id || context.directiveHash !== row.directive_hash ||
+        context.kind !== "CORRECTED" || context.sourceManifestHash !== caseRow.manifest_hash ||
+        context.sourceRequiredLaneContractHash !== caseRow.required_lane_contract_hash ||
+        canonicalJson(context.blockers) !== canonicalJson(JSON.parse(caseRow.blockers_json)) ||
+        canonicalJson(context.blockers) !== canonicalJson(JSON.parse(directiveRow.selected_blockers_json))) {
+      throw new ReplacementLineageUnverifiedError(runId, "REPLACEMENT_TAMPERED");
+    }
+    const replacement = this.getRun(runId);
+    const source = this.getRun(context.sourceRunId);
+    const sourceManifest = this.getManifest(context.sourceRunId);
+    if (!sourceManifest || sourceManifest.manifestHash !== context.sourceManifestHash ||
+        replacement.userId !== source.userId || replacement.userId !== caseRow.owner_user_id ||
+        replacement.repository.repositoryId !== source.repository.repositoryId ||
+        replacement.repository.repositoryId !== caseRow.repository_id ||
+        replacement.repository.baseCommitSha !== caseRow.base_commit_sha ||
+        replacement.requestOriginal !== source.requestOriginal) {
+      throw new ReplacementLineageUnverifiedError(runId, "REPLACEMENT_TAMPERED");
+    }
+    return createCorrectedRunDirective({
+      policyVersion: "engineer-corrected-run-v1",
+      sourceRunId: source.runId,
+      replacementRunId: runId,
+      sourceManifestHash: sourceManifest.manifestHash,
+      requestOriginalHash: sha256(source.requestOriginal),
+      requestNormalized: sourceManifest.request.normalized,
+      acceptanceCriteria: sourceManifest.acceptanceCriteria,
+      acceptanceCriteriaHash: sha256(sourceManifest.acceptanceCriteria),
+      testPlan: sourceManifest.testPlan,
+      allowedPaths: sourceManifest.allowedPaths,
+      deniedPaths: sourceManifest.deniedPaths,
+      allowedCommands: sourceManifest.allowedCommands,
+      actions: context.blockers.map((blocker) => ({
+        code: /SECURITY|SECRET|CREDENTIAL/.test(blocker.reasonCode)
+          ? "ADDRESS_RECORDED_SECURITY_FINDING" as const
+          : "REPAIR_FAILED_VERIFICATION" as const,
+        sourceRecordIds: [blocker.blockerId],
+        file: null,
+        lineStart: null,
+        lineEnd: null,
+      })),
+      createdAt: context.createdAt,
+    });
   }
 
   /**
