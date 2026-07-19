@@ -2999,3 +2999,32 @@ unfinished pair has passed.
   schemas, audit-export) AND closes the R2 security blocker — candidate,
   repository, SHA, lineage and ownership must derive from durable server records,
   never the browser (facade selectCandidate spreads the client body today).
+
+### R2 — server-derived publication authority + frozen contract (Fable-gated, 2026-07-19)
+
+- SECURITY BLOCKER CLOSED: the gateway facade no longer spreads the browser body.
+  selectCandidate/approve/startPublication derive EVERY authority field
+  (repositoryId, checkpointHash, resultCommitSha, candidateRunId, runId, lineage,
+  ownership) from durable rows keyed by the server-owned principal; the browser
+  passes only opaque checkpointId/approvalId. Unknown checkpoint AND cross-owner
+  checkpoint collapse to the same CandidateNotFoundError (no ownership oracle). A
+  resolution-replacement checkpoint claimed as ORIGINAL is stored as
+  server-derived P7_REPLACEMENT and gated by the real ResolutionLineageVerifier
+  (fail-closed when the durable lineage link is absent). Fable mutation-verified:
+  reintroducing body-passthrough for repositoryId/resultCommitSha/lineage turns a
+  security test red, restore clean; the existing suite also DRIVES a poisoned
+  ATTACKER-CONTROLLED requester and reads the stored derived row.
+- CONTRACT FROZEN: docs/zintus-engineer/R2-FROZEN-CONTRACT.md freezes the 6
+  shared items (org+repo ownership, checkpointId↔hash binding + lineage
+  derivation, approval identity format, publication state machine + v33 rows +
+  v35 provenance_attestations record, audit-export AuditEntry/AuditExport), each
+  citing the authoritative TS/Zod/DDL by file:line with an INVARIANT R3/R4 must
+  not unilaterally change.
+- FABLE RULING §0 added to the contract: the P8 PublicationAuthorityService is
+  the AUTHORITATIVE publication lane; the legacy EngineerPublicationManager is
+  superseded (R3 bridges the UI+run flow onto P8 and retires legacy). Two live
+  publication systems is itself a release blocker — R3 owns the cutover.
+- Explicitly NOT closed (handed to R4/R6): single-install-secret approver
+  identity is FORMAT-frozen not fixed (R4 B4); v35 resultTreeHash unsourced
+  (attestation stays deferred/fail-closed). Gates: engineer 795, gateway 418,
+  web 569, typecheck + diff clean.

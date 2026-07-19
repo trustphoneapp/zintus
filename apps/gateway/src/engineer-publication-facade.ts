@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
+import { StaleCandidateError } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
 import type { EngineerPublicationAuthorityFacade } from "./handler.js";
 
@@ -7,20 +8,37 @@ import type { EngineerPublicationAuthorityFacade } from "./handler.js";
  * P8 publication-authority gateway facade (real adapter).
  *
  * The routes in handler.ts forward JSON and derive nothing; ALL authority is
- * derived here, server-side:
- *   - selectCandidate: `requesterUserId` is FORCED to the server principal's
- *     ownerId — the browser cannot name a requester (finding A2). `runId` is the
- *     URL's, never the body's.
- *   - approve: the `ApproverAuthContext` (approverActorId / implementationActorId /
- *     evidenceRoot / expiresAt) is built from the server principal + run-derived
- *     facts, NEVER from the request body. `approverActorId` is the principal's
- *     `reviewerId`, distinct from the selection's requester (`ownerId`), so the
- *     service's self-approval control is a structural backstop, never tripped by
- *     the normal single-owner flow. The strict §3 body carries only the browser's
- *     choice; the service `.parse`s it (a ZodError surfaces as a typed 400).
- *   - startPublication: the Idempotency-Key arrives from the HTTP header (never the
- *     body) and is threaded into the service's `idempotencyKey` seam; `operation`
- *     is fixed to BRANCH_PR.
+ * derived here, server-side, from DURABLE server records keyed by the server-owned
+ * principal. The browser may reference a candidate/approval ONLY by an opaque id
+ * (checkpointId / approvalId); every authority field is derived, and a body value
+ * for a derived field is IGNORED (the derived value always wins). Cross-owner or
+ * unknown references collapse to a single not-found shape (no ownership oracle).
+ *
+ *   - selectCandidate (R2 server-derivation fix): the body is NO LONGER spread into
+ *     the service. The browser sends only `checkpointId`. repositoryId,
+ *     checkpointHash, resultCommitSha, candidateRunId, the root runId, lineage
+ *     (ORIGINAL vs P7_REPLACEMENT) and parentSelectionId are all DERIVED from
+ *     `verified_candidate_checkpoints` (the promoted checkpoint row) plus
+ *     `resolution_replacements` -> `resolution_cases` for a replacement's lineage.
+ *     `requesterUserId` is the principal's ownerId. A checkpoint that is not a
+ *     promoted verified-candidate row owned by the principal is not-found. A
+ *     P7_REPLACEMENT's lineage is derived (never client-claimed) and remains gated
+ *     by the real `ResolutionLineageVerifier` inside the service.
+ *   - approve: the checkpointHash is DERIVED from the owner's durable selection row
+ *     keyed by checkpointId — NEVER read from the request body. The
+ *     `ApproverAuthContext` (approverActorId / implementationActorId / evidenceRoot /
+ *     expiresAt) is built from the server principal + run-derived facts, NEVER from
+ *     the request body. `approverActorId` is the principal's `reviewerId`, distinct
+ *     from the selection's requester (`ownerId`), so the service's self-approval
+ *     control is a structural backstop, never tripped by the normal single-owner
+ *     flow. The strict §3 body carries only the browser's choice
+ *     (decision/policyVersion/rationale); the service `.parse`s it (a ZodError
+ *     surfaces as a typed 400).
+ *   - startPublication: the browser names the approval only by opaque `approvalId`.
+ *     The `runId` is DERIVED from the approval's durable row (never the URL), and a
+ *     cross-owner approval is not-found. The Idempotency-Key arrives from the HTTP
+ *     header (never the body) and is threaded into the service's `idempotencyKey`
+ *     seam; `operation` is fixed to BRANCH_PR.
  *
  * Attestation last-mile (item 2 / P11 + P12 Finding A). The v35 provenance
  * attestation binds a ledger `approval_decision`
@@ -57,6 +75,22 @@ export class PublicationAttestationUnavailableError extends Error {
   constructor(detail: string) {
     super(`publication approval is fail-closed: ${detail}`);
     this.name = "PublicationAttestationUnavailableError";
+  }
+}
+
+/**
+ * Single not-found shape for every unresolvable server-derived reference: an
+ * unknown checkpoint/approval AND a checkpoint/approval owned by a DIFFERENT
+ * principal both surface this identical 404 — so the response is never an
+ * ownership oracle. The message is intentionally generic (no derived authority
+ * fields are echoed back).
+ */
+export class CandidateNotFoundError extends Error {
+  readonly httpStatus = 404;
+  readonly code = "CANDIDATE_NOT_FOUND";
+  constructor() {
+    super("no such publication candidate for this principal");
+    this.name = "CandidateNotFoundError";
   }
 }
 
@@ -120,10 +154,20 @@ export interface PublicationFacadeDeps {
   resultTreeHashFor: (input: { runId: string; resultCommitSha: string }) => string | null;
 }
 
-interface SelectionRow {
+/** The promoted verified-candidate checkpoint row — the durable authority root. */
+interface VerifiedCheckpointRow {
+  checkpoint_hash: string;
+  run_id: string;
+  requester_user_id: string;
+  repository_id: string;
+  result_commit_sha: string;
+}
+
+/** The owner-scoped durable selection row used to derive the approve/plan facts. */
+interface OwnedSelectionRow {
   run_id: string;
   result_commit_sha: string;
-  requester_user_id: string;
+  checkpoint_hash: string;
 }
 
 function sha256Hex(...parts: string[]): string {
@@ -135,40 +179,120 @@ function sha256Hex(...parts: string[]): string {
 export function createEngineerPublicationAuthorityFacade(deps: PublicationFacadeDeps): EngineerPublicationAuthorityFacade {
   const { service, principal, connection } = deps;
 
-  const readSelection = (checkpointId: string, checkpointHash: string): SelectionRow | null =>
+  // --- Durable server-record reads (all authority is derived here) -----------
+
+  /** The promoted verified-candidate checkpoint, keyed by its opaque id. */
+  const readVerifiedCheckpoint = (checkpointId: string): VerifiedCheckpointRow | null =>
     connection
-      .query("SELECT run_id, result_commit_sha, requester_user_id FROM publication_candidate_selections_v33 WHERE checkpoint_id=? AND checkpoint_hash=?")
-      .get(checkpointId, checkpointHash) as SelectionRow | null;
+      .query("SELECT checkpoint_hash, run_id, requester_user_id, repository_id, result_commit_sha FROM verified_candidate_checkpoints WHERE id=?")
+      .get(checkpointId) as VerifiedCheckpointRow | null;
+
+  /** True iff a candidate run is a durable P7 resolution replacement run. */
+  const isResolutionReplacementRun = (candidateRunId: string): boolean =>
+    connection
+      .query("SELECT 1 FROM resolution_replacements WHERE replacement_run_id=?")
+      .get(candidateRunId) !== null;
+
+  /**
+   * The durable hardening candidate-lineage attestation for a replacement child
+   * checkpoint, keyed by the principal. It binds the child checkpoint to its
+   * publication ROOT run (never the frozen resolution source run, which the v37
+   * freeze trigger forbids as a selection run_id). Absent => the replacement is
+   * not selectable (fail closed).
+   */
+  const readChildLineageRootRun = (childCheckpointId: string): string | null =>
+    (connection
+      .query("SELECT root_run_id FROM candidate_lineage_attestations WHERE child_checkpoint_id=? AND requester_user_id=?")
+      .get(childCheckpointId, principal.ownerId) as { root_run_id: string } | null)?.root_run_id ?? null;
+
+  /** The principal's ORIGINAL selection for a root run — the required parent of a P7 replacement. */
+  const readParentOriginalSelectionId = (rootRunId: string): string | null =>
+    (connection
+      .query("SELECT id FROM publication_candidate_selections_v33 WHERE run_id=? AND requester_user_id=? AND is_hardening_child=0 ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(rootRunId, principal.ownerId) as { id: string } | null)?.id ?? null;
+
+  /** The principal's durable selection for a checkpoint — derives the checkpointHash for approve. */
+  const readOwnedSelection = (checkpointId: string): OwnedSelectionRow | null =>
+    connection
+      .query("SELECT run_id, result_commit_sha, checkpoint_hash FROM publication_candidate_selections_v33 WHERE checkpoint_id=? AND requester_user_id=? ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(checkpointId, principal.ownerId) as OwnedSelectionRow | null;
+
+  /** The run a principal-owned approval binds — derives the startPublication runId. */
+  const readOwnedApprovalRun = (approvalId: string): string | null =>
+    (connection
+      .query("SELECT run_id FROM publication_approvals_v33 WHERE approval_id=? AND requester_actor_id=? ORDER BY revision DESC LIMIT 1")
+      .get(approvalId, principal.ownerId) as { run_id: string } | null)?.run_id ?? null;
 
   return {
     listCandidates(_p, runId) {
       return service.listPublicationCandidates(runId);
     },
 
-    selectCandidate(_p, runId, body) {
+    selectCandidate(_p, _runId, body) {
       const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
-      // Force server-owned authority: requester is the principal's ownerId (never
-      // the body), runId is the URL's (never the body).
-      return service.selectCandidate({ ...record, runId, requesterUserId: principal.ownerId });
+      // The browser references a candidate ONLY by opaque checkpointId. EVERY
+      // authority field is DERIVED from durable server records keyed by the
+      // server-owned principal — the request body supplies none of them, so a
+      // body-claimed repositoryId / resultCommitSha / lineage / candidateRunId is
+      // simply never read (the derived value always wins).
+      const checkpointId = typeof record.checkpointId === "string" ? record.checkpointId : "";
+      const checkpoint = readVerifiedCheckpoint(checkpointId);
+      // The candidate MUST be a PROMOTED verified_candidate_checkpoints row owned by
+      // the principal. An unknown checkpoint AND another owner's checkpoint collapse
+      // to the SAME not-found shape (no ownership oracle).
+      if (!checkpoint || checkpoint.requester_user_id !== principal.ownerId) throw new CandidateNotFoundError();
+
+      if (isResolutionReplacementRun(checkpoint.run_id)) {
+        // P7_REPLACEMENT: the candidate's run is a durable resolution replacement
+        // run, so lineage is DERIVED as P7_REPLACEMENT — a client can NEVER claim
+        // ORIGINAL to skip verification, nor forge the lineage. The publication
+        // ROOT run + parent ORIGINAL selection are derived from the durable
+        // hardening candidate-lineage attestation (never the frozen source run),
+        // and the service gates the candidate through the real
+        // ResolutionLineageVerifier. If either durable link is absent, the
+        // replacement is not selectable (fail closed).
+        const rootRunId = readChildLineageRootRun(checkpointId);
+        if (!rootRunId) throw new StaleCandidateError();
+        const parentSelectionId = readParentOriginalSelectionId(rootRunId);
+        // The original candidate must be selected before its replacement.
+        if (!parentSelectionId) throw new StaleCandidateError();
+        return service.selectCandidate({
+          runId: rootRunId, candidateRunId: checkpoint.run_id, requesterUserId: principal.ownerId,
+          repositoryId: checkpoint.repository_id, checkpointId, checkpointHash: checkpoint.checkpoint_hash,
+          resultCommitSha: checkpoint.result_commit_sha, lineage: "P7_REPLACEMENT", parentSelectionId,
+        });
+      }
+      // ORIGINAL: root run == candidate run == the checkpoint's own run.
+      return service.selectCandidate({
+        runId: checkpoint.run_id, candidateRunId: checkpoint.run_id, requesterUserId: principal.ownerId,
+        repositoryId: checkpoint.repository_id, checkpointId, checkpointHash: checkpoint.checkpoint_hash,
+        resultCommitSha: checkpoint.result_commit_sha, lineage: "ORIGINAL", parentSelectionId: null,
+      });
     },
 
     approve(_p, checkpointId, body) {
       const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
-      const checkpointHash = typeof record.checkpointHash === "string" ? record.checkpointHash : "";
       const decision = record.decision;
+
+      // The checkpointHash is DERIVED from the principal's durable selection row
+      // keyed by checkpointId — NEVER read from the request body. An unknown or
+      // cross-owner checkpoint collapses to the SAME not-found shape (no oracle).
+      const selection = readOwnedSelection(checkpointId);
+      if (!selection) throw new CandidateNotFoundError();
+      const checkpointHash = selection.checkpoint_hash;
+      // Rebuild the strict body with the SERVER-DERIVED checkpointHash so a client
+      // cannot name a foreign checkpoint hash; decision/policyVersion/rationale (the
+      // browser's choice) still flow through and still surface a ZodError as a 400.
+      const derivedBody = { ...record, checkpointHash };
 
       // Server-derived approval context — NEVER the request body. Approver is the
       // principal's reviewerId (distinct from the selection's requester = ownerId).
-      const selection = readSelection(checkpointId, checkpointHash);
       const expiresAt = new Date(deps.now().getTime() + 24 * 60 * 60_000).toISOString();
 
       // Attestation feasibility is checked BEFORE any write so a signer-configured
       // APPROVE that cannot emit fails closed with nothing persisted.
       let attestationPlan: { request: ApprovalRequestLike; resultTreeHash: string } | null = null;
       if (deps.attestationRequired && decision === "APPROVE") {
-        if (!selection) {
-          throw new PublicationAttestationUnavailableError("the candidate selection is unknown to the server");
-        }
         const request = deps.latestApprovalRequest(selection.run_id);
         if (!request || request.status !== "PENDING" ||
             request.verifiedCheckpointId !== checkpointId || request.verifiedCheckpointHash !== checkpointHash) {
@@ -197,7 +321,7 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
         expiresAt: attestationPlan ? attestationPlan.request.deadlineAt : expiresAt,
       };
 
-      const result = service.approve(checkpointId, body, context);
+      const result = service.approve(checkpointId, derivedBody, context);
 
       // Emit + persist the v35 attestation over the ledger approval_decision path.
       // This is a SEPARATE ledger transaction from the P8 approve above; to keep
@@ -244,13 +368,19 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
       return result;
     },
 
-    async startPublication(_p, runId, body, idempotencyKey) {
+    async startPublication(_p, _runId, body, idempotencyKey) {
       const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
-      // idempotencyKey comes from the HTTP HEADER; operation is fixed. The body
-      // carries only the approvalId choice (any body idempotencyKey is ignored).
+      const approvalId = typeof record.approvalId === "string" ? record.approvalId : "";
+      // The browser names the approval ONLY by opaque approvalId. The runId is
+      // DERIVED from the approval's durable row (never the URL), and a cross-owner or
+      // unknown approval collapses to the SAME not-found shape (no oracle). The
+      // idempotencyKey comes from the HTTP HEADER (any body idempotencyKey is
+      // ignored) and operation is fixed to BRANCH_PR.
+      const derivedRunId = readOwnedApprovalRun(approvalId);
+      if (!derivedRunId) throw new CandidateNotFoundError();
       return service.startPublication({
-        runId,
-        approvalId: record.approvalId,
+        runId: derivedRunId,
+        approvalId,
         operation: "BRANCH_PR",
         idempotencyKey,
       });
