@@ -12,9 +12,12 @@ import {
   getEngineerDiff,
   getEngineerArtifactPreview,
   getEngineerLiveSummary,
+  getEngineerHardeningReadiness,
   getEngineerPlan,
   getEngineerRepository,
   getGithubConnector,
+  getGithubBranchCommit,
+  listGithubConnectorRepositories,
   startGithubConnector,
   disconnectGithubConnector,
   getEngineerRunStatus,
@@ -28,23 +31,35 @@ import {
   startEngineerRun,
   streamEngineerEvents,
   topUpEngineerBudget,
-  type EngineerBudgetLimits,
   type EngineerBudgetSnapshot,
   type EngineerArtifact,
+  type EngineerApproval,
   type EngineerRepository,
   type EngineerRun,
   type EngineerRunStatus,
+  type GithubConnectorRepository,
   type PlanProposal,
   type RunEvent,
 } from "@/lib/engineer";
 import type { EngineerDecisionItem } from "@/lib/engineer-decisions";
 import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresentation";
+import { ApprovalDecisionControls, PublicationUnavailableNotice, VerifiedCandidateCard } from "./EngineerVerificationControls";
+import { HardeningReadinessBanner } from "./EngineerHardeningReadiness";
 import { clearEphemeralGatewayToken, fetchGatewayConnection, setEphemeralGatewayToken } from "@/lib/gateway";
 import { estimateEngineerCost, formatUsd } from "@/lib/engineer-cost";
 import { downloadBlob } from "@/lib/download";
 import { deriveDiffProvenance, deriveSecurityStatus, DIFF_PROVENANCE_PRESENTATION, engineerTextSha256 } from "@/lib/engineer-truth";
 import { frozenPlanCapabilities } from "@/lib/engineer-capabilities";
 import { EngineerActionLock } from "@/lib/engineer-action-lock";
+import { engineerCorrectionRecovery } from "@/lib/engineer-correction";
+import { candidateConflictAppliesToRun, candidateMatchesApproval as matchesApproval } from "@/lib/engineer-candidate";
+import {
+  ENGINEER_BUDGET_CHIPS,
+  ENGINEER_BUDGET_PRESETS,
+  engineerBudgetPreset,
+  formatEngineerTokenLimit,
+  recommendedEngineerBudgetPresetIndex,
+} from "@/lib/engineer-budget-presets";
 
 type EvidenceData = Awaited<ReturnType<typeof getEngineerSnapshot>>["data"];
 const TERMINAL = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
@@ -59,21 +74,47 @@ const WORKFLOW_STAGES = [
   { label: "Human decision", states: /^(HUMAN_|FIX_REQUESTED|PAUSED_BUDGET)/ },
   { label: "Publication", states: /^(PR_|BASE_BRANCH|COMPLETED)/ },
 ] as const;
-const DEFAULT_BUDGET: EngineerBudgetLimits = { costBudgetUsd: 5, tokenBudget: 100_000, timeBudgetSeconds: 3_600 };
 const TOP_UP_DEFAULTS = { addCostBudgetUsd: 2, addTokenBudget: 50_000, addTimeBudgetSeconds: 900 };
-const CORRECTABLE_TERMINAL_STATES = new Set(["SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "REJECTED", "FAILED"]);
-
-function recommendedBudget(request: string): EngineerBudgetLimits {
-  const riskTerms = /\b(auth|security|crypt|migration|database|distributed|architecture|payment|permission|webhook)\b/gi;
-  const riskMatches = request.match(riskTerms)?.length ?? 0;
-  if (request.length > 2_000 || riskMatches >= 3) return { costBudgetUsd: 10, tokenBudget: 200_000, timeBudgetSeconds: 7_200 };
-  if (request.length < 500 && riskMatches === 0) return { costBudgetUsd: 2, tokenBudget: 50_000, timeBudgetSeconds: 1_800 };
-  return DEFAULT_BUDGET;
-}
 
 const FOLDER_INVENTORY_MAX_FILES = 5_000;
 const FOLDER_INVENTORY_MAX_ENTRIES = 10_000;
 const FOLDER_INVENTORY_MAX_DEPTH = 32;
+const FOLDER_TREE_MAX_NODES = 160;
+
+interface FolderTreeNode {
+  name: string;
+  kind: "directory" | "file";
+  size?: number;
+  children?: FolderTreeNode[];
+}
+
+function EngineerTopbar({ gatewayState }: { gatewayState: "connected" | "authentication-required" | "offline" }) {
+  return <header className="engineer-topbar"><div className="engineer-topbar-title"><span aria-hidden="true">Z</span><div><strong>Zintus Engineer</strong><small>AI writes the code. Zintus proves whether it works.</small></div></div><span className={`engineer-status engineer-status--${gatewayState}`}><i aria-hidden="true" />{gatewayState.replaceAll("-", " ")}</span></header>;
+}
+
+function BudgetSlider({ index, recommendedIndex, onChange }: { index: number; recommendedIndex: number; onChange: (index: number) => void }) {
+  const preset = engineerBudgetPreset(index);
+  const minutes = Math.round(preset.limits.timeBudgetSeconds / 60);
+  const fill = ENGINEER_BUDGET_PRESETS.length > 1 ? (index / (ENGINEER_BUDGET_PRESETS.length - 1)) * 100 : 0;
+  return <section className="engineer-budget-picker engineer-budget-slider" aria-labelledby="engineer-budget-title">
+    <div className="engineer-card-heading"><div><h3 id="engineer-budget-title">Run budget</h3><p>Set a hard ceiling before planning makes its first model call.</p></div><span className="engineer-chip" tabIndex={0} title="Budgets are reserved server-side. If a model would exceed the ceiling, execution pauses safely at the last durable checkpoint.">No overages</span></div>
+    <div className="engineer-budget-readout" aria-live="polite"><div><span>Max cost</span><strong>${preset.limits.costBudgetUsd}</strong></div><div><span>Max tokens</span><strong>{formatEngineerTokenLimit(preset.limits.tokenBudget)}</strong></div><div><span>Max minutes</span><strong>{minutes}</strong></div></div>
+    <div className="engineer-budget-range"><div className="engineer-budget-range-fill" style={{ width: `${fill}%` }} /><input aria-label="Run budget preset" type="range" min="0" max={ENGINEER_BUDGET_PRESETS.length - 1} step="1" value={index} onChange={(event) => onChange(Number(event.target.value))} /></div>
+    <div className="engineer-budget-ticks">{ENGINEER_BUDGET_PRESETS.map((item, itemIndex) => <button type="button" key={item.id} className={itemIndex === index ? "active" : ""} onClick={() => onChange(itemIndex)}>{item.tickLabel}</button>)}</div>
+    <div className="engineer-budget-presets">{ENGINEER_BUDGET_CHIPS.map((chip) => {
+      const targetIndex = chip.label === "Recommended" ? recommendedIndex : chip.presetIndex;
+      return <button type="button" key={chip.label} className={targetIndex === index ? "active" : ""} onClick={() => onChange(targetIndex)}>{chip.label}{chip.label === "Recommended" ? <small>{engineerBudgetPreset(recommendedIndex).tickLabel} for this task</small> : null}</button>;
+    })}</div>
+    <p className="engineer-budget-note">The run pauses at ${preset.limits.costBudgetUsd}, {preset.limits.tokenBudget.toLocaleString()} tokens, or {minutes} minutes—whichever comes first. You can inspect partial work and explicitly top up later.</p>
+  </section>;
+}
+
+function FolderTree({ nodes }: { nodes: FolderTreeNode[] }) {
+  if (!nodes.length) return null;
+  return <div className="engineer-folder-tree">{nodes.map((node) => node.kind === "directory"
+    ? <details key={`directory:${node.name}`}><summary><span>›</span><code>{node.name}</code><small>{node.children?.length ?? 0} entries</small></summary><FolderTree nodes={node.children ?? []} /></details>
+    : <div className="engineer-folder-file" key={`file:${node.name}`}><span>·</span><code>{node.name}</code><small>{((node.size ?? 0) / 1_024).toFixed(1)} KB</small></div>)}</div>;
+}
 
 function BudgetHud({ budget, manifest }: { budget: EngineerBudgetSnapshot | null; manifest: PlanProposal["manifest"] | null }) {
   const limits = budget?.limits ?? (manifest ? { costUsd: manifest.costBudgetUsd, tokens: manifest.tokenBudget, timeSeconds: manifest.timeBudgetSeconds } : null);
@@ -191,22 +232,26 @@ export default function EngineerPage() {
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [managerError, setManagerError] = useState<string | null>(null);
+  const [candidateStaleRunId, setCandidateStaleRunId] = useState<string | null>(null);
   const [activity, setActivity] = useState<EngineerRunStatus["activity"] | null>(null);
   const [displayedDiffHash, setDisplayedDiffHash] = useState<string | null>(null);
   const [gatewayToken, setGatewayToken] = useState("");
   const [gatewayAuthenticated, setGatewayAuthenticated] = useState(false);
   const [gatewayState, setGatewayState] = useState<"connected" | "authentication-required" | "offline">("offline");
+  const [hardeningReadiness,setHardeningReadiness]=useState<"READY"|"DEGRADED"|"UNKNOWN">("UNKNOWN");
   const [showAdvancedGateway, setShowAdvancedGateway] = useState(false);
   const [githubConnected, setGithubConnected] = useState(false);
   const [githubConfigured, setGithubConfigured] = useState(false);
+  const [githubRepositories, setGithubRepositories] = useState<GithubConnectorRepository[]>([]);
+  const [githubRepositoriesBusy, setGithubRepositoriesBusy] = useState(false);
   const [recentRuns, setRecentRuns] = useState<EngineerRun[]>([]);
   const [recentRunsCursor, setRecentRunsCursor] = useState<string | null>(null);
   const [showAllRuns, setShowAllRuns] = useState(false);
-  const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number; truncated: boolean } | null>(null);
+  const [folderSnapshot, setFolderSnapshot] = useState<{ name: string; files: number; bytes: number; truncated: boolean; scannedMs: number; tree: FolderTreeNode[] } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   const [budget, setBudget] = useState<EngineerBudgetSnapshot | null>(null);
-  const [budgetMode, setBudgetMode] = useState<"recommended" | "custom">("recommended");
-  const [customBudget, setCustomBudget] = useState<EngineerBudgetLimits>(DEFAULT_BUDGET);
+  const [budgetPresetIndex, setBudgetPresetIndex] = useState(2);
+  const [budgetPresetTouched, setBudgetPresetTouched] = useState(false);
   const [topUp, setTopUp] = useState(TOP_UP_DEFAULTS);
   const [topUpPending, setTopUpPending] = useState(false);
   const [topUpNotice, setTopUpNotice] = useState<string | null>(null);
@@ -217,6 +262,26 @@ export default function EngineerPage() {
   const activeRunIdRef = useRef<string | null>(null);
   const topUpPendingRef = useRef(false);
   const actionLockRef = useRef(new EngineerActionLock());
+  const recommendedPresetIndex = useMemo(() => recommendedEngineerBudgetPresetIndex(request), [request]);
+
+  useEffect(() => {
+    if (!budgetPresetTouched) setBudgetPresetIndex(recommendedPresetIndex);
+  }, [budgetPresetTouched, recommendedPresetIndex]);
+
+  useEffect(() => {
+    if (!githubConnected) {
+      setGithubRepositories([]);
+      setGithubRepositoriesBusy(false);
+      return;
+    }
+    let active = true;
+    setGithubRepositoriesBusy(true);
+    void listGithubConnectorRepositories()
+      .then((repositories) => { if (active) setGithubRepositories(repositories); })
+      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : "Unable to load authorized GitHub repositories"); })
+      .finally(() => { if (active) setGithubRepositoriesBusy(false); });
+    return () => { active = false; };
+  }, [githubConnected]);
 
   const withRunMutation = useCallback(async (action: string, work: () => Promise<void>) => {
     await actionLockRef.current.run("run-control", async () => {
@@ -238,6 +303,7 @@ export default function EngineerPage() {
     setManagerError(status.lastError);
     setActivity(status.activity);
     setData(nextData);
+    setCandidateStaleRunId(null);
     setBudget(nextBudget);
     setEvents(snapshot.events);
   }, []);
@@ -260,7 +326,11 @@ export default function EngineerPage() {
     void streamEngineerEvents(runId, (event) => {
       setEvents((current) => current.some((item) => item.eventId === event.eventId) ? current : [...current, event]);
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => { refreshTimerRef.current = null; void refreshLiveSummary(runId); }, 100);
+      refreshTimerRef.current = setTimeout(() => {
+        refreshTimerRef.current = null;
+        if (event.reasonCode === "VERIFIED_CANDIDATE_PROMOTED" || /^(HUMAN_APPROVAL_|HUMAN_(APPROVED|REJECTED|REQUESTED_CHANGES))/.test(event.reasonCode)) void refresh(runId);
+        else void refreshLiveSummary(runId);
+      }, 100);
     }, controller.signal, {
       afterSequence,
     }).then(() => {
@@ -302,10 +372,13 @@ export default function EngineerPage() {
     const connection = await fetchGatewayConnection();
     setGatewayState(connection.state);
     if (connection.state === "connected") setGatewayAuthenticated(true);
-    const [canonical, history, connector] = await Promise.allSettled([getEngineerRepository(), listEngineerRunsPage(), getGithubConnector()]);
+    const [canonical, history, connector, hardening] = await Promise.allSettled([
+      getEngineerRepository(), listEngineerRunsPage(), getGithubConnector(), getEngineerHardeningReadiness(),
+    ]);
     if (canonical.status === "fulfilled") setRepository(canonical.value);
     if (history.status === "fulfilled") { setRecentRuns(history.value.runs); setRecentRunsCursor(history.value.nextCursor); }
     if (connector.status === "fulfilled") { setGithubConfigured(connector.value.configured); setGithubConnected(connector.value.connected); }
+    setHardeningReadiness(hardening.status==="fulfilled"?hardening.value.state:"UNKNOWN");
     if (canonical.status === "fulfilled" || history.status === "fulfilled") setError(null);
     if (canonical.status === "rejected" && history.status === "rejected") {
       if (isGatewayAuthorizationError(canonical.reason) || isGatewayAuthorizationError(history.reason)) {
@@ -320,6 +393,21 @@ export default function EngineerPage() {
       }
     }
   }, []);
+
+  // The browser may open before the local gateway has finished its preflight.
+  // Retry only while it is unreachable so zero-terminal onboarding heals
+  // automatically after the gateway becomes ready, without token re-entry or
+  // a manual page refresh.
+  useEffect(() => {
+    if (gatewayState !== "offline") return;
+    const reconnect = () => { void loadDashboard(); };
+    const timer = window.setInterval(reconnect, 3_000);
+    window.addEventListener("focus", reconnect);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", reconnect);
+    };
+  }, [gatewayState, loadDashboard]);
 
   const loadOlderRuns = async () => {
     if (!recentRunsCursor) return;
@@ -337,7 +425,44 @@ export default function EngineerPage() {
     try { window.location.href = await startGithubConnector(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to connect GitHub"); setBusy(false); }
   };
-  const disconnectGithub = async () => { setBusy(true); try { await disconnectGithubConnector(); setGithubConnected(false); } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to disconnect GitHub"); } finally { setBusy(false); } };
+  const disconnectGithub = async () => {
+    setBusy(true); setError(null);
+    try {
+      await disconnectGithubConnector();
+      setGithubConnected(false);
+      setGithubRepositories([]);
+      setRepository(await getEngineerRepository());
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to disconnect GitHub"); }
+    finally { setBusy(false); }
+  };
+
+  const selectGithubRepository = async (candidate: GithubConnectorRepository) => {
+    const separator = candidate.fullName.indexOf("/");
+    if (separator <= 0) { setError("The connector returned an invalid repository name."); return; }
+    const owner = candidate.fullName.slice(0, separator);
+    const name = candidate.fullName.slice(separator + 1);
+    setBusy(true); setError(null);
+    try {
+      const baseCommitSha = await getGithubBranchCommit(owner, name, candidate.defaultBranch);
+      setRepository({
+        repositoryId: candidate.id,
+        provider: "github",
+        owner,
+        name,
+        url: candidate.cloneUrl,
+        baseBranch: candidate.defaultBranch,
+        baseCommitSha,
+      });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to verify the GitHub branch"); }
+    finally { setBusy(false); }
+  };
+
+  const useLocalRepository = async () => {
+    setBusy(true); setError(null);
+    try { setRepository(await getEngineerRepository()); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to load the verified local repository"); }
+    finally { setBusy(false); }
+  };
 
   // Browser-only inspection is intentionally read-only. The selected directory
   // never leaves this tab; the local gateway remains the execution/editing
@@ -348,25 +473,36 @@ export default function EngineerPage() {
     setFolderBusy(true); setError(null);
     try {
       const root = await picker({ mode: "read" }) as { name: string; values?: () => AsyncIterable<unknown> };
-      let files = 0; let bytes = 0; let entries = 0; let truncated = false;
-      const visit = async (directory: { values?: () => AsyncIterable<unknown> }, depth: number): Promise<void> => {
-        if (!directory.values || truncated) return;
-        if (depth > FOLDER_INVENTORY_MAX_DEPTH) { truncated = true; return; }
+      const started = performance.now();
+      let files = 0; let bytes = 0; let entries = 0; let treeNodes = 0; let truncated = false;
+      const visit = async (directory: { values?: () => AsyncIterable<unknown> }, depth: number): Promise<FolderTreeNode[]> => {
+        const nodes: FolderTreeNode[] = [];
+        if (!directory.values || truncated) return nodes;
+        if (depth > FOLDER_INVENTORY_MAX_DEPTH) { truncated = true; return nodes; }
         for await (const entry of directory.values()) {
           entries += 1;
-          if (entries > FOLDER_INVENTORY_MAX_ENTRIES || files >= FOLDER_INVENTORY_MAX_FILES) { truncated = true; return; }
+          if (entries > FOLDER_INVENTORY_MAX_ENTRIES || files >= FOLDER_INVENTORY_MAX_FILES) { truncated = true; return nodes; }
           const item = entry as { kind?: string; name?: string; values?: () => AsyncIterable<unknown>; getFile?: () => Promise<{ size: number }> };
           if (item.kind === "directory") {
             if (item.name === ".git" || item.name === "node_modules") continue;
-            await visit(item, depth + 1);
+            const children = await visit(item, depth + 1);
+            if (treeNodes < FOLDER_TREE_MAX_NODES) {
+              treeNodes += 1;
+              nodes.push({ name: item.name ?? "folder", kind: "directory", children });
+            } else truncated = true;
           } else if (item.kind === "file" && item.getFile) {
             const file = await item.getFile(); files += 1; bytes += file.size;
+            if (treeNodes < FOLDER_TREE_MAX_NODES) {
+              treeNodes += 1;
+              nodes.push({ name: item.name ?? "file", kind: "file", size: file.size });
+            } else truncated = true;
           }
-          if (truncated) return;
+          if (truncated && treeNodes >= FOLDER_TREE_MAX_NODES) return nodes;
         }
+        return nodes;
       };
-      await visit(root, 0);
-      setFolderSnapshot({ name: root.name, files, bytes, truncated });
+      const tree = await visit(root, 0);
+      setFolderSnapshot({ name: root.name, files, bytes, truncated, scannedMs: Math.round(performance.now() - started), tree });
     } catch (cause) {
       if ((cause as { name?: string })?.name !== "AbortError") setError(cause instanceof Error ? cause.message : "Unable to read the selected folder");
     } finally { setFolderBusy(false); }
@@ -380,6 +516,7 @@ export default function EngineerPage() {
       getEngineerSnapshot(runId), getEngineerPlan(runId).catch(() => null),
     ]);
     if (activeRunIdRef.current !== runId) return;
+    setCandidateStaleRunId(null);
     setRun(snapshot.status.run); setPlan(storedPlan); setData(snapshot.data); setBudget(snapshot.status.budget); setEvents(snapshot.events); setManagerError(snapshot.status.lastError); setActivity(snapshot.status.activity);
     window.localStorage.setItem(RUN_STORAGE_KEY, runId);
     if (snapshot.status.run.state !== "PAUSED_BUDGET" && !TERMINAL.has(snapshot.status.run.state)) watch(runId, snapshot.latestEventSequence);
@@ -390,6 +527,7 @@ export default function EngineerPage() {
     activeRunIdRef.current = null;
     if (refreshTimerRef.current) { clearTimeout(refreshTimerRef.current); refreshTimerRef.current = null; }
     window.localStorage.removeItem(RUN_STORAGE_KEY);
+    setCandidateStaleRunId(null);
     setRun(null); setPlan(null); setData(null); setBudget(null); setEvents([]); setManagerError(null); setActivity(null); setError(null);
     void loadDashboard();
   }, [loadDashboard]);
@@ -411,7 +549,7 @@ export default function EngineerPage() {
     setBusy(true); setError(null);
     cancellationRequestedRef.current = false;
     try {
-      const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
+      const selectedBudget = engineerBudgetPreset(budgetPresetIndex).limits;
       const created = await createEngineerRun({ repository, request: request.trim(), budget: selectedBudget });
       activeRunIdRef.current = created.runId;
       setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
@@ -509,7 +647,7 @@ export default function EngineerPage() {
   };
 
   const createCorrectedRun = async () => {
-    if (!run || !CORRECTABLE_TERMINAL_STATES.has(run.state)) return;
+    if (!run || correctionRecovery !== "corrected-run") return;
     await withRunMutation("create-corrected-run", async () => {
       setError(null);
       try {
@@ -520,6 +658,22 @@ export default function EngineerPage() {
     });
   };
 
+  const prepareNewBoundedRun = () => {
+    if (!run) return;
+    const sourceRequest = run.requestOriginal;
+    returnToRuns();
+    setRequest(sourceRequest);
+    setBudgetPresetTouched(false);
+    setBudgetPresetIndex(recommendedEngineerBudgetPresetIndex(sourceRequest));
+  };
+
+  const approval = data?.approval as EngineerApproval | null | undefined;
+  const approvalAuthority = data?.approvalAuthority ?? null;
+  const verifiedCandidate = data?.verifiedCandidate ?? null;
+  const candidateStale = candidateConflictAppliesToRun(candidateStaleRunId, run?.runId ?? null);
+  const candidateMatchesApproval = matchesApproval(verifiedCandidate, approvalAuthority);
+  const approvalControlsDisabled = busy || candidateStale || !candidateMatchesApproval;
+
   const decide = async (action: "approve" | "request-changes" | "reject" | "cancel") => {
     if (!run) return;
     await withRunMutation(`approval:${action}`, async () => {
@@ -529,8 +683,17 @@ export default function EngineerPage() {
         setCancelling(true);
       }
       setError(null);
-      try { await engineerDecision(run.runId, action, reason.trim() || `${action} from Zintus Engineer`); setReason(""); await refresh(run.runId); }
-      catch (cause) { setError(cause instanceof Error ? cause.message : "Decision failed"); }
+      try {
+        if (action !== "cancel" && !approvalAuthority) throw new Error("The candidate changed or its approval is unavailable. Refresh before deciding.");
+        await engineerDecision(run.runId, action, reason.trim() || `${action} from Zintus Engineer`, approvalAuthority ?? undefined);
+        setReason("");
+        await refresh(run.runId);
+      }
+      catch (cause) {
+        const message = cause instanceof Error ? cause.message : "Decision failed";
+        if (/candidate changed/i.test(message)) setCandidateStaleRunId(run.runId);
+        setError(message);
+      }
       finally { setCancelling(false); }
     });
   };
@@ -539,12 +702,21 @@ export default function EngineerPage() {
     if (!run) return;
     await withRunMutation("approval:extend", async () => {
       setError(null);
-      try { await extendEngineerApproval(run.runId, reason.trim() || "More time required for human review."); setReason(""); await refresh(run.runId); }
-      catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to extend approval"); }
+      try {
+        if (!approvalAuthority) throw new Error("The candidate changed or its approval is unavailable. Refresh before extending.");
+        await extendEngineerApproval(run.runId, reason.trim() || "More time required for human review.", approvalAuthority);
+        setReason("");
+        await refresh(run.runId);
+      }
+      catch (cause) {
+        const message = cause instanceof Error ? cause.message : "Unable to extend approval";
+        if (/candidate changed/i.test(message)) setCandidateStaleRunId(run.runId);
+        setError(message);
+      }
     });
   };
 
-  const resolveHumanReview = async (decision: "approve" | "reject") => {
+  const resolveHumanReview = async (decision: "reject" | "retry") => {
     if (!run) return;
     await withRunMutation(`human-review:${decision}`, async () => {
       setError(null);
@@ -556,7 +728,7 @@ export default function EngineerPage() {
   };
 
   const applyTopUp = async (resume: boolean) => {
-    if (!run || !budget || topUpPendingRef.current) return;
+    if (!run || !budget || run.state !== "PAUSED_BUDGET" || topUpPendingRef.current) return;
     topUpPendingRef.current = true;
     setTopUpPending(true);
     setBusy(true); setError(null);
@@ -565,9 +737,15 @@ export default function EngineerPage() {
       setBudget(updated);
       setTopUpNotice(`Allowance added once. New ceiling: $${updated.limits.costUsd} / ${updated.limits.tokens.toLocaleString()} tokens.`);
       if (resume) {
-        const resumed = await resumeEngineerBudget(run.runId, { expectedStateVersion: run.stateVersion, expectedBudgetRevision: updated.revision });
-        const latestSequence = events.at(-1)?.sequence ?? 0;
-        setRun(resumed); watch(resumed.runId, latestSequence);
+        try {
+          const resumed = await resumeEngineerBudget(run.runId, { expectedStateVersion: run.stateVersion, expectedBudgetRevision: updated.revision });
+          const latestSequence = events.at(-1)?.sequence ?? 0;
+          setRun(resumed); watch(resumed.runId, latestSequence);
+        } catch (cause) {
+          await refresh(run.runId);
+          setTopUpNotice("Allowance was added exactly once, but resume did not complete. Use Resume with current allowance; do not add it again.");
+          throw cause;
+        }
       }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to update the run budget"); }
     finally { topUpPendingRef.current = false; setTopUpPending(false); setBusy(false); }
@@ -601,12 +779,12 @@ export default function EngineerPage() {
   const artifacts = data?.artifacts ?? [];
   const claims = (data?.claims ?? []) as Array<{ claimId?: string; claim?: string; status?: string; notes?: string }>;
   const tests = (data?.tests ?? []) as Array<{ testExecutionId?: string; type?: string; status?: string }>;
-  const findings = (data?.securityFindings ?? []) as Array<{ securityFindingId?: string; severity?: string; category?: string; description?: string }>;
+  const findings = (data?.securityFindings ?? []) as Array<{ securityFindingId?: string; severity?: string; category?: string; description?: string; status?: string }>;
   const failures = (data?.failures ?? []) as Array<{ failureId?: string; reasonCode?: string; failureClass?: string }>;
+  const correctionRecovery = engineerCorrectionRecovery(latestState, findings, failures);
   const gitOperations = (data?.gitOperations ?? []) as Array<{ gitOperationId?: string; operationType?: string; status?: string; evidenceBundleHash?: string | null; remoteReference?: string | null; errorCode?: string | null }>;
   const evidenceBundles = (data?.evidenceBundles ?? []) as Array<{ evidenceBundleId?: string; bundleHash?: string }>;
   const decisions = (data?.decisions ?? []) as EngineerDecisionItem[];
-  const approval = data?.approval as { status?: string; riskTier?: string; deadlineAt?: string; manifestHash?: string; diffHash?: string; evidenceBundleHash?: string } | null | undefined;
   const diffProvenance = deriveDiffProvenance({
     state: latestState,
     displayedDiffHash,
@@ -617,8 +795,11 @@ export default function EngineerPage() {
   });
   const diffPresentation = DIFF_PROVENANCE_PRESENTATION[diffProvenance];
   const securityStatus = deriveSecurityStatus({ events, findingCount: findings.length, errors: data?.errors ?? [] });
+  const humanReviewCanRetry = failures.some((failure) =>
+    failure.reasonCode === "PHASE3_UNEXPECTED_FAILURE" || failure.reasonCode === "FLAKY_TEST_QUARANTINED");
   const reachedImplementation = events.some((event) => ["IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "VERIFICATION_RECOVERY", "REVERIFYING"].includes(event.nextState));
   const reachedVerification = events.some((event) => ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE", "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING", "REVIEW_APPROVED", "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED"].includes(event.nextState));
+  const visibleEvidenceErrors = reachedVerification ? (data?.errors ?? []) : [];
   const visibleTabs = ["timeline", ...(reachedImplementation ? ["diff"] : []), ...(reachedVerification ? ["evidence"] : [])] as Array<"timeline" | "diff" | "evidence">;
   useEffect(() => {
     if ((tab === "diff" && !reachedImplementation) || (tab === "evidence" && !reachedVerification)) setTab("timeline");
@@ -626,7 +807,6 @@ export default function EngineerPage() {
   const stage = useMemo(() => workflowStage(latestState), [latestState]);
   const costEstimate = useMemo(() => estimateEngineerCost(request, repository.name), [request, repository.name]);
   const planCapabilities = useMemo(() => plan ? frozenPlanCapabilities(plan.manifest, { githubConnected }) : [], [githubConnected, plan]);
-  const selectedBudget = budgetMode === "recommended" ? recommendedBudget(request) : customBudget;
   const budgetUsage = budget ? Math.max(
     budget.limits.costUsd > 0 ? (budget.used.costUsd + budget.reserved.costUsd) / budget.limits.costUsd : 0,
     budget.limits.tokens > 0 ? (budget.used.tokens + budget.reserved.tokens) / budget.limits.tokens : 0,
@@ -634,6 +814,7 @@ export default function EngineerPage() {
   ) : 0;
   const hasRemainingBudget = Boolean(budget && budget.remaining.costUsd > 0 && budget.remaining.tokens > 0 && budget.remaining.timeSeconds > 0);
   const canRetryLegacyReservation = Boolean(hasRemainingBudget && budget?.resumeState === "PLANNING" && failures.some((failure) => failure.reasonCode === "PLANNER_MODEL_CALL_FAILED"));
+  const canResumePausedBudget = latestState === "PAUSED_BUDGET" && hasRemainingBudget && (canRetryLegacyReservation || Boolean(budget?.topUpPendingResume));
   const approachingBudget = budget?.status === "WARNING" || budgetUsage >= (budget?.warningThreshold ?? 0.8);
   const liveDiff = data?.diff ?? "";
   const liveChangedFiles = liveDiff.match(/^diff --git /gm)?.length ?? 0;
@@ -642,25 +823,34 @@ export default function EngineerPage() {
 
   if (!run) return (
     <main className="engineer-screen">
-      <header className="engineer-hero"><span className="engineer-kicker">Zintus Engineer</span><h1>AI writes the code. Zintus proves whether it works.</h1><p>Define the exact repository snapshot and the outcome. Zintus plans, isolates, verifies, reviews, and waits for you before risky publication.</p><a href="/engineer/operations">Open operations and cost health →</a></header>
+      <EngineerTopbar gatewayState={gatewayState} />
+      <HardeningReadinessBanner state={hardeningReadiness} />
       <section className="engineer-card" id="gateway-access">
-        <div className="engineer-section-title"><span>00</span><div><h2>Gateway</h2><p>{gatewayState === "connected" ? "Connected locally. No token is required on a loopback gateway." : gatewayState === "authentication-required" ? "This gateway requires an operator token." : "Start the local gateway to connect automatically."}</p></div></div>
+        <div className="engineer-section-title"><span>01</span><div><h2>Gateway</h2><p>{gatewayState === "connected" ? "Connected locally. No token is required on a loopback gateway." : gatewayState === "authentication-required" ? "This gateway requires an operator token." : "Start the local gateway to connect automatically."}</p></div></div>
         <div className="engineer-actions"><span className={`engineer-status engineer-status--${gatewayState}`}>{gatewayState.replaceAll("-", " ")}</span><button onClick={() => setShowAdvancedGateway((value) => !value)}>{showAdvancedGateway ? "Hide advanced security" : "Advanced security"}</button></div>
         {showAdvancedGateway ? <div className="engineer-actions"><label>Operator token<input type="password" value={gatewayToken} autoComplete="off" onChange={(event) => setGatewayToken(event.target.value)} placeholder="Paste GATEWAY_TOKEN" /></label><button disabled={!gatewayToken.trim()} onClick={() => { setEphemeralGatewayToken(gatewayToken); setGatewayToken(""); setGatewayAuthenticated(true); void loadDashboard(true); }}>Use token for this tab</button>{gatewayAuthenticated ? <button onClick={() => { clearEphemeralGatewayToken(); setGatewayAuthenticated(false); void loadDashboard(); }}>Clear token</button> : null}</div> : null}
       </section>
       <section className="engineer-card" id="repository-connector">
-        <div className="engineer-section-title"><span>01</span><div><h2>Repository connector</h2><p>Local is the default. GitHub access is scoped to repositories you authorize.</p></div></div>
-        <div className="engineer-actions"><span className="engineer-chip">{githubConnected ? "GitHub publication connected" : "Verified local repository"}</span>{githubConfigured && !githubConnected ? <button onClick={() => void connectGithub()} disabled={busy}>Connect GitHub</button> : null}{githubConnected ? <button onClick={() => void disconnectGithub()} disabled={busy}>Disconnect</button> : null}</div>
-        {githubConnected ? <p className="engineer-muted">GitHub credentials are available for approved publication. Runs remain bound to the repository admitted by this local gateway.</p> : null}
+        <div className="engineer-section-title"><span>02</span><div><h2>Repository</h2><p>Choose the exact source snapshot. Local remains the safe default.</p></div></div>
+        <div className="engineer-connector-grid">
+          <button type="button" className={`engineer-connector${repository.provider === "local" ? " selected" : ""}`} onClick={() => void useLocalRepository()} disabled={busy}>
+            <span aria-hidden="true">⌂</span><div><strong>Local repository</strong><small>{repository.provider === "local" ? `${repository.owner}/${repository.name}` : "Verified by the local gateway"}</small></div><i>{repository.provider === "local" ? "Active" : "Use local"}</i>
+          </button>
+          <button type="button" className={`engineer-connector${repository.provider === "github" ? " selected" : ""}`} onClick={() => { if (!githubConnected && githubConfigured) void connectGithub(); }} disabled={busy || !githubConfigured}>
+            <span aria-hidden="true">GH</span><div><strong>GitHub</strong><small>{!githubConfigured ? "Not configured on this gateway" : githubConnected ? `${githubRepositories.length} authorized repositories` : "Connect with scoped OAuth"}</small></div><i>{githubConnected ? "Connected" : "Connect"}</i>
+          </button>
+        </div>
+        <div className="engineer-actions">{githubConfigured && !githubConnected ? <button onClick={() => void connectGithub()} disabled={busy}>Connect GitHub</button> : null}{githubConnected ? <button onClick={() => void disconnectGithub()} disabled={busy}>Disconnect GitHub</button> : null}<a href="/engineer/operations">Operations and cost health →</a></div>
+        {githubConnected ? <div className="engineer-github-repositories"><strong>Authorized repositories</strong>{githubRepositoriesBusy ? <p className="engineer-muted">Loading repositories…</p> : githubRepositories.length ? <div>{githubRepositories.map((candidate) => <button type="button" key={candidate.id} className={repository.provider === "github" && repository.repositoryId === candidate.id ? "selected" : ""} onClick={() => void selectGithubRepository(candidate)} disabled={busy}><span><strong>{candidate.fullName}</strong><small>{candidate.private ? "Private" : "Public"} · {candidate.defaultBranch}</small></span><i>{repository.provider === "github" && repository.repositoryId === candidate.id ? "Selected" : "Choose"}</i></button>)}</div> : <p className="engineer-muted">No repositories were returned by the connector. Review the GitHub installation scope.</p>}</div> : null}
         {!githubConfigured ? <p className="engineer-muted">GitHub is not configured on this gateway. Local repositories remain available.</p> : null}
         <div className="engineer-folder-picker">
           <div><strong>Inspect a local folder in this browser</strong><p className="engineer-muted">Read-only inventory only. This does not change the repository used by Engineer; execution remains bound to the verified gateway repository.</p></div>
           <div className="engineer-actions"><button onClick={() => void chooseLocalFolder()} disabled={folderBusy}>{folderBusy ? "Reading folder…" : "Inspect folder"}</button></div>
-          {folderSnapshot ? <p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · browser-only inspection{folderSnapshot.truncated ? " · inventory safely truncated" : ""}</p> : null}
+          {folderSnapshot ? <div className="engineer-folder-snapshot"><p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · scanned in {folderSnapshot.scannedMs.toLocaleString()} ms{folderSnapshot.truncated ? " · preview safely truncated" : ""}</p><FolderTree nodes={folderSnapshot.tree} /></div> : null}
         </div>
       </section>
       {recentRuns.length ? <section className="engineer-card" id="recent-runs">
-        <div className="engineer-section-title"><span>02</span><div><h2>Recent durable runs</h2><p>Reopen any run from the gateway ledger, including after a browser restart.</p></div></div>
+        <div className="engineer-section-title"><span>03</span><div><h2>Recent durable runs</h2><p>Reopen a gateway-ledger run after any browser restart.</p></div></div>
         <div className="engineer-list">{(showAllRuns ? recentRuns : recentRuns.slice(0, 2)).map((item) => <button key={item.runId} onClick={() => void openRun(item.runId)}>
           <span className={`engineer-status engineer-status--${item.state.toLowerCase()}`}>{item.state.replaceAll("_", " ")}</span>
           <div><strong>{item.requestNormalized || item.requestOriginal}</strong><code>{item.runId}</code></div>
@@ -669,7 +859,7 @@ export default function EngineerPage() {
         {showAllRuns && recentRunsCursor ? <button className="engineer-secondary" disabled={busy} onClick={() => void loadOlderRuns()}>{busy ? "Loading…" : "Load older runs"}</button> : null}
       </section> : null}
       <section className="engineer-card engineer-new-run">
-        <div className="engineer-section-title"><span>03</span><div><h2>New engineering run</h2><p>No chat transcript. One evidence-driven workflow.</p></div></div>
+        <div className="engineer-section-title"><span>04</span><div><h2>New engineering run</h2><p>One bounded request. One evidence-driven workflow.</p></div></div>
         <label>Feature or bug<textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={5} placeholder="Add a bounded feature with measurable acceptance criteria…" /></label>
         <div className="engineer-form-grid">
           <label>Provider<input value={repository.provider === "github" ? "GitHub" : "Local repository"} readOnly /></label>
@@ -685,25 +875,7 @@ export default function EngineerPage() {
           <p>Estimate only; actual provider billing depends on context and retries. No model call is made until you create the evidence plan.</p>
           <ul>{costEstimate.checks.map((check) => <li key={check}>{check}</li>)}</ul>
         </aside>
-        <section className="engineer-budget-picker" aria-labelledby="engineer-budget-title">
-          <div className="engineer-card-heading"><div><h3 id="engineer-budget-title">Run budget</h3><p>Choose a hard ceiling before planning makes its first model call.</p></div><span className="engineer-chip" tabIndex={0} title="Budgets are reserved server-side. If a model would exceed the ceiling, execution pauses safely at the last durable checkpoint.">No overages</span></div>
-          <div className="engineer-budget-options">
-            <button type="button" className={budgetMode === "recommended" ? "selected" : ""} onClick={() => setBudgetMode("recommended")} aria-pressed={budgetMode === "recommended"}>
-              <span><strong>Recommended</strong><small>Adjusted locally from task size and risk signals</small></span>
-              <b>${recommendedBudget(request).costBudgetUsd} · {(recommendedBudget(request).tokenBudget / 1_000).toLocaleString()}k tokens</b>
-            </button>
-            <button type="button" className={budgetMode === "custom" ? "selected" : ""} onClick={() => setBudgetMode("custom")} aria-pressed={budgetMode === "custom"}>
-              <span><strong>Custom</strong><small>Set your own cost, token, and time ceilings</small></span>
-              <b>${customBudget.costBudgetUsd} · {(customBudget.tokenBudget / 1_000).toLocaleString()}k tokens</b>
-            </button>
-          </div>
-          {budgetMode === "custom" ? <div className="engineer-budget-custom">
-            <label>Maximum cost (USD)<input type="number" min="0.5" max="100" step="0.5" value={customBudget.costBudgetUsd} onChange={(event) => setCustomBudget({ ...customBudget, costBudgetUsd: Math.max(0.5, Number(event.target.value) || 0.5) })} /></label>
-            <label>Maximum tokens<input type="number" min="10000" max="1000000" step="10000" value={customBudget.tokenBudget} onChange={(event) => setCustomBudget({ ...customBudget, tokenBudget: Math.min(1_000_000, Math.max(10_000, Number(event.target.value) || 10_000)) })} /></label>
-            <label>Maximum minutes<input type="number" min="10" max="480" step="10" value={Math.round(customBudget.timeBudgetSeconds / 60)} onChange={(event) => setCustomBudget({ ...customBudget, timeBudgetSeconds: Math.max(600, (Number(event.target.value) || 10) * 60) })} /></label>
-          </div> : null}
-          <p className="engineer-budget-note">The run pauses at ${selectedBudget.costBudgetUsd}, {selectedBudget.tokenBudget.toLocaleString()} tokens, or {Math.round(selectedBudget.timeBudgetSeconds / 60)} minutes—whichever comes first. You can inspect partial work and explicitly top up later.</p>
-        </section>
+        <BudgetSlider index={budgetPresetIndex} recommendedIndex={recommendedPresetIndex} onChange={(index) => { setBudgetPresetTouched(true); setBudgetPresetIndex(index); }} />
         {error ? <p className="engineer-error">{error}</p> : null}
         <button className="engineer-primary" onClick={() => void submit()} disabled={busy || !request.trim() || !repository.baseCommitSha}>{busy ? "Planning…" : "Create evidence plan"}</button>
       </section>
@@ -713,6 +885,7 @@ export default function EngineerPage() {
   if (plan && run.state === "PLAN_READY") return (
     <main className="engineer-screen">
       <RunHeader run={run} stage={stage} onBack={returnToRuns} />
+      <HardeningReadinessBanner state={hardeningReadiness} />
       <section className="engineer-plan-grid">
         <div className="engineer-card">
           <div className="engineer-section-title"><span>02</span><div><h2>Review the frozen contract</h2><p>This scope controls every file, command, test, and retry.</p></div></div>
@@ -738,46 +911,49 @@ export default function EngineerPage() {
           <button className="engineer-primary" onClick={() => void freezeAndStart()} disabled={busy}>{pendingAction === "freeze-start" ? "Starting…" : "Freeze plan and start"}</button>
         </aside>
       </section>
-      <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} />
+      <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} stage={stage} />
     </main>
   );
 
   return (
     <main className="engineer-screen">
       <RunHeader run={run} stage={stage} onBack={returnToRuns} />
+      <HardeningReadinessBanner state={hardeningReadiness} />
       <BudgetHud budget={budget} manifest={plan?.manifest ?? null} />
       {approachingBudget && latestState !== "PAUSED_BUDGET" ? <section className="engineer-budget-warning" role="status">
         <div><strong>Approaching the run budget</strong><p>{topUpNotice ?? `Zintus has reserved or used ${Math.min(100, Math.round(budgetUsage * 100))}% of at least one limit. It will pause safely before spending beyond your ceiling.`}</p></div>
-        <button disabled={busy || topUpPending || !budget} onClick={() => { if (topUpNotice) setTopUpNotice(null); else void applyTopUp(false); }}>{topUpPending ? "Applying one top-up…" : topUpNotice ? "Prepare another top-up" : `Add $${topUp.addCostBudgetUsd} / ${(topUp.addTokenBudget / 1_000).toLocaleString()}k tokens`}</button>
+        <span className="engineer-chip">No action needed · active top-ups are locked</span>
       </section> : null}
       {latestState === "PAUSED_BUDGET" ? <section className="engineer-card engineer-budget-paused">
         <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Run paused · model admission stopped</span><h2>Your work is checkpointed</h2><p>{canRetryLegacyReservation ? "This run used the earlier byte-based reservation. Retry once with the corrected provider token count, without adding allowance." : hasRemainingBudget ? "The next exact model reservation exceeds the remaining allowance. Add only the cost, tokens, or time needed before resuming." : "One of the hard limits is exhausted. Add allowance before resuming; publication remains disabled."}</p></div><span className="engineer-unverified">Unverified partial work</span></div>
         <BudgetTopUp value={topUp} onChange={(value) => { setTopUp(value); setTopUpNotice(null); }} disabled={busy || topUpPending} />
         {topUpNotice ? <p className="engineer-muted" role="status">{topUpNotice} Review the ceiling before adding more.</p> : null}
-        <div className="engineer-actions">{canRetryLegacyReservation ? <button className="engineer-primary" disabled={busy || topUpPending || !budget} onClick={() => void resumeCurrentBudget()}>{pendingAction === "resume-budget" ? "Resuming…" : "Retry with current limits"}</button> : null}<button className={canRetryLegacyReservation ? undefined : "engineer-primary"} disabled={busy || topUpPending || !budget} onClick={() => { if (topUpNotice) setTopUpNotice(null); else void applyTopUp(true); }}>{topUpPending ? "Applying one top-up…" : topUpNotice ? "Prepare another top-up" : "Top up and resume checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>View partial diff</button></div>
+        <div className="engineer-actions">{canResumePausedBudget ? <button className="engineer-primary" disabled={busy || topUpPending || !budget} onClick={() => void resumeCurrentBudget()}>{pendingAction === "resume-budget" ? "Resuming…" : canRetryLegacyReservation ? "Retry with current limits" : "Resume with current allowance"}</button> : null}<button className={canResumePausedBudget ? undefined : "engineer-primary"} disabled={busy || topUpPending || !budget || Boolean(topUpNotice)} onClick={() => void applyTopUp(true)}>{topUpPending ? "Applying one top-up…" : topUpNotice ? "Allowance already added" : "Top up once and resume checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>View partial diff</button></div>
       </section> : null}
       {latestState === "MODEL_PROVIDER_RETRY_PENDING" ? <section className="engineer-card engineer-budget-paused" role="alert">
         <div className="engineer-budget-paused-header"><div><span className="engineer-kicker">Provider timeout · balance is not the issue</span><h2>Your workspace checkpoint is retained</h2><p>The model request exceeded its execution timeout. Zintus stopped automatic replay to prevent duplicate charges. Planning, the frozen manifest, and current workspace are preserved.</p>{managerError ? <p className="engineer-error">{managerError}</p> : null}</div><span className="engineer-unverified">Unverified partial work</span></div>
         <div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void retryProviderTimeout()}>{pendingAction === "retry-provider" ? "Retrying…" : "Retry from workspace checkpoint"}</button><button disabled={busy || !reachedImplementation} onClick={() => setTab("diff")}>Inspect partial diff</button></div>
       </section> : null}
-      {data?.errors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {data.errors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
+      {visibleEvidenceErrors.length ? <section className="engineer-card"><p className="engineer-error">Some evidence sections are unavailable: {visibleEvidenceErrors.map((item) => item.section).join(", ")}. Empty values below are not treated as successful checks.</p></section> : null}
       {machineStage && latestState !== "PAUSED_BUDGET" ? <section className="engineer-card engineer-gate" role="status" aria-live="polite"><div><span className="engineer-kicker">Truthful live activity</span><h2>{activity?.active ? `${activity.role?.toLowerCase() ?? "worker"} is active` : "No worker is currently active"}</h2><p>{activity?.detail ?? "Waiting for an authoritative worker signal."}</p>{latestState === "IMPLEMENTING" ? <p>{liveChangedFiles ? `${liveChangedFiles} changed ${liveChangedFiles === 1 ? "file" : "files"} · ${liveAddedLines.toLocaleString()} added lines in the live checkpoint.` : "No workspace change has been recorded yet."}</p> : null}</div><div><Metric label="Reserved now" value={budget ? `${Math.max(0, budget.reserved.tokens - budget.ambiguous.tokens).toLocaleString()} active · ${budget.ambiguous.tokens.toLocaleString()} ambiguous` : "Unavailable"} /><Metric label="Worker signal" value={activity?.active ? "ACTIVE" : "IDLE"} /></div></section> : null}
       <nav className="engineer-tabs" aria-label="Engineer run views">{visibleTabs.map((item) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}>{item}</button>)}</nav>
       {!reachedImplementation ? <p className="engineer-stage-availability"><strong>Nothing is missing.</strong> Diff appears after implementation changes a file. Evidence appears after tests and independent verification. No implementation change has been recorded for this run yet.</p> : !reachedVerification ? <p className="engineer-stage-availability">Evidence appears after tests and independent verification begin.</p> : null}
       {!activity?.active && ["PLANNING", "REPLANNING"].includes(latestState) && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The exact failure is recorded below. The durable run and prior human answers remain intact.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{pendingAction === "retry-planning" ? "Retrying…" : "Retry planning"}</button></section> : null}
       {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{pendingAction === "start-frozen" ? "Starting…" : "Start frozen plan"}</button></section> : null}
       {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recreate and verify on the current base</h2><p>The reviewed candidate will not be published. A new immutable run will plan, execute, test, and obtain fresh review and approval.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void recoverStaleBase()}>{pendingAction === "recover-stale-base" ? "Recovering…" : "Start controlled recovery"}</button></section> : null}
-      <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} />
+      <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} stage={stage} />
+      {verifiedCandidate ? <VerifiedCandidateCard candidate={verifiedCandidate} /> : null}
       {tab === "timeline" ? <section className="engineer-run-grid">
         <div className="engineer-card"><h2>Live timeline</h2><Timeline events={events} /></div>
         <aside className="engineer-card engineer-verification"><h2>{reachedVerification ? "Verification" : "Current stage"}</h2>{reachedVerification ? <><Metric label="Tests" value={tests.length ? `${tests.filter((item) => item.status === "PASSED").length}/${tests.length} passed` : "Pending"} /><Metric label="Security" value={securityStatus.label} /><Metric label="Claims" value={claims.length ? `${claims.filter((item) => item.status === "VERIFIED").length}/${claims.length} verified` : "Pending"} /></> : <Metric label="Activity" value={latestState.replaceAll("_", " ")} />}<Metric label="Failures" value={String(failures.length)} /></aside>
       </section> : null}
       {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><div><h2>{diffPresentation.title}</h2><p>{diffPresentation.description}</p></div><span className={diffPresentation.verified ? "engineer-chip" : "engineer-unverified"}>{diffProvenance}</span></div><DiffViewer diff={data?.diff ?? ""} /></section> : null}
       {tab === "evidence" ? <><ArtifactViewer key={run.runId} runId={run.runId} artifacts={artifacts} /><section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed stream</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">{securityStatus.status === "NO_FINDINGS" ? "No findings." : securityStatus.status === "UNAVAILABLE" ? "Security results are unavailable. Retry loading the evidence before making a decision." : "Security review is pending."}</p>}</div><PublicationOperations operations={gitOperations} /></section></> : null}
-      {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human gate</span><h2>Approve the exact reviewed result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void decide("approve")}>{pendingAction === "approval:approve" ? "Publishing…" : "Approve and publish"}</button><button disabled={busy} onClick={() => void decide("request-changes")}>{pendingAction === "approval:request-changes" ? "Requesting changes…" : "Request changes"}</button><button disabled={busy} onClick={() => void extendApproval()}>{pendingAction === "approval:extend" ? "Applying extension…" : "Give me 24 hours"}</button><button className="danger" disabled={busy} onClick={() => void decide("reject")}>{pendingAction === "approval:reject" ? "Rejecting…" : "Reject"}</button></div></section> : null}
-      {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Review the verified candidate</h2><p>The isolated Reviewer escalated this result for a human decision. Inspect the Diff and Evidence tabs, then either continue to the approval gate or reject the candidate.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("approve")}>{pendingAction === "human-review:approve" ? "Applying…" : "Continue to approval"}</button><button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>{pendingAction === "human-review:reject" ? "Rejecting…" : "Reject candidate"}</button></div></section> : null}
-      {latestState === "REVIEW_APPROVED" && !approval ? <section className="engineer-card engineer-gate"><span className="engineer-kicker">Review approved</span><h2>Publication is not configured locally</h2><p>The candidate passed human review and is safe to inspect locally. Configure the GitHub publication credentials before enabling merge or pull-request creation.</p></section> : null}
-      {CORRECTABLE_TERMINAL_STATES.has(latestState) ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{pendingAction === "create-corrected-run" ? "Creating…" : "Create corrected run"}</button></div></section> : null}
+      {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human approval</span><h2>Approve the exact machine-verified result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><ApprovalDecisionControls disabled={approvalControlsDisabled} candidateChanged={!candidateMatchesApproval || candidateStale} pendingAction={pendingAction} onApprove={() => void decide("approve")} onRequestChanges={() => void decide("request-changes")} onExtend={() => void extendApproval()} onReject={() => void decide("reject")} /></section> : null}
+      {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Reviewer evidence needs recovery</h2><p>This run has not produced an authorized verified candidate. Retry only an already-recorded failed verification or Reviewer attempt, or reject the run. Human review cannot bypass machine verification.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions">{humanReviewCanRetry ? <button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("retry")}>{pendingAction === "human-review:retry" ? "Retrying review…" : "Retry reviewer from checkpoint"}</button> : null}<button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>{pendingAction === "human-review:reject" ? "Rejecting…" : "Reject candidate"}</button></div></section> : null}
+      {latestState === "REVIEW_APPROVED" && !approval ? <PublicationUnavailableNotice /> : null}
+      {correctionRecovery === "corrected-run" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Create a corrected run</h2><p>Zintus will preserve this immutable audit record, carry forward its request and acceptance criteria, add a bounded correction from the recorded failure evidence, and require fresh verification.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={() => void createCorrectedRun()}>{pendingAction === "create-corrected-run" ? "Creating…" : "Create corrected run"}</button></div></section> : null}
+      {correctionRecovery === "new-bounded-run" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">New bounded request required</span><h2>Revise and start a fresh run</h2><p>This failure has no safe structured patch to carry forward automatically. Zintus will preload the original request so you can narrow its scope and review a new budget before any model call.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={prepareNewBoundedRun}>Prepare new bounded request</button></div></section> : null}
       {TERMINAL.has(latestState) ? <section className={`engineer-card engineer-final engineer-final--${latestState === "COMPLETED" ? "success" : "blocked"}`}><span className="engineer-kicker">Final result</span><h2>{latestState === "COMPLETED" ? "Verified and published" : latestState.replaceAll("_", " ")}</h2><p>{latestState === "COMPLETED" ? "The Supervisor completed the evidence gates and publication workflow." : "The workflow stopped safely. Inspect failures and evidence before taking another action."}</p></section> : null}
       {TERMINAL.has(latestState) ? <DeferredHumanTaskSummary decisions={decisions} /> : null}
       {!TERMINAL.has(latestState) && latestState !== "HUMAN_APPROVAL_PENDING" && latestState !== "PAUSED_BUDGET" && !NON_CANCELLABLE_PUBLICATION_STATES.has(latestState) ? <button className="engineer-cancel" disabled={cancelling} onClick={() => void decide("cancel")}>{cancelling ? "Cancelling…" : "Cancel run"}</button> : null}
@@ -787,6 +963,17 @@ export default function EngineerPage() {
   );
 }
 
-function RunHeader({ run, stage, onBack }: { run: EngineerRun; stage: ReturnType<typeof workflowStage>; onBack: () => void }) { return <header className="engineer-run-header"><div><button className="engineer-kicker" onClick={onBack}>← All runs</button><span className="engineer-kicker">Zintus Engineer · {run.repository.name}</span><h1>{run.requestNormalized || run.requestOriginal}</h1><div className="engineer-run-meta"><span className={`engineer-risk engineer-risk--${run.riskTier.toLowerCase()}`}>{run.riskTier}</span><code>{run.runId}</code></div></div><div className="engineer-progress"><div><span>{run.state.replaceAll("_", " ")}</span><strong>{stage.complete ? "Complete" : stage.index === 0 ? stage.label : `Stage ${stage.index} of ${stage.total} · ${stage.label}`}</strong></div><progress max={stage.total} value={stage.complete ? stage.total : stage.index} /></div></header>; }
+function RunHeader({ run, stage, onBack }: { run: EngineerRun; stage: ReturnType<typeof workflowStage>; onBack: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const task = run.requestNormalized || run.requestOriginal;
+  return <header className="engineer-run-header">
+    <div className="engineer-run-heading">
+      <div className="engineer-run-breadcrumb"><button className="engineer-kicker" onClick={onBack}>← All runs</button><span className="engineer-kicker">Zintus Engineer · {run.repository.name}</span></div>
+      <h1 className={`engineer-run-task${expanded ? " expanded" : ""}`}>{task}</h1>
+      <div className="engineer-run-meta"><button type="button" className="engineer-task-toggle" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>{expanded ? "Collapse task" : "Show full task"}</button><span className={`engineer-risk engineer-risk--${run.riskTier.toLowerCase()}`}>{run.riskTier}</span><code>{run.runId}</code></div>
+    </div>
+    <div className="engineer-progress"><div><span>{run.state.replaceAll("_", " ")}</span><strong>{stage.complete ? "Complete" : stage.index === 0 ? stage.label : `Stage ${stage.index} of ${stage.total} · ${stage.label}`}</strong></div><progress max={stage.total} value={stage.complete ? stage.total : stage.index} /></div>
+  </header>;
+}
 function Metric({ label, value }: { label: string; value: string }) { return <div className="engineer-metric"><span>{label}</span><strong>{value}</strong></div>; }
 function PublicationOperations({ operations }: { operations: Array<{ gitOperationId?: string; operationType?: string; status?: string; remoteReference?: string | null; errorCode?: string | null }> }) { return <div className="engineer-card"><h2>Publication operations</h2>{operations.length ? operations.map((operation) => <article className="engineer-claim" key={operation.gitOperationId}><span className={`engineer-status engineer-status--${(operation.status ?? "").toLowerCase()}`}>{operation.status}</span><strong>{operation.operationType?.replaceAll("_", " ")}</strong>{operation.remoteReference?.startsWith("https://") ? <a href={operation.remoteReference} target="_blank" rel="noreferrer">Open published result</a> : <code>{operation.remoteReference ?? operation.errorCode ?? operation.gitOperationId}</code>}</article>) : <p className="engineer-muted">No credentialed Git operation has started.</p>}</div>; }

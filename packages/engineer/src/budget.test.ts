@@ -49,6 +49,7 @@ describe("durable Engineer budgets", () => {
     expect(paused.state).toBe("PAUSED_BUDGET");
     expect(pausedBudget.pauseReason).toBe("TOKEN_LIMIT_REACHED");
     expect(pausedBudget.resumeState).toBe("REQUEST_RECEIVED");
+    expect(pausedBudget.topUpPendingResume).toBe(false);
 
     const topped = sup.topUpBudget({
       runId: run.runId, expectedRevision: pausedBudget.revision,
@@ -56,20 +57,22 @@ describe("durable Engineer budgets", () => {
       actorId: "user-1", idempotencyKey: "top-up-1",
     });
     expect(topped.limits.tokens).toBe(200);
+    expect(topped.topUpPendingResume).toBe(true);
     const resumed = sup.resumeBudget({
       runId: run.runId, expectedStateVersion: paused.stateVersion,
       expectedBudgetRevision: topped.revision, actorId: "user-1", idempotencyKey: "resume-1",
     });
     expect(resumed.run.state).toBe("REQUEST_RECEIVED");
-    expect(sup.getBudget(run.runId).status).toBe("ACTIVE");
+    expect(sup.getBudget(run.runId)).toMatchObject({ status: "ACTIVE", topUpPendingResume: false });
   });
 
   test("rejects ownership bypass and lifetime-cap escape", () => {
     const sup = supervisor();
     const run = sup.receiveRequest({
       runId: "run-cap", userId: "owner", repository, request: "bounded task",
-      budget: { costBudgetUsd: 1, lifetimeCostBudgetUsd: 2 },
+      budget: { costBudgetUsd: 1, lifetimeCostBudgetUsd: 2, tokenBudget: 0, lifetimeTokenBudget: 1_000 },
     });
+    sup.reconcileBudget(run.runId);
     const budget = sup.getBudget(run.runId);
     expect(() => sup.topUpBudget({
       runId: run.runId, expectedRevision: budget.revision,
@@ -87,8 +90,9 @@ describe("durable Engineer budgets", () => {
     const sup = supervisor();
     const run = sup.receiveRequest({
       runId: "run-idempotent-top-up", userId: "owner", repository, request: "bounded task",
-      budget: { tokenBudget: 100, lifetimeTokenBudget: 1_000 },
+      budget: { tokenBudget: 0, lifetimeTokenBudget: 1_000 },
     });
+    sup.reconcileBudget(run.runId);
     const budget = sup.getBudget(run.runId);
     const first = sup.topUpBudget({
       runId: run.runId, expectedRevision: budget.revision,
@@ -106,6 +110,43 @@ describe("durable Engineer budgets", () => {
       topUp: { addCostBudgetUsd: 0, addTokenBudget: 200, addTimeBudgetSeconds: 0 },
       actorId: "owner", idempotencyKey: "one-logical-click",
     })).toThrow("reused with different allowance values");
+  });
+
+  test("rejects new allowance while active but permits an exact replay after resume", () => {
+    const sup = supervisor();
+    const active = sup.receiveRequest({
+      runId: "run-active-top-up", userId: "owner", repository, request: "bounded task",
+      budget: { tokenBudget: 100, lifetimeTokenBudget: 1_000 },
+    });
+    const activeBudget = sup.getBudget(active.runId);
+    expect(() => sup.topUpBudget({
+      runId: active.runId, expectedRevision: activeBudget.revision,
+      topUp: { addCostBudgetUsd: 0, addTokenBudget: 100, addTimeBudgetSeconds: 0 },
+      actorId: "owner", idempotencyKey: "active-top-up",
+    })).toThrow("only while the run is paused");
+
+    const pausedRun = sup.receiveRequest({
+      runId: "run-replay-after-resume", userId: "owner", repository, request: "bounded task",
+      budget: { tokenBudget: 0, lifetimeTokenBudget: 1_000 },
+    });
+    sup.reconcileBudget(pausedRun.runId);
+    const paused = sup.getRun(pausedRun.runId);
+    const pausedBudget = sup.getBudget(pausedRun.runId);
+    const topUp = { addCostBudgetUsd: 0, addTokenBudget: 100, addTimeBudgetSeconds: 0 };
+    const topped = sup.topUpBudget({
+      runId: pausedRun.runId, expectedRevision: pausedBudget.revision, topUp,
+      actorId: "owner", idempotencyKey: "replay-after-resume",
+    });
+    sup.resumeBudget({
+      runId: pausedRun.runId, expectedStateVersion: paused.stateVersion,
+      expectedBudgetRevision: topped.revision, actorId: "owner", idempotencyKey: "resume-after-top-up",
+    });
+    const replay = sup.topUpBudget({
+      runId: pausedRun.runId, expectedRevision: pausedBudget.revision, topUp,
+      actorId: "owner", idempotencyKey: "replay-after-resume",
+    });
+    expect(replay.limits.tokens).toBe(100);
+    expect((sup.exportRunRecords(pausedRun.runId).audit_events ?? []).filter((event) => event.action === "BUDGET_TOPPED_UP")).toHaveLength(1);
   });
 
   test("does not consume execution time while paused and resumes accumulation once", () => {

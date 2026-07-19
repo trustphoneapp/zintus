@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { z } from "zod";
@@ -27,6 +28,18 @@ export type WarmSandboxKey = Pick<WarmSandboxDescriptor,
   "repositoryId" | "baseCommitSha" | "imageDigest" | "lockfileHash" | "toolchainHash" |
   "networkPolicyVersion" | "sandboxPolicyVersion">;
 
+export const ENGINEER_LOCKFILE_NAMES = [
+  "bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock",
+] as const;
+
+export function lockfileHashFromBytes(entries: ReadonlyArray<{ file: string; bytes: Uint8Array }>): string {
+  const byName = new Map(entries.map((entry) => [entry.file, entry.bytes]));
+  const canonical = ENGINEER_LOCKFILE_NAMES
+    .filter((file) => byName.has(file))
+    .map((file) => ({ file, bytes: Buffer.from(byName.get(file)!).toString("base64") }));
+  return sha256(canonical.length > 0 ? canonical : "NO_LOCKFILE");
+}
+
 export function warmSandboxKey(input: WarmSandboxKey): string {
   return sha256({
     repositoryId: input.repositoryId,
@@ -40,11 +53,39 @@ export function warmSandboxKey(input: WarmSandboxKey): string {
 }
 
 export function workspaceLockfileHash(workspaceRoot: string): string {
-  const files = ["bun.lock", "bun.lockb", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock"];
-  const entries = files
+  const entries = ENGINEER_LOCKFILE_NAMES
     .filter((file) => existsSync(join(workspaceRoot, file)))
-    .map((file) => ({ file, bytes: readFileSync(join(workspaceRoot, file)).toString("base64") }));
-  return sha256(entries.length > 0 ? entries : "NO_LOCKFILE");
+    .map((file) => ({ file, bytes: readFileSync(join(workspaceRoot, file)) }));
+  return lockfileHashFromBytes(entries);
+}
+
+/**
+ * Hashes the supported lockfiles from an immutable Git commit rather than the
+ * mutable checkout. Gateway readiness and cold-sandbox admission must agree on
+ * this exact-base value even when the operator has unrelated working-tree
+ * changes.
+ */
+export function gitCommitLockfileHash(repositoryRoot: string, commitSha: string): string {
+  if (!/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(commitSha)) throw new Error("invalid exact base commit SHA");
+  const runText = (args: string[]) => spawnSync("git", ["-C", repositoryRoot, ...args], {
+    encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+  });
+  const runBytes = (args: string[]) => spawnSync("git", ["-C", repositoryRoot, ...args], {
+    encoding: null, maxBuffer: 16 * 1024 * 1024,
+  });
+  const verified = runText(["rev-parse", "--verify", `${commitSha}^{commit}`]);
+  if (verified.status !== 0 || verified.stdout.trim().toLowerCase() !== commitSha.toLowerCase()) {
+    throw new Error("exact base commit is unavailable");
+  }
+  const tree = runBytes(["ls-tree", "-z", "--name-only", commitSha, "--", ...ENGINEER_LOCKFILE_NAMES]);
+  if (tree.status !== 0) throw new Error("unable to inspect exact-base lockfiles");
+  const present = new Set(tree.stdout.toString("utf8").split("\0").filter(Boolean));
+  const entries = ENGINEER_LOCKFILE_NAMES.filter((file) => present.has(file)).map((file) => {
+    const blob = runBytes(["show", `${commitSha}:${file}`]);
+    if (blob.status !== 0) throw new Error(`unable to read exact-base lockfile ${file}`);
+    return { file, bytes: new Uint8Array(blob.stdout) };
+  });
+  return lockfileHashFromBytes(entries);
 }
 
 export const NO_LOCKFILE_HASH = sha256("NO_LOCKFILE");

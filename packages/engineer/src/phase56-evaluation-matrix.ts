@@ -1,13 +1,13 @@
 import { z } from "zod";
 import { sha256 } from "./hash.js";
 
-export const PHASE56_EVALUATION_POLICY_VERSION = "engineer-phase56-evaluation-v1";
+export const PHASE56_EVALUATION_POLICY_VERSION = "engineer-phase56-evaluation-v2";
 
 const ScenarioSchema = z.object({
   scenarioId: z.string().regex(/^[a-z0-9_]+$/),
   category: z.enum(["PLANNING", "BUDGET", "CACHE", "OBSERVABILITY", "RECOVERY", "STORAGE", "ISOLATION", "HUMAN_FLOW"]),
   expectedOutcome: z.string().min(1).max(500),
-  testFile: z.enum(["planning.test.ts", "runtime-budget.test.ts", "supervisor.test.ts", "hardening.test.ts", "execution.test.ts", "verification.test.ts", "publication.test.ts", "engineer.test.ts", "handler.test.ts"]),
+  testFile: z.enum(["planning.test.ts", "budget.test.ts", "runtime-budget.test.ts", "supervisor.test.ts", "hardening.test.ts", "execution.test.ts", "verification.test.ts", "publication.test.ts", "engineer.test.ts", "handler.test.ts"]),
   testName: z.string().min(1).max(500),
 }).strict();
 
@@ -32,6 +32,8 @@ const scenarios = [
   { scenarioId: "cache_pricing_versioned", category: "CACHE", expectedOutcome: "Cached reads and cache writes use the versioned GPT-5.6 price catalog and invalid usage fails closed.", testFile: "runtime-budget.test.ts", testName: "uses the versioned SOL/TERRA/LUNA catalog and rejects unknown or malformed usage" },
   { scenarioId: "reservation_reconciled", category: "BUDGET", expectedOutcome: "Worst-case model spend is reserved before a call and reconciled to measured cached-token usage.", testFile: "supervisor.test.ts", testName: "atomically reserves worst-case model spend and reconciles it to actual usage" },
   { scenarioId: "infinite_repair_stops", category: "RECOVERY", expectedOutcome: "Repeated equivalent failures exhaust the deterministic repair bound.", testFile: "hardening.test.ts", testName: "infinite repair loops stop at the deterministic same-failure bound" },
+  { scenarioId: "builder_discovery_bounded", category: "BUDGET", expectedOutcome: "Unique read-only discovery is bounded across pause and resume, and an exhausted checkpoint cannot purchase another model call.", testFile: "execution.test.ts", testName: "rejects an exhausted legacy discovery checkpoint before another paid call" },
+  { scenarioId: "paused_topup_single_use", category: "BUDGET", expectedOutcome: "New allowance is accepted only while paused, remains idempotent, and exposes a durable pending-resume signal.", testFile: "budget.test.ts", testName: "rejects new allowance while active but permits an exact replay after resume" },
   { scenarioId: "flake_never_passes", category: "RECOVERY", expectedOutcome: "Mixed repeated outcomes are quarantined and cannot become authoritative success.", testFile: "hardening.test.ts", testName: "mixed repeated outcomes are quarantined and never count as a pass" },
   { scenarioId: "cas_single_writer", category: "RECOVERY", expectedOutcome: "Concurrent supervisors allow exactly one state writer.", testFile: "hardening.test.ts", testName: "concurrent supervisors use compare-and-swap so exactly one writer advances" },
   { scenarioId: "private_storage", category: "STORAGE", expectedOutcome: "Ledger, artifact, and warm-pool storage is owner-only and rejects symlink substitution.", testFile: "hardening.test.ts", testName: "local storage repairs private modes and rejects symlink substitution" },

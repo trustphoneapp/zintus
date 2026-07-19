@@ -74,6 +74,8 @@ import {
   formatIssues,
 } from "@zintus/schemas";
 import { compress } from "tokzen";
+import { ApprovalAuthorityConflictError, HardeningBudgetExtensionRequiresNewRunError,
+  HardeningGenericOperationForbiddenError, VerifiedCandidateIntegrityError, VerifiedCandidateRequiredError } from "@zintus/engineer";
 import {
   getSearchStrategy,
   groqCompoundModel,
@@ -170,6 +172,118 @@ interface TraceUsageExtras {
   routeReason?: string;
   costUsd?: number;
   savedVsBaselineUsd?: number;
+}
+
+type EngineerAdvisoryErrorCode =
+  | "ENGINEER_ADVISORY_REQUEST_INVALID" | "ENGINEER_ADVISORY_CURSOR_INVALID"
+  | "ENGINEER_ADVISORY_NOT_FOUND" | "ENGINEER_ADVISORY_CHANGED"
+  | "ENGINEER_ADVISORY_TRANSITION_INVALID" | "ENGINEER_ADVISORY_IDEMPOTENCY_CONFLICT"
+  | "ENGINEER_ADVISORY_MATERIALIZATION_REQUIRED" | "ENGINEER_ADVISORY_INTEGRITY_FAILURE";
+
+type EngineerAdvisoryInternalErrorCode =
+  | "REQUEST_INVALID" | "CURSOR_INVALID" | "NOT_FOUND" | "CHANGED"
+  | "TRANSITION_INVALID" | "IDEMPOTENCY_CONFLICT" | "MATERIALIZATION_REQUIRED"
+  | "INTEGRITY_FAILURE";
+
+function engineerAdvisoryError(code: EngineerAdvisoryInternalErrorCode, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+function classifyEngineerAdvisoryError(error: unknown): {
+  code: EngineerAdvisoryErrorCode;
+  status: number;
+  message: string;
+  action?: "REFRESH_ADVISORIES";
+} {
+  const candidate = error as { code?: unknown; message?: unknown; name?: unknown };
+  const message = redactSecrets(typeof candidate?.message === "string" ? candidate.message : String(error));
+  const explicit = typeof candidate?.code === "string" ? candidate.code : "";
+  const normalizedExplicit = explicit.startsWith("ENGINEER_ADVISORY_")
+    ? explicit.slice("ENGINEER_ADVISORY_".length)
+    : explicit;
+  const internalCode = candidate?.name === "IdempotencyConflictError"
+    ? "IDEMPOTENCY_CONFLICT"
+    : normalizedExplicit;
+  const classified: EngineerAdvisoryInternalErrorCode = [
+    "REQUEST_INVALID", "CURSOR_INVALID", "NOT_FOUND", "CHANGED", "TRANSITION_INVALID",
+    "IDEMPOTENCY_CONFLICT", "MATERIALIZATION_REQUIRED", "INTEGRITY_FAILURE",
+  ].includes(internalCode)
+    ? internalCode as EngineerAdvisoryInternalErrorCode
+    : /not found|does not own/i.test(message) ? "NOT_FOUND"
+      : /cursor/i.test(message) ? "CURSOR_INVALID"
+        : "INTEGRITY_FAILURE";
+  const code = `ENGINEER_ADVISORY_${classified}` as EngineerAdvisoryErrorCode;
+  const status = classified === "NOT_FOUND" ? 404
+    : classified === "CHANGED" || classified === "TRANSITION_INVALID" || classified === "IDEMPOTENCY_CONFLICT" || classified === "MATERIALIZATION_REQUIRED" ? 409
+      : classified === "INTEGRITY_FAILURE" ? 500 : 400;
+  const publicMessages: Record<EngineerAdvisoryInternalErrorCode, string> = {
+    REQUEST_INVALID: "Advisory request is invalid",
+    CURSOR_INVALID: "Advisory cursor is invalid",
+    NOT_FOUND: "Advisory resource not found",
+    CHANGED: "Advisory changed; refresh advisories before deciding",
+    TRANSITION_INVALID: "Advisory transition is invalid",
+    IDEMPOTENCY_CONFLICT: "Advisory operation conflicts with an existing idempotency key",
+    MATERIALIZATION_REQUIRED: "Advisory materialization is required",
+    INTEGRITY_FAILURE: "Advisory authority integrity validation failed",
+  };
+  return { code, status, message: publicMessages[classified],
+    ...(classified === "CHANGED" ? { action: "REFRESH_ADVISORIES" as const } : {}) };
+}
+
+type EngineerHardeningErrorCode =
+  | "ENGINEER_HARDENING_INVALID_REQUEST" | "ENGINEER_HARDENING_NOT_FOUND"
+  | "ENGINEER_HARDENING_IDEMPOTENCY_CONFLICT" | "ENGINEER_HARDENING_STATE_CONFLICT"
+  | "ENGINEER_HARDENING_SELECTION_INVALID" | "ENGINEER_HARDENING_QUOTE_EXPIRED"
+  | "ENGINEER_HARDENING_PRICING_UNAVAILABLE" | "ENGINEER_HARDENING_AUTHORITY_INVALID"
+  | "HARDENING_PROMPT_CACHE_AUTHORITY_UNAVAILABLE" | "HARDENING_PROMPT_CACHE_AUTHORITY_MISMATCH"
+  | "ENGINEER_HARDENING_INTERNAL_ERROR";
+
+function engineerHardeningError(code: EngineerHardeningErrorCode, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+function classifyEngineerHardeningError(error: unknown): { code: EngineerHardeningErrorCode; status: number; message: string } {
+  const candidate = error as { code?: unknown; name?: unknown; message?: unknown };
+  const explicit = typeof candidate?.code === "string" ? candidate.code : "";
+  const message = redactSecrets(typeof candidate?.message === "string" ? candidate.message : String(error));
+  const named = candidate?.name === "IdempotencyConflictError" ? "ENGINEER_HARDENING_IDEMPOTENCY_CONFLICT"
+    : candidate?.name === "StateVersionConflictError" ? "ENGINEER_HARDENING_STATE_CONFLICT" : "";
+  const inferred = /not found|does not own/i.test(message) ? "ENGINEER_HARDENING_NOT_FOUND"
+    : /expired/i.test(message) ? "ENGINEER_HARDENING_QUOTE_EXPIRED"
+      : /pricing/i.test(message) ? "ENGINEER_HARDENING_PRICING_UNAVAILABLE"
+        : /budget.*exceed|exceed.*(?:quote|cap)|hard cap/i.test(message) ? "ENGINEER_HARDENING_AUTHORITY_INVALID"
+        : /selection|actionable advisory/i.test(message) ? "ENGINEER_HARDENING_SELECTION_INVALID"
+          : /authority|checkpoint|quote binding|integrity/i.test(message) ? "ENGINEER_HARDENING_AUTHORITY_INVALID"
+            : "ENGINEER_HARDENING_INTERNAL_ERROR";
+  const supported: EngineerHardeningErrorCode[] = [
+    "ENGINEER_HARDENING_INVALID_REQUEST", "ENGINEER_HARDENING_NOT_FOUND",
+    "ENGINEER_HARDENING_IDEMPOTENCY_CONFLICT", "ENGINEER_HARDENING_STATE_CONFLICT",
+    "ENGINEER_HARDENING_SELECTION_INVALID", "ENGINEER_HARDENING_QUOTE_EXPIRED",
+    "ENGINEER_HARDENING_PRICING_UNAVAILABLE", "ENGINEER_HARDENING_AUTHORITY_INVALID",
+    "HARDENING_PROMPT_CACHE_AUTHORITY_UNAVAILABLE", "HARDENING_PROMPT_CACHE_AUTHORITY_MISMATCH",
+    "ENGINEER_HARDENING_INTERNAL_ERROR",
+  ];
+  const code = supported.includes(explicit as EngineerHardeningErrorCode) ? explicit as EngineerHardeningErrorCode
+    : supported.includes(named as EngineerHardeningErrorCode) ? named as EngineerHardeningErrorCode : inferred;
+  const status = code === "ENGINEER_HARDENING_INVALID_REQUEST" ? 400
+    : code === "ENGINEER_HARDENING_NOT_FOUND" ? 404
+      : code === "ENGINEER_HARDENING_PRICING_UNAVAILABLE" ? 503
+        : code === "HARDENING_PROMPT_CACHE_AUTHORITY_UNAVAILABLE"||code === "HARDENING_PROMPT_CACHE_AUTHORITY_MISMATCH" ? 503
+        : code === "ENGINEER_HARDENING_INTERNAL_ERROR" ? 500 : 409;
+  const messages: Record<EngineerHardeningErrorCode, string> = {
+    ENGINEER_HARDENING_INVALID_REQUEST: "Hardening request is invalid",
+    ENGINEER_HARDENING_NOT_FOUND: "Hardening resource not found",
+    ENGINEER_HARDENING_IDEMPOTENCY_CONFLICT: "Hardening operation conflicts with an existing idempotency key",
+    ENGINEER_HARDENING_STATE_CONFLICT: "Parent candidate changed; refresh before continuing",
+    ENGINEER_HARDENING_SELECTION_INVALID: "Hardening advisory selection is invalid",
+    ENGINEER_HARDENING_QUOTE_EXPIRED: "Hardening quote has expired",
+    ENGINEER_HARDENING_PRICING_UNAVAILABLE: "Hardening pricing is temporarily unavailable",
+    ENGINEER_HARDENING_AUTHORITY_INVALID: "Hardening authority is invalid",
+    HARDENING_PROMPT_CACHE_AUTHORITY_UNAVAILABLE: "Optional hardening is paused. Restore the original local prompt-cache secret and restart the gateway.",
+    HARDENING_PROMPT_CACHE_AUTHORITY_MISMATCH: "Optional hardening is paused because the local prompt-cache authority does not match durable history. Restore the original secret and restart the gateway.",
+    ENGINEER_HARDENING_INTERNAL_ERROR: "Hardening request could not be completed",
+  };
+  return { code, status, message: messages[code] };
 }
 
 /**
@@ -2756,14 +2870,14 @@ export function createGatewayHandler(
     if (url.pathname === "/v1/engineer/readiness" && request.method === "GET") {
       if (!engineerRuns) return json(request, { readiness: { state: "DISABLED", error: null } });
       const readiness = engineerRuns.readiness();
-      return json(request, { readiness }, readiness.state === "READY" || readiness.state === "DISABLED" ? 200 : 503);
+      return json(request, { readiness, hardening: engineerRuns.hardeningReadiness() }, readiness.state === "READY" || readiness.state === "DISABLED" ? 200 : 503);
     }
 
     if (url.pathname === "/v1/engineer/readiness/retry" && request.method === "POST") {
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
       try {
         await engineerRuns.ensureReady();
-        return json(request, { readiness: engineerRuns.readiness() });
+        return json(request, { readiness: engineerRuns.readiness(), hardening: engineerRuns.hardeningReadiness() });
       } catch (error) {
         return json(request, { readiness: engineerRuns.readiness(), error: { message: redactSecrets(error instanceof Error ? error.message : String(error)) } }, 503);
       }
@@ -2836,7 +2950,14 @@ export function createGatewayHandler(
       const action = parts[5];
       const decisionId = parts[6];
       const decisionAction = parts[7];
+      const advisoryRoute = action === "advisories";
+      const hardeningRoute = action === "hardening";
       try {
+        let hardeningRunId = runId;
+        if (hardeningRoute) {
+          try { hardeningRunId = decodeURIComponent(runId); }
+          catch { throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "runId is invalid"); }
+        }
         if (request.method === "POST") {
           const limited = enforceRateLimit(request, requestId, url.pathname);
           if (limited) return limited;
@@ -2896,32 +3017,221 @@ export function createGatewayHandler(
           return json(request, await engineerRuns.createCorrectedRun(engineerPrincipal!, runId), 201);
         }
         if (action === "approval" && request.method === "GET") {
-          return json(request, { approval: engineerRuns.approval(runId) });
+          return json(request, engineerRuns.approvalView(runId));
+        }
+        if (action === "checkpoint" && request.method === "GET") {
+          return json(request, { verifiedCandidate: await engineerRuns.checkpoint(engineerPrincipal!, runId) });
         }
         if (action === "snapshot" && request.method === "GET") {
-          return json(request, engineerRuns.snapshot(engineerPrincipal!, runId));
+          return json(request, await engineerRuns.snapshot(engineerPrincipal!, runId));
+        }
+        if (action === "advisories" && !decisionId && request.method === "GET") {
+          const rawLimit = url.searchParams.get("limit") ?? "20";
+          const cursor = url.searchParams.get("cursor") ?? undefined;
+          const status = url.searchParams.get("status") ?? undefined;
+          const actionability = url.searchParams.get("actionability") ?? undefined;
+          if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 50) {
+            throw engineerAdvisoryError("REQUEST_INVALID", "advisory page limit must be between 1 and 50");
+          }
+          if (cursor !== undefined && (cursor.length < 1 || cursor.length > 4_000)) {
+            throw engineerAdvisoryError("CURSOR_INVALID", "invalid advisory page cursor");
+          }
+          if (status !== undefined && !["OPEN", "DEFERRED", "DISMISSED"].includes(status)) {
+            throw engineerAdvisoryError("REQUEST_INVALID", "status must be OPEN, DEFERRED, or DISMISSED");
+          }
+          if (actionability !== undefined && !["ACTIONABLE", "AUDIT_ONLY"].includes(actionability)) {
+            throw engineerAdvisoryError("REQUEST_INVALID", "actionability must be ACTIONABLE or AUDIT_ONLY");
+          }
+          const page = await engineerRuns.listAdvisories(engineerPrincipal!, runId, {
+            limit: Number(rawLimit),
+            ...(cursor !== undefined ? { cursor } : {}),
+            ...(status !== undefined ? { status: status as "OPEN" | "DEFERRED" | "DISMISSED" } : {}),
+            ...(actionability !== undefined ? { actionability: actionability as "ACTIONABLE" | "AUDIT_ONLY" } : {}),
+          });
+          return json(request, page, 200, { "Cache-Control": "no-store" });
+        }
+        if (action === "advisories" && decisionId && ["defer", "dismiss", "reopen"].includes(decisionAction ?? "") && request.method === "POST") {
+          let body: unknown;
+          try { body = await request.json(); }
+          catch { throw engineerAdvisoryError("REQUEST_INVALID", "request body must be valid JSON"); }
+          if (!body || typeof body !== "object" || Array.isArray(body)) {
+            throw engineerAdvisoryError("REQUEST_INVALID", "request body must be an object");
+          }
+          const record = body as Record<string, unknown>;
+          const allowed = new Set(["expectedRevision", "idempotencyKey", "rationale"]);
+          if (Object.keys(record).some((key) => !allowed.has(key))) {
+            throw engineerAdvisoryError("REQUEST_INVALID", "request body contains unsupported fields");
+          }
+          if (!Number.isSafeInteger(record.expectedRevision) || (record.expectedRevision as number) < 0 ||
+              typeof record.idempotencyKey !== "string" || record.idempotencyKey.length < 1 || record.idempotencyKey.length > 200 ||
+              !(record.rationale === null || (typeof record.rationale === "string" && record.rationale.length <= 4_000))) {
+            throw engineerAdvisoryError("REQUEST_INVALID", "expectedRevision, idempotencyKey, and nullable rationale are required");
+          }
+          const command = {
+            expectedRevision: record.expectedRevision as number,
+            idempotencyKey: record.idempotencyKey,
+            rationale: record.rationale as string | null,
+          };
+          let advisoryId: string;
+          try { advisoryId = decodeURIComponent(decisionId); }
+          catch { throw engineerAdvisoryError("REQUEST_INVALID", "advisoryId is invalid"); }
+          const result = decisionAction === "defer"
+            ? await engineerRuns.deferAdvisory(engineerPrincipal!, runId, advisoryId, command)
+            : decisionAction === "dismiss"
+              ? await engineerRuns.dismissAdvisory(engineerPrincipal!, runId, advisoryId, command)
+              : await engineerRuns.reopenAdvisory(engineerPrincipal!, runId, advisoryId, command);
+          return json(request, { advisory: result }, 200, { "Cache-Control": "no-store" });
+        }
+        if (action === "hardening" && decisionId === "quotes" && !decisionAction && request.method === "POST") {
+          let body: unknown;
+          try { body = await request.json(); }
+          catch { throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "request body must be valid JSON"); }
+          if (!body || typeof body !== "object" || Array.isArray(body)) throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "request body must be an object");
+          const record = body as Record<string, unknown>;
+          const allowed = new Set(["runId", "advisoryIds", "expectedParentStateVersion", "idempotencyKey"]);
+          const advisoryIds = Array.isArray(record.advisoryIds) ? record.advisoryIds : [];
+          const advisorySelectionValid = advisoryIds.length >= 1 && advisoryIds.length <= 20 &&
+            advisoryIds.every((id) => typeof id === "string") && new Set(advisoryIds).size === advisoryIds.length &&
+            advisoryIds.every((id, index) => index === 0 || String(advisoryIds[index - 1]) < String(id));
+          const hashPattern = /^sha256:[a-f0-9]{64}$/;
+          if (Object.keys(record).some((key) => !allowed.has(key)) || typeof record.runId !== "string" || record.runId.length < 1 || record.runId.length > 200 || record.runId !== hardeningRunId ||
+              !advisoryIds.every((id) => typeof id === "string" && hashPattern.test(id)) ||
+              !advisorySelectionValid ||
+              !Number.isSafeInteger(record.expectedParentStateVersion) || (record.expectedParentStateVersion as number) < 0 ||
+              typeof record.idempotencyKey !== "string" || record.idempotencyKey.length < 1 || record.idempotencyKey.length > 200) {
+            throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "hardening quote request is invalid");
+          }
+          const quote = await engineerRuns.createHardeningQuote(engineerPrincipal!, hardeningRunId, {
+            runId: record.runId,
+            advisoryIds: advisoryIds as string[],
+            expectedParentStateVersion: record.expectedParentStateVersion as number,
+            idempotencyKey: record.idempotencyKey,
+          });
+          return json(request, { quote }, 201, { "Cache-Control": "no-store" });
+        }
+        if (action === "hardening" && decisionId === "quotes" && decisionAction && !parts[8] && request.method === "GET") {
+          let quoteId: string;
+          try { quoteId = decodeURIComponent(decisionAction); }
+          catch { throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "quoteId is invalid"); }
+          if (!quoteId) throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "quoteId is invalid");
+          if (!/^sha256:[a-f0-9]{64}$/.test(quoteId)) throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "quoteId is invalid");
+          const quote = await engineerRuns.getHardeningQuote(engineerPrincipal!, hardeningRunId, quoteId);
+          return json(request, { quote }, 200, { "Cache-Control": "no-store" });
+        }
+        if (action === "hardening" && decisionId === "consents" && !decisionAction && request.method === "POST") {
+          let body: unknown;
+          try { body = await request.json(); }
+          catch { throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "request body must be valid JSON"); }
+          if (!body || typeof body !== "object" || Array.isArray(body)) throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "request body must be an object");
+          const record = body as Record<string, unknown>;
+          const allowed = new Set(["quoteId", "quoteHash", "authorizedBudget", "acknowledgements", "expectedParentStateVersion", "idempotencyKey"]);
+          const budget = record.authorizedBudget;
+          const acknowledgements = record.acknowledgements;
+          const exactKeys = (value: unknown, keys: string[]) => !!value && typeof value === "object" && !Array.isArray(value) &&
+            Object.keys(value as Record<string, unknown>).length === keys.length && keys.every((key) => Object.hasOwn(value as object, key));
+          const budgetRecord = budget && typeof budget === "object" && !Array.isArray(budget) ? budget as Record<string, unknown> : {};
+          const positiveBudget = Number.isSafeInteger(budgetRecord.costMicrousd) && (budgetRecord.costMicrousd as number) > 0 && (budgetRecord.costMicrousd as number) <= 100_000_000 &&
+            Number.isSafeInteger(budgetRecord.tokens) && (budgetRecord.tokens as number) > 0 && (budgetRecord.tokens as number) <= 1_000_000 &&
+            Number.isSafeInteger(budgetRecord.timeSeconds) && (budgetRecord.timeSeconds as number) > 0 && (budgetRecord.timeSeconds as number) <= 86_400;
+          if (Object.keys(record).some((key) => !allowed.has(key)) || typeof record.quoteId !== "string" || !/^sha256:[a-f0-9]{64}$/.test(record.quoteId) ||
+              typeof record.quoteHash !== "string" || !/^sha256:[a-f0-9]{64}$/.test(record.quoteHash) ||
+              !exactKeys(budget, ["costMicrousd", "tokens", "timeSeconds"]) ||
+              !positiveBudget ||
+              !exactKeys(acknowledgements, ["separateRun", "parentCandidateUnchanged", "noAutomaticRepair", "noOverages"]) ||
+              !["separateRun", "parentCandidateUnchanged", "noAutomaticRepair", "noOverages"].every((key) => (acknowledgements as Record<string, unknown>)[key] === true) ||
+              !Number.isSafeInteger(record.expectedParentStateVersion) || (record.expectedParentStateVersion as number) < 0 ||
+              typeof record.idempotencyKey !== "string" || record.idempotencyKey.length < 1 || record.idempotencyKey.length > 200) {
+            throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "hardening consent request is invalid");
+          }
+          const consent = await engineerRuns.acceptHardeningConsent(engineerPrincipal!, hardeningRunId, {
+            quoteId: record.quoteId,
+            quoteHash: record.quoteHash,
+            authorizedBudget: budget as { costMicrousd: number; tokens: number; timeSeconds: number },
+            acknowledgements: acknowledgements as { separateRun: true; parentCandidateUnchanged: true; noAutomaticRepair: true; noOverages: true },
+            expectedParentStateVersion: record.expectedParentStateVersion as number,
+            idempotencyKey: record.idempotencyKey,
+          });
+          return json(request, { consent }, 201, { "Cache-Control": "no-store" });
+        }
+        if (action === "hardening" && decisionId === "children" && !decisionAction && request.method === "POST") {
+          let body: unknown;
+          try { body = await request.json(); }
+          catch { throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "request body must be valid JSON"); }
+          if (!body || typeof body !== "object" || Array.isArray(body)) {
+            throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "request body must be an object");
+          }
+          const record = body as Record<string, unknown>;
+          const keys = Object.keys(record);
+          const hashPattern = /^sha256:[a-f0-9]{64}$/;
+          if (keys.length !== 2 || !Object.hasOwn(record, "consentId") || !Object.hasOwn(record, "consentHash") ||
+              typeof record.consentId !== "string" || !hashPattern.test(record.consentId) ||
+              typeof record.consentHash !== "string" || !hashPattern.test(record.consentHash)) {
+            throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST", "hardening child request is invalid");
+          }
+          const creation = await engineerRuns.createOptionalHardeningChild(engineerPrincipal!, hardeningRunId, {
+            consentId: record.consentId,
+            consentHash: record.consentHash,
+          });
+          return json(request, creation, 201, { "Cache-Control": "no-store" });
+        }
+        if(action==="hardening"&&decisionId==="children"&&decisionAction&&parts[8]==="start"&&!parts[9]&&request.method==="POST"){
+          let childRunId:string;try{childRunId=decodeURIComponent(decisionAction);}catch{throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST","childRunId is invalid");}
+          let body:unknown;try{body=await request.json();}catch{throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST","request body must be valid JSON");}
+          if(!body||typeof body!=="object"||Array.isArray(body))throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST","hardening start request is invalid");
+          const record=body as Record<string,unknown>,keys=Object.keys(record),hash=/^sha256:[a-f0-9]{64}$/;
+          if(keys.length!==4||!Object.hasOwn(record,"expectedChildStateVersion")||!Object.hasOwn(record,"lineageId")||!Object.hasOwn(record,"lineageHash")||
+            !Object.hasOwn(record,"idempotencyKey")||record.expectedChildStateVersion!==0||typeof record.lineageId!=="string"||!hash.test(record.lineageId)||
+            typeof record.lineageHash!=="string"||!hash.test(record.lineageHash)||typeof record.idempotencyKey!=="string"||record.idempotencyKey.length<1||record.idempotencyKey.length>200)
+            throw engineerHardeningError("ENGINEER_HARDENING_INVALID_REQUEST","hardening start request is invalid");
+          const started=await engineerRuns.startOptionalHardeningChild(engineerPrincipal!,hardeningRunId,childRunId,{expectedChildStateVersion:0,
+            lineageId:record.lineageId,lineageHash:record.lineageHash,idempotencyKey:record.idempotencyKey});
+          return json(request,{start:started},202,{"Cache-Control":"no-store"});
         }
         if (action === "human-review" && request.method === "POST") {
           const body = await request.json() as { decision?: string; reason?: string };
-          if (body.decision !== "approve" && body.decision !== "reject") throw new Error("decision must be approve or reject");
+          if (body.decision === "approve") throw new VerifiedCandidateRequiredError();
           if (typeof body.reason !== "string" || !body.reason.trim()) throw new Error("reason is required");
+          if (body.decision !== "reject" && body.decision !== "retry") {
+            throw new Error("decision must be reject or retry");
+          }
           return json(request, await engineerRuns.resolveHumanReview(engineerPrincipal!, runId, body.decision, body.reason));
         }
-        if (["approve", "request-changes", "reject", "extend-approval", "cancel"].includes(action ?? "") && request.method === "POST") {
-          const body = await request.json() as { actorId?: string; reason?: string; extensionSeconds?: number };
+        if (["approve", "request-changes", "reject", "extend-approval", "expire-approval", "cancel"].includes(action ?? "") && request.method === "POST") {
+          const body = await request.json() as {
+            actorId?: string; reason?: string; extensionSeconds?: number;
+            expectedVerifiedCheckpointId?: string; expectedVerifiedCheckpointHash?: string;
+            expectedApprovalRevision?: number;
+          };
           if (typeof body.reason !== "string") throw new Error("reason is required");
-          if (action === "approve") return json(request, { result: await engineerRuns.approve(engineerPrincipal!, runId, body.reason) });
+          const expected = {
+            expectedVerifiedCheckpointId: body.expectedVerifiedCheckpointId,
+            expectedVerifiedCheckpointHash: body.expectedVerifiedCheckpointHash,
+            expectedApprovalRevision: body.expectedApprovalRevision,
+          };
+          if (action !== "cancel" && (typeof expected.expectedVerifiedCheckpointId !== "string" ||
+              typeof expected.expectedVerifiedCheckpointHash !== "string" ||
+              typeof expected.expectedApprovalRevision !== "number")) {
+            throw new Error("expectedVerifiedCheckpointId, expectedVerifiedCheckpointHash, and expectedApprovalRevision are required");
+          }
+          const strictExpected = expected as {
+            expectedVerifiedCheckpointId: string; expectedVerifiedCheckpointHash: string; expectedApprovalRevision: number;
+          };
+          if (action === "approve") return json(request, { result: await engineerRuns.approve(engineerPrincipal!, runId, body.reason, strictExpected) });
           if (action === "request-changes") {
-            await engineerRuns.requestChanges(engineerPrincipal!, runId, body.reason);
+            await engineerRuns.requestChanges(engineerPrincipal!, runId, body.reason, strictExpected);
             return json(request, { run: engineerRuns.get(runId).run });
           }
           if (action === "reject") {
-            await engineerRuns.reject(engineerPrincipal!, runId, body.reason);
+            await engineerRuns.reject(engineerPrincipal!, runId, body.reason, strictExpected);
             return json(request, { run: engineerRuns.get(runId).run });
           }
           if (action === "extend-approval") {
             if (typeof body.extensionSeconds !== "number") throw new Error("extensionSeconds is required");
-            return json(request, { approval: await engineerRuns.extendApproval(engineerPrincipal!, runId, body.reason, body.extensionSeconds) });
+            return json(request, { approval: await engineerRuns.extendApproval(engineerPrincipal!, runId, body.reason, body.extensionSeconds, strictExpected) });
+          }
+          if (action === "expire-approval") {
+            await engineerRuns.expireApproval(engineerPrincipal!, runId, strictExpected);
+            return json(request, { run: engineerRuns.get(runId).run });
           }
           await engineerRuns.cancel(engineerPrincipal!, runId, body.reason);
           return json(request, { run: engineerRuns.get(runId).run });
@@ -3006,6 +3316,44 @@ export function createGatewayHandler(
           return json(request, { diff: engineerRuns.diff(runId) });
         }
       } catch (error) {
+        if (hardeningRoute) {
+          const mapped = classifyEngineerHardeningError(error);
+          if (mapped.code === "ENGINEER_HARDENING_INTERNAL_ERROR") {
+            onError?.(error, { requestId, path: url.pathname });
+            log("error", "engineer.hardening.failed", {
+              requestId,
+              error: redactSecrets(error instanceof Error ? error.message : String(error)),
+            });
+          }
+          return json(request, { error: { code: mapped.code, message: mapped.message } }, mapped.status, { "Cache-Control": "no-store" });
+        }
+        if (advisoryRoute) {
+          const mapped = classifyEngineerAdvisoryError(error);
+          return json(request, { error: { code: mapped.code, message: mapped.message, ...(mapped.action ? { action: mapped.action } : {}) } },
+            mapped.status, { "Cache-Control": "no-store" });
+        }
+        if (error instanceof ApprovalAuthorityConflictError) {
+          return json(request, {
+            error: {
+              code: error.code,
+              message: error.message,
+              action: error.action,
+            },
+          }, 409);
+        }
+        if (error instanceof VerifiedCandidateIntegrityError) {
+          return json(request, {
+            error: { code: error.code, message: error.message },
+          }, 500);
+        }
+        if (error instanceof VerifiedCandidateRequiredError) {
+          return json(request, {
+            error: { code: error.code, message: error.message, action: error.action },
+          }, 409);
+        }
+        if(error instanceof HardeningGenericOperationForbiddenError||error instanceof HardeningBudgetExtensionRequiresNewRunError){
+          return json(request,{error:{code:error.code,message:error.message}},409,{"Cache-Control":"no-store"});
+        }
         const message = error instanceof Error ? error.message : String(error);
         const status = /not found/i.test(message) ? 404 : /preflight/i.test(message) ? 503 : /not configured|PLAN_FROZEN|planning requires/i.test(message) ? 409 : 400;
         return json(request, { error: { message: redactSecrets(message) } }, status);
@@ -3382,7 +3730,17 @@ export function createGatewayHandler(
 
   return async function fetch(request: Request): Promise<Response> {
     const start = Date.now();
-    const response = await route(request);
+    let response = await route(request);
+    const path = new URL(request.url).pathname;
+    if (/^\/v1\/engineer\/runs\/[^/]+\/(?:advisories|hardening)(?:\/|$)/.test(path)) {
+      const headers = new Headers(response.headers);
+      headers.set("Cache-Control", "no-store");
+      response = new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    }
     metrics.recordRequest(response.status, Date.now() - start);
     return response;
   };

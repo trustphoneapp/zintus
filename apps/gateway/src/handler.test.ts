@@ -8,7 +8,16 @@ import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
-import { EngineerSupervisor, LocalArtifactStore } from "@zintus/engineer";
+import {
+  ApprovalAuthorityConflictError,
+  EngineerPublicationManager,
+  EngineerSupervisor,
+  IdempotencyConflictError,
+  LocalArtifactStore,
+  VerifiedCandidateIntegrityError,
+  type ApprovalRequestRecord,
+  type EngineerRun,
+} from "@zintus/engineer";
 import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal } from "./engineer-identity.js";
 import { EngineerCapabilityPreflight } from "./engineer-preflight.js";
@@ -109,6 +118,272 @@ describe("origin rejection (CSRF / denial-of-wallet guard)", () => {
 });
 
 describe("gateway handler", () => {
+  test("legacy human-review approve returns the stable verified-candidate 409 with zero workflow calls", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "handler-human-review-bypass" });
+    const calls = { resolve: 0, transition: 0, checkpoint: 0, approval: 0, git: 0, provider: 0 };
+    const engineerRuns = {
+      readiness: () => ({ state: "READY", error: null }), principal: () => principal,
+      resolveHumanReview: async () => { calls.resolve += 1; throw new Error("must not call manager"); },
+    } as unknown as EngineerRunManager;
+    const handler = makeHandler({ token: "secret" }, fakeEngine({
+      routeAndStream: async () => { calls.provider += 1; throw new Error("must not call provider"); },
+    }), { engineerRuns });
+    const response = await handler(new Request("http://x/v1/engineer/runs/review-bypass/human-review", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: "approve", reason: "Legacy approval attempt" }),
+    }));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: {
+      code: "ENGINEER_VERIFIED_CANDIDATE_REQUIRED",
+      message: "Human review cannot approve unpromoted work. Retry verification to produce a verified candidate or reject the run.",
+      action: "RETRY_OR_REJECT",
+    } });
+    expect(calls).toEqual({ resolve: 0, transition: 0, checkpoint: 0, approval: 0, git: 0, provider: 0 });
+    const withoutReason = await handler(new Request("http://x/v1/engineer/runs/review-bypass/human-review", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: "approve" }),
+    }));
+    expect(withoutReason.status).toBe(409);
+    expect(calls.resolve).toBe(0);
+  });
+
+  test("verified candidate checkpoint route requires bearer auth and returns the owner-safe summary", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "handler-checkpoint-owner" });
+    const summary = {
+      checkpointId: `sha256:${"1".repeat(64)}`, checkpointHash: `sha256:${"2".repeat(64)}`,
+      resultCommitSha: "3".repeat(40), classificationResult: "READY", requiredTestCount: 2,
+      allRequiredChecksPassed: true, openBlockingCriticalCount: 0,
+      environmentDigest: `sha256:${"4".repeat(64)}`, createdAt: "2026-07-17T12:00:00.000Z",
+    };
+    let receivedPrincipal: unknown;
+    const engineerRuns = {
+      readiness: () => ({ state: "READY", error: null }), principal: () => principal,
+      checkpoint: async (input: unknown) => { receivedPrincipal = input; return summary; },
+    } as unknown as EngineerRunManager;
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const url = "http://x/v1/engineer/runs/checkpoint-run/checkpoint";
+    expect((await handler(new Request(url))).status).toBe(401);
+    const response = await handler(new Request(url, { headers: { Authorization: "Bearer secret" } }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ verifiedCandidate: summary });
+    expect(receivedPrincipal).toEqual(principal);
+  });
+
+  test("verified candidate checkpoint route propagates promoted authority corruption", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "handler-corrupt-checkpoint-owner" });
+    const engineerRuns = {
+      readiness: () => ({ state: "READY", error: null }), principal: () => principal,
+      checkpoint: async () => { throw new VerifiedCandidateIntegrityError("corrupt-checkpoint-run"); },
+    } as unknown as EngineerRunManager;
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const response = await handler(new Request("http://x/v1/engineer/runs/corrupt-checkpoint-run/checkpoint", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: {
+      code: "ENGINEER_VERIFIED_CANDIDATE_CORRUPT",
+      message: "Verified candidate promotion references missing or corrupt durable checkpoint authority.",
+    } });
+  });
+
+  test("two browser approval decisions race to one success and one actionable candidate-changed 409", async () => {
+    const authority = {
+      expectedVerifiedCheckpointId: `sha256:${"a".repeat(64)}`,
+      expectedVerifiedCheckpointHash: `sha256:${"b".repeat(64)}`,
+      expectedApprovalRevision: 3,
+    };
+    const approval = {
+      approvalRequestId: "approval-race", status: "PENDING", riskTier: "HIGH",
+      verifiedCheckpointId: authority.expectedVerifiedCheckpointId,
+      verifiedCheckpointHash: authority.expectedVerifiedCheckpointHash,
+      approvalRevision: authority.expectedApprovalRevision,
+    };
+    const principal = { ownerId: "owner-race", reviewerId: "reviewer-race" };
+    const received: unknown[] = [];
+    let winner = false;
+    const engineerRuns = {
+      readiness: () => ({ state: "READY", error: null }),
+      principal: () => principal,
+      approval: () => approval,
+      approvalAuthority: () => authority,
+      approvalView: () => ({ approval, approvalAuthority: authority }),
+      get: () => ({ run: { state: winner ? "HUMAN_APPROVED" : "HUMAN_APPROVAL_PENDING" } }),
+      async approve(_principal: unknown, runId: string, _reason: string, expected: unknown) {
+        received.push(expected);
+        await Promise.resolve();
+        if (winner) throw new ApprovalAuthorityConflictError(runId);
+        winner = true;
+        return { status: "PUBLISHED" };
+      },
+    } as unknown as EngineerRunManager;
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const missingAuthority = await handler(new Request("http://x/v1/engineer/runs/run-race/approve", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Approve without displayed authority" }),
+    }));
+    expect(missingAuthority.status).toBe(400);
+    expect(received).toEqual([]);
+    const request = () => new Request("http://x/v1/engineer/runs/run-race/approve", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Approve exact candidate", ...authority }),
+    });
+    const responses = await Promise.all([handler(request()), handler(request())]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(received).toEqual([authority, authority]);
+    const conflict = responses.find((response) => response.status === 409)!;
+    expect(await conflict.json()).toEqual({
+      error: {
+        code: "ENGINEER_CANDIDATE_CHANGED",
+        message: "Candidate changed since this approval was displayed. Refresh the approval and review the current checkpoint before deciding.",
+        action: "REFRESH_APPROVAL",
+      },
+    });
+    const read = await handler(new Request("http://x/v1/engineer/runs/run-race/approval", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(await read.json()).toEqual({ approval, approvalAuthority: authority });
+  });
+
+  test("every approval-control endpoint forwards the exact displayed authority", async () => {
+    const authority = {
+      expectedVerifiedCheckpointId: `sha256:${"c".repeat(64)}`,
+      expectedVerifiedCheckpointHash: `sha256:${"d".repeat(64)}`,
+      expectedApprovalRevision: 8,
+    };
+    const received: Array<{ action: string; expected: unknown }> = [];
+    const engineerRuns = {
+      readiness: () => ({ state: "READY", error: null }),
+      principal: () => ({ ownerId: "owner-controls", reviewerId: "reviewer-controls" }),
+      get: () => ({ run: { state: "HUMAN_APPROVAL_PENDING" } }),
+      approve: async (_principal: unknown, _runId: string, _reason: string, expected: unknown) => {
+        received.push({ action: "approve", expected }); return { status: "PUBLISHED" };
+      },
+      requestChanges: async (_principal: unknown, _runId: string, _reason: string, expected: unknown) => {
+        received.push({ action: "request-changes", expected });
+      },
+      reject: async (_principal: unknown, _runId: string, _reason: string, expected: unknown) => {
+        received.push({ action: "reject", expected });
+      },
+      extendApproval: async (_principal: unknown, _runId: string, _reason: string, _seconds: number, expected: unknown) => {
+        received.push({ action: "extend-approval", expected }); return { status: "PENDING" };
+      },
+      expireApproval: async (_principal: unknown, _runId: string, expected: unknown) => {
+        received.push({ action: "expire-approval", expected });
+      },
+    } as unknown as EngineerRunManager;
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    for (const action of ["approve", "request-changes", "reject", "extend-approval", "expire-approval"]) {
+      const response = await handler(new Request(`http://x/v1/engineer/runs/run-controls/${action}`, {
+        method: "POST",
+        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Exact displayed candidate", extensionSeconds: 60, ...authority }),
+      }));
+      expect(response.status).toBe(200);
+    }
+    expect(received).toEqual([
+      { action: "approve", expected: authority },
+      { action: "request-changes", expected: authority },
+      { action: "reject", expected: authority },
+      { action: "extend-approval", expected: authority },
+      { action: "expire-approval", expected: authority },
+    ]);
+  });
+
+  test("the real gateway and publication stack maps an approval CAS loser to 409", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-gateway-approval-cas-"));
+    const hash = (value: string) => `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
+    const authority = {
+      expectedVerifiedCheckpointId: hash("gateway-cas-checkpoint-id"),
+      expectedVerifiedCheckpointHash: hash("gateway-cas-checkpoint-hash"),
+      expectedApprovalRevision: 0,
+    };
+    let approvalStatus: ApprovalRequestRecord["status"] = "PENDING";
+    let approvalRevision = 0;
+    let arrivals = 0;
+    let release!: () => void;
+    const bothArrived = new Promise<void>((resolve) => { release = resolve; });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "gateway-real-cas-identity-secret" });
+    const approval = (): ApprovalRequestRecord => ({
+      approvalRequestId: "approval-real-cas", runId: "run-real-cas", riskTier: "HIGH",
+      assignedReviewerId: principal.reviewerId, requestedAt: "2026-07-17T09:00:00.000Z",
+      deadlineAt: "2026-07-19T09:00:00.000Z", reminderSchedule: [], timeoutAction: "HUMAN_REVIEW_REQUIRED",
+      manifestHash: hash("gateway-cas-manifest"), diffHash: hash("gateway-cas-diff"),
+      evidenceBundleHash: hash("gateway-cas-bundle"), reviewerSessionId: "reviewer-real-cas",
+      classificationHash: hash("gateway-cas-classification"), classificationResult: "READY",
+      status: approvalStatus, approvalRevision, verifiedCheckpointId: authority.expectedVerifiedCheckpointId,
+      verifiedCheckpointHash: authority.expectedVerifiedCheckpointHash,
+    });
+    const run = (): EngineerRun => ({
+      runId: "run-real-cas", userId: principal.ownerId,
+      repository: { repositoryId: "repo-real-cas", provider: "github", owner: "o", name: "r", baseBranch: "main", baseCommitSha: "d".repeat(40) },
+      requestOriginal: "change", requestNormalized: "change", state: "HUMAN_APPROVAL_PENDING", stateVersion: 9,
+      manifestHash: approval().manifestHash, riskTier: "HIGH", humanGateRequired: true,
+      createdAt: "2026-07-17T09:00:00.000Z", updatedAt: "2026-07-17T09:00:00.000Z", terminalAt: null,
+    });
+    const evidence = () => ({
+      runId: run().runId, reviewerSessionId: "reviewer-real-cas", reviewerDecision: "APPROVE" as const,
+      classificationHash: approval().classificationHash!, classificationResult: "READY" as const,
+      reviewerDiffHash: approval().diffHash, reviewerEvidenceBundleHash: approval().evidenceBundleHash,
+      reviewerIsolationVerified: true as const, evidenceBundleId: "bundle-real-cas",
+      evidenceBundleHash: approval().evidenceBundleHash, resultCommitSha: "b".repeat(40),
+      allRequiredChecksPassed: true, openCriticalSecurityFindings: 0,
+    });
+    const supervisor = {
+      getRun: () => run(), latestApprovalRequest: () => approval(), getPublicationEvidence: () => evidence(),
+      async getVerifiedCandidateCheckpoint() {
+        arrivals += 1;
+        if (arrivals === 2) release();
+        await bothArrived;
+        return { checkpoint: {
+          checkpointId: authority.expectedVerifiedCheckpointId, checkpointHash: authority.expectedVerifiedCheckpointHash,
+          runId: run().runId, manifestHash: approval().manifestHash, diffHash: approval().diffHash,
+          evidenceBundleHash: approval().evidenceBundleHash, reviewerSessionId: approval().reviewerSessionId,
+          classificationHash: approval().classificationHash, classificationResult: approval().classificationResult,
+        }, attestation: {} };
+      },
+      extendApproval: (decision: { expectedApprovalRevision: number }, deadlineAt: string, reminders: string[]) => {
+        if (approvalStatus !== "PENDING" || approvalRevision !== decision.expectedApprovalRevision) {
+          throw new IdempotencyConflictError(run().runId, "approval-extension:approval-real-cas");
+        }
+        approvalRevision += 1;
+        return { ...approval(), deadlineAt, reminderSchedule: reminders };
+      },
+    } as unknown as EngineerSupervisor;
+    const publication = new EngineerPublicationManager({
+      supervisor, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
+      diffForRun: () => "gateway-cas-diff", commandSigningSecret: "gateway-real-cas-signing-secret-at-least-32-bytes",
+      checkpointAttestor: { algorithm: "test", keyId: "test", sign: () => "test", verify: () => true },
+      gitService: {
+        async inspectBaseBranch() { throw new Error("unused"); }, async createRunBranch() { throw new Error("unused"); },
+        async pushVerifiedCommit() { throw new Error("unused"); }, async createPullRequest() { throw new Error("unused"); },
+      },
+    });
+    const engineerRuns = new EngineerRunManager({
+      supervisor, publication, principal,
+      preflight: {
+        readiness: () => ({ state: "READY", error: null }),
+        assertRunAdmission: async () => {},
+      } as unknown as EngineerCapabilityPreflight,
+    });
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const request = () => new Request("http://x/v1/engineer/runs/run-real-cas/extend-approval", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Need exact review time", extensionSeconds: 60, ...authority }),
+    });
+    const responses = await Promise.all([handler(request()), handler(request())]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(await responses.find((response) => response.status === 409)!.json()).toEqual({
+      error: {
+        code: "ENGINEER_CANDIDATE_CHANGED",
+        message: "Candidate changed since this approval was displayed. Refresh the approval and review the current checkpoint before deciding.",
+        action: "REFRESH_APPROVAL",
+      },
+    });
+    rmSync(root, { recursive: true, force: true });
+  });
+
   test("Engineer run intake and reads use the gateway bearer boundary", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-gateway-engineer-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
@@ -199,6 +474,11 @@ describe("gateway handler", () => {
     const storedArtifact = supervisor.recordArtifact(artifactStore.put({
       runId: "gateway-run-1", type: "COMMAND_STDOUT", bytes: "safe output", producerType: "EXECUTOR", producerId: "test-executor", trusted: true,
     }));
+    const ordinaryRunClassifier=supervisor.isOptionalHardeningChild.bind(supervisor),
+      exactRead=artifactStore.readVerifiedExact.bind(artifactStore);let exactReadCount=0;
+    supervisor.isOptionalHardeningChild=(()=>true) as never;
+    artifactStore.readVerifiedExact=((artifact:Parameters<typeof exactRead>[0])=>{
+      exactReadCount+=1;return exactRead(artifact);}) as never;
     const preview = await handler(new Request(`http://x/v1/engineer/runs/gateway-run-1/artifacts/${storedArtifact.artifactId}`, {
       headers: { Authorization: "Bearer secret" },
     }));
@@ -211,8 +491,9 @@ describe("gateway handler", () => {
     const largeArtifact = supervisor.recordArtifact(artifactStore.put({
       runId: "gateway-run-1", type: "COMMAND_STDOUT", bytes: largeBytes, producerType: "EXECUTOR", producerId: "test-executor", trusted: true,
     }));
-    const wholeFileRead = artifactStore.read.bind(artifactStore);
+    const wholeFileRead = artifactStore.read.bind(artifactStore),verifiedChunks=artifactStore.verifiedChunks.bind(artifactStore);
     artifactStore.read = () => { throw new Error("evidence stream must not use the whole-file reader"); };
+    artifactStore.verifiedChunks=(async function*(){throw new Error("hardening evidence stream must not use legacy chunks");}) as never;
     const evidenceStream = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/evidence-stream", {
       headers: { Authorization: "Bearer secret" },
     }));
@@ -227,12 +508,15 @@ describe("gateway handler", () => {
       streamChunks.push(Buffer.from(next.value));
     }
     const streamedEvidence = Buffer.concat(streamChunks).toString("utf8");
-    artifactStore.read = wholeFileRead;
+    artifactStore.read=wholeFileRead;artifactStore.verifiedChunks=verifiedChunks;
+    supervisor.isOptionalHardeningChild=ordinaryRunClassifier as never;
+    expect(exactReadCount).toBeGreaterThanOrEqual(3);
     expect(largestStreamChunk).toBeLessThan(largeBytes.byteLength);
     expect(streamedEvidence).toContain('"type":"artifactPayload"');
     expect(streamedEvidence).toContain('"type":"checksum"');
     expect(streamedEvidence).not.toContain("storageReference");
     expect(streamedEvidence).not.toContain("storage_reference");
+    expect(streamedEvidence).not.toContain(root);
     const evidenceLines = streamedEvidence.trimEnd().split("\n");
     const checksum = JSON.parse(evidenceLines.at(-1)!) as { type: string; algorithm: string; value: string };
     expect(checksum).toEqual({ type: "checksum", algorithm: "sha256", value: `sha256:${createHash("sha256").update(`${evidenceLines.slice(0, -1).join("\n")}\n`).digest("hex")}` });
@@ -261,7 +545,7 @@ describe("gateway handler", () => {
     const diff = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/diff", { headers: { Authorization: "Bearer secret" } }));
     expect((await diff.json()) as unknown).toEqual({ diff: "diff --git a/a b/a" });
     const approval = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/approval", { headers: { Authorization: "Bearer secret" } }));
-    expect((await approval.json()) as unknown).toEqual({ approval: null });
+    expect((await approval.json()) as unknown).toEqual({ approval: null, approvalAuthority: null });
     const observability = await handler(new Request("http://x/v1/engineer/observability", { headers: { Authorization: "Bearer secret" } }));
     expect(observability.status).toBe(200);
     expect(((await observability.json()) as { snapshot: { totalRuns: number; runsByState: Record<string, number> } }).snapshot).toMatchObject({
@@ -290,9 +574,16 @@ describe("gateway handler", () => {
     expect(resumedText).not.toContain("id: 1\n");
     expect(resumedText).toContain("id: 2\n");
     expect(resumedText).toContain("retry: 1000");
+    supervisor.isOptionalHardeningChild=(()=>true) as never;
+    artifactStore.read=()=>{throw new Error("hardening evidence export must not use legacy reads");};
     const exported = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/evidence-export", { headers: { Authorization: "Bearer secret" } }));
     expect(exported.headers.get("content-disposition")).toContain("gateway-run-1");
-    expect((await exported.json()) as { exportHash?: string }).toMatchObject({ exportHash: expect.stringMatching(/^sha256:/) });
+    const exportedBody=await exported.json() as {exportHash?:string};
+    expect(exportedBody).toMatchObject({ exportHash: expect.stringMatching(/^sha256:/) });
+    expect(JSON.stringify(exportedBody)).not.toContain("storageReference");
+    expect(JSON.stringify(exportedBody)).not.toContain("storage_reference");
+    expect(JSON.stringify(exportedBody)).not.toContain(root);
+    artifactStore.read=wholeFileRead;artifactStore.readVerifiedExact=exactRead;supervisor.isOptionalHardeningChild=ordinaryRunClassifier as never;
     supervisor.close();
     rmSync(root, { recursive: true, force: true });
   });
@@ -1519,6 +1810,301 @@ describe("gateway handler", () => {
       expect(res.headers.get(h)).toBeNull();
     }
     await res.text();
+  });
+});
+
+describe("Engineer advisory backlog HTTP contract", () => {
+  const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "advisory-handler-owner" });
+  const item = {
+    advisoryId: `sha256:${"a".repeat(64)}`, severity: "HIGH", category: "security",
+    description: "Optional hardening", recommendedChange: "Add a defense", file: "src/a.ts",
+    lineStart: 1, lineEnd: 2, actionability: "ACTIONABLE", status: "OPEN", revision: 1,
+    createdAt: "2026-07-18T10:00:00.000Z", updatedAt: "2026-07-18T10:00:00.000Z",
+  };
+  const makeAdvisoryHandler = (overrides: Record<string, unknown> = {}) => {
+    const calls: unknown[][] = [];
+    const manager = {
+      readiness: () => ({ state: "READY", error: null }), principal: () => principal,
+      listAdvisories: (...args: unknown[]) => { calls.push(args); return { schemaVersion: 1, materializationStatus: "COMPLETE", items: [item], nextCursor: "next" }; },
+      deferAdvisory: (...args: unknown[]) => { calls.push(args); return { ...item, status: "DEFERRED", revision: 2 }; },
+      dismissAdvisory: (...args: unknown[]) => { calls.push(args); return { ...item, status: "DISMISSED", revision: 2 }; },
+      reopenAdvisory: (...args: unknown[]) => { calls.push(args); return { ...item, status: "OPEN", revision: 2 }; },
+      ...overrides,
+    } as unknown as EngineerRunManager;
+    return { handler: makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns: manager }), calls };
+  };
+  const authorized = { Authorization: "Bearer secret", "Content-Type": "application/json" };
+
+  test("lists a filtered owner page with no-store and requires authentication", async () => {
+    const { handler, calls } = makeAdvisoryHandler();
+    const unauthenticated = await handler(new Request("http://x/v1/engineer/runs/run-1/advisories"));
+    expect(unauthenticated.status).toBe(401);
+    expect(unauthenticated.headers.get("Cache-Control")).toBe("no-store");
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/advisories?limit=7&cursor=abc&status=OPEN&actionability=ACTIONABLE", { headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({ schemaVersion: 1, materializationStatus: "COMPLETE", items: [item], nextCursor: "next" });
+    expect(calls).toEqual([[principal, "run-1", { limit: 7, cursor: "abc", status: "OPEN", actionability: "ACTIONABLE" }]]);
+  });
+
+  test("dispatches strict lifecycle commands without accepting client actor authority", async () => {
+    const { handler, calls } = makeAdvisoryHandler();
+    const command = { expectedRevision: 1, idempotencyKey: "operation-1", rationale: "Later" };
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/advisories/advisory-1/defer", {
+      method: "POST", headers: authorized, body: JSON.stringify(command),
+    }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({ advisory: { ...item, status: "DEFERRED", revision: 2 } });
+    expect(calls).toEqual([[principal, "run-1", "advisory-1", command]]);
+    const actorAttempt = await handler(new Request("http://x/v1/engineer/runs/run-1/advisories/advisory-1/dismiss", {
+      method: "POST", headers: authorized, body: JSON.stringify({ ...command, actorId: "attacker" }),
+    }));
+    expect(actorAttempt.status).toBe(400);
+    expect(await actorAttempt.json()).toMatchObject({ error: { code: "ENGINEER_ADVISORY_REQUEST_INVALID" } });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("returns the frozen stable error codes and refresh action", async () => {
+    for (const [code, status, message, action] of [
+      ["CURSOR_INVALID", 400, "Advisory cursor is invalid"],
+      ["NOT_FOUND", 404, "Advisory resource not found"],
+      ["CHANGED", 409, "Advisory changed; refresh advisories before deciding", "REFRESH_ADVISORIES"],
+      ["TRANSITION_INVALID", 409, "Advisory transition is invalid"],
+      ["IDEMPOTENCY_CONFLICT", 409, "Advisory operation conflicts with an existing idempotency key"],
+      ["MATERIALIZATION_REQUIRED", 409, "Advisory materialization is required"],
+      ["INTEGRITY_FAILURE", 500, "Advisory authority integrity validation failed"],
+    ] as const) {
+      const { handler } = makeAdvisoryHandler({
+        listAdvisories: () => { throw Object.assign(new Error(`safe ${code}`), { code }); },
+      });
+      const response = await handler(new Request("http://x/v1/engineer/runs/run-1/advisories", { headers: authorized }));
+      expect(response.status).toBe(status);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toEqual({ error: {
+        code: `ENGINEER_ADVISORY_${code}`, message, ...(action ? { action } : {}),
+      } });
+    }
+    const foreignHandler = makeAdvisoryHandler({ listAdvisories: () => { throw new Error("authenticated Engineer principal does not own this run"); } }).handler;
+    const unknownHandler = makeAdvisoryHandler({ listAdvisories: () => { throw Object.assign(new Error("advisory backlog missing"), { code: "NOT_FOUND" }); } }).handler;
+    const foreignResponse = await foreignHandler(new Request("http://x/v1/engineer/runs/foreign/advisories", { headers: authorized }));
+    const unknownResponse = await unknownHandler(new Request("http://x/v1/engineer/runs/unknown/advisories", { headers: authorized }));
+    expect(foreignResponse.status).toBe(404);
+    expect(unknownResponse.status).toBe(404);
+    expect(await foreignResponse.json()).toEqual(await unknownResponse.json());
+    const internalIntegrity = makeAdvisoryHandler({ listAdvisories: () => {
+      throw Object.assign(new Error("internal authority detail"), { code: "ENGINEER_ADVISORY_INTEGRITY_FAILURE" });
+    } }).handler;
+    const integrityResponse = await internalIntegrity(new Request("http://x/v1/engineer/runs/run-1/advisories", { headers: authorized }));
+    expect(integrityResponse.status).toBe(500);
+    expect(await integrityResponse.json()).toEqual({ error: { code: "ENGINEER_ADVISORY_INTEGRITY_FAILURE", message: "Advisory authority integrity validation failed" } });
+    const internalIdempotency = makeAdvisoryHandler({ deferAdvisory: () => {
+      throw Object.assign(new Error("key detail"), { name: "IdempotencyConflictError" });
+    } }).handler;
+    const conflictResponse = await internalIdempotency(new Request("http://x/v1/engineer/runs/run-1/advisories/advisory-1/defer", {
+      method: "POST", headers: authorized, body: JSON.stringify({ expectedRevision: 0, idempotencyKey: "same-key", rationale: null }),
+    }));
+    expect(conflictResponse.status).toBe(409);
+    expect(await conflictResponse.json()).toMatchObject({ error: { code: "ENGINEER_ADVISORY_IDEMPOTENCY_CONFLICT" } });
+  });
+
+  test("sets no-store on origin rejection and OPTIONS before advisory routing", async () => {
+    const originRestricted = makeHandler(
+      { token: "secret", corsOrigins: "loopback" },
+      fakeEngine(),
+      { engineerRuns: ({ readiness: () => ({ state: "READY", error: null }), principal: () => principal } as unknown as EngineerRunManager) },
+    );
+    const rejected = await originRestricted(new Request("http://x/v1/engineer/runs/run-1/advisories", {
+      headers: { Origin: "https://evil.example", Authorization: "Bearer secret" },
+    }));
+    expect(rejected.status).toBe(403);
+    expect(rejected.headers.get("Cache-Control")).toBe("no-store");
+
+    const { handler } = makeAdvisoryHandler();
+    const preflight = await handler(new Request("http://x/v1/engineer/runs/run-1/advisories", { method: "OPTIONS" }));
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("Cache-Control")).toBe("no-store");
+  });
+});
+
+describe("Engineer optional hardening HTTP contract", () => {
+  const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "hardening-handler-owner" });
+  const quote = {
+    quoteId: `sha256:${"a".repeat(64)}`, quoteHash: `sha256:${"b".repeat(64)}`, parentRunId: "run-1",
+    parentCheckpointId: `sha256:${"c".repeat(64)}`, parentCheckpointHash: `sha256:${"d".repeat(64)}`,
+    parentStateVersion: 4, selectionHash: `sha256:${"e".repeat(64)}`, advisoryIds: [`sha256:${"f".repeat(64)}`],
+    routingPolicyVersion: "routing-v1", pricingVersion: "pricing-v1", estimatorVersion: "estimator-v1",
+    estimate: { maxCostMicrousd: 1000, maxTokens: 100, maxTimeSeconds: 30, maxPlannerCalls: 0, maxBuilderCalls: 1, maxReviewerCalls: 1, automaticRepairCalls: 0 },
+    assumptions: ["ESTIMATE_IS_HARD_CAP"], createdAt: "2026-07-18T10:00:00.000Z", expiresAt: "2099-07-18T10:30:00.000Z", status: "ACTIVE",
+  };
+  const consent = { consentId: `sha256:${"1".repeat(64)}`, consentHash: `sha256:${"2".repeat(64)}` };
+  const child = {
+    schemaVersion: 1, parentRunId: "run-1", rootRunId: "run-1", childRunId: "hardening-child-1",
+    lineageId: `sha256:${"3".repeat(64)}`, lineageHash: `sha256:${"4".repeat(64)}`,
+    state: "REQUEST_RECEIVED", stateVersion: 0, riskTier: "HIGH", humanGateRequired: true,
+    budget: { costMicrousd: 1000, tokens: 100, timeSeconds: 30 }, createdAt: "2026-07-18T10:02:00.000Z",
+  };
+  const lineage = {
+    schemaVersion: 1, policyVersion: "engineer-hardening-lineage-v1", relation: "OPTIONAL_HARDENING",
+    lineageId: child.lineageId, lineageHash: child.lineageHash, rootRunId: child.rootRunId, parentRunId: child.parentRunId, childRunId: child.childRunId,
+    parentCheckpointId: `sha256:${"5".repeat(64)}`, parentCheckpointHash: `sha256:${"6".repeat(64)}`,
+    parentBaseCommitSha: "a".repeat(40), seedResultCommitSha: "b".repeat(40), quoteId: `sha256:${"7".repeat(64)}`,
+    quoteHash: `sha256:${"8".repeat(64)}`, consentId: consent.consentId, consentHash: consent.consentHash,
+    selectionHash: `sha256:${"9".repeat(64)}`, budget: child.budget, createdAt: child.createdAt,
+  };
+  const creation = { child, lineage };
+  const startResult = { run: { runId: child.childRunId, state: "QUEUED" }, start: { operationId: `sha256:${"0".repeat(64)}`,
+    childRunId: child.childRunId, createdAt: child.createdAt }, seed: { status: "VERIFIED", seedAttestationId: `sha256:${"a".repeat(64)}`,
+    seedDiffHash: `sha256:${"b".repeat(64)}` }, status: "STARTED" };
+  const authorized = { Authorization: "Bearer secret", "Content-Type": "application/json" };
+  const quoteBody = { runId: "run-1", advisoryIds: quote.advisoryIds, expectedParentStateVersion: 4, idempotencyKey: "quote-op" };
+  const consentBody = {
+    quoteId: quote.quoteId, quoteHash: quote.quoteHash,
+    authorizedBudget: { costMicrousd: 1000, tokens: 100, timeSeconds: 30 },
+    acknowledgements: { separateRun: true, parentCandidateUnchanged: true, noAutomaticRepair: true, noOverages: true },
+    expectedParentStateVersion: 4, idempotencyKey: "consent-op",
+  };
+  const setup = (overrides: Record<string, unknown> = {}) => {
+    const calls: unknown[][] = [];
+    const manager = {
+      readiness: () => ({ state: "READY", error: null }), principal: () => principal,
+      createHardeningQuote: (...args: unknown[]) => { calls.push(args); return quote; },
+      getHardeningQuote: (...args: unknown[]) => { calls.push(args); return quote; },
+      acceptHardeningConsent: (...args: unknown[]) => { calls.push(args); return consent; },
+      createOptionalHardeningChild: (...args: unknown[]) => { calls.push(args); return creation; },
+      startOptionalHardeningChild: (...args: unknown[]) => { calls.push(args); return startResult; },
+      ...overrides,
+    } as unknown as EngineerRunManager;
+    return { calls, handler: makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns: manager }) };
+  };
+
+  test("dispatches strict nested quote, consent, and child routes", async () => {
+    const { handler, calls } = setup();
+    const created = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/quotes", { method: "POST", headers: authorized, body: JSON.stringify(quoteBody) }));
+    const read = await handler(new Request(`http://x/v1/engineer/runs/run-1/hardening/quotes/${encodeURIComponent(quote.quoteId)}`, { headers: authorized }));
+    const accepted = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/consents", { method: "POST", headers: authorized, body: JSON.stringify(consentBody) }));
+    const childCreated = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/children", { method: "POST", headers: authorized, body: JSON.stringify(consent) }));
+    const childReplayed = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/children", { method: "POST", headers: authorized, body: JSON.stringify(consent) }));
+    expect([created.status, read.status, accepted.status, childCreated.status, childReplayed.status]).toEqual([201, 200, 201, 201, 201]);
+    expect([created, read, accepted, childCreated, childReplayed].every((response) => response.headers.get("Cache-Control") === "no-store")).toBe(true);
+    expect(await created.json()).toEqual({ quote });
+    expect(await read.json()).toEqual({ quote });
+    expect(await accepted.json()).toEqual({ consent });
+    expect(await childCreated.clone().text()).toBe(await childReplayed.clone().text());
+    expect(await childCreated.json()).toEqual(creation);
+    expect(await childReplayed.json()).toEqual(creation);
+    expect(calls).toEqual([
+      [principal, "run-1", quoteBody],
+      [principal, "run-1", quote.quoteId],
+      [principal, "run-1", consentBody],
+      [principal, "run-1", consent],
+      [principal, "run-1", consent],
+    ]);
+  });
+
+  test("rejects client authority and unsupported fields before dispatch", async () => {
+    const { handler, calls } = setup();
+    for (const body of [
+      { ...quoteBody, actorId: "attacker" },
+      { ...quoteBody, runId: "other-run" },
+      { ...consentBody, requesterUserId: "attacker" },
+      { ...consentBody, acknowledgements: { ...consentBody.acknowledgements, noOverages: false } },
+    ]) {
+      const endpoint = "quoteId" in body ? "consents" : "quotes";
+      const response = await handler(new Request(`http://x/v1/engineer/runs/run-1/hardening/${endpoint}`, { method: "POST", headers: authorized, body: JSON.stringify(body) }));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: { code: "ENGINEER_HARDENING_INVALID_REQUEST", message: "Hardening request is invalid" } });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test("rejects every child field beyond the two consent hashes before dispatch", async () => {
+    const { handler, calls } = setup();
+    for (const body of [
+      {},
+      { consentId: consent.consentId },
+      { ...consent, actorId: "attacker" },
+      { ...consent, consentHash: "not-a-hash" },
+    ]) {
+      const response = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/children", {
+        method: "POST", headers: authorized, body: JSON.stringify(body),
+      }));
+      expect(response.status).toBe(400);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toEqual({ error: { code: "ENGINEER_HARDENING_INVALID_REQUEST", message: "Hardening request is invalid" } });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  test("starts an exact child through the nested strict owner route and rejects changed authority shapes", async () => {
+    const {handler,calls}=setup();const input={expectedChildStateVersion:0,lineageId:child.lineageId,lineageHash:child.lineageHash,idempotencyKey:"start-1"};
+    const response=await handler(new Request(`http://x/v1/engineer/runs/run-1/hardening/children/${encodeURIComponent(child.childRunId)}/start`,
+      {method:"POST",headers:authorized,body:JSON.stringify(input)}));expect(response.status).toBe(202);expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({start:startResult});expect(calls).toEqual([[principal,"run-1",child.childRunId,input]]);
+    for(const body of [{...input,expectedChildStateVersion:1},{...input,actorId:"attacker"},{...input,lineageHash:"bad"}]){
+      const invalid=await handler(new Request(`http://x/v1/engineer/runs/run-1/hardening/children/${child.childRunId}/start`,
+        {method:"POST",headers:authorized,body:JSON.stringify(body)}));expect(invalid.status).toBe(400);
+      expect(await invalid.json()).toEqual({error:{code:"ENGINEER_HARDENING_INVALID_REQUEST",message:"Hardening request is invalid"}});}
+    expect(calls).toHaveLength(1);
+  });
+
+  test("returns an owner-safe stable 404 for missing child authority", async () => {
+    const { handler } = setup({
+      createOptionalHardeningChild: () => { throw new Error(`hardening consent not found: ${consent.consentId}`); },
+    });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/children", {
+      method: "POST", headers: authorized, body: JSON.stringify(consent),
+    }));
+    expect(response.status).toBe(404);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      error: { code: "ENGINEER_HARDENING_NOT_FOUND", message: "Hardening resource not found" },
+    });
+  });
+
+  test("maps stable errors uniformly and applies no-store to global early exits", async () => {
+    for (const [code, status] of [
+      ["ENGINEER_HARDENING_NOT_FOUND", 404], ["ENGINEER_HARDENING_IDEMPOTENCY_CONFLICT", 409],
+      ["ENGINEER_HARDENING_STATE_CONFLICT", 409], ["ENGINEER_HARDENING_SELECTION_INVALID", 409],
+      ["ENGINEER_HARDENING_QUOTE_EXPIRED", 409], ["ENGINEER_HARDENING_PRICING_UNAVAILABLE", 503],
+      ["ENGINEER_HARDENING_AUTHORITY_INVALID", 409], ["ENGINEER_HARDENING_INTERNAL_ERROR", 500],
+    ] as const) {
+      const { handler } = setup({ createOptionalHardeningChild: () => { throw Object.assign(new Error("sk-TESTFAKE0123456789 secret detail"), { code }); } });
+      const response = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/children", { method: "POST", headers: authorized, body: JSON.stringify(consent) }));
+      expect(response.status).toBe(status);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect((await response.json() as { error: { code: string; message: string } }).error).toMatchObject({ code });
+    }
+    const { handler } = setup();
+    const unauthenticated = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/children"));
+    const preflight = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/children", { method: "OPTIONS" }));
+    const originRestricted = makeHandler(
+      { token: "secret", corsOrigins: "loopback" }, fakeEngine(),
+      { engineerRuns: ({ readiness: () => ({ state: "READY", error: null }), principal: () => principal } as unknown as EngineerRunManager) },
+    );
+    const rejectedOrigin = await originRestricted(new Request("http://x/v1/engineer/runs/run-1/hardening/children", {
+      headers: { Origin: "https://evil.example", Authorization: "Bearer secret" },
+    }));
+    expect(unauthenticated.headers.get("Cache-Control")).toBe("no-store");
+    expect(preflight.headers.get("Cache-Control")).toBe("no-store");
+    expect(rejectedOrigin.status).toBe(403);
+    expect(rejectedOrigin.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  test("maps a consent budget above the signed quote caps to a stable 409 without leaking details", async () => {
+    const { handler } = setup({
+      acceptHardeningConsent: () => {
+        throw new TypeError("consent budget exceeds the quote hard caps: sk-TESTFAKE0123456789");
+      },
+    });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/hardening/consents", {
+      method: "POST", headers: authorized, body: JSON.stringify(consentBody),
+    }));
+    expect(response.status).toBe(409);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({
+      error: { code: "ENGINEER_HARDENING_AUTHORITY_INVALID", message: "Hardening authority is invalid" },
+    });
   });
 });
 

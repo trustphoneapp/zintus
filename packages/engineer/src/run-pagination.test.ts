@@ -37,6 +37,11 @@ describe("Engineer run pagination", () => {
       const second = supervisor.exportRunRecordPage("run-1", "artifacts", 2, 2);
       expect([...first, ...second]).toEqual(supervisor.exportRunRecords("run-1").artifacts ?? []);
       expect(supervisor.exportRunRecordTables("run-1")).toContain("approval_decisions");
+      for (const table of ["advisory_backlog_items", "hardening_quotes", "hardening_consents", "engineer_run_lineage", "advisory_backlog_events", "publication_candidate_selections"] as const) {
+        expect(supervisor.exportRunRecordTables("run-1")).toContain(table);
+        expect(supervisor.exportRunRecordPage("run-1", table, 0, 10)).toEqual([]);
+      }
+      expect(supervisor.exportRunRecordTables("run-1")).not.toContain("candidate_lineage_attestations");
       expect(() => supervisor.exportRunRecordPage("run-1", "not_a_table" as "artifacts", 0, 1)).toThrow("unknown run export table");
     } finally {
       supervisor.close();

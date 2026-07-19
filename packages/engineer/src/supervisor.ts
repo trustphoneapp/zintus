@@ -21,14 +21,18 @@ import {
   type TaskManifest,
   type TaskManifestContent,
   ModelRoutingDecisionSchema,
+  ReviewerInputSchema,
+  TrustedEvidenceSchema,
+  reviewerEvidenceBundleHash,
   type ModelRoutingDecision,
 } from "./contracts.js";
-import type {
-  AgentExecutionRecord,
-  ArtifactRecord,
-  CommandExecutionRecord,
-  ModelCallRecord,
-  SandboxRecord,
+import {
+  type ArtifactRecord,
+  type AgentExecutionRecord,
+  type BuilderDispatchClaim,
+  type CommandExecutionRecord,
+  type ModelCallRecord,
+  type SandboxRecord,
 } from "./execution-contracts.js";
 import type {
   ClaimEvidenceRecord,
@@ -38,28 +42,51 @@ import type {
   SecurityFindingRecord,
   VerificationExecutionRecord,
 } from "./verification-contracts.js";
-import type {
-  ApprovalDecisionRecord,
-  ApprovalRequestRecord,
-  FailureRecord,
-  GitOperationRecord,
-  PublicationEvidence,
-  TestExecutionView,
+import type { ReviewClassificationBatch } from "./review-classification.js";
+import {
+  FailureRecordSchema,
+  type FailureRecord,
+  type ApprovalDecisionRecord,
+  type ApprovalRequestRecord,
+  type NewApprovalDecisionRecord,
+  type NewApprovalRequestRecord,
+  type NewGitOperationRecord,
+  type GitOperationRecord,
+  type PublicationEvidence,
+  type TestExecutionView,
 } from "./control-contracts.js";
-import { BudgetPausedError, BuilderModelCallLimitError, IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
-import { canonicalJson, sha256 } from "./hash.js";
+import { AdvisoryIntegrityError, BudgetPausedError, BuilderModelCallLimitError, IdempotencyConflictError, InvalidTransitionError, ManifestIntegrityError, StateVersionConflictError } from "./errors.js";
+import { canonicalJson, compareCodeUnits, sha256 } from "./hash.js";
+import { hardeningCheckpointMilestoneKey,hardeningReviewCompletionEvidence,OptionalHardeningIndependentCheckpointSchema,
+  OptionalHardeningReviewInputAuthoritySchema,validateOptionalHardeningCheckpointChain,
+  hardeningFinalRiskAssessmentId,hardeningFinalScopeArtifactId,hardeningPreReviewArtifactId,
+  hardeningReviewAuthorityArtifactId,hardeningReviewerIngressTimes,resolveHardeningArtifactAuthority } from
+  "./hardening-verification-recovery.js";
+import { LocalArtifactStore } from "./artifact-store.js";
 import {
   EngineerLedger,
   type FailureClassProjection,
   type LedgerTransitionResult,
   type RunExportTable,
   type RunObservabilityProjection,
-  type ReviewerPersistenceRecoveryCandidate,
-  type RecordedReviewerOutput,
+  type ClassifiedReviewerAuthority,
+  type ArtifactByteReader,
+  type OptionalHardeningStartPreparation,
 } from "./ledger.js";
+import { buildOptionalHardeningManifest } from "./hardening-manifest.js";
+import { HardeningBudgetExtensionRequiresNewRunError } from "./hardening-budget-contracts.js";
 import { assessRisk, type RiskDecision, type RiskPolicyOptions } from "./risk.js";
+import { derivePostVerificationRiskFeatures } from "./post-verification-risk.js";
+import { buildFinalChangeScopeAttestation, FinalChangeScopeAttestationSchema,
+  type FinalChangeScopeAttestation } from "./final-change-scope.js";
+import { TestBaselineManifestSchema, TestIntegrityComparisonSchema,
+  type TestIntegrityComparison } from "./test-integrity.js";
+import { REVIEWER_POLICY_VERSION } from "./isolated-reviewer.js";
+import { buildHardeningPendingSemanticRows,resolveHardeningReviewerEvidenceAuthority,
+  resolveHardeningReviewerSemanticAuthority } from "./hardening-review-input-authority.js";
+import { hardeningFinalRiskAuditId,hardeningPreReviewAuditId } from "./hardening-verification-recovery.js";
 import { evaluateRetry, type RetryDecision } from "./retry.js";
-import { canTransition, isTerminalState } from "./state-machine.js";
+import { canTransition, isCancellationAllowed, isTerminalState } from "./state-machine.js";
 import type { PlanProposal } from "./planning.js";
 import { StoredContextSnapshotSchema, type StoredContextSnapshot } from "./context-contracts.js";
 import {
@@ -77,6 +104,18 @@ import {
   type DecisionResolution,
 } from "./decision-contracts.js";
 import { DECISION_POLICY_VERSION, classifyDecisionFactors } from "./decision-policy.js";
+import type { AdvisoryBacklogPage, AdvisoryOwnerCommand, HardeningConsentRequest, HardeningQuoteRequest, OptionalHardeningChildRequest } from "./advisory-hardening-contracts.js";
+import {
+  createRequiredLaneContract,
+  type RequiredLaneContract,
+  type RequiredLaneContractAuthority,
+} from "./required-lane-contracts.js";
+import { TRUSTED_COMMAND_POLICY_VERSION } from "./trusted-executor.js";
+import {
+  REQUIRED_LANE_REVIEWER_MAPPING_POLICY_VERSION,
+  SECURITY_POLICY_VERSION,
+  VERIFICATION_POLICY_VERSION,
+} from "./required-lane-policy-versions.js";
 import { assertRunBudget as assertBudgetPolicy, estimateGpt56CostUsd, RunBudgetUsageSchema, RuntimeBudgetExhaustedError, type RunBudgetDecision, type RunBudgetUsage } from "./runtime-budget.js";
 import {
   BudgetTopUpSchema,
@@ -87,18 +126,43 @@ import {
   type EngineerBudgetSnapshot,
 } from "./budget-contracts.js";
 import type { RepositoryAdmission, RepositoryAdmissionSource } from "./repository-admission.js";
+import type {
+  CheckpointAttestor,
+  PromoteVerifiedCandidateInput,
+  VerifiedCandidatePromotionResult,
+} from "./verified-candidate-checkpoint.js";
+import { StaleWorkerLeaseError, type WorkerLeaseRecord } from "./worker-lease.js";
+
+export interface RecoveryWorkerLeaseProof {
+  leaseId: string;
+  ownerId: string;
+  fencingToken: number;
+  leaseToken: string;
+}
+
+export interface RecoveryWorkerLeaseAuthority {
+  assertActive(input: RecoveryWorkerLeaseProof): WorkerLeaseRecord;
+  withActiveLease<T>(input: RecoveryWorkerLeaseProof, operation: (lease: WorkerLeaseRecord) => T): T;
+}
 
 export interface SupervisorOptions {
   dbPath?: string;
   now?: () => Date;
   idFactory?: () => string;
   builderModelCallLimit?: number;
+  checkpointAttestor?: CheckpointAttestor;
+  hardeningPromptCacheSecret?: string;
+  recoveryWorkerLeaseAuthority?: RecoveryWorkerLeaseAuthority;
+  /** Synchronous crash seam; a thrown error must roll back the entire hardening ingress bundle. */
+  afterHardeningIngressStepForTest?:(step:"FINAL_SCOPE"|"PRE_REVIEW"|"INTEGRITY_AUDIT"|"FINAL_RISK"|
+    "SEMANTIC_PREFLIGHT"|"REVIEW_AUTHORITY"|"COMPLETION")=>void;
 }
+
 
 /**
  * Durable backstop above the complete default workflow envelope:
  * one initial Builder pass plus four authorized repair passes may each use
- * thirteen model turns, and three transient retries may be admitted. Runtime
+ * twelve model turns, and three transient retries may be admitted. Runtime
  * token/cost/time budgets and retry progress guards remain the tighter limits.
  */
 export const MAX_BUILDER_MODEL_CALLS_PER_RUN = 68;
@@ -117,6 +181,7 @@ export interface TransitionFacts {
   reviewerDecisionValid?: boolean;
   reviewerFindingsActionable?: boolean;
   freshReviewerSession?: boolean;
+  reviewerRetryAuthorized?: boolean;
   fullVerificationRerun?: boolean;
   retryBudgetAvailable?: boolean;
   scopeWithinManifest?: boolean;
@@ -202,15 +267,71 @@ export class EngineerSupervisor {
   private readonly now: () => Date;
   private readonly idFactory: () => string;
   private readonly builderModelCallLimit: number;
+  private checkpointAttestor?: CheckpointAttestor;
+  private recoveryWorkerLeaseAuthority?: RecoveryWorkerLeaseAuthority;
+  private artifactReadAuthority?:LocalArtifactStore;
+  private readonly afterHardeningIngressStepForTest?:SupervisorOptions["afterHardeningIngressStepForTest"];
 
   constructor(options: SupervisorOptions = {}) {
-    this.ledger = new EngineerLedger(options.dbPath ?? join(homedir(), ".zintus", "engineer.db"));
+    this.ledger = new EngineerLedger(options.dbPath ?? join(homedir(), ".zintus", "engineer.db"), options.now,
+      options.hardeningPromptCacheSecret);
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
     this.builderModelCallLimit = options.builderModelCallLimit ?? MAX_BUILDER_MODEL_CALLS_PER_RUN;
+    this.checkpointAttestor = options.checkpointAttestor;
+    this.recoveryWorkerLeaseAuthority = options.recoveryWorkerLeaseAuthority;
+    this.afterHardeningIngressStepForTest=options.afterHardeningIngressStepForTest;
     if (!Number.isSafeInteger(this.builderModelCallLimit) || this.builderModelCallLimit < 1) {
       throw new TypeError("Builder model-call limit must be a positive safe integer");
     }
+  }
+
+  /** Binds the server-owned worker-lease authority exactly once after startup wiring. */
+  configureRecoveryWorkerLeaseAuthority(authority: RecoveryWorkerLeaseAuthority): void {
+    if(this.recoveryWorkerLeaseAuthority&&this.recoveryWorkerLeaseAuthority!==authority){
+      throw new Error("Engineer recovery worker-lease authority is already configured");
+    }
+    this.recoveryWorkerLeaseAuthority=authority;
+  }
+
+  configureArtifactReadAuthority(authority:LocalArtifactStore):void{
+    if(!(authority instanceof LocalArtifactStore))throw new TypeError("Engineer artifact read authority must be a LocalArtifactStore");
+    if(this.artifactReadAuthority&&this.artifactReadAuthority!==authority)
+      throw new Error("Engineer artifact read authority is already configured");
+    if(this.artifactReadAuthority===authority)return;
+    this.artifactReadAuthority=authority;
+    this.ledger.configureHardeningArtifactReader((artifact)=>authority.readVerifiedExact(artifact));
+  }
+
+  /** Optional-hardening artifacts may only be consumed through the admitted root/FD authority. */
+  private strictArtifactReader(runId:string):ArtifactByteReader|undefined{
+    if(!this.isOptionalHardeningChild(runId))return undefined;
+    if(!this.artifactReadAuthority)throw new InvalidTransitionError(
+      "optional-hardening durable evidence requires strict artifact-read authority");
+    return (artifact)=>this.artifactReadAuthority!.readVerifiedExact(artifact);
+  }
+
+  /**
+   * Holds the durable worker-lease authority across a synchronous
+   * optional-hardening mutation. Lock order is worker lease DB, then Engineer
+   * DB; asynchronous callbacks are forbidden at this boundary.
+   */
+  private withRecoveryWorkerLease<T>(runId:string,proof:RecoveryWorkerLeaseProof,operation:()=>T):T{
+    const authority=this.recoveryWorkerLeaseAuthority;
+    if(!authority)throw new InvalidTransitionError(
+      "optional-hardening worker-lease authority is not configured");
+    return authority.withActiveLease(proof,(lease)=>{
+      if(lease.status!=="ACTIVE"||lease.resourceKey!==`run:${runId}`||lease.leaseId!==proof.leaseId||
+        lease.ownerId!==proof.ownerId||lease.fencingToken!==proof.fencingToken){
+        throw new StaleWorkerLeaseError(proof.leaseId);
+      }
+      const result=operation();
+      if(result!==null&&typeof result==="object"&&"then" in result&&
+        typeof (result as {then?:unknown}).then==="function"){
+        throw new TypeError("optional-hardening worker-lease operations must be synchronous");
+      }
+      return result;
+    });
   }
 
   /**
@@ -384,12 +505,6 @@ export class EngineerSupervisor {
     if (content.riskTier !== run.riskTier || content.humanGateRequired !== run.humanGateRequired) {
       throw new ManifestIntegrityError("manifest risk and human gate must match the Supervisor decision");
     }
-    // A manifest may tighten the selected ceiling, but can never raise it.
-    // This preserves legacy/manual plans without allowing prompt output to
-    // silently increase the user's authoritative budget.
-    this.ledger.constrainBudget(run.runId, {
-      costUsd: content.costBudgetUsd, tokens: content.tokenBudget, timeSeconds: content.timeBudgetSeconds,
-    }, this.timestamp());
     const proposal = this.ledger.latestPlanProposal(run.runId);
     if (proposal && sha256(proposal.manifest) !== sha256(content)) {
       throw new ManifestIntegrityError("manifest does not match the persisted plan proposal");
@@ -420,6 +535,24 @@ export class EngineerSupervisor {
       throw new ManifestIntegrityError(`manifest version must be ${existingVersions.length + 1}`);
     }
     const timestamp = this.timestamp();
+    const context = this.ledger.latestContextSnapshot(run.runId);
+    const requiredLaneAuthority: RequiredLaneContractAuthority = {
+      planningBinding: {
+        contextManifestHash: context?.manifest.manifestHash ?? proposal?.contextManifestHash ?? null,
+        planProposalHash: proposal?.proposalHash ?? null,
+      },
+      policyBindings: {
+        verificationPolicyVersion: VERIFICATION_POLICY_VERSION,
+        securityPolicyVersion: SECURITY_POLICY_VERSION,
+        reviewerMappingPolicyVersion: REQUIRED_LANE_REVIEWER_MAPPING_POLICY_VERSION,
+        commandPolicyVersion: TRUSTED_COMMAND_POLICY_VERSION,
+      },
+    };
+    const requiredLaneContract = createRequiredLaneContract({
+      manifest,
+      ...requiredLaneAuthority.planningBinding,
+      policyBindings: requiredLaneAuthority.policyBindings,
+    });
     return this.ledger.freezeManifest(
       {
         runId: run.runId,
@@ -437,7 +570,13 @@ export class EngineerSupervisor {
         terminalAt: null,
       },
       manifest,
+      requiredLaneContract,
+      requiredLaneAuthority,
     );
+  }
+
+  getRequiredLaneContract(runId: string, manifestHash?: string): RequiredLaneContract | null {
+    return this.ledger.getRequiredLaneContract(runId, manifestHash);
   }
 
   assessRunRisk(
@@ -450,23 +589,40 @@ export class EngineerSupervisor {
     if (run.stateVersion !== expectedStateVersion) {
       throw new StateVersionConflictError(runId, expectedStateVersion, run.stateVersion);
     }
-    const decision = assessRisk(features, options);
+    const decision = assessRisk(features, options),assessment=this.riskAssessmentFromDecision(run,decision,
+      this.idFactory(),this.timestamp());
+    this.ledger.recordRisk(assessment, expectedStateVersion);
+    return assessment;
+  }
+
+  /** Pure deterministic final-risk projection used before the atomic hardening ingress commit. */
+  prepareOptionalHardeningFinalRisk(input:{runId:string;expectedStateVersion:number;checkpointHash:string;
+    features:RiskFeatures;assessedAt:string;options?:Partial<RiskPolicyOptions>}):RiskAssessment{
+    const run=this.ledger.getRun(input.runId);
+    if(!this.isOptionalHardeningChild(run.runId)||run.stateVersion!==input.expectedStateVersion)
+      throw new InvalidTransitionError("optional-hardening final risk authority changed");
+    const decision=assessRisk(input.features,input.options??{}),assessmentId=hardeningFinalRiskAssessmentId({
+      runId:run.runId,checkpointHash:input.checkpointHash,featuresHash:sha256(decision.features),
+      ruleVersion:decision.ruleVersion});
+    return this.riskAssessmentFromDecision(run,decision,assessmentId,input.assessedAt);
+  }
+
+  private riskAssessmentFromDecision(run:EngineerRun,decision:RiskDecision,assessmentId:string,
+    assessedAt:string):RiskAssessment{
     const rank: Record<RiskTier, number> = { LOW: 0, MEDIUM: 1, HIGH: 2, CRITICAL: 3 };
     const retainPriorFloor = run.manifestHash !== null || rank[run.riskTier] >= rank.HIGH;
     const riskTier = retainPriorFloor && rank[decision.riskTier] < rank[run.riskTier] ? run.riskTier : decision.riskTier;
     const retainedFloor = riskTier !== decision.riskTier;
-    const assessment = RiskAssessmentSchema.parse({
-      assessmentId: this.idFactory(),
-      runId,
+    return RiskAssessmentSchema.parse({
+      assessmentId,
+      runId:run.runId,
       riskTier,
       humanGateRequired: (retainPriorFloor && run.humanGateRequired) || decision.humanGateRequired || riskTier !== "LOW",
       ruleVersion: decision.ruleVersion,
       matchedRules: retainedFloor ? [...decision.matchedRules, "PRIOR_RISK_TIER_FLOOR"] : decision.matchedRules,
       features: decision.features,
-      assessedAt: this.timestamp(),
+      assessedAt,
     });
-    this.ledger.recordRisk(assessment, expectedStateVersion);
-    return assessment;
   }
 
   authorizeRetry(input: AuthorizeRetryInput): RetryDecision {
@@ -476,6 +632,24 @@ export class EngineerSupervisor {
     }
     const budgets = this.ledger.getManifest(input.runId)?.retryBudgets ?? RetryBudgetsSchema.parse({});
     const history = this.ledger.listRetryHistory(input.runId);
+    const prior = input.kind === "REVIEWER_FIX" ? [...history].reverse().find((item) => item.kind === input.kind &&
+      item.failureFingerprint === input.failureFingerprint && item.patchHash === (input.patchHash ?? null) &&
+      item.progressMetric === (input.progressMetric ?? null)) : undefined;
+    if (prior) {
+      const kindBudget = input.kind === "BUILDER_REPAIR" ? budgets.builderRepairAttempts
+        : input.kind === "REVIEWER_FIX" ? budgets.reviewerFixAttempts
+          : input.kind === "PLANNER_RESTART" ? budgets.plannerRestarts
+            : input.kind === "SANDBOX_PROVISIONING" ? budgets.sandboxProvisioningAttempts
+              : budgets.transientModelAttempts;
+      const attemptNumber = history.filter((item) => item.kind === input.kind && item.allowed).length;
+      return {
+        allowed: prior.allowed,
+        reasonCode: prior.reasonCode,
+        attemptNumber: Math.max(1, attemptNumber),
+        remainingKindAttempts: Math.max(0, kindBudget - attemptNumber),
+        policyVersion: prior.policyVersion as "retry-policy-v2",
+      };
+    }
     const decision = evaluateRetry(input, history, budgets);
     this.ledger.recordRetry({
       id: this.idFactory(),
@@ -669,7 +843,7 @@ export class EngineerSupervisor {
     if (!context || context.manifest.manifestHash !== proposal.contextManifestHash) {
       throw new ManifestIntegrityError("plan proposal is not bound to the latest persisted context manifest");
     }
-    return this.ledger.recordPlanProposal(proposal);
+    return this.ledger.recordPlanProposal(proposal, run.stateVersion);
   }
 
   latestPlanProposal(runId: string): PlanProposal | null {
@@ -687,7 +861,7 @@ export class EngineerSupervisor {
         parsed.manifest.requestHash !== sha256(run.requestOriginal)) {
       throw new ManifestIntegrityError("context snapshot does not match the run repository, exact base, and request");
     }
-    return this.ledger.recordContextSnapshot(parsed);
+    return this.ledger.recordContextSnapshot(parsed, run.stateVersion);
   }
 
   latestContextSnapshot(runId: string): StoredContextSnapshot | null {
@@ -712,6 +886,371 @@ export class EngineerSupervisor {
 
   exportRunRecordPage(runId: string, table: RunExportTable, offset: number, limit = 500): Array<Record<string, unknown>> {
     return this.ledger.exportRunRecordPage(runId, table, offset, limit);
+  }
+
+  configureCheckpointAttestor(attestor:CheckpointAttestor):void{this.checkpointAttestor=attestor;}
+  private advisoryAttestor():CheckpointAttestor{if(!this.checkpointAttestor)throw new AdvisoryIntegrityError();return this.checkpointAttestor;}
+  listAdvisoryBacklogForOwner(ownerId:string,runId:string,options:{limit?:number;cursor?:string;status?:"OPEN"|"DEFERRED"|"DISMISSED";actionability?:"ACTIONABLE"|"AUDIT_ONLY"}={}):Promise<AdvisoryBacklogPage>{return this.ledger.listAdvisoryBacklogForOwner(ownerId,runId,options,this.advisoryAttestor());}
+  deferAdvisoryForOwner(ownerId:string,runId:string,advisoryId:string,command:AdvisoryOwnerCommand){return this.ledger.applyAdvisoryOwnerAction(ownerId,runId,advisoryId,"DEFER",command,this.advisoryAttestor());}
+  dismissAdvisoryForOwner(ownerId:string,runId:string,advisoryId:string,command:AdvisoryOwnerCommand){return this.ledger.applyAdvisoryOwnerAction(ownerId,runId,advisoryId,"DISMISS",command,this.advisoryAttestor());}
+  reopenAdvisoryForOwner(ownerId:string,runId:string,advisoryId:string,command:AdvisoryOwnerCommand){return this.ledger.applyAdvisoryOwnerAction(ownerId,runId,advisoryId,"REOPEN",command,this.advisoryAttestor());}
+  createHardeningQuoteForOwner(ownerId:string,input:HardeningQuoteRequest){return this.ledger.createHardeningQuoteForOwner(ownerId,input,this.advisoryAttestor());}
+  getHardeningQuoteForOwner(ownerId:string,runId:string,quoteId:string){return this.ledger.getHardeningQuoteForOwner(ownerId,runId,quoteId,this.advisoryAttestor());}
+  acceptHardeningConsentForOwner(ownerId:string,runId:string,input:HardeningConsentRequest){return this.ledger.acceptHardeningConsentForOwner(ownerId,runId,input,this.advisoryAttestor());}
+  createOptionalHardeningChildForOwner(ownerId:string,parentRunId:string,input:OptionalHardeningChildRequest){return this.ledger.createOptionalHardeningChildForOwner(ownerId,parentRunId,input,this.advisoryAttestor());}
+  listOptionalHardeningStartOperationsForOwner(ownerId:string){return this.ledger.listOptionalHardeningStartOperationsForOwner(ownerId);}
+  isOptionalHardeningChild(runId:string){return this.ledger.isOptionalHardeningChild(runId);}
+  getHardeningChildBudgetAuthority(childRunId:string){return this.ledger.getHardeningChildBudgetAuthority(childRunId);}
+  acquireHardeningExecutionFence(input:Parameters<EngineerLedger["acquireHardeningExecutionFence"]>[0]){
+    return this.ledger.acquireHardeningExecutionFence(input);
+  }
+  assertHardeningExecutionFence(input:Parameters<EngineerLedger["assertHardeningExecutionFence"]>[0]){
+    return this.ledger.assertHardeningExecutionFence(input);
+  }
+  renewHardeningExecutionFence(input:Parameters<EngineerLedger["renewHardeningExecutionFence"]>[0]){
+    return this.ledger.renewHardeningExecutionFence(input);
+  }
+  releaseHardeningExecutionFence(input:Parameters<EngineerLedger["releaseHardeningExecutionFence"]>[0]){
+    return this.ledger.releaseHardeningExecutionFence(input);
+  }
+  reserveHardeningPaidCall(input:Parameters<EngineerLedger["reserveHardeningPaidCall"]>[0]){
+    this.strictArtifactReader(input.childRunId);
+    return this.ledger.reserveHardeningPaidCall(input);
+  }
+  markHardeningPaidCallDispatching(input:Parameters<EngineerLedger["markHardeningPaidCallDispatching"]>[0]){
+    this.strictArtifactReader(input.childRunId);
+    return this.ledger.markHardeningPaidCallDispatching(input);
+  }
+  recordHardeningPaidCallResponse(input:Parameters<EngineerLedger["recordHardeningPaidCallResponse"]>[0]){
+    this.strictArtifactReader(input.childRunId);
+    return this.ledger.recordHardeningPaidCallResponse(input);
+  }
+  recoverHardeningPaidCall(input:Parameters<EngineerLedger["recoverHardeningPaidCall"]>[0]){
+    this.strictArtifactReader(input.childRunId);
+    return this.ledger.recoverHardeningPaidCall(input);
+  }
+  hardeningPaidCallRecoveryReady(childRunId:string,nowMs:number){
+    return this.ledger.hardeningPaidCallRecoveryReady(childRunId,nowMs);
+  }
+  voidHardeningPaidCallUnsent(input:Parameters<EngineerLedger["voidHardeningPaidCallUnsent"]>[0]){
+    this.strictArtifactReader(input.childRunId);
+    return this.ledger.voidHardeningPaidCallUnsent(input);
+  }
+  listOpenHardeningPaidCallReservations(childRunId?:string){return this.ledger.listOpenHardeningPaidCallReservations(childRunId);}
+  listPendingHardeningPaidCallFinalizations(childRunId?:string){return this.ledger.listPendingHardeningPaidCallFinalizations(childRunId);}
+  hasOutstandingHardeningPaidCallRecoveryWork(childRunId:string){
+    return this.ledger.hasOutstandingHardeningPaidCallRecoveryWork(childRunId);
+  }
+  /**
+   * The only production consumer for paid-call finalization intents. Claim,
+   * exact successor proof, and APPLIED transition share one Engineer DB
+   * transaction, so corruption can never land between validation and apply.
+   */
+  consumeHardeningPaidCallFinalization(input:Parameters<EngineerLedger["claimHardeningPaidCallFinalization"]>[0]&{
+    expectedSuccessor:"SUCCESS"|"RECOVERY_TERMINAL";
+  }){
+    return this.ledger.atomic(()=>{
+      const claimed=this.ledger.claimHardeningPaidCallFinalization(input);
+      if(claimed.role!=="BUILDER"&&claimed.role!=="REVIEWER")
+        throw new InvalidTransitionError("hardening paid-call finalization role is invalid");
+      const exact=input.expectedSuccessor==="RECOVERY_TERMINAL"
+        ?this.ledger.hasExactHardeningRecoveryTerminalSuccessor({childRunId:claimed.childRunId,
+          reservationId:claimed.reservationId,agentExecutionId:claimed.agentExecutionId,role:claimed.role,
+          expectedRunState:claimed.expectedRunState,expectedStateVersion:claimed.expectedStateVersion},
+          this.strictArtifactReader(claimed.childRunId))
+        :claimed.role==="BUILDER"
+          ?this.ledger.hasExactHardeningBuilderSuccessor({childRunId:claimed.childRunId,
+            reservationId:claimed.reservationId,agentExecutionId:claimed.agentExecutionId,
+            expectedRunState:claimed.expectedRunState,expectedStateVersion:claimed.expectedStateVersion},
+            this.strictArtifactReader(claimed.childRunId))
+          :this.ledger.hasExactHardeningReviewerSuccessor({childRunId:claimed.childRunId,
+            reservationId:claimed.reservationId,agentExecutionId:claimed.agentExecutionId},
+            this.strictArtifactReader(claimed.childRunId));
+      if(!exact)throw new InvalidTransitionError("hardening paid-call finalization lacks its exact deterministic successor");
+      return this.ledger.applyHardeningPaidCallFinalization(input);
+    });
+  }
+  recoverHardeningPaidCallLifecycle(input:{childRunId:string;ownerId:string;rawToken:string;nowMs:number;
+    /** Capability for an ACTIVE lease on the exact run resource. */
+    recoveryWorkerLease:RecoveryWorkerLeaseProof}):{
+      recoveredReservations:number;appliedFinalizations:number;terminalizedPreReservationAgent:boolean;
+    }{
+    const authority=this.recoveryWorkerLeaseAuthority;
+    if(!authority)throw new InvalidTransitionError("hardening recovery worker-lease authority is not configured");
+    try{return authority.withActiveLease(input.recoveryWorkerLease,(activeRecoveryLease)=>{
+      // The authority holds worker-leases.db BEGIN IMMEDIATE for this entire
+      // synchronous callback. Global lock order is worker DB -> Engineer DB;
+      // this callback must never re-enter the WorkerLeaseManager.
+      const lease=activeRecoveryLease;
+      if(lease.status!=="ACTIVE"||lease.resourceKey!==`run:${input.childRunId}`||lease.ownerId!==input.ownerId||
+          lease.leaseId!==input.recoveryWorkerLease.leaseId||lease.fencingToken!==input.recoveryWorkerLease.fencingToken){
+        throw new InvalidTransitionError("hardening recovery lease does not bind the exact run and owner");
+      }
+      return this.ledger.atomic(()=>{
+    if(!this.isOptionalHardeningChild(input.childRunId)){
+      return {recoveredReservations:0,appliedFinalizations:0,terminalizedPreReservationAgent:false};
+    }
+    // Recheck after the external run lease is held and inside the Engineer DB
+    // transaction. A gateway pre-gate can race with another recovery worker;
+    // zero-work runs must not advance the durable recovery fence.
+    if(!this.ledger.hasOutstandingHardeningPaidCallRecoveryWork(input.childRunId)){
+      return {recoveredReservations:0,appliedFinalizations:0,terminalizedPreReservationAgent:false};
+    }
+    const paidFenceGone=this.ledger.hardeningPaidCallRecoveryReady(input.childRunId,input.nowMs);
+    if(!paidFenceGone){
+      return {recoveredReservations:0,appliedFinalizations:0,terminalizedPreReservationAgent:false};
+    }
+    this.ledger.claimHardeningRecoveryWorkerFence({childRunId:input.childRunId,workerLeaseId:activeRecoveryLease.leaseId,
+      workerOwnerId:activeRecoveryLease.ownerId,workerFencingToken:activeRecoveryLease.fencingToken,
+      rawWorkerLeaseToken:input.recoveryWorkerLease.leaseToken,nowMs:input.nowMs});
+    const openAtStart=this.ledger.listOpenHardeningPaidCallReservations(input.childRunId);
+    const pendingAtStart=this.ledger.listPendingHardeningPaidCallFinalizations(input.childRunId);
+    const recoveryHead=this.getRun(input.childRunId);
+    const terminalStop:(null|{
+      budgetReason:"FAILED"|"CANCELLED"|"SECURITY_BLOCKED"|"ENVIRONMENT_BLOCKED";
+      advisoryReason:"FAILED"|"CANCELLED"|"BUDGET_EXHAUSTED"|"TIMED_OUT"|"SECURITY_BLOCKED"|"ENVIRONMENT_BLOCKED";
+    })=recoveryHead.state==="CANCELLED"||recoveryHead.state==="CANCELLATION_PENDING"
+      ?{budgetReason:"CANCELLED",advisoryReason:"CANCELLED"}
+      :recoveryHead.state==="TIMED_OUT"
+        ?{budgetReason:"FAILED",advisoryReason:"TIMED_OUT"}
+        :recoveryHead.state==="RETRY_BUDGET_EXHAUSTED"
+          ?{budgetReason:"FAILED",advisoryReason:"BUDGET_EXHAUSTED"}
+          :recoveryHead.state==="SECURITY_ESCALATION"
+            ?{budgetReason:"SECURITY_BLOCKED",advisoryReason:"SECURITY_BLOCKED"}
+            :recoveryHead.state==="BLOCKED_BY_ENVIRONMENT"||recoveryHead.state==="BLOCKED_BY_EXTERNAL_DEPENDENCY"
+              ?{budgetReason:"ENVIRONMENT_BLOCKED",advisoryReason:"ENVIRONMENT_BLOCKED"}
+              :recoveryHead.state==="FAILED"||recoveryHead.state==="REJECTED"||
+                  recoveryHead.state==="VERIFICATION_INCOMPLETE"||recoveryHead.state==="ROLLED_BACK"
+                ?{budgetReason:"FAILED",advisoryReason:"FAILED"}
+                :null;
+    let recoveredReservations=0,appliedFinalizations=0;
+    for(const open of openAtStart){
+      this.ledger.recoverHardeningPaidCall({childRunId:input.childRunId,reservationId:open.reservationId,
+        recoveryOwnerId:input.ownerId,recoveryIdempotencyKey:sha256({namespace:"engineer-hardening-paid-call-recovery-v1",
+          childRunId:input.childRunId,reservationId:open.reservationId,ownerId:input.ownerId}),rawRecoveryToken:input.rawToken,nowMs:input.nowMs});
+      recoveredReservations+=1;
+    }
+    for(const pending of this.ledger.listPendingHardeningPaidCallFinalizations(input.childRunId)){
+      const idempotencyKey=sha256({namespace:"engineer-hardening-paid-call-finalization-consumer-v1",finalizationId:pending.id,ownerId:input.ownerId});
+      let run=this.getRun(input.childRunId);
+      const successorExists=pending.role==="BUILDER"
+        ?this.ledger.hasExactHardeningBuilderSuccessor({childRunId:input.childRunId,reservationId:pending.reservationId,
+          agentExecutionId:pending.agentExecutionId,expectedRunState:pending.expectedRunState,
+          expectedStateVersion:pending.expectedStateVersion},this.strictArtifactReader(input.childRunId))
+        :this.ledger.hasExactHardeningReviewerSuccessor({childRunId:input.childRunId,reservationId:pending.reservationId,
+          agentExecutionId:pending.agentExecutionId},this.strictArtifactReader(input.childRunId));
+      if(!successorExists){
+        const completedAt=new Date(input.nowMs).toISOString();
+        this.ledger.finalizeRunningAgentExecutions(input.childRunId,"FAILED",completedAt,"HARDENING_PAID_CALL_RECOVERY_TERMINAL");
+        run=this.getRun(input.childRunId);
+        // A paid response can be durable while a stale worker advances the run
+        // before crashing. Exact successor validation is the authority: if it
+        // fails, every still-active verification state must converge rather
+        // than being stranded merely because the original CAS version moved.
+        const cancellationIntent=run.state==="CANCELLED"||run.state==="CANCELLATION_PENDING";
+        if(!cancellationIntent&&canTransition(run.state,"FAILED")){
+          run=this.transition({runId:run.runId,expectedStateVersion:run.stateVersion,nextState:"FAILED",
+            reasonCode:"HARDENING_PAID_CALL_RECOVERY_TERMINAL",actorType:"SUPERVISOR",actorId:"hardening-paid-call-recovery",
+            evidenceIds:[pending.reconciliationId],manifestHash:run.manifestHash,
+            idempotencyKey:`hardening-paid-call-recovery:${pending.id}:${input.recoveryWorkerLease.fencingToken}`}).run;
+        }
+        const cancelled=cancellationIntent||run.state==="CANCELLED"||run.state==="CANCELLATION_PENDING";
+        const stop=terminalStop??(cancelled?{budgetReason:"CANCELLED" as const,advisoryReason:"CANCELLED" as const}:
+          {budgetReason:"FAILED" as const,advisoryReason:"FAILED" as const});
+        this.ledger.stopHardeningChildBudgetForRecovery(input.childRunId,stop.budgetReason,input.nowMs);
+        this.ledger.recordOptionalHardeningStopped(input.childRunId,stop.advisoryReason);
+      }
+      this.consumeHardeningPaidCallFinalization({finalizationId:pending.id,ownerId:input.ownerId,rawToken:input.rawToken,
+        idempotencyKey,nowMs:input.nowMs,expectedSuccessor:successorExists?"SUCCESS":"RECOVERY_TERMINAL"});
+      appliedFinalizations+=1;
+    }
+    // C0: a crash can happen after the paid agent is durable but before the
+    // first reservation exists. With the worker lease absent and no paid fence,
+    // that generation has no authority to continue. It must converge instead
+    // of being redispatched or left RUNNING forever.
+    const records=this.ledger.exportRunRecords(input.childRunId);
+    const reservations=records.hardening_child_model_reservations??[];
+    const preReservationRunning=(records.agent_executions??[]).filter((agent)=>agent.status==="RUNNING"&&
+      (agent.role==="BUILDER"||agent.role==="REVIEWER")&&!reservations.some((reservation)=>
+        reservation.agent_execution_id===agent.id));
+    let terminalizedPreReservationAgent=false;
+    if(preReservationRunning.length>0&&paidFenceGone&&pendingAtStart.length===0){
+      let run=this.getRun(input.childRunId);
+      this.ledger.finalizeRunningAgentExecutions(input.childRunId,"FAILED",new Date(input.nowMs).toISOString(),
+        "HARDENING_PRE_RESERVATION_AGENT_INTERRUPTED");
+      run=this.getRun(input.childRunId);
+      if((run.state==="IMPLEMENTING"||run.state==="REVIEWING")&&canTransition(run.state,"FAILED")){
+        run=this.transition({runId:run.runId,expectedStateVersion:run.stateVersion,nextState:"FAILED",
+          reasonCode:"HARDENING_PRE_RESERVATION_AGENT_INTERRUPTED",actorType:"SUPERVISOR",actorId:"hardening-paid-call-recovery",
+          evidenceIds:[],manifestHash:run.manifestHash,
+          idempotencyKey:`hardening-pre-reservation-recovery:${input.recoveryWorkerLease.fencingToken}:${run.stateVersion}`}).run;
+      }
+      const cancelled=run.state==="CANCELLED"||run.state==="CANCELLATION_PENDING";
+      const stop=terminalStop??(cancelled?{budgetReason:"CANCELLED" as const,advisoryReason:"CANCELLED" as const}:
+        {budgetReason:"FAILED" as const,advisoryReason:"FAILED" as const});
+      this.ledger.stopHardeningChildBudgetForRecovery(input.childRunId,stop.budgetReason,input.nowMs);
+      this.ledger.recordOptionalHardeningStopped(input.childRunId,stop.advisoryReason);
+      terminalizedPreReservationAgent=true;
+    }
+    // Reconcile every reserved/possibly-sent call before applying the workflow
+    // terminal intent. Accounting owns the first stop cause
+    // (MODEL_DISPATCH_NOT_STARTED / MODEL_USAGE_AMBIGUOUS); cancellation is a
+    // separate run/advisory outcome and must never overwrite that evidence.
+    if(terminalStop){
+      this.ledger.stopHardeningChildBudgetForRecovery(input.childRunId,terminalStop.budgetReason,input.nowMs);
+      this.ledger.recordOptionalHardeningStopped(input.childRunId,terminalStop.advisoryReason);
+    }
+    return {recoveredReservations,appliedFinalizations,terminalizedPreReservationAgent};
+    });
+    });}catch(error){
+      if(error instanceof StaleWorkerLeaseError){
+        throw new InvalidTransitionError("hardening recovery requires an active authenticated run lease");
+      }
+      throw error;
+    }
+  }
+  settleHardeningPaidCall(input:Parameters<EngineerLedger["settleHardeningPaidCall"]>[0]){
+    this.strictArtifactReader(input.childRunId);
+    return this.ledger.settleHardeningPaidCall(input);
+  }
+  claimOptionalHardeningStart(input:Parameters<EngineerLedger["claimOptionalHardeningStart"]>[0]){
+    return this.ledger.claimOptionalHardeningStart(input);
+  }
+  listExpiredOptionalHardeningStartClaimsForOwner(ownerId:string){
+    return this.ledger.listExpiredOptionalHardeningStartClaimsForOwner(ownerId);
+  }
+  listOptionalHardeningStartClaimsForRecovery(ownerId:string){return this.ledger.listOptionalHardeningStartClaimsForRecovery(ownerId);}
+  getFinalizedOptionalHardeningStartClaim(childRunId:string){return this.ledger.getFinalizedOptionalHardeningStartClaim(childRunId);}
+  hasExactHardeningBuilderSuccessor(input:Parameters<EngineerLedger["hasExactHardeningBuilderSuccessor"]>[0]){
+    return this.ledger.hasExactHardeningBuilderSuccessor(input,this.strictArtifactReader(input.childRunId));
+  }
+  hasExactHardeningReviewerSuccessor(input:Parameters<EngineerLedger["hasExactHardeningReviewerSuccessor"]>[0]){
+    return this.ledger.hasExactHardeningReviewerSuccessor(input,this.strictArtifactReader(input.childRunId));
+  }
+  finalizeOptionalHardeningStartClaim(input:Parameters<EngineerLedger["finalizeOptionalHardeningStartClaim"]>[0]){
+    return this.ledger.finalizeOptionalHardeningStartClaim(input);
+  }
+  recordOptionalHardeningStopped(runId:string,reason:"FAILED"|"CANCELLED"|"BUDGET_EXHAUSTED"|"TIMED_OUT"|"SECURITY_BLOCKED"|"ENVIRONMENT_BLOCKED"){
+    return this.ledger.recordOptionalHardeningStopped(runId,reason);
+  }
+  /**
+   * Provider-free, idempotent quarantine for a restart whose signed workspace
+   * or Reviewer footprint cannot be reconstructed exactly. The failure,
+   * budget/advisory stop, stable UI guidance, and terminal state are one
+   * Supervisor transaction.
+   */
+  quarantineOptionalHardeningRecovery(input:{runId:string;expectedStateVersion:number;
+    reasonCode:"HARDENING_WORKSPACE_RECOVERY_AUTHORITY_INVALID"|"HARDENING_REVIEWER_RECOVERY_AUTHORITY_INVALID"}){
+    if(!this.isOptionalHardeningChild(input.runId))throw new InvalidTransitionError("recovery quarantine requires an optional-hardening child");
+    const guidance=input.reasonCode==="HARDENING_REVIEWER_RECOVERY_AUTHORITY_INVALID"
+      ?"HARDENING_REVIEWER_RECOVERY_AUTHORITY_INVALID: Optional hardening stopped safely because its durable Reviewer footprint is partial, ambiguous, or does not match the classified result. Inspect retained evidence and start a new bounded hardening run if needed."
+      :"HARDENING_WORKSPACE_RECOVERY_AUTHORITY_INVALID: Optional hardening stopped safely because its signed workspace recovery authority is missing, ambiguous, or does not match retained bytes. Start a new bounded hardening run from the last verified parent candidate.";
+    const failureId=sha256({namespace:"engineer-optional-hardening-recovery-quarantine-v1",runId:input.runId,
+      reasonCode:input.reasonCode});
+    return this.ledger.atomic(()=>{
+      let current=this.getRun(input.runId);
+      const failure=FailureRecordSchema.parse({failureId,runId:input.runId,failureClass:"SECURITY_FAILURE",
+        reasonCode:input.reasonCode,fingerprint:sha256({runId:input.runId,manifestHash:current.manifestHash,
+          reasonCode:input.reasonCode}),evidenceIds:[],retryable:false,createdAt:this.timestamp()});
+      const existing=this.ledger.listFailures(input.runId).find((item)=>item.failureId===failureId);
+      if(existing&&canonicalJson({...existing,createdAt:failure.createdAt})!==canonicalJson(failure))
+        throw new IdempotencyConflictError(input.runId,failureId);
+      if(current.state==="FAILED"){
+        const latest=this.listEvents(input.runId).at(-1);
+        if(!existing||latest?.reasonCode!==input.reasonCode||this.ledger.getLastError(input.runId)!==guidance)
+          throw new IdempotencyConflictError(input.runId,`hardening-recovery-quarantine:${failureId}`);
+        return current;
+      }
+      if(current.stateVersion!==input.expectedStateVersion)
+        throw new StateVersionConflictError(input.runId,input.expectedStateVersion,current.stateVersion);
+      if(!canTransition(current.state,"FAILED"))throw new InvalidTransitionError(`cannot quarantine optional hardening from ${current.state}`);
+      if(!existing)this.ledger.recordFailure(failure);
+      const nowMs=Date.parse(failure.createdAt);
+      this.ledger.stopHardeningChildBudgetForRecovery(input.runId,"SECURITY_BLOCKED",nowMs);
+      this.ledger.recordOptionalHardeningStopped(input.runId,"SECURITY_BLOCKED");
+      this.ledger.setLastError(input.runId,guidance,failure.createdAt);
+      current=this.transition({runId:input.runId,expectedStateVersion:current.stateVersion,nextState:"FAILED",
+        reasonCode:input.reasonCode,actorType:"SUPERVISOR",actorId:"hardening-recovery-quarantine",evidenceIds:[],
+        manifestHash:current.manifestHash,idempotencyKey:`hardening-recovery-quarantine:${failureId}`}).run;
+      return current;
+    });
+  }
+  /**
+   * Fail-closed boundary for a child whose inherited required test is stably
+   * failing.  The failure, advisory stop markers, and frozen human-review
+   * state are one transaction: a crash cannot expose only part of the stop.
+   */
+  stopOptionalHardeningForStableRequiredTest(record: import("./control-contracts.js").FailureRecord) {
+    const parsed = FailureRecordSchema.parse(record);
+    this.getRun(parsed.runId);
+    if (!this.isOptionalHardeningChild(parsed.runId) || parsed.failureClass !== "TEST_FAILURE" ||
+        parsed.reasonCode !== "STABLE_REQUIRED_TEST_FAILED" || parsed.retryable) {
+      throw new InvalidTransitionError("stable required-test stop requires a non-retryable optional-hardening test failure");
+    }
+    return this.ledger.atomic(() => {
+      const existing = this.ledger.listFailures(parsed.runId).find((item) => item.failureId === parsed.failureId);
+      if (existing && canonicalJson(existing) !== canonicalJson(parsed)) {
+        throw new IdempotencyConflictError(parsed.runId, parsed.failureId);
+      }
+      if (!existing) this.ledger.recordFailure(parsed);
+      this.ledger.recordOptionalHardeningStopped(parsed.runId, "FAILED");
+      const current = this.getRun(parsed.runId);
+      if (current.state === "HUMAN_REVIEW_REQUIRED") {
+        const latest = this.listEvents(parsed.runId).at(-1);
+        if (latest?.reasonCode !== "HARDENING_STABLE_REQUIRED_TEST_FAILED" ||
+            canonicalJson(latest.evidenceIds) !== canonicalJson(parsed.evidenceIds)) {
+          throw new IdempotencyConflictError(parsed.runId, `hardening-stable-stop:${parsed.failureId}`);
+        }
+        return current;
+      }
+      return this.transition({
+        runId: parsed.runId,
+        expectedStateVersion: current.stateVersion,
+        nextState: "HUMAN_REVIEW_REQUIRED",
+        reasonCode: "HARDENING_STABLE_REQUIRED_TEST_FAILED",
+        evidenceIds: parsed.evidenceIds,
+        manifestHash: current.manifestHash,
+        idempotencyKey: `hardening-stable-stop:${parsed.failureId}`,
+      }).run;
+    });
+  }
+  prepareOptionalHardeningStartForOwner(ownerId:string,parentRunId:string,childRunId:string,input:import("./hardening-start-contracts.js").HardeningStartRequest){return this.ledger.prepareOptionalHardeningStartForOwner(ownerId,parentRunId,childRunId,input,this.advisoryAttestor());}
+  commitOptionalHardeningStartForOwner(ownerId:string,parentRunId:string,childRunId:string,input:import("./hardening-start-contracts.js").HardeningStartRequest,
+    operation:import("./hardening-start-contracts.js").HardeningStartOperation,signedSeed:import("./hardening-start-contracts.js").SignedHardeningSeedAttestation,
+    fence:import("./ledger.js").ActiveOptionalHardeningStartFence,durable:{sandbox:SandboxRecord;checkpoint:ArtifactRecord}){
+    return this.ledger.commitOptionalHardeningStartForOwner(ownerId,parentRunId,childRunId,input,operation,signedSeed,this.advisoryAttestor(),fence,
+      (committed)=>{this.finalizeOptionalHardeningStart(committed);this.recordSandboxWithCheckpoint(durable.sandbox,durable.checkpoint);return durable.sandbox.sandboxId;});}
+  previewOptionalHardeningStart(preparation:OptionalHardeningStartPreparation){
+    return buildOptionalHardeningManifest({authority:preparation.authority,lineage:preparation.lineage,parentManifest:preparation.parentManifest,child:preparation.child});
+  }
+  finalizeOptionalHardeningStart(preparation:OptionalHardeningStartPreparation){
+    const built=this.previewOptionalHardeningStart(preparation);
+    let run=this.getRun(preparation.operation.childRunId);
+    if(built.status==="ENVIRONMENT_BLOCKED"){
+      if(run.state==="BLOCKED_BY_ENVIRONMENT")return {run,manifest:null,contextAuthority:built.contextAuthority,status:built.status};
+      if(run.state!=="REQUEST_RECEIVED"||run.stateVersion!==0)throw new InvalidTransitionError("hardening environment block requires pristine child authority");
+      run=this.transition({runId:run.runId,expectedStateVersion:run.stateVersion,nextState:"BLOCKED_BY_ENVIRONMENT",
+        reasonCode:built.reasonCode,manifestHash:null,idempotencyKey:`hardening-environment-blocked:${preparation.operation.operationId}`}).run;
+      return {run,manifest:null,contextAuthority:built.contextAuthority,status:built.status};
+    }
+    const advance=(from:RunState,to:RunState,reason:string)=>{if(run.state===from){const timestamp=this.timestamp();run=this.ledger.appendTransition({runId:run.runId,
+      expectedStateVersion:run.stateVersion,previousState:from,nextState:to,reasonCode:reason,actorType:"SUPERVISOR",actorId:"engineer-supervisor",
+      evidenceIds:[preparation.operation.operationId,preparation.signedSeed!.attestation.seedAttestationId],manifestHash:run.manifestHash,
+      idempotencyKey:`hardening-start:${preparation.operation.operationId}:${to}`,eventId:this.idFactory(),timestamp,terminalAt:null}).run;}};
+    advance("REQUEST_RECEIVED","REQUEST_NORMALIZED","HARDENING_REQUEST_NORMALIZED");advance("REQUEST_NORMALIZED","PLANNING","HARDENING_DETERMINISTIC_PLANNING");
+    advance("PLANNING","PLAN_READY","HARDENING_DETERMINISTIC_PLAN_READY");
+    if(run.state==="PLAN_READY")run=this.freezePlan({runId:run.runId,expectedStateVersion:run.stateVersion,manifest:TaskManifestContentSchema.parse((({manifestHash:_hash,...content})=>content)(built.manifest)),
+      actorId:"engineer-supervisor",idempotencyKey:`hardening-start:${preparation.operation.operationId}:PLAN_FROZEN`}).run;
+    // A start request is an idempotent authority operation, not a request to
+    // rewind execution.  Once the deterministic manifest is frozen, retries
+    // must return the durable child at whatever later state it has reached.
+    // The exact manifest binding prevents a changed request from borrowing
+    // that replay behavior.
+    const durableManifest=this.getManifest(run.runId);
+    if(!durableManifest||durableManifest.manifestHash!==built.manifest.manifestHash){
+      throw new InvalidTransitionError(`hardening start cannot resume from ${run.state}`);
+    }
+    return {run,manifest:built.manifest,contextAuthority:built.contextAuthority,status:built.status};
   }
 
   evidenceExportSummary(runId: string) {
@@ -770,8 +1309,20 @@ export class EngineerSupervisor {
     return this.ledger.latestRiskAssessment(runId);
   }
 
+  preflightDurableReviewerEvidence(input:Parameters<EngineerLedger["preflightDurableReviewerEvidence"]>[0]){
+    const strict=this.isOptionalHardeningChild(input.runId);
+    if(strict&&!this.artifactReadAuthority)throw new InvalidTransitionError(
+      "optional-hardening Reviewer evidence requires strict artifact-read authority");
+    return this.ledger.preflightDurableReviewerEvidence(input,strict
+      ?(artifact)=>this.artifactReadAuthority!.readVerifiedExact(artifact):undefined);
+  }
+
   recordSandbox(record: SandboxRecord): SandboxRecord {
     return this.ledger.recordSandbox(record);
+  }
+
+  recordSandboxWithCheckpoint(record:SandboxRecord,checkpoint:ArtifactRecord):SandboxRecord{
+    return this.ledger.atomic(()=>{const sandbox=this.ledger.recordSandbox(record);this.ledger.recordArtifact(checkpoint);return sandbox;});
   }
 
   markRunSandboxesDestroyed(runId: string, destroyedAt: string, reason: string): number {
@@ -786,8 +1337,325 @@ export class EngineerSupervisor {
     });
   }
 
+  /** Deterministic O/R writer; recovery worker wall time is never authority. */
+  transitionOptionalHardeningCheckpointMilestone(input:{kind:"OPENED"|"RESUMED";artifact:ArtifactRecord;
+    checkpoint:ReturnType<typeof OptionalHardeningIndependentCheckpointSchema.parse>;
+    workerLease:RecoveryWorkerLeaseProof}):LedgerTransitionResult{
+    return this.withRecoveryWorkerLease(input.artifact.runId,input.workerLease,()=>this.ledger.atomic(()=>{
+      const run=this.ledger.getRun(input.artifact.runId);
+      if(!this.artifactReadAuthority||!this.isOptionalHardeningChild(run.runId)||run.manifestHash!==input.checkpoint.manifestHash)
+        throw new InvalidTransitionError("optional-hardening checkpoint milestone authority changed");
+      const artifacts=this.ledger.listArtifacts(run.runId),exact=artifacts.filter((candidate)=>
+        candidate.type==="INDEPENDENT_VERIFICATION_CHECKPOINT");
+      if(exact.length!==1||canonicalJson(exact[0])!==canonicalJson(input.artifact)||!input.artifact.trusted||
+        input.artifact.producerType!=="SYSTEM"||input.artifact.producerId!=="engineer-verification")
+        throw new InvalidTransitionError("optional-hardening checkpoint milestone artifact is invalid");
+      let text:string,checkpoint;try{text=new TextDecoder("utf-8",{fatal:true}).decode(
+        this.artifactReadAuthority.readVerifiedExact(input.artifact));checkpoint=OptionalHardeningIndependentCheckpointSchema.parse(
+          JSON.parse(text));}catch{throw new InvalidTransitionError("optional-hardening checkpoint milestone bytes are invalid");}
+      if(text!==canonicalJson(checkpoint)||canonicalJson(checkpoint)!==canonicalJson(input.checkpoint))
+        throw new InvalidTransitionError("optional-hardening checkpoint milestone payload is invalid");
+      try{resolveHardeningArtifactAuthority({authority:checkpoint.verified.securityReportArtifact,artifacts,
+        readArtifact:(candidate)=>this.artifactReadAuthority!.readVerifiedExact(candidate)});}
+      catch{throw new InvalidTransitionError("optional-hardening checkpoint security report authority is invalid");}
+      let chain;try{chain=validateOptionalHardeningCheckpointChain({checkpoint,artifact:input.artifact,
+        events:this.ledger.listEvents(run.runId),manifestHash:checkpoint.manifestHash});}
+      catch{throw new InvalidTransitionError("optional-hardening checkpoint milestone chain is invalid");}
+      if(chain.completed||input.kind==="OPENED"&&(chain.opened||chain.resumed)||
+        input.kind==="RESUMED"&&(!chain.opened||chain.resumed))throw new InvalidTransitionError(
+          "optional-hardening checkpoint milestone is not the next exact step");
+      const times=hardeningReviewerIngressTimes({headTimestamp:chain.head.timestamp,
+        checkpointCreatedAt:input.artifact.createdAt,checkpointEvidence:checkpoint.verified.trustedEvidence}),
+        opened=input.kind==="OPENED",nextState=opened?"VERIFICATION_RECOVERY" as const:"SECURITY_REVIEW" as const,
+        reasonCode=opened?"PHASE3_PROCESS_INTERRUPTED":"INDEPENDENT_VERIFICATION_CHECKPOINT_RESUMED",
+        evidenceIds=[input.artifact.artifactId,input.artifact.sha256,checkpoint.checkpointHash],
+        idempotencyKey=hardeningCheckpointMilestoneKey({kind:input.kind,runId:run.runId,
+          artifactId:input.artifact.artifactId,artifactHash:input.artifact.sha256,checkpointHash:checkpoint.checkpointHash,
+          selectedEventId:checkpoint.selectedEventId,selectedEventSequence:checkpoint.selectedEventSequence,
+          selectedEventStateVersion:checkpoint.selectedEventStateVersion,selectedEventHash:checkpoint.selectedEventHash});
+      return this.transitionInternal(run,{runId:run.runId,expectedStateVersion:run.stateVersion,nextState,reasonCode,
+        evidenceIds,manifestHash:checkpoint.manifestHash,idempotencyKey},undefined,
+        opened?times.openedAt:times.resumedAt);
+    }));
+  }
+
+  /**
+   * Atomically publishes the complete deterministic optional-hardening
+   * Reviewer ingress bundle. None of FINAL_SCOPE, PRE_REVIEW, final risk,
+   * Reviewer authority, or C can become durable independently.
+   */
+  completeOptionalHardeningReviewInput(input:{artifact:ArtifactRecord;finalScopeArtifact:ArtifactRecord;
+    finalScope:FinalChangeScopeAttestation;preReviewArtifact:ArtifactRecord;preReview:TestIntegrityComparison;
+    riskAssessment:RiskAssessment;expectedStateVersion:number;
+    manifestHash:string;checkpointEvidenceIds:readonly [string,string,string];trustedEvidenceIds:readonly string[];
+    reviewerInputCreatedAt:string;idempotencyKey:string;workerLease:RecoveryWorkerLeaseProof;
+  }):{artifact:ArtifactRecord;transition:LedgerTransitionResult}{
+    return this.withRecoveryWorkerLease(input.artifact.runId,input.workerLease,()=>this.ledger.atomic(()=>{
+      const run=this.ledger.getRun(input.artifact.runId);
+      if(!this.artifactReadAuthority)throw new InvalidTransitionError(
+        "optional-hardening artifact read authority is unavailable");
+      if(!this.isOptionalHardeningChild(run.runId)||run.manifestHash!==input.manifestHash)
+        throw new InvalidTransitionError("optional-hardening Reviewer ingress authority changed");
+      const artifacts=this.ledger.listArtifacts(run.runId),checkpointArtifacts=artifacts.filter((candidate)=>
+        candidate.type==="INDEPENDENT_VERIFICATION_CHECKPOINT");
+      if(checkpointArtifacts.length!==1)throw new InvalidTransitionError(
+        "optional-hardening checkpoint authority is not unique");
+      const checkpointArtifact=checkpointArtifacts[0]!;
+      const decode=(artifact:ArtifactRecord,label:string):{text:string;value:unknown}=>{
+        let text:string;try{text=new TextDecoder("utf-8",{fatal:true}).decode(
+          this.artifactReadAuthority!.readVerifiedExact(artifact));}
+        catch{throw new InvalidTransitionError(`${label} is not exact UTF-8`);}
+        let value:unknown;try{value=JSON.parse(text);}catch{throw new InvalidTransitionError(`${label} is not JSON`);}
+        if(text!==canonicalJson(value))throw new InvalidTransitionError(`${label} is not canonical`);
+        return {text,value};
+      };
+      let checkpoint;try{const decoded=decode(checkpointArtifact,"optional-hardening checkpoint");
+        checkpoint=OptionalHardeningIndependentCheckpointSchema.parse(decoded.value);
+        if(decoded.text!==canonicalJson(checkpoint))throw new Error("schema normalization changed bytes");}
+      catch{throw new InvalidTransitionError("optional-hardening checkpoint payload is invalid");}
+      if(!checkpointArtifact.trusted||checkpointArtifact.producerType!=="SYSTEM"||
+        checkpointArtifact.producerId!=="engineer-verification"||checkpoint.runId!==run.runId||
+        checkpoint.manifestHash!==input.manifestHash)
+        throw new InvalidTransitionError("optional-hardening checkpoint artifact authority is invalid");
+      try{resolveHardeningArtifactAuthority({authority:checkpoint.verified.securityReportArtifact,artifacts,
+        readArtifact:(candidate)=>this.artifactReadAuthority!.readVerifiedExact(candidate)});}
+      catch{throw new InvalidTransitionError("optional-hardening checkpoint security report authority is invalid");}
+      let chain;try{chain=validateOptionalHardeningCheckpointChain({checkpoint,artifact:checkpointArtifact,
+        events:this.ledger.listEvents(run.runId),manifestHash:input.manifestHash});}
+      catch{throw new InvalidTransitionError("optional-hardening checkpoint chain is invalid");}
+      const times=hardeningReviewerIngressTimes({headTimestamp:chain.head.timestamp,
+        checkpointCreatedAt:checkpointArtifact.createdAt,checkpointEvidence:checkpoint.verified.trustedEvidence});
+      const diffArtifacts=artifacts.filter((candidate)=>candidate.artifactId===checkpoint.diffArtifactId&&
+        candidate.sha256===checkpoint.diffArtifactHash&&candidate.type==="FINAL_DIFF"&&candidate.trusted&&
+        candidate.producerType==="SYSTEM"&&candidate.producerId==="engineer-verification");
+      if(diffArtifacts.length!==1)throw new InvalidTransitionError("optional-hardening final diff authority is invalid");
+      let diff:string;try{diff=new TextDecoder("utf-8",{fatal:true}).decode(
+        this.artifactReadAuthority.readVerifiedExact(diffArtifacts[0]!));}
+      catch{throw new InvalidTransitionError("optional-hardening final diff bytes are invalid");}
+      if(sha256(diff)!==checkpoint.diffHash)throw new InvalidTransitionError(
+        "optional-hardening final diff hash is invalid");
+      const manifest=this.ledger.getManifest(run.runId);
+      if(!manifest||manifest.manifestHash!==input.manifestHash)
+        throw new InvalidTransitionError("optional-hardening manifest authority is invalid");
+      const expectedScope=buildFinalChangeScopeAttestation({manifest,diff,resultCommitSha:checkpoint.resultCommitSha,
+        credentialedGitOperationCount:this.ledger.listGitOperations(run.runId).length}),scopePayloadHash=sha256(expectedScope),
+        expectedScopeId=hardeningFinalScopeArtifactId({runId:run.runId,checkpointHash:checkpoint.checkpointHash,
+          scopePayloadHash});
+      let scopePayload;try{const decoded=decode(input.finalScopeArtifact,"optional-hardening final scope");
+        scopePayload=FinalChangeScopeAttestationSchema.parse(decoded.value);
+        if(decoded.text!==canonicalJson(scopePayload))throw new Error("schema normalization changed bytes");}
+      catch{throw new InvalidTransitionError("optional-hardening final scope payload is invalid");}
+      if(canonicalJson(scopePayload)!==canonicalJson(input.finalScope)||canonicalJson(scopePayload)!==canonicalJson(expectedScope)||
+        input.finalScopeArtifact.artifactId!==expectedScopeId||input.finalScopeArtifact.runId!==run.runId||
+        input.finalScopeArtifact.type!=="FINAL_CHANGE_SCOPE_ATTESTATION"||!input.finalScopeArtifact.trusted||
+        input.finalScopeArtifact.producerType!=="SYSTEM"||input.finalScopeArtifact.producerId!=="final-change-scope-policy"||
+        input.finalScopeArtifact.createdAt!==times.scopeAt)
+        throw new InvalidTransitionError("optional-hardening final scope authority is invalid");
+      let comparison;try{const decoded=decode(input.preReviewArtifact,"optional-hardening PRE_REVIEW");
+        comparison=TestIntegrityComparisonSchema.parse(decoded.value);
+        if(decoded.text!==canonicalJson(comparison))throw new Error("schema normalization changed bytes");}
+      catch{throw new InvalidTransitionError("optional-hardening PRE_REVIEW payload is invalid");}
+      const baselines=artifacts.filter((candidate)=>candidate.type==="TEST_BASELINE_MANIFEST"&&candidate.trusted&&
+        candidate.producerType==="SYSTEM"&&candidate.producerId==="engineer-supervisor-test-integrity");
+      if(baselines.length!==1)throw new InvalidTransitionError("optional-hardening test baseline authority is not unique");
+      let baseline;try{const decoded=decode(baselines[0]!,"optional-hardening test baseline");
+        baseline=TestBaselineManifestSchema.parse(decoded.value);
+        if(decoded.text!==canonicalJson(baseline))throw new Error("schema normalization changed bytes");}
+      catch{throw new InvalidTransitionError("optional-hardening test baseline payload is invalid");}
+      const expectedPreReviewId=hardeningPreReviewArtifactId({runId:run.runId,checkpointHash:checkpoint.checkpointHash,
+        baselineHash:baseline.baselineHash,comparisonHash:comparison.comparisonHash});
+      if(canonicalJson(comparison)!==canonicalJson(input.preReview)||comparison.runId!==run.runId||
+        comparison.baselineHash!==baseline.baselineHash||comparison.stage!=="PRE_REVIEW"||!comparison.passed||
+        comparison.comparedAt!==times.preReviewAt||input.preReviewArtifact.artifactId!==expectedPreReviewId||
+        input.preReviewArtifact.runId!==run.runId||input.preReviewArtifact.type!=="TEST_INTEGRITY_COMPARISON"||
+        !input.preReviewArtifact.trusted||input.preReviewArtifact.producerType!=="SYSTEM"||
+        input.preReviewArtifact.producerId!=="engineer-supervisor-test-integrity"||
+        input.preReviewArtifact.createdAt!==times.preReviewAt)
+        throw new InvalidTransitionError("optional-hardening PRE_REVIEW authority is invalid");
+      const derivedRiskFeatures=derivePostVerificationRiskFeatures({diff,
+        requiredChecksPassed:checkpoint.verified.executions.every((execution)=>execution.status==="PASSED"),
+        retryCount:this.ledger.retryAttemptCount(run.runId),unresolvedWarnings:0,
+        securityFindings:checkpoint.verified.securityFindings}),decision=assessRisk(derivedRiskFeatures,{autoApproveLowRisk:true}),
+        riskId=hardeningFinalRiskAssessmentId({runId:run.runId,checkpointHash:checkpoint.checkpointHash,
+          featuresHash:sha256(decision.features),ruleVersion:decision.ruleVersion}),expectedRisk=this.riskAssessmentFromDecision(
+          run,decision,riskId,times.riskAt);
+      if(canonicalJson(expectedRisk)!==canonicalJson(input.riskAssessment))
+        throw new InvalidTransitionError("optional-hardening final risk authority is invalid");
+      let authority;try{const decoded=decode(input.artifact,"optional-hardening review input");
+        authority=OptionalHardeningReviewInputAuthoritySchema.parse(decoded.value);
+        if(decoded.text!==canonicalJson(authority))throw new Error("schema normalization changed bytes");}
+      catch{throw new InvalidTransitionError("optional-hardening review input payload is invalid");}
+      const scopeEvidence=TrustedEvidenceSchema.parse({evidenceId:input.finalScopeArtifact.artifactId,runId:run.runId,
+        eventType:"FINAL_CHANGE_SCOPE_ATTESTATION",producerType:"SYSTEM",producerId:"final-change-scope-policy",
+        sha256:input.finalScopeArtifact.sha256,payload:scopePayload,createdAt:input.finalScopeArtifact.createdAt}),
+        integrityEvidence=TrustedEvidenceSchema.parse({evidenceId:input.preReviewArtifact.artifactId,runId:run.runId,
+          eventType:"TEST_INTEGRITY_ATTESTATION",producerType:"SYSTEM",
+          producerId:"engineer-supervisor-test-integrity",sha256:input.preReviewArtifact.sha256,payload:comparison,
+          createdAt:input.preReviewArtifact.createdAt}),trustedEvidence=[...checkpoint.verified.trustedEvidence,
+          scopeEvidence,integrityEvidence].sort((left,right)=>compareCodeUnits(left.evidenceId,right.evidenceId)),
+        reviewAttempt=this.ledger.nextReviewerAttempt(run.runId),reviewSessionId=sha256({
+          namespace:"engineer-hardening-review-session-v1",runId:run.runId,checkpointHash:checkpoint.checkpointHash,
+          attempt:reviewAttempt}),reviewerContent={reviewSessionId,runId:run.runId,reviewAttempt,manifest,
+          manifestHash:manifest.manifestHash,finalDiff:diff,diffHash:checkpoint.diffHash,trustedEvidence,
+          resultCommitSha:checkpoint.resultCommitSha,riskAssessment:expectedRisk,reviewPolicyVersion:REVIEWER_POLICY_VERSION,
+          createdAt:times.reviewerAt},expectedReviewer=ReviewerInputSchema.parse({...reviewerContent,
+            evidenceBundleHash:reviewerEvidenceBundleHash(reviewerContent)}),expectedAuthorityId=hardeningReviewAuthorityArtifactId({
+              runId:run.runId,checkpointHash:checkpoint.checkpointHash,authorityHash:authority.authorityHash});
+      if(canonicalJson(authority.reviewerInput)!==canonicalJson(expectedReviewer)||authority.runId!==run.runId||
+        authority.manifestHash!==manifest.manifestHash||authority.diffHash!==checkpoint.diffHash||
+        authority.resultCommitSha!==checkpoint.resultCommitSha||authority.checkpointArtifactId!==checkpointArtifact.artifactId||
+        authority.checkpointArtifactHash!==checkpointArtifact.sha256||authority.checkpointHash!==checkpoint.checkpointHash||
+        input.artifact.artifactId!==expectedAuthorityId||input.artifact.runId!==run.runId||
+        input.artifact.type!=="HARDENING_REVIEW_INPUT_AUTHORITY"||!input.artifact.trusted||
+        input.artifact.producerType!=="SYSTEM"||input.artifact.producerId!=="engineer-verification"||
+        input.artifact.createdAt!==times.reviewerAt)
+        throw new InvalidTransitionError("optional-hardening review input binding is invalid");
+      const authorityArtifacts=[...artifacts];
+      for(const pending of [input.finalScopeArtifact,input.preReviewArtifact]){
+        const existing=authorityArtifacts.find((candidate)=>candidate.artifactId===pending.artifactId);
+        if(existing&&canonicalJson(existing)!==canonicalJson(pending))throw new InvalidTransitionError(
+          "optional-hardening pending evidence identity conflicts");
+        if(!existing)authorityArtifacts.push(pending);
+      }
+      let resolvedEvidenceAuthority;try{resolvedEvidenceAuthority=resolveHardeningReviewerEvidenceAuthority({
+        reviewerInput:expectedReviewer,artifacts:authorityArtifacts,runRecords:this.ledger.exportRunRecords(run.runId),
+        readArtifact:(candidate)=>this.artifactReadAuthority!.readVerifiedExact(candidate)});}
+      catch{throw new InvalidTransitionError("optional-hardening Reviewer evidence authority is invalid");}
+      if(canonicalJson(resolvedEvidenceAuthority)!==canonicalJson(authority.evidenceAuthority)||
+        sha256(resolvedEvidenceAuthority)!==authority.evidenceAuthorityHash)
+        throw new InvalidTransitionError("optional-hardening Reviewer evidence authority changed");
+      const pendingSemanticRows=buildHardeningPendingSemanticRows({runId:run.runId,
+        checkpointHash:checkpoint.checkpointHash,preReviewArtifact:input.preReviewArtifact,preReview:comparison,
+        riskAssessment:expectedRisk});
+      let resolvedSemanticAuthority;try{resolvedSemanticAuthority=resolveHardeningReviewerSemanticAuthority({
+        reviewerInput:expectedReviewer,artifacts:authorityArtifacts,runRecords:this.ledger.exportRunRecords(run.runId),
+        pendingRows:pendingSemanticRows,readArtifact:(candidate)=>this.artifactReadAuthority!.readVerifiedExact(candidate)});}
+      catch{throw new InvalidTransitionError("optional-hardening Reviewer semantic authority is invalid");}
+      if(canonicalJson(resolvedSemanticAuthority)!==canonicalJson(authority.semanticAuthority))
+        throw new InvalidTransitionError("optional-hardening Reviewer semantic authority changed");
+      const derivedCheckpointEvidence=[checkpointArtifact.artifactId,checkpointArtifact.sha256,
+        checkpoint.checkpointHash] as const,derivedTrustedIds=trustedEvidence.map((item)=>item.evidenceId).sort(),
+        derivedKey=hardeningCheckpointMilestoneKey({kind:"COMPLETED",runId:run.runId,
+          artifactId:checkpointArtifact.artifactId,artifactHash:checkpointArtifact.sha256,
+          checkpointHash:checkpoint.checkpointHash,selectedEventId:checkpoint.selectedEventId,
+          selectedEventSequence:checkpoint.selectedEventSequence,
+          selectedEventStateVersion:checkpoint.selectedEventStateVersion,selectedEventHash:checkpoint.selectedEventHash});
+      if(canonicalJson(input.checkpointEvidenceIds)!==canonicalJson(derivedCheckpointEvidence)||
+        canonicalJson([...new Set(input.trustedEvidenceIds)].sort())!==canonicalJson(derivedTrustedIds)||
+        input.reviewerInputCreatedAt!==times.reviewerAt||input.idempotencyKey!==derivedKey)
+        throw new InvalidTransitionError("optional-hardening completion caller projection is invalid");
+      const existingAuthority=artifacts.filter((candidate)=>candidate.type==="HARDENING_REVIEW_INPUT_AUTHORITY"),
+        existingScopes=artifacts.filter((candidate)=>candidate.type==="FINAL_CHANGE_SCOPE_ATTESTATION"),
+        existingPreReviews=artifacts.filter((candidate)=>{
+          if(candidate.type!=="TEST_INTEGRITY_COMPARISON")return false;
+          try{return TestIntegrityComparisonSchema.parse(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(
+            this.artifactReadAuthority!.readVerifiedExact(candidate)))).stage==="PRE_REVIEW";}catch{return false;}
+        }),records=this.ledger.exportRunRecords(run.runId),riskRows=(records.risk_assessments??[]).filter((row)=>
+          String(row.id)===riskId||Date.parse(String(row.assessed_at))>=Date.parse(times.riskAt));
+      const evidenceIds=hardeningReviewCompletionEvidence({checkpointEvidenceIds:derivedCheckpointEvidence,
+        authorityArtifactId:input.artifact.artifactId,authorityArtifactHash:input.artifact.sha256,
+        trustedEvidenceIds:derivedTrustedIds});
+      if(chain.completed){
+        if(existingAuthority.length!==1||existingScopes.length!==1||existingPreReviews.length!==1||riskRows.length!==1||
+          canonicalJson(existingAuthority[0])!==canonicalJson(input.artifact)||
+          canonicalJson(existingScopes[0])!==canonicalJson(input.finalScopeArtifact)||
+          canonicalJson(existingPreReviews[0])!==canonicalJson(input.preReviewArtifact)||
+          canonicalJson(this.ledger.latestRiskAssessment(run.runId))!==canonicalJson(expectedRisk))
+          throw new InvalidTransitionError("optional-hardening Reviewer ingress replay is incomplete or conflicting");
+        try{this.preflightDurableReviewerEvidence(expectedReviewer);}catch{
+          throw new InvalidTransitionError("optional-hardening Reviewer ingress replay semantics are invalid");}
+        const replay=this.ledger.replayTransition({runId:run.runId,idempotencyKey:derivedKey,nextState:"REVIEWING",
+          reasonCode:"INDEPENDENT_VERIFICATION_COMPLETE",actorType:"SUPERVISOR",actorId:"engineer-supervisor",
+          evidenceIds,manifestHash:manifest.manifestHash});
+        if(!replay||replay.event.timestamp!==times.completionAt)
+          throw new InvalidTransitionError("optional-hardening Reviewer ingress replay event is invalid");
+        return {artifact:existingAuthority[0]!,transition:replay};
+      }
+      if(run.state!=="SECURITY_REVIEW"||run.stateVersion!==input.expectedStateVersion||existingAuthority.length||
+        existingScopes.length||existingPreReviews.length||riskRows.length)
+        throw new InvalidTransitionError("optional-hardening Reviewer ingress is partial or changed");
+      const scope=this.ledger.recordArtifact(input.finalScopeArtifact);
+      if(canonicalJson(scope)!==canonicalJson(input.finalScopeArtifact))throw new InvalidTransitionError(
+        "optional-hardening final scope identity changed");
+      this.afterHardeningIngressStepForTest?.("FINAL_SCOPE");
+      const preReview=this.ledger.recordArtifact(input.preReviewArtifact);
+      if(canonicalJson(preReview)!==canonicalJson(input.preReviewArtifact))throw new InvalidTransitionError(
+        "optional-hardening PRE_REVIEW identity changed");
+      this.afterHardeningIngressStepForTest?.("PRE_REVIEW");
+      this.ledger.recordTestIntegrityAttestation(preReview.artifactId,comparison,hardeningPreReviewAuditId({
+        runId:run.runId,checkpointHash:checkpoint.checkpointHash,comparisonHash:comparison.comparisonHash}),
+        this.strictArtifactReader(run.runId));
+      this.afterHardeningIngressStepForTest?.("INTEGRITY_AUDIT");
+      this.ledger.recordRisk(expectedRisk,run.stateVersion,hardeningFinalRiskAuditId({runId:run.runId,
+        checkpointHash:checkpoint.checkpointHash,assessmentId:expectedRisk.assessmentId}));
+      this.afterHardeningIngressStepForTest?.("FINAL_RISK");
+      try{this.preflightDurableReviewerEvidence(expectedReviewer);}catch{
+        throw new InvalidTransitionError("optional-hardening Reviewer evidence semantics are invalid");}
+      this.afterHardeningIngressStepForTest?.("SEMANTIC_PREFLIGHT");
+      const artifact=this.ledger.recordArtifact(input.artifact);
+      if(canonicalJson(artifact)!==canonicalJson(input.artifact))throw new InvalidTransitionError(
+        "optional-hardening review input identity changed");
+      this.afterHardeningIngressStepForTest?.("REVIEW_AUTHORITY");
+      const transition=this.transitionInternal(run,{runId:run.runId,expectedStateVersion:run.stateVersion,
+        nextState:"REVIEWING",reasonCode:"INDEPENDENT_VERIFICATION_COMPLETE",evidenceIds,
+        manifestHash:manifest.manifestHash,idempotencyKey:derivedKey},undefined,times.completionAt);
+      this.afterHardeningIngressStepForTest?.("COMPLETION");
+      this.assertRuntimeBudget(run.runId);
+      return {artifact,transition};
+    }));
+  }
+
+  /** Atomically elects the one durable cancellation request and its artifact. */
+  requestRunCancellation(input:{runId:string;actorId:string;artifact:ArtifactRecord}):{
+    run:EngineerRun;applied:boolean;
+  }{
+    return this.ledger.atomic(()=>{
+      const run=this.ledger.getRun(input.runId);
+      if(run.userId!==input.actorId)throw new InvalidTransitionError("cancellation actor does not own this run");
+      if(run.state==="CANCELLED"||run.state==="CANCELLATION_PENDING")return {run,applied:false};
+      if(run.terminalAt)throw new InvalidTransitionError(`terminal run ${run.state} cannot be cancelled`);
+      if(!isCancellationAllowed(run.state))throw new InvalidTransitionError(
+        `cancellation is fenced while publication state is ${run.state}; remote cleanup is not safely available`,
+      );
+      if(input.artifact.runId!==run.runId||input.artifact.type!=="CANCELLATION_REQUEST"||
+          input.artifact.producerType!=="SYSTEM"||input.artifact.producerId!=="engineer-supervisor"||!input.artifact.trusted)
+        throw new InvalidTransitionError("cancellation request artifact authority is invalid");
+      const artifact=this.ledger.recordArtifact(input.artifact);
+      const transitioned=this.transition({runId:run.runId,expectedStateVersion:run.stateVersion,
+        nextState:"CANCELLATION_PENDING",reasonCode:"USER_CANCELLATION_REQUESTED",actorType:"HUMAN",
+        actorId:input.actorId,evidenceIds:[artifact.artifactId],manifestHash:run.manifestHash,
+        idempotencyKey:`control:cancel:${run.stateVersion}`}).run;
+      return {run:transitioned,applied:true};
+    });
+  }
+
+  /** Final cancellation CAS; caller must hold the separate durable run lease. */
+  finalizeRunCancellation(input:{runId:string;outcome:"CANCELLED"|"FAILED";
+    expectedLastError:string|null;lastError:string|null}):EngineerRun{
+    return this.ledger.atomic(()=>{
+      const run=this.ledger.getRun(input.runId);
+      if(run.state===input.outcome)return run;
+      if(run.state!=="CANCELLATION_PENDING")
+        throw new InvalidTransitionError(`cancellation finalization requires CANCELLATION_PENDING, received ${run.state}`);
+      if(this.ledger.getLastError(run.runId)!==input.expectedLastError)
+        throw new InvalidTransitionError("cancellation finalization last-error authority changed");
+      const transitioned=this.transition({runId:run.runId,expectedStateVersion:run.stateVersion,nextState:input.outcome,
+        reasonCode:input.outcome==="CANCELLED"?"RUN_CLEANUP_COMPLETE":"CANCELLATION_CLEANUP_FAILED",
+        actorType:"SUPERVISOR",actorId:"engineer-supervisor",evidenceIds:[],manifestHash:run.manifestHash,
+        idempotencyKey:`control:${input.outcome.toLowerCase()}:${run.stateVersion}`}).run;
+      this.ledger.setLastError(run.runId,input.lastError,this.timestamp());
+      return this.ledger.getRun(transitioned.runId);
+    });
+  }
+
   listArtifacts(runId: string): ArtifactRecord[] {
     return this.ledger.listArtifacts(runId);
+  }
+
+  recordTestIntegrityAttestation(artifactId: string, comparison: unknown): void {
+    const parsed=TestIntegrityComparisonSchema.parse(comparison);
+    this.ledger.atomic(() => this.ledger.recordTestIntegrityAttestation(artifactId,parsed,undefined,
+      this.strictArtifactReader(parsed.runId)));
   }
 
   recordCommandExecution(record: CommandExecutionRecord): CommandExecutionRecord {
@@ -814,6 +1682,18 @@ export class EngineerSupervisor {
       this.ledger.recordAgentExecution(record);
       if (record.status === "RUNNING") this.assertRuntimeBudget(record.runId);
     });
+  }
+
+  builderRepairExecutions(runId: string, inputHash: string): AgentExecutionRecord[] {
+    return this.ledger.builderRepairExecutions(runId, inputHash);
+  }
+
+  claimBuilderDispatch(
+    record: AgentExecutionRecord,
+    worker: { ownerId: string; fencingToken: number } | null = null,
+  ): { won: boolean; claim: BuilderDispatchClaim; execution: AgentExecutionRecord } {
+    this.assertRuntimeBudget(record.runId);
+    return this.ledger.claimBuilderDispatch(record, worker);
   }
 
   finalizeRunningAgentExecutions(
@@ -940,6 +1820,7 @@ export class EngineerSupervisor {
   topUpBudget(input: { runId: string; expectedRevision: number; topUp: BudgetTopUp; actorId: string; idempotencyKey: string }): EngineerBudgetSnapshot {
     const run = this.getRun(input.runId);
     if (run.userId !== input.actorId) throw new InvalidTransitionError("budget actor does not own this run");
+    if (this.isOptionalHardeningChild(input.runId)) throw new HardeningBudgetExtensionRequiresNewRunError();
     return this.ledger.topUpBudget({ ...input, topUp: BudgetTopUpSchema.parse(input.topUp), createdAt: this.timestamp() });
   }
 
@@ -947,6 +1828,7 @@ export class EngineerSupervisor {
     const run = this.getRun(input.runId);
     const budget = this.getBudget(input.runId);
     if (run.userId !== input.actorId) throw new InvalidTransitionError("budget actor does not own this run");
+    if (this.isOptionalHardeningChild(input.runId)) throw new HardeningBudgetExtensionRequiresNewRunError();
     if (run.state !== "PAUSED_BUDGET" || budget.status !== "PAUSED" || !budget.resumeState) throw new InvalidTransitionError("run is not paused for budget");
     if (run.stateVersion !== input.expectedStateVersion) throw new StateVersionConflictError(run.runId, input.expectedStateVersion, run.stateVersion);
     if (budget.revision !== input.expectedBudgetRevision) throw new StateVersionConflictError(run.runId, input.expectedBudgetRevision, budget.revision);
@@ -974,47 +1856,61 @@ export class EngineerSupervisor {
     return this.ledger.recordSecurityFinding(record);
   }
 
-  recordReviewerSession(record: ReviewerSessionRecord, findings: ReviewFindingRecord[]): ReviewerSessionRecord {
-    const run = this.ledger.getRun(record.runId);
-    if (run.state !== "REVIEWING") {
-      throw new InvalidTransitionError(`review sessions cannot be recorded while run is ${run.state}`);
-    }
-    if (!record.isolationVerified || record.modelTier !== "GPT-5.6_SOL") {
-      throw new InvalidTransitionError("Reviewer session must be fresh, isolated, and routed to SOL");
-    }
-    return this.ledger.recordReviewerSession(record, findings);
-  }
-
-  reviewerPersistenceRecoveryCandidate(runId: string): ReviewerPersistenceRecoveryCandidate | null {
-    const run = this.ledger.getRun(runId);
-    if (run.state !== "HUMAN_REVIEW_REQUIRED" ||
-        this.ledger.getLastError(runId) !== "UNIQUE constraint failed: review_findings.id") return null;
-    const sequence = this.ledger.latestEventSequence(runId);
-    const latest = sequence > 0 ? this.ledger.listEvents(runId, sequence - 1, 1)[0] : undefined;
-    if (latest?.previousState !== "REVIEWING" || latest.reasonCode !== "PHASE3_UNEXPECTED_FAILURE") return null;
-    return this.ledger.latestReviewerPersistenceRecoveryCandidate(runId);
-  }
-
-  recoverReviewerSession(
+  recordClassifiedReviewerSession(
     record: ReviewerSessionRecord,
     findings: ReviewFindingRecord[],
-    outputArtifactId: string,
-  ): ReviewerSessionRecord {
-    const candidate = this.reviewerPersistenceRecoveryCandidate(record.runId);
-    if (!candidate || candidate.outputArtifactId !== outputArtifactId ||
-        candidate.inputHash !== record.inputHash || candidate.modelTier !== record.modelTier ||
-        candidate.resolvedModel !== record.resolvedModel || candidate.cacheKey !== record.cacheKey ||
-        candidate.cacheHit !== record.cacheHit ||
-        candidate.startedAt !== record.startedAt || candidate.completedAt !== record.completedAt ||
-        record.attempt !== this.ledger.nextReviewerAttempt(record.runId) ||
-        record.decision !== "REQUEST_CHANGES" || !record.isolationVerified) {
-      throw new InvalidTransitionError("Reviewer persistence recovery evidence does not match the failed isolated review");
+    classification: ReviewClassificationBatch,
+    authority: ClassifiedReviewerAuthority,
+  ): ReviewClassificationBatch {
+    const run = this.ledger.getRun(record.runId);
+    if (!record.isolationVerified || record.modelTier !== "GPT-5.6_SOL") {
+      throw new InvalidTransitionError("Classified Reviewer session must be fresh, isolated, and routed to SOL");
     }
-    return this.ledger.recordReviewerSession(record, findings);
+    const readArtifact=this.strictArtifactReader(record.runId);
+    if (run.state !== "REVIEWING" && this.ledger.getReviewClassification(record.reviewerSessionId,readArtifact) === null) {
+      throw new InvalidTransitionError(`classified review sessions cannot be recorded while run is ${run.state}`);
+    }
+    return this.ledger.recordClassifiedReviewerSession(record, findings, classification, authority,readArtifact);
   }
 
-  recordedReviewerOutput(runId: string, outputArtifactId: string): RecordedReviewerOutput | null {
-    return this.ledger.recordedReviewerOutput(runId, outputArtifactId);
+  getReviewClassification(reviewerSessionId: string): ReviewClassificationBatch | null {
+    const runId=this.ledger.reviewClassificationRunId(reviewerSessionId);
+    if(!runId)return null;
+    return this.ledger.getReviewClassification(reviewerSessionId,this.strictArtifactReader(runId));
+  }
+
+  latestClassifiedReview(runId: string): ReturnType<EngineerLedger["latestClassifiedReview"]> {
+    return this.ledger.latestClassifiedReview(runId,this.strictArtifactReader(runId));
+  }
+
+  async promoteVerifiedCandidate(
+    input: PromoteVerifiedCandidateInput,
+    expectedStateVersion: number,
+  ): Promise<VerifiedCandidatePromotionResult> {
+    return this.ledger.promoteVerifiedCandidate(input, expectedStateVersion);
+  }
+
+  async promoteVerifiedHardeningCandidate(
+    input: PromoteVerifiedCandidateInput,
+    expectedStateVersion: number,
+  ): ReturnType<EngineerLedger["promoteVerifiedHardeningCandidate"]> {
+    return this.ledger.promoteVerifiedHardeningCandidate(input, expectedStateVersion,this.strictArtifactReader(input.runId));
+  }
+
+  async getVerifiedCandidateCheckpoint(
+    reference: { runId: string } | { checkpointId: string },
+    attestor: CheckpointAttestor,
+  ): ReturnType<EngineerLedger["getVerifiedCandidateCheckpoint"]> {
+    return this.ledger.getVerifiedCandidateCheckpoint(reference, attestor);
+  }
+
+  async getVerifiedHardeningCandidateCheckpoint(
+    reference: { runId: string } | { checkpointId: string },
+    attestor: CheckpointAttestor,
+  ): ReturnType<EngineerLedger["getVerifiedHardeningCandidateCheckpoint"]> {
+    const runId=this.ledger.verifiedHardeningCheckpointRunId(reference);
+    if(!runId)return null;
+    return this.ledger.getVerifiedHardeningCandidateCheckpoint(reference,attestor,this.strictArtifactReader(runId));
   }
 
   nextReviewerAttempt(runId: string): number {
@@ -1045,29 +1941,49 @@ export class EngineerSupervisor {
     return this.ledger.listSecurityFindings(runId);
   }
 
-  recordApprovalRequest(record: ApprovalRequestRecord): ApprovalRequestRecord {
-    const run = this.ledger.getRun(record.runId);
-    if (run.state !== "REVIEW_APPROVED") throw new InvalidTransitionError("approval may only be requested after review approval");
-    return this.ledger.recordApprovalRequest(record);
+  recordApprovalRequest(record: NewApprovalRequestRecord, attestor: CheckpointAttestor): Promise<NewApprovalRequestRecord>;
+  recordApprovalRequest(record: ApprovalRequestRecord): ApprovalRequestRecord;
+  recordApprovalRequest(
+    record: ApprovalRequestRecord,
+    attestor?: CheckpointAttestor,
+  ): Promise<NewApprovalRequestRecord> | ApprovalRequestRecord {
+    if (!attestor || !record.verifiedCheckpointId || !record.verifiedCheckpointHash) {
+      throw new Error("new approval request requires verified checkpoint authority and attestor");
+    }
+    return this.ledger.recordApprovalRequest(record as NewApprovalRequestRecord, attestor);
   }
 
   latestApprovalRequest(runId: string): ApprovalRequestRecord | null {
     return this.ledger.latestApprovalRequest(runId);
   }
 
-  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): ApprovalDecisionRecord {
-    return this.ledger.decideApproval(record, status);
+  listApprovalDecisions(approvalRequestId: string): ApprovalDecisionRecord[] {
+    return this.ledger.listApprovalDecisions(approvalRequestId);
   }
 
+  decideApproval(record: NewApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): NewApprovalDecisionRecord;
+  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): ApprovalDecisionRecord;
+  decideApproval(record: ApprovalDecisionRecord, status: ApprovalRequestRecord["status"]): ApprovalDecisionRecord {
+    if (!record.expectedVerifiedCheckpointId || !record.expectedVerifiedCheckpointHash) {
+      throw new Error("approval decisions require expected verified checkpoint authority");
+    }
+    return this.ledger.decideApproval(record as NewApprovalDecisionRecord, status, this.timestamp());
+  }
+
+  extendApproval(record: NewApprovalDecisionRecord, deadlineAt: string, reminders: string[]): ApprovalRequestRecord;
+  extendApproval(record: ApprovalDecisionRecord, deadlineAt: string, reminders: string[]): ApprovalRequestRecord;
   extendApproval(record: ApprovalDecisionRecord, deadlineAt: string, reminders: string[]): ApprovalRequestRecord {
-    return this.ledger.extendApproval(record, deadlineAt, reminders);
+    if (!record.expectedVerifiedCheckpointId || !record.expectedVerifiedCheckpointHash) {
+      throw new Error("approval extensions require expected verified checkpoint authority");
+    }
+    return this.ledger.extendApproval(record as NewApprovalDecisionRecord, deadlineAt, reminders, this.timestamp());
   }
 
   getPublicationEvidence(runId: string): PublicationEvidence {
     return this.ledger.getPublicationEvidence(runId);
   }
 
-  recordGitOperation(record: GitOperationRecord): GitOperationRecord {
+  recordGitOperation(record: NewGitOperationRecord): NewGitOperationRecord {
     return this.ledger.recordGitOperation(record);
   }
 
@@ -1086,6 +2002,12 @@ export class EngineerSupervisor {
   listFailures(runId: string): FailureRecord[] {
     return this.ledger.listFailures(runId);
   }
+  getExactHardeningDatabaseIntegrityFatal(runId:string){
+    return this.ledger.getExactHardeningDatabaseIntegrityFatal(runId);
+  }
+  recordOrReplayHardeningDatabaseIntegrityFatal(runId:string){
+    return this.ledger.recordOrReplayHardeningDatabaseIntegrityFatal(runId);
+  }
 
   getLastError(runId: string): string | null {
     return this.ledger.getLastError(runId);
@@ -1093,6 +2015,10 @@ export class EngineerSupervisor {
 
   setLastError(runId: string, message: string | null): void {
     this.ledger.setLastError(runId, message, this.timestamp());
+  }
+
+  clearLastErrorIfExact(runId:string,expected:string):boolean{
+    return this.ledger.clearLastErrorIfExact(runId,expected,this.timestamp());
   }
 
   close(): void {
@@ -1171,9 +2097,13 @@ export class EngineerSupervisor {
     run: EngineerRun,
     input: TransitionInput,
     normalizedRequest?: string,
+    timestampOverride?:string,
   ): LedgerTransitionResult {
     const actorType = input.actorType ?? "SUPERVISOR";
     const actorId = input.actorId ?? "engineer-supervisor";
+    if (input.nextState === "REVIEW_APPROVED") {
+      throw new InvalidTransitionError("REVIEW_APPROVED requires verified-candidate promotion");
+    }
     this.validateManifestBinding(run, input.manifestHash);
     const replay = this.ledger.replayTransition({
       runId: run.runId,
@@ -1222,7 +2152,7 @@ export class EngineerSupervisor {
     this.validateActor(input.nextState, actorType);
     this.validateManifestBinding(run, input.manifestHash);
     this.validateStateGuards(run, input, actorType);
-    const timestamp = this.timestamp();
+    const timestamp = timestampOverride??this.timestamp();
     return this.ledger.appendTransition({
       runId: run.runId,
       expectedStateVersion: input.expectedStateVersion,
@@ -1246,11 +2176,11 @@ export class EngineerSupervisor {
       throw new InvalidTransitionError(`${actorType} cannot directly mutate authoritative workflow state`);
     }
     if (actorType === "HUMAN" && ![
-      "REVIEW_APPROVED",
       "HUMAN_APPROVED",
       "FIX_REQUESTED",
       "REJECTED",
       "HUMAN_REVIEW_REQUIRED",
+      "VERIFICATION_RECOVERY",
       "CANCELLATION_PENDING",
     ].includes(nextState)) {
       throw new InvalidTransitionError(`human actor cannot directly promote state to ${nextState}`);
@@ -1282,12 +2212,11 @@ export class EngineerSupervisor {
     actorType: Exclude<ActorType, "AGENT" | "EXECUTOR">,
   ): void {
     const evidenceCount = input.evidenceIds?.length ?? 0;
-    if (input.nextState === "REVIEW_APPROVED") {
-      if (run.riskTier === "CRITICAL") {
-        throw new InvalidTransitionError("critical risk cannot be review-approved for publication");
+    if (run.state === "HUMAN_REVIEW_REQUIRED" && input.nextState === "VERIFICATION_RECOVERY") {
+      requireFacts(input.facts, ["reviewerRetryAuthorized"], input.nextState);
+      if (actorType !== "HUMAN" || evidenceCount === 0) {
+        throw new InvalidTransitionError("Reviewer recovery requires an explicit human decision and failure evidence");
       }
-      requireFacts(input.facts, ["reviewerDecisionValid", "freshReviewerSession"], input.nextState);
-      if (evidenceCount === 0) throw new InvalidTransitionError("REVIEW_APPROVED requires review evidence");
     }
     if (input.nextState === "REVIEW_CHANGES_REQUESTED") {
       requireFacts(input.facts, ["reviewerFindingsActionable"], input.nextState);

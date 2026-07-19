@@ -1,11 +1,15 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { Database } from "bun:sqlite";
 import {
   NO_LOCKFILE_HASH,
   OfflineDependencyBundle,
+  gitCommitLockfileHash,
   runProcessAsync,
-  workspaceLockfileHash,
   type AsyncProcessResult,
 } from "../packages/engineer/src/index.js";
+import { inspectEngineerPromptCacheAuthority } from "../apps/gateway/src/engineer-prompt-cache-authority.js";
 
 export type EngineerDoctorCheck = { name: string; ok: boolean; detail: string };
 export type EngineerDoctorResult = { ok: boolean; checks: EngineerDoctorCheck[] };
@@ -17,7 +21,8 @@ const required = [
   "ZINTUS_ENGINEER_BASE_BRANCH", "ZINTUS_ENGINEER_BASE_COMMIT_SHA", "ZINTUS_ENGINEER_IMAGE", "ZINTUS_ENGINEER_IMAGE_DIGEST",
 ] as const;
 
-export async function runEngineerDoctor(options: { env?: NodeJS.ProcessEnv; runner?: Runner } = {}): Promise<EngineerDoctorResult> {
+export async function runEngineerDoctor(options: { env?: NodeJS.ProcessEnv; runner?: Runner; engineerDbPath?:string;
+  promptCacheSecretPath?:string } = {}): Promise<EngineerDoctorResult> {
   const env = options.env ?? process.env;
   const runner = options.runner ?? ((executable, args, processOptions) => runProcessAsync(executable, args, {
     timeoutMs: processOptions.timeoutMs, maxOutputBytes: processOptions.maxOutputBytes, cwd: processOptions.cwd,
@@ -63,7 +68,7 @@ export async function runEngineerDoctor(options: { env?: NodeJS.ProcessEnv; runn
       add("exact base branch", exact, exact ? base : "branch/base mismatch");
       add("repository origin", origin.status === 0 && Boolean(origin.stdout.trim()), origin.status === 0 ? origin.stdout.trim() : "unavailable");
 
-      const lockfileHash = workspaceLockfileHash(repositoryRoot);
+      const lockfileHash = gitCommitLockfileHash(repositoryRoot, base);
       if (lockfileHash === NO_LOCKFILE_HASH) {
         add("offline dependencies", true, "repository has no supported lockfile");
       } else {
@@ -91,6 +96,28 @@ export async function runEngineerDoctor(options: { env?: NodeJS.ProcessEnv; runn
     add("repository origin", false, "repository/base configuration missing");
     add("offline dependencies", false, "repository/base configuration missing");
   }
+
+  const engineerDbPath=options.engineerDbPath??env.ZINTUS_ENGINEER_DB_PATH??join(homedir(),".zintus","engineer","engineer.db");
+  if(!existsSync(engineerDbPath)){
+    add("Engineer database integrity",true,`not initialized: ${engineerDbPath}`);
+  }else{
+    let db:Database|null=null;
+    try{
+      db=new Database(engineerDbPath,{readonly:true});
+      const quick=db.query("PRAGMA quick_check").all() as Array<Record<string,unknown>>;
+      const quickOk=quick.length===1&&Object.values(quick[0]??{})[0]==="ok";
+      const foreignKeyViolations=db.query("PRAGMA foreign_key_check").all() as Array<Record<string,unknown>>;
+      const ok=quickOk&&foreignKeyViolations.length===0;
+      add("Engineer database integrity",ok,ok?"read-only quick_check passed; foreign_key_check found 0 violations":
+        `DATABASE_INTEGRITY_CORRUPTION: ${quickOk?"quick_check passed":"quick_check failed"}; foreign_key_check found ${foreignKeyViolations.length} violation(s). Restore the Engineer database and artifact store from the same backup before retrying.`);
+    }catch(error){
+      add("Engineer database integrity",false,`DATABASE_INTEGRITY_CORRUPTION: read-only database inspection failed: ${error instanceof Error?error.message:String(error)}. Restore the Engineer database and artifact store from the same backup before retrying.`);
+    }finally{try{db?.close();}catch{/* retain the original integrity result */}}
+  }
+  const promptCacheSecretPath=options.promptCacheSecretPath??env.ZINTUS_ENGINEER_PROMPT_CACHE_SECRET_PATH??
+    join(dirname(engineerDbPath),"prompt-cache.secret");
+  const promptCache=inspectEngineerPromptCacheAuthority({secretPath:promptCacheSecretPath,dbPath:engineerDbPath});
+  add("Hardening prompt-cache authority",promptCache.ok,`${promptCache.state}: ${promptCache.detail}; durable reservations: ${promptCache.reservationCount}`);
 
   return { ok: checks.every((check) => check.ok), checks };
 }

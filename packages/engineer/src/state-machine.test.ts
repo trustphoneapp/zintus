@@ -28,12 +28,23 @@ describe("Engineer state machine", () => {
     expect(canTransition("REVIEW_CHANGES_REQUESTED", "REVIEW_FIX_PREPARING")).toBe(true);
     expect(canTransition("REVIEW_FIX_PREPARING", "IMPLEMENTING")).toBe(true);
     expect(canTransition("REVIEW_APPROVED", "HUMAN_APPROVAL_PENDING")).toBe(true);
-    expect(canTransition("HUMAN_REVIEW_REQUIRED", "REVIEW_APPROVED")).toBe(true);
+    expect(canTransition("HUMAN_REVIEW_REQUIRED", "REVIEW_APPROVED")).toBe(false);
     expect(canTransition("HUMAN_REVIEW_REQUIRED", "REJECTED")).toBe(true);
     expect(canTransition("HUMAN_APPROVED", "PR_PREFLIGHT")).toBe(true);
     expect(canTransition("PR_CREATED", "COMPLETED")).toBe(true);
     expect(canTransition("IMPLEMENTING", "PR_CREATING")).toBe(false);
     expect(canTransition("UNIT_TESTING", "PR_CREATING")).toBe(false);
+  });
+
+  test("no generic state-machine edge can enter REVIEW_APPROVED", () => {
+    for (const state of RUN_STATES) expect(canTransition(state, "REVIEW_APPROVED")).toBe(false);
+  });
+
+  test("unrecoverable execution evidence can fail closed from every verification stage", () => {
+    for (const state of ["IMPLEMENTING","FAST_CHECKS","UNIT_TESTING","INTEGRATION_TESTING","E2E_TESTING",
+      "FLAKE_QUARANTINE","SECURITY_REVIEW","CODE_REVIEW","EVIDENCE_SYNTHESIS","REVIEWING","HUMAN_REVIEW_REQUIRED"] as const) {
+      expect(canTransition(state,"FAILED")).toBe(true);
+    }
   });
 
   test("provider timeout recovery is human-bounded and remains cancellable", () => {
@@ -60,6 +71,8 @@ describe("Engineer state machine", () => {
       expect(STATE_RUNTIME_POLICIES[state].cancellationState).toBeNull();
     }
     expect(isCancellationAllowed("HUMAN_APPROVED")).toBe(true);
+    expect(canTransition("PR_PREFLIGHT", "FAILED")).toBe(true);
+    expect(canTransition("PR_CREATING", "HUMAN_REVIEW_REQUIRED")).toBe(true);
   });
 
   test("every non-terminal state has a path to a terminal state and a timeout policy", () => {

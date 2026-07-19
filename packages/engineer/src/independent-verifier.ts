@@ -4,20 +4,19 @@ import { TrustedEvidenceSchema } from "./contracts.js";
 import { FailureRecordSchema, type FailureRecord } from "./control-contracts.js";
 import type { ArtifactRecord, CommandExecutionRecord } from "./execution-contracts.js";
 import type { LocalArtifactStore } from "./artifact-store.js";
-import { sha256 } from "./hash.js";
+import { canonicalJson, sha256 } from "./hash.js";
 import { assessRepeatedTest } from "./hardening.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 import type { TrustedCommandExecutor } from "./trusted-executor.js";
 import {
   buildVerificationCoverageMatrix,
-  SecurityFindingRecordSchema,
   VerificationExecutionRecordSchema,
   type SecurityFindingRecord,
   type VerificationExecutionRecord,
 } from "./verification-contracts.js";
-
-export const VERIFICATION_POLICY_VERSION = "engineer-verification-v1";
-export const SECURITY_POLICY_VERSION = "engineer-security-v1";
+export { VERIFICATION_POLICY_VERSION, SECURITY_POLICY_VERSION } from "./required-lane-policy-versions.js";
+import { VERIFICATION_POLICY_VERSION, SECURITY_POLICY_VERSION } from "./required-lane-policy-versions.js";
+import { scanDiffForSecurity } from "./deterministic-security-scan.js";
 
 type TestPlanItem = TaskManifest["testPlan"][number];
 
@@ -30,6 +29,8 @@ export interface IndependentVerifierOptions {
   now?: () => Date;
   idFactory?: () => string;
   verificationPass?: number;
+  /** A mandatory deterministic diff scan will run in this same fenced pass. */
+  deterministicSecurityGateCovered?: boolean;
   beforeCommand?: (command: string) => string | Promise<string>;
   afterCommand?: (command: string, beforeSnapshot: string) => void | Promise<void>;
 }
@@ -129,11 +130,13 @@ export class IndependentVerifier {
   async run(): Promise<IndependentVerificationOutput> {
     const executions: VerificationExecutionRecord[] = [];
     const trustedEvidence: TrustedEvidence[] = [];
-    const coverageMatrix = buildVerificationCoverageMatrix(this.options.manifest);
+    const coverageMatrix = buildVerificationCoverageMatrix(this.options.manifest, {
+      deterministicSecurityGateCovered: this.options.deterministicSecurityGateCovered === true,
+    });
     const coverageArtifact = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
       runId: this.options.manifest.runId,
       type: "VERIFICATION_COVERAGE_MATRIX",
-      bytes: JSON.stringify(coverageMatrix),
+      bytes: canonicalJson(coverageMatrix),
       producerType: "SYSTEM",
       producerId: "verification-coverage-policy",
       trusted: true,
@@ -264,7 +267,12 @@ export class IndependentVerifier {
         });
       }
     }
-    const securityFindings = this.scanDiff(this.options.diff());
+    const securityFindings = scanDiffForSecurity({
+      runId: this.options.manifest.runId,
+      diff: this.options.diff(),
+      createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
+      idFactory: this.options.idFactory,
+    });
     for (const finding of securityFindings) this.options.supervisor.recordSecurityFinding(finding);
     const report = {
       policyVersion: SECURITY_POLICY_VERSION,
@@ -275,7 +283,7 @@ export class IndependentVerifier {
     const securityReportArtifact = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
       runId: this.options.manifest.runId,
       type: "SECURITY_REPORT",
-      bytes: JSON.stringify(report),
+      bytes: canonicalJson(report),
       producerType: "SYSTEM",
       producerId: "deterministic-security-scanner",
       trusted: true,
@@ -364,87 +372,6 @@ export class IndependentVerifier {
         createdAt: execution.completedAt,
       }),
     };
-  }
-
-  private scanDiff(diff: string): SecurityFindingRecord[] {
-    const rules = [
-      { category: "POSSIBLE_SECRET", severity: "CRITICAL" as const, pattern: /^\+.*(?:api[_-]?key|secret|password|token)\s*[:=]\s*["'][^"']{8,}["']/i,
-        description: "A newly added line appears to contain a hard-coded credential." },
-      { category: "UNSAFE_EVAL", severity: "HIGH" as const, pattern: /^\+.*\beval\s*\(/,
-        description: "A newly added line invokes eval()." },
-      { category: "SHELL_EXECUTION", severity: "MEDIUM" as const, pattern: /^\+.*\b(?:exec|spawn)\s*\([^\n]*shell\s*:\s*true/,
-        description: "A newly added process invocation enables a shell." },
-      { category: "TLS_VERIFICATION_DISABLED", severity: "CRITICAL" as const, pattern: /^\+.*(?:rejectUnauthorized|verify)\s*[:=]\s*false\b/i,
-        description: "A newly added line disables transport certificate verification." },
-      { category: "COOKIE_SECURITY_DISABLED", severity: "HIGH" as const, pattern: /^\+.*(?:httpOnly|secure)\s*:\s*false\b/i,
-        description: "A newly added line disables a cookie security control." },
-    ];
-    const negativeConstraints = [
-      { category: "AUTHENTICATION_CONTROL_REMOVED", pattern: /\b(?:authenticate|requireAuth|verifyToken|verifySession|currentUser)\b/i,
-        description: "The diff removes an authentication control without a replacement in the same file." },
-      { category: "AUTHORIZATION_CONTROL_REMOVED", pattern: /\b(?:authorize|requirePermission|hasPermission|canAccess|enforceRbac)\b/i,
-        description: "The diff removes an authorization control without a replacement in the same file." },
-      { category: "INPUT_VALIDATION_REMOVED", pattern: /\b(?:safeParse|validate|sanitize|escapeHtml)\s*\(/i,
-        description: "The diff removes input validation or sanitization without a replacement in the same file." },
-      { category: "CSRF_CONTROL_REMOVED", pattern: /\b(?:csrf|sameSite|originCheck)\b/i,
-        description: "The diff removes a request-forgery control without a replacement in the same file." },
-    ];
-    const findings: SecurityFindingRecord[] = [];
-    const changedLines = new Map<string, { added: string[]; removed: string[] }>();
-    let file: string | null = null;
-    let newLine = 0;
-    for (const line of diff.split("\n")) {
-      if (line.startsWith("+++ b/")) file = line.slice(6);
-      else if (line.startsWith("@@")) {
-        const match = /\+(\d+)/.exec(line);
-        newLine = match ? Number(match[1]) - 1 : 0;
-      } else if (newLine > 0 && (line.startsWith("+") && !line.startsWith("+++") || line.startsWith(" "))) {
-        // Only hunk additions and context lines advance the new-file line.
-        // Diff metadata (diff/index/---) must not skew finding locations.
-        newLine += 1;
-      }
-      if (file && ((line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")))) {
-        const changes = changedLines.get(file) ?? { added: [], removed: [] };
-        (line.startsWith("+") ? changes.added : changes.removed).push(line.slice(1));
-        changedLines.set(file, changes);
-      }
-      for (const rule of rules) {
-        if (!rule.pattern.test(line)) continue;
-        findings.push(SecurityFindingRecordSchema.parse({
-          securityFindingId: (this.options.idFactory ?? randomUUID)(),
-          runId: this.options.manifest.runId,
-          severity: rule.severity,
-          category: rule.category,
-          description: rule.description,
-          file,
-          lineStart: newLine || null,
-          lineEnd: newLine || null,
-          evidenceIds: [],
-          status: "OPEN",
-          createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
-        }));
-      }
-    }
-    for (const [changedFile, changes] of changedLines) {
-      for (const constraint of negativeConstraints) {
-        if (!changes.removed.some((line) => constraint.pattern.test(line))) continue;
-        if (changes.added.some((line) => constraint.pattern.test(line))) continue;
-        findings.push(SecurityFindingRecordSchema.parse({
-          securityFindingId: (this.options.idFactory ?? randomUUID)(),
-          runId: this.options.manifest.runId,
-          severity: "HIGH",
-          category: constraint.category,
-          description: constraint.description,
-          file: changedFile,
-          lineStart: null,
-          lineEnd: null,
-          evidenceIds: [],
-          status: "OPEN",
-          createdAt: (this.options.now ?? (() => new Date()))().toISOString(),
-        }));
-      }
-    }
-    return findings;
   }
 
   private ensureState(target: "FAST_CHECKS" | "UNIT_TESTING" | "INTEGRATION_TESTING" | "E2E_TESTING" | "SECURITY_REVIEW"): void {

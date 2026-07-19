@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Database } from "bun:sqlite";
 import {
   EngineerWorkerLeaseManager,
   StaleWorkerLeaseError,
@@ -107,6 +108,73 @@ describe("durable Engineer worker leases", () => {
     expect(() => manager.heartbeat(command(first, "late-heartbeat"))).toThrow(StaleWorkerLeaseError);
     expect(() => manager.heartbeat(command(first, "heartbeat-1"))).toThrow(StaleWorkerLeaseError);
     expect(manager.assertActive(command(second, "unused")).ownerId).toBe("worker-b");
+    item.close(manager);
+  });
+
+  test("withActiveLease is synchronous, rolls callback failures back, and commits expiry authority loss", () => {
+    const item = fixture();
+    const manager = item.create();
+    const grant = manager.acquire({
+      resourceKey: "run-guarded-recovery",
+      ownerId: "recovery-worker",
+      ttlMs: 1_000,
+      idempotencyKey: "acquire",
+    });
+    const proof = command(grant, "unused");
+
+    expect(() => manager.withActiveLease(proof, () => Promise.resolve("unsafe") as never))
+      .toThrow("strictly synchronous");
+    expect(manager.assertActive(proof)).toMatchObject({ status: "ACTIVE", fencingToken: 1 });
+
+    expect(() => manager.withActiveLease(proof, () => { throw new Error("engineer transaction failed"); }))
+      .toThrow("engineer transaction failed");
+    expect(manager.assertActive(proof)).toMatchObject({ status: "ACTIVE", fencingToken: 1 });
+
+    item.advance(1_001);
+    expect(() => manager.withActiveLease(proof, () => "must-not-run")).toThrow(StaleWorkerLeaseError);
+    expect(manager.get(grant.lease.leaseId)).toMatchObject({ status: "EXPIRED" });
+    const replacement = manager.acquire({
+      resourceKey: "run-guarded-recovery",
+      ownerId: "replacement-worker",
+      ttlMs: 1_000,
+      idempotencyKey: "replacement",
+    });
+    expect(replacement.lease.fencingToken).toBe(2);
+    item.close(manager);
+  });
+
+  test("withActiveLease holds the durable worker authority until its synchronous callback commits", () => {
+    const item = fixture();
+    const manager = item.create();
+    const grant = manager.acquire({
+      resourceKey: "run-cross-db-lock-order",
+      ownerId: "recovery-worker",
+      ttlMs: 1_000,
+      idempotencyKey: "acquire",
+    });
+    const contender = new Database(item.dbPath, { readwrite: true, create: false });
+    contender.exec("PRAGMA busy_timeout = 1");
+
+    manager.withActiveLease(command(grant, "unused"), (active) => {
+      expect(active).toMatchObject({ status: "ACTIVE", fencingToken: 1 });
+      item.advance(1_001);
+      expect(() => contender.query(
+        "UPDATE worker_leases SET status = 'EXPIRED' WHERE id = ? AND status = 'ACTIVE'",
+      ).run(grant.lease.leaseId)).toThrow(/locked|busy/i);
+      return undefined;
+    });
+
+    // The callback committed before the outer lease lock was released. Only a
+    // later transaction can expire the old generation and mint a replacement.
+    expect(() => manager.assertActive(command(grant, "unused"))).toThrow(StaleWorkerLeaseError);
+    const replacement = manager.acquire({
+      resourceKey: "run-cross-db-lock-order",
+      ownerId: "replacement-worker",
+      ttlMs: 1_000,
+      idempotencyKey: "replacement",
+    });
+    expect(replacement.lease.fencingToken).toBe(2);
+    contender.close();
     item.close(manager);
   });
 

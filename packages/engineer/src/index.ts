@@ -21,6 +21,8 @@ export * from "./worker-lease.js";
 export * from "./codex-builder.js";
 export * from "./execution-manager.js";
 export * from "./verification-contracts.js";
+export * from "./review-classification.js";
+export * from "./verified-candidate-checkpoint.js";
 export * from "./independent-verifier.js";
 export * from "./terra-advisors.js";
 export * from "./luna-failure-advisor.js";
@@ -38,7 +40,27 @@ export * from "./adversarial-coverage.js";
 export * from "./hardening.js";
 export * from "./observability.js";
 export * from "./database-schema.js";
+export * from "./database-migrations.js";
+export * from "./required-lane-contracts.js";
+export * from "./required-lane-policy-versions.js";
+export * from "./advisory-hardening-contracts.js";
+export * from "./hardening-start-contracts.js";
+export * from "./hardening-execution-fencing.js";
+export * from "./hardening-budget-contracts.js";
+export {
+  HardeningPromptCacheDescriptorSchema,
+  canonicalHardeningPromptCacheMaterial,
+  createHardeningPromptCacheMaterial,
+  HARDENING_PROMPT_CACHE_ACCOUNTING_VERSION,
+  HARDENING_PROMPT_CACHE_BREAKPOINT_COUNT,
+  HARDENING_PROMPT_CACHE_TTL_SECONDS,
+  type HardeningPromptCacheDescriptor,
+  type HardeningPromptCacheMaterial,
+} from "./hardening-prompt-cache.js";
+export * from "./hardening-estimator.js";
+export * from "./hardening-manifest.js";
 export * from "./errors.js";
+export * from "./hardening-database-integrity.js";
 export * from "./hash.js";
 export * from "./model-routing.js";
 export * from "./budget-contracts.js";

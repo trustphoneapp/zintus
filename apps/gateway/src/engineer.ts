@@ -11,6 +11,7 @@ import {
   type RepositoryReference,
   type TaskManifestContent,
   type LocalArtifactStore,
+  type ArtifactRecord,
   type BudgetTopUp,
   type EngineerBudgetSelection,
   type EngineerBudgetSnapshot,
@@ -29,12 +30,39 @@ import {
   FailureRecordSchema,
   type EngineerWorkerLeaseManager,
   type WorkerLeaseGrant,
+  type ApprovalAuthorityExpectation,
+  type CheckpointAttestor,
+  verifiedCandidateSummary,
+  VerifiedCandidateRequiredError,
+  OptionalHardeningChildCreationSchema,
+  OptionalHardeningChildRequestSchema,
+  type OptionalHardeningChildCreation,
+  type OptionalHardeningChildRequest,
+  HardeningStartClaimBusyError,
+  HardeningGenericOperationForbiddenError,
+  HardeningReviewerRecoveryAuthorityInvalidError,
+  HardeningWorkspaceRecoveryAuthorityInvalidError,
+  HardeningBudgetExtensionRequiresNewRunError,
+  WorkerLeaseCapacityError,
+  WorkerLeaseConflictError,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
 import { previewEngineerArtifact } from "./engineer-artifact-preview.js";
 import type { EngineerCapabilityPreflight, EngineerReadiness } from "./engineer-preflight.js";
 import { redactSecrets } from "@zintus/router";
 import { createHash, randomUUID } from "node:crypto";
+import { unlinkSync } from "node:fs";
+
+class CancellationStillPendingError extends Error {
+  constructor(message:string){super(message);this.name="CancellationStillPendingError";}
+}
+
+interface DurableCancellationSupervisor {
+  requestRunCancellation(input:{runId:string;actorId:string;artifact:ArtifactRecord}):{run:EngineerRun;applied:boolean};
+  finalizeRunCancellation(input:{runId:string;outcome:"CANCELLED"|"FAILED";
+    expectedLastError:string|null;lastError:string|null}):EngineerRun;
+  getLastError(runId:string):string|null;
+}
 
 export interface EngineerRunManagerOptions {
   supervisor: EngineerSupervisor;
@@ -52,7 +80,23 @@ export interface EngineerRunManagerOptions {
   workerOwnerId?: string;
   leaseTtlMs?: number;
   heartbeatIntervalMs?: number;
+  /** Maximum synchronous UI wait for cancellation drain; never above the run lease TTL. */
+  cancellationDrainTimeoutMs?: number;
+  checkpointAttestor?: CheckpointAttestor;
+  now?: () => Date;
+  hardeningPromptCacheReadiness?: EngineerHardeningReadiness;
 }
+
+export type EngineerHardeningReadiness=
+  |{state:"READY";code:null;message:null}
+  |{state:"DEGRADED";code:"HARDENING_PROMPT_CACHE_AUTHORITY_UNAVAILABLE"|"HARDENING_PROMPT_CACHE_AUTHORITY_MISMATCH";message:string};
+
+const unavailableCheckpointAttestor: CheckpointAttestor = {
+  algorithm: "unavailable",
+  keyId: "unavailable",
+  sign: () => { throw new Error("Engineer verified-candidate attestor is not configured"); },
+  verify: () => { throw new Error("Engineer verified-candidate attestor is not configured"); },
+};
 
 export function correctedRunRepository(source: RepositoryReference, current: RepositoryReference): RepositoryReference {
   const { baseCommitSha: _sourceBase, ...sourceIdentity } = source;
@@ -63,12 +107,67 @@ export function correctedRunRepository(source: RepositoryReference, current: Rep
   return RepositoryReferenceSchema.parse(current);
 }
 
+function redactAdvisoryText<T extends { description: string; recommendedChange: string }>(item: T): T {
+  return { ...item, description: redactSecrets(item.description), recommendedChange: redactSecrets(item.recommendedChange) };
+}
+
+type HardeningBudget = { costMicrousd: number; tokens: number; timeSeconds: number };
+type HardeningAcknowledgements = {
+  separateRun: true;
+  parentCandidateUnchanged: true;
+  noAutomaticRepair: true;
+  noOverages: true;
+};
+
+function publicHardeningQuote(quote: {
+  schemaVersion: 1 | 2; policyVersion: string;
+  quoteId: string; quoteHash: string; parentRunId: string; parentCheckpointId: string;
+  requesterUserId: string; repositoryId: string;
+  parentCheckpointHash: string; parentStateVersion: number; selectionHash: string;
+  advisoryIds: string[]; routingPolicyVersion: string; pricingVersion: string;
+  estimatorVersion: string; estimate: unknown; assumptions: string[]; createdAt: string; expiresAt: string;
+  status: "ACTIVE" | "EXPIRED";
+}) {
+  return {
+    schemaVersion: quote.schemaVersion,
+    policyVersion: quote.policyVersion,
+    quoteId: quote.quoteId,
+    quoteHash: quote.quoteHash,
+    parentRunId: quote.parentRunId,
+    requesterUserId: quote.requesterUserId,
+    repositoryId: quote.repositoryId,
+    parentCheckpointId: quote.parentCheckpointId,
+    parentCheckpointHash: quote.parentCheckpointHash,
+    parentStateVersion: quote.parentStateVersion,
+    selectionHash: quote.selectionHash,
+    advisoryIds: [...quote.advisoryIds],
+    routingPolicyVersion: quote.routingPolicyVersion,
+    pricingVersion: quote.pricingVersion,
+    estimatorVersion: quote.estimatorVersion,
+    estimate: quote.estimate,
+    assumptions: [...quote.assumptions],
+    createdAt: quote.createdAt,
+    expiresAt: quote.expiresAt,
+    status: quote.status,
+  };
+}
+
+function withoutArtifactStorageReferences<T>(value:T):T{
+  return JSON.parse(JSON.stringify(value,(key,item)=>
+    key==="storage_reference"||key==="storageReference"?undefined:item)) as T;
+}
+
 /** Gateway facade. It exposes no generic state-transition endpoint. */
 export class EngineerRunManager {
   private readonly options: EngineerRunManagerOptions;
   private readonly background = new Set<Promise<void>>();
   private readonly activePlanning = new Map<string, AbortController>();
   private readonly activePlanningSettled = new Map<string, Promise<void>>();
+  private readonly activePlanningRevocations = new Map<string, () => void>();
+  private readonly hardeningRecovery = new Map<string, Promise<unknown>>();
+  private readonly recoveredHardeningAuthorities = new Set<string>();
+  private readonly cancellationRecovery = new Map<string, Promise<void>>();
+  private readonly managerInstanceId = randomUUID();
   private draining = false;
 
   constructor(options: EngineerRunManagerOptions) {
@@ -78,11 +177,263 @@ export class EngineerRunManager {
 
   principal(): EngineerPrincipal { return { ...this.options.principal }; }
   readiness(): EngineerReadiness { return this.options.preflight.readiness(); }
+  hardeningReadiness():EngineerHardeningReadiness{return this.options.hardeningPromptCacheReadiness?
+    {...this.options.hardeningPromptCacheReadiness}:{state:"READY",code:null,message:null};}
   ensureReady(): Promise<void> { return this.options.preflight.assertStartup(); }
+
+  private assertHardeningPromptCacheReady():void{
+    const readiness=this.hardeningReadiness();
+    if(readiness.state!=="READY")throw Object.assign(new Error(readiness.message),{code:readiness.code,retryable:true});
+  }
+
+  private assertRequiredLaneAction(runId:string):void{
+    if(this.options.supervisor.isOptionalHardeningChild?.(runId))
+      throw new HardeningGenericOperationForbiddenError();
+  }
+
+  private assertHardeningBudgetIsNotExtended(runId:string):void{
+    if(this.options.supervisor.isOptionalHardeningChild?.(runId))
+      throw new HardeningBudgetExtensionRequiresNewRunError();
+  }
 
   repository(principal: EngineerPrincipal): RepositoryReference {
     this.assertPrincipal(principal);
     return this.options.preflight.repository();
+  }
+
+  async listAdvisories(principal: EngineerPrincipal, runId: string, query: {
+    limit: number;
+    cursor?: string;
+    status?: "OPEN" | "DEFERRED" | "DISMISSED";
+    actionability?: "ACTIONABLE" | "AUDIT_ONLY";
+  }) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    const page = await this.options.supervisor.listAdvisoryBacklogForOwner(principal.ownerId, runId, query);
+    return {
+      schemaVersion: page.schemaVersion,
+      materializationStatus: page.materializationStatus,
+      items: page.items.map(redactAdvisoryText),
+      nextCursor: page.nextCursor,
+    };
+  }
+
+  async deferAdvisory(principal: EngineerPrincipal, runId: string, advisoryId: string, command: {
+    expectedRevision: number;
+    idempotencyKey: string;
+    rationale: string | null;
+  }) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    return redactAdvisoryText(await this.options.supervisor.deferAdvisoryForOwner(principal.ownerId, runId, advisoryId, command));
+  }
+
+  async dismissAdvisory(principal: EngineerPrincipal, runId: string, advisoryId: string, command: {
+    expectedRevision: number;
+    idempotencyKey: string;
+    rationale: string | null;
+  }) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    return redactAdvisoryText(await this.options.supervisor.dismissAdvisoryForOwner(principal.ownerId, runId, advisoryId, command));
+  }
+
+  async reopenAdvisory(principal: EngineerPrincipal, runId: string, advisoryId: string, command: {
+    expectedRevision: number;
+    idempotencyKey: string;
+    rationale: string | null;
+  }) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    return redactAdvisoryText(await this.options.supervisor.reopenAdvisoryForOwner(principal.ownerId, runId, advisoryId, command));
+  }
+
+  async createHardeningQuote(principal: EngineerPrincipal, runId: string, input: {
+    runId: string;
+    advisoryIds: string[];
+    expectedParentStateVersion: number;
+    idempotencyKey: string;
+  }) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    this.assertHardeningPromptCacheReady();
+    if (input.runId !== runId) throw Object.assign(new Error("hardening run authority mismatch"), { code: "ENGINEER_HARDENING_AUTHORITY_INVALID" });
+    const quote = await this.options.supervisor.createHardeningQuoteForOwner(principal.ownerId, input);
+    return publicHardeningQuote(quote);
+  }
+
+  async getHardeningQuote(principal: EngineerPrincipal, runId: string, quoteId: string) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    const quote = await this.options.supervisor.getHardeningQuoteForOwner(principal.ownerId, runId, quoteId);
+    return publicHardeningQuote(quote);
+  }
+
+  async acceptHardeningConsent(principal: EngineerPrincipal, runId: string, input: {
+    quoteId: string;
+    quoteHash: string;
+    authorizedBudget: HardeningBudget;
+    acknowledgements: HardeningAcknowledgements;
+    expectedParentStateVersion: number;
+    idempotencyKey: string;
+  }) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    this.assertHardeningPromptCacheReady();
+    return this.options.supervisor.acceptHardeningConsentForOwner(principal.ownerId, runId, input);
+  }
+
+  async createOptionalHardeningChild(
+    principal: EngineerPrincipal,
+    parentRunId: string,
+    input: OptionalHardeningChildRequest,
+  ): Promise<OptionalHardeningChildCreation> {
+    this.assertPrincipal(principal);
+    this.assertOwner(parentRunId, principal);
+    this.assertHardeningPromptCacheReady();
+    const request = OptionalHardeningChildRequestSchema.parse(input);
+    const creation = await this.options.supervisor.createOptionalHardeningChildForOwner(
+      principal.ownerId,
+      parentRunId,
+      request,
+    );
+    return OptionalHardeningChildCreationSchema.parse(creation);
+  }
+
+  async startOptionalHardeningChild(principal:EngineerPrincipal,parentRunId:string,childRunId:string,input:import("@zintus/engineer").HardeningStartRequest){
+    this.assertPrincipal(principal);this.assertOwner(parentRunId,principal);this.assertOwner(childRunId,principal);
+    this.assertHardeningPromptCacheReady();
+    if(!this.options.execution)throw new Error("Engineer hardening execution is not configured on this gateway");
+    if(!this.options.verification)throw new Error("Engineer hardening verification is not configured on this gateway");
+    const leaseAuthority=this.options.leaseManager;
+    if(!leaseAuthority||!this.options.execution.usesWorkerLeaseAuthority(leaseAuthority)||
+      !this.options.verification.usesWorkerLeaseAuthority(leaseAuthority)){
+      throw Object.assign(new Error("Engineer hardening requires one shared durable worker-lease authority"),{
+        code:"ENGINEER_HARDENING_WORKER_LEASE_AUTHORITY_UNAVAILABLE"});
+    }
+    const signer=this.options.checkpointAttestor??unavailableCheckpointAttestor;
+    const prepared=await this.options.supervisor.prepareOptionalHardeningStartForOwner(principal.ownerId,parentRunId,childRunId,input);
+    const startLaneStates=["REQUEST_RECEIVED","REQUEST_NORMALIZED","PLANNING","PLAN_READY","PLAN_FROZEN","QUEUED"];
+    const beforeClaim=this.options.supervisor.getRun(childRunId);
+    if(prepared.replay&&!startLaneStates.includes(beforeClaim.state)){
+      const replay=this.options.supervisor.finalizeOptionalHardeningStart(prepared);
+      return {run:replay.run,start:{operationId:prepared.operation.operationId,childRunId,createdAt:prepared.operation.createdAt},
+        seed:{status:"VERIFIED" as const,seedAttestationId:prepared.signedSeed!.attestation.seedAttestationId,
+          seedDiffHash:prepared.signedSeed!.attestation.seedDiffHash},status:replay.status};
+    }
+    const startClaim=this.options.supervisor.claimOptionalHardeningStart({
+      requesterUserId:prepared.lineage.requesterUserId,rootRunId:prepared.lineage.rootRunId,parentRunId:prepared.lineage.parentRunId,
+      childRunId:prepared.operation.childRunId,repositoryId:prepared.lineage.repositoryId,
+      parentCheckpointId:prepared.parentCheckpoint.checkpointId,parentCheckpointHash:prepared.parentCheckpoint.checkpointHash,
+      lineageId:prepared.lineage.lineageId,lineageHash:prepared.lineage.lineageHash,
+      quoteId:prepared.authority.quoteId,quoteHash:prepared.authority.quoteHash,
+      consentId:prepared.authority.consentId,consentHash:prepared.authority.consentHash,
+      operationId:prepared.operation.operationId,operationHash:prepared.operation.operationHash,
+      idempotencyKey:prepared.operation.idempotencyKey,
+      ownerId:this.options.workerOwnerId??"engineer-hardening-start-worker",leaseMs:this.options.leaseTtlMs??120_000,
+    });
+    if(!startClaim.applied&&startClaim.fence.status==="PREPARING")throw new HardeningStartClaimBusyError();
+    let committed=prepared;let pendingSeed=false;
+    try{
+      if(!prepared.replay){const signedSeed=await this.options.execution.materializeOptionalHardeningSeed(prepared,signer);pendingSeed=true;
+        const preview=this.options.supervisor.previewOptionalHardeningStart({...prepared,signedSeed});
+        if(preview.status!=="READY")throw new Error("hardening seed cannot commit without a deterministic frozen manifest");
+        const durable=this.options.execution.prepareOptionalHardeningSeedCommit(childRunId,preview.manifest.manifestHash);
+        committed=await this.options.supervisor.commitOptionalHardeningStartForOwner(principal.ownerId,parentRunId,childRunId,input,
+          prepared.operation,signedSeed,{claimId:startClaim.fence.claimId,fenceToken:startClaim.fence.fenceToken,generation:startClaim.fence.generation},durable);
+        this.options.execution.completeOptionalHardeningSeedCommit(childRunId);pendingSeed=false;
+        this.recoveredHardeningAuthorities.add(childRunId);}
+      else if(!(this.options.execution as EngineerExecutionManager&{hasOptionalHardeningAuthority?:(runId:string)=>boolean})
+        .hasOptionalHardeningAuthority?.(childRunId)){
+        const current=this.options.supervisor.getRun(childRunId);
+        const recovered=await this.options.execution.recoverOptionalHardeningSeed(prepared);
+        if(!recovered){
+          if(!startLaneStates.includes(current.state))
+            throw new Error("durable optional-hardening seed checkpoint is unavailable");
+          await this.options.execution.materializeOptionalHardeningSeed(prepared,signer);pendingSeed=true;
+        }else this.recoveredHardeningAuthorities.add(childRunId);
+      }
+      const finalized=this.options.supervisor.finalizeOptionalHardeningStart(committed);
+      if(finalized.status==="ENVIRONMENT_BLOCKED")this.options.supervisor.recordOptionalHardeningStopped(childRunId,"ENVIRONMENT_BLOCKED");
+    if(finalized.status==="READY"&&finalized.run.state==="PLAN_FROZEN"){const run=this.options.execution.enqueue(childRunId);this.clearError(childRunId);this.launchExecution(childRunId);
+      return {run,start:{operationId:committed.operation.operationId,childRunId,createdAt:committed.operation.createdAt},
+        seed:{status:"VERIFIED" as const,seedAttestationId:committed.signedSeed!.attestation.seedAttestationId,
+          seedDiffHash:committed.signedSeed!.attestation.seedDiffHash},status:"STARTED" as const};}
+    if(finalized.status==="READY"&&finalized.run.state==="QUEUED"){this.clearError(childRunId);this.launchExecution(childRunId);}
+    return {run:finalized.run,start:{operationId:committed.operation.operationId,childRunId,createdAt:committed.operation.createdAt},
+      seed:{status:"VERIFIED" as const,seedAttestationId:committed.signedSeed!.attestation.seedAttestationId,
+        seedDiffHash:committed.signedSeed!.attestation.seedDiffHash},status:finalized.status};
+    }catch(error){if(pendingSeed)await this.options.execution.discardOptionalHardeningSeed(childRunId);throw error;}
+  }
+
+  recoverOptionalHardeningStarts(runIds?:readonly string[]):Array<{runId:string;promise:Promise<unknown>}>
+  {
+    if(this.hardeningReadiness().state!=="READY")return [];
+    const recoverable=new Set(["REQUEST_RECEIVED","REQUEST_NORMALIZED","PLANNING","PLAN_READY","PLAN_FROZEN","QUEUED"]);
+    const committed=this.options.supervisor.listOptionalHardeningStartOperationsForOwner(this.options.principal.ownerId)
+      .filter(({operation})=>!runIds||runIds.includes(operation.childRunId)).map(({parentRunId,operation})=>({
+      parentRunId,childRunId:operation.childRunId,input:{expectedChildStateVersion:operation.expectedChildStateVersion,
+        lineageId:operation.lineageId,lineageHash:operation.lineageHash,idempotencyKey:operation.idempotencyKey},
+    }));
+    const committedChildren=new Set(committed.map((item)=>item.childRunId));
+    const pending=this.options.supervisor.listOptionalHardeningStartClaimsForRecovery(this.options.principal.ownerId)
+      .filter((item)=>(!runIds||runIds.includes(item.childRunId))&&!committedChildren.has(item.childRunId));
+    const immediate=committed.flatMap(({parentRunId,childRunId,input})=>{
+      const run=this.options.supervisor.getRun(childRunId);if(!recoverable.has(run.state))return [];
+      if(this.options.supervisor.hasOutstandingHardeningPaidCallRecoveryWork?.(childRunId))return [];
+      const execution=this.options.execution as (EngineerExecutionManager&{hasOptionalHardeningAuthority?:(runId:string)=>boolean})|undefined;
+      if(this.recoveredHardeningAuthorities.has(childRunId)||execution?.hasOptionalHardeningAuthority?.(childRunId))return [];
+      return [{runId:childRunId,promise:this.startOptionalHardeningChild(this.options.principal,parentRunId,childRunId,input)}];
+    });
+    const scheduled=pending.flatMap(({parentRunId,childRunId,input,leaseExpiresAt})=>{
+      const run=this.options.supervisor.getRun(childRunId);if(!recoverable.has(run.state))return [];
+      if(this.options.supervisor.hasOutstandingHardeningPaidCallRecoveryWork?.(childRunId))return [];
+      let promise=this.hardeningRecovery.get(childRunId);if(!promise){const now=(this.options.now??(()=>new Date()))().getTime();
+        const delay=Math.max(0,Date.parse(leaseExpiresAt)-now);
+        promise=new Promise<void>((resolve)=>setTimeout(resolve,delay)).then(()=>
+          this.startOptionalHardeningChild(this.options.principal,parentRunId,childRunId,input));
+        this.hardeningRecovery.set(childRunId,promise);void promise.then(()=>{if(this.hardeningRecovery.get(childRunId)===promise)this.hardeningRecovery.delete(childRunId);},
+          ()=>{if(this.hardeningRecovery.get(childRunId)===promise)this.hardeningRecovery.delete(childRunId);});}
+      return [{runId:childRunId,promise}];});
+    return [...immediate,...scheduled];
+  }
+
+  recoverOptionalHardeningVerification(runIds?:readonly string[]):Array<{runId:string;promise:Promise<unknown>}>{
+    if(this.hardeningReadiness().state!=="READY"||!this.options.execution||!this.options.verification)return [];
+    const recoverable=new Set(["FAST_CHECKS","UNIT_TESTING","INTEGRATION_TESTING","E2E_TESTING","FLAKE_QUARANTINE",
+      "SECURITY_REVIEW","CODE_REVIEW","EVIDENCE_SYNTHESIS","REVIEWING","VERIFICATION_RECOVERY"]);
+    return this.options.supervisor.listOptionalHardeningStartOperationsForOwner(this.options.principal.ownerId).flatMap(({parentRunId,operation})=>{
+      if(runIds&&!runIds.includes(operation.childRunId))return [];
+      const run=this.options.supervisor.getRun(operation.childRunId);
+      if(!recoverable.has(run.state)||run.terminalAt||this.options.supervisor.hasOutstandingHardeningPaidCallRecoveryWork(run.runId))return [];
+      const input={expectedChildStateVersion:operation.expectedChildStateVersion,lineageId:operation.lineageId,
+        lineageHash:operation.lineageHash,idempotencyKey:operation.idempotencyKey};
+      const promise:Promise<unknown>=(async()=>{
+          try{
+            const preparation=await this.options.supervisor.prepareOptionalHardeningStartForOwner(
+              this.options.principal.ownerId,parentRunId,run.runId,input);
+            const snapshot=this.options.execution!.prepareOptionalHardeningWorkspaceRecovery(preparation);
+            return this.options.verification!.resumeOptionalHardeningRecovered(snapshot);
+          }catch(error){
+            if(!(error instanceof HardeningGenericOperationForbiddenError))throw error;
+            const current=this.options.supervisor.getRun(run.runId);
+            // Cancellation and any concurrent state owner take precedence over
+            // a stale read-only recovery preflight. Never turn a user's stop
+            // intent into a security failure.
+            if(current.terminalAt||["CANCELLATION_PENDING","CANCELLED"].includes(current.state)||
+              current.state!==run.state||current.stateVersion!==run.stateVersion)return current;
+            const reasonCode=current.state==="REVIEWING"
+              ?"HARDENING_REVIEWER_RECOVERY_AUTHORITY_INVALID" as const
+              :"HARDENING_WORKSPACE_RECOVERY_AUTHORITY_INVALID" as const;
+            this.options.supervisor.quarantineOptionalHardeningRecovery({runId:run.runId,
+              expectedStateVersion:current.stateVersion,reasonCode});
+            throw reasonCode==="HARDENING_REVIEWER_RECOVERY_AUTHORITY_INVALID"
+              ?new HardeningReviewerRecoveryAuthorityInvalidError(run.runId)
+              :new HardeningWorkspaceRecoveryAuthorityInvalidError(run.runId);
+          }
+        })();
+      return [{runId:run.runId,promise}];
+    });
   }
 
   repositories(principal: EngineerPrincipal): RepositoryReference[] {
@@ -110,11 +461,12 @@ export class EngineerRunManager {
     this.assertOwner(runId, this.options.principal);
     const budget = this.options.supervisor.reconcileBudget(runId);
     const run = this.options.supervisor.getRun(runId);
-    const activity = this.activePlanning.has(runId)
+    const workflowCanBeActive=!run.terminalAt&&run.state!=="CANCELLATION_PENDING";
+    const activity = workflowCanBeActive&&this.activePlanning.has(runId)
       ? { active: true, role: "PLANNER" as const, detail: "Planner model request or reconciliation is active." }
-      : this.options.execution?.isActive(runId)
+      : workflowCanBeActive&&this.options.execution?.isActive(runId)
         ? { active: true, role: "BUILDER" as const, detail: "Builder model or sandbox tool work is active." }
-        : this.options.verification?.isActive(runId)
+        : workflowCanBeActive&&this.options.verification?.isActive(runId)
           ? { active: true, role: "VERIFIER" as const, detail: "Independent verification or review is active." }
           : { active: false, role: null, detail: run.state === "PAUSED_BUDGET" ? "Checkpoint retained; no worker is consuming model budget." : "No worker is currently active for this run." };
     const durableLastError = this.options.supervisor.getLastError(runId);
@@ -124,7 +476,7 @@ export class EngineerRunManager {
   }
 
   /** One ownership-checked projection for the active UI; individual routes remain for compatibility. */
-  snapshot(principal: EngineerPrincipal, runId: string) {
+  async snapshot(principal: EngineerPrincipal, runId: string) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -174,6 +526,19 @@ export class EngineerRunManager {
           evidenceBundleHash: evidence.evidenceBundleHash,
         };
       }, null) : null;
+      const approval = reachedVerification ? section("approval", () => this.approval(runId), null) : null;
+      const approvalAuthority = approval?.status === "PENDING" &&
+          approval.verifiedCheckpointId && approval.verifiedCheckpointHash
+        ? {
+            expectedVerifiedCheckpointId: approval.verifiedCheckpointId,
+            expectedVerifiedCheckpointHash: approval.verifiedCheckpointHash,
+            expectedApprovalRevision: approval.approvalRevision,
+          }
+        : null;
+      // This strict verification is deliberately outside the best-effort
+      // section projector. A promoted but corrupt checkpoint must fail the
+      // entire snapshot rather than silently disappearing from the UI.
+      const verifiedCandidate = await this.checkpoint(principal, runId);
       const data = {
         artifacts: section("artifacts", () => this.artifacts(runId), []),
         claims: reachedVerification ? section("claims", () => this.claims(runId), []) : [],
@@ -183,7 +548,9 @@ export class EngineerRunManager {
         failures: section("failures", () => this.failures(runId), []),
         gitOperations: reachedVerification ? section("publication", () => this.gitOperations(runId), []) : [],
         diff: reachedImplementation ? section("diff", () => this.diff(runId), "") : "",
-        approval: reachedVerification ? section("approval", () => this.approval(runId), null) : null,
+        approval,
+        approvalAuthority,
+        verifiedCandidate,
         decisions: section("decisions", () => this.decisions(principal, runId), []),
         reviewBinding,
         errors,
@@ -210,6 +577,35 @@ export class EngineerRunManager {
     throw new Error("Engineer run changed repeatedly while building a consistent snapshot; retry the read");
   }
 
+  async checkpoint(principal: EngineerPrincipal, runId: string) {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    const attestor = this.options.checkpointAttestor ?? unavailableCheckpointAttestor;
+    const authority = this.options.supervisor.isOptionalHardeningChild?.(runId) === true
+      ? await this.options.supervisor.getVerifiedHardeningCandidateCheckpoint({ runId }, attestor)
+      : await this.options.supervisor.getVerifiedCandidateCheckpoint({ runId }, attestor);
+    return authority ? verifiedCandidateSummary(authority.checkpoint) : null;
+  }
+
+  approvalAuthority(runId: string) {
+    const approval = this.approval(runId);
+    return this.authorityForApproval(approval);
+  }
+
+  approvalView(runId: string) {
+    const approval = this.approval(runId);
+    return { approval, approvalAuthority: this.authorityForApproval(approval) };
+  }
+
+  private authorityForApproval(approval: ReturnType<EngineerRunManager["approval"]>) {
+    if (approval?.status !== "PENDING" || !approval.verifiedCheckpointId || !approval.verifiedCheckpointHash) return null;
+    return {
+      expectedVerifiedCheckpointId: approval.verifiedCheckpointId,
+      expectedVerifiedCheckpointHash: approval.verifiedCheckpointHash,
+      expectedApprovalRevision: approval.approvalRevision,
+    };
+  }
+
   budget(principal: EngineerPrincipal, runId: string): EngineerBudgetSnapshot {
     this.assertOwner(runId, principal);
     return this.options.supervisor.reconcileBudget(runId);
@@ -219,6 +615,7 @@ export class EngineerRunManager {
     expectedRevision: number; topUp: BudgetTopUp; idempotencyKey: string;
   }): EngineerBudgetSnapshot {
     this.assertOwner(runId, principal);
+    this.assertHardeningBudgetIsNotExtended(runId);
     return this.options.supervisor.topUpBudget({ runId, ...input, actorId: principal.ownerId });
   }
 
@@ -226,6 +623,7 @@ export class EngineerRunManager {
     expectedStateVersion: number; expectedBudgetRevision: number; idempotencyKey: string;
   }): Promise<EngineerRun> {
     this.assertOwner(runId, principal);
+    this.assertHardeningBudgetIsNotExtended(runId);
     const verificationOwnedCheckpoint = this.options.verification?.ownsBudgetCheckpoint(runId) ?? false;
     const result = this.options.supervisor.resumeBudget({ runId, ...input, actorId: principal.ownerId });
     this.clearError(runId);
@@ -292,6 +690,7 @@ export class EngineerRunManager {
   }): Promise<EngineerRun> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     return this.options.supervisor.freezePlan({
       runId,
@@ -305,6 +704,7 @@ export class EngineerRunManager {
   async plan(principal: EngineerPrincipal, runId: string) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.context) throw new Error("Engineer context is not configured on this gateway");
     if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
@@ -341,12 +741,25 @@ export class EngineerRunManager {
       }, this.options.heartbeatIntervalMs ?? 10_000);
       heartbeatTimer.unref?.();
     }
+    let planningAuthorityRevoked=false;
+    const revokePlanningAuthority=()=>{
+      if(planningAuthorityRevoked)return;planningAuthorityRevoked=true;
+      cancellation.abort(new EngineerPlanningCancelledError());
+      if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
+      if(lease&&this.options.leaseManager){
+        try{this.options.leaseManager.release({leaseId:lease.lease.leaseId,ownerId:leaseOwnerId,
+          fencingToken:lease.lease.fencingToken,leaseToken:lease.leaseToken,
+          idempotencyKey:`plan-cancel-release:${lease.lease.renewalCount}`});}catch{/* expiry/recovery already revoked it */}
+        lease=null;
+      }
+    };
+    this.activePlanningRevocations.set(runId,revokePlanningAuthority);
     this.activePlanning.set(runId, cancellation);
     let markPlanningSettled!: () => void;
     const planningSettled = new Promise<void>((resolve) => { markPlanningSettled = resolve; });
     this.activePlanningSettled.set(runId, planningSettled);
     const assertPlanningAuthority = () => {
-      if (cancellation.signal.aborted) throw new EngineerPlanningCancelledError();
+      if (planningAuthorityRevoked||cancellation.signal.aborted) throw new EngineerPlanningCancelledError();
       if (lease && this.options.leaseManager) {
         try {
           this.options.leaseManager.assertActive({
@@ -428,6 +841,7 @@ export class EngineerRunManager {
       }
       throw error;
     } finally {
+      if(this.activePlanningRevocations.get(runId)===revokePlanningAuthority)this.activePlanningRevocations.delete(runId);
       if (heartbeatTimer) clearInterval(heartbeatTimer);
       if (lease && this.options.leaseManager) {
         try {
@@ -449,6 +863,7 @@ export class EngineerRunManager {
   recoverPlanning(): Array<{ runId: string; promise: Promise<unknown> }> {
     const recoveries: Array<{ runId: string; promise: Promise<unknown> }> = [];
     for (const run of this.options.supervisor.listRuns(["PLANNING", "REPLANNING"])) {
+      if(this.options.supervisor.isOptionalHardeningChild(run.runId))continue;
       const runningPlanner = (this.options.supervisor.exportRunRecords(run.runId)?.agent_executions ?? [])
         .some((agent) => agent.role === "PLANNER" && agent.status === "RUNNING");
       if (runningPlanner) {
@@ -470,6 +885,53 @@ export class EngineerRunManager {
       recoveries.push({ runId: run.runId, promise: this.plan(this.options.principal, run.runId) });
     }
     return recoveries;
+  }
+
+  /**
+   * Reclaims a cancellation that was durably committed before the gateway
+   * crashed. A live run lease is never displaced: the worker watchdog calls
+   * resumeCancellation after that authority expires. No user retry and no
+   * provider transport are involved.
+   */
+  recoverPendingCancellations(): Array<{ runId: string; promise: Promise<void> }> {
+    const recoveries: Array<{ runId: string; promise: Promise<void> }> = [];
+    for (const run of this.options.supervisor.listRuns(["CANCELLATION_PENDING"])) {
+      const promise = this.startCancellationRecovery(run.runId);
+      if (promise) recoveries.push({ runId: run.runId, promise });
+    }
+    return recoveries;
+  }
+
+  /** Watchdog continuation for a run whose previous worker lease expired. */
+  resumeCancellation(runId: string): void {
+    void this.startCancellationRecovery(runId)?.catch(() => undefined);
+  }
+
+  private startCancellationRecovery(runId: string): Promise<void> | null {
+    const existing = this.cancellationRecovery.get(runId);
+    if (existing) return existing;
+    const run = this.options.supervisor.getRun(runId);
+    if (run.state !== "CANCELLATION_PENDING") return null;
+    const promise = this.recoverPendingCancellation(runId).finally(() => {
+      if (this.cancellationRecovery.get(runId) === promise) this.cancellationRecovery.delete(runId);
+    });
+    this.cancellationRecovery.set(runId, promise);
+    this.background.add(promise);
+    void promise.finally(() => this.background.delete(promise));
+    return promise;
+  }
+
+  private async recoverPendingCancellation(runId: string): Promise<void> {
+    this.activePlanningRevocations.get(runId)?.();
+    this.activePlanning.get(runId)?.abort(new EngineerPlanningCancelledError());
+    this.options.execution?.cancel?.(runId);
+    this.options.verification?.cancel?.(runId);
+    try {
+      await this.completeCancellation(runId);
+    } finally {
+      this.options.execution?.finishCancellation?.(runId);
+      this.options.verification?.finishCancellation?.(runId);
+    }
   }
 
   resumePlanning(runId: string): void {
@@ -494,6 +956,7 @@ export class EngineerRunManager {
   async start(principal: EngineerPrincipal, runId: string): Promise<EngineerRun> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
     const run = this.options.execution.enqueue(runId);
@@ -505,6 +968,7 @@ export class EngineerRunManager {
   async retryProviderTimeout(principal: EngineerPrincipal, runId: string): Promise<EngineerRun> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     const pending = this.options.supervisor.getRun(runId);
     const reason = this.options.supervisor.listEvents(runId).at(-1)?.reasonCode;
@@ -540,12 +1004,19 @@ export class EngineerRunManager {
       if (this.draining) throw new Error("Engineer gateway is draining");
       await this.options.execution!.runQueued(runId).then(async () => {
         if (this.options.verification) await this.options.verification.verify(runId);
-        if (this.options.publication && this.options.supervisor.getRun(runId).state === "REVIEW_APPROVED") {
+        if (this.options.publication && !this.options.supervisor.isOptionalHardeningChild(runId) &&
+            this.options.supervisor.getRun(runId).state === "REVIEW_APPROVED") {
           await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
           await this.options.publication.start(runId, this.options.principal.reviewerId);
         }
       });
     })().catch((error) => {
+      if(this.options.supervisor.isOptionalHardeningChild(runId)){
+        const message=error instanceof Error?`${error.name} ${error.message}`:String(error);
+        const reason=error instanceof BudgetPausedError?"BUDGET_EXHAUSTED":/timeout/i.test(message)?"TIMED_OUT":
+          /security|scope|policy/i.test(message)?"SECURITY_BLOCKED":/environment|sandbox|docker|dependency/i.test(message)?"ENVIRONMENT_BLOCKED":"FAILED";
+        try{this.options.supervisor.recordOptionalHardeningStopped(runId,reason);}catch{/* preserve the primary execution failure */}
+      }
       if (error instanceof BudgetPausedError) this.clearError(runId);
       else this.persistError(runId, error);
     });
@@ -557,6 +1028,7 @@ export class EngineerRunManager {
   async recoverStaleBase(principal: EngineerPrincipal, runId: string): Promise<{ supersededRun: EngineerRun; replacementRun: EngineerRun }> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
     if (!this.options.publication || !this.options.planning || !this.options.context || !this.options.execution || !this.options.artifactStore) {
       throw new Error("stale-base recovery is not configured on this gateway");
     }
@@ -623,6 +1095,7 @@ export class EngineerRunManager {
   }> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
     if (!this.options.planning || !this.options.context || !this.options.artifactStore) {
       throw new Error("corrected-run recovery is not configured on this gateway");
     }
@@ -647,11 +1120,25 @@ export class EngineerRunManager {
     }).slice("sha256:".length, "sha256:".length + 32)}`;
     let replacement = this.options.supervisor.listRuns().find((candidate) => candidate.runId === replacementRunId);
     if (!replacement) {
+      const sourceBudget = this.options.supervisor.getBudget(runId);
+      if (sourceBudget.remaining.costUsd <= 0 || sourceBudget.remaining.tokens <= 0 || sourceBudget.remaining.timeSeconds <= 0) {
+        throw new Error("corrected-run recovery requires remaining budget; explicitly authorize a new bounded run instead");
+      }
       replacement = this.options.supervisor.receiveRequest({
         runId: replacementRunId,
         userId: principal.ownerId,
         repository: replacementRepository,
         request: sourceRun.requestOriginal,
+        // A correction is a continuation of the original attempt, never an
+        // opportunity to reset or silently enlarge the user's hard cap.
+        budget: {
+          costBudgetUsd: sourceBudget.remaining.costUsd,
+          tokenBudget: sourceBudget.remaining.tokens,
+          timeBudgetSeconds: sourceBudget.remaining.timeSeconds,
+          lifetimeCostBudgetUsd: sourceBudget.remaining.costUsd,
+          lifetimeTokenBudget: sourceBudget.remaining.tokens,
+          lifetimeTimeBudgetSeconds: sourceBudget.remaining.timeSeconds,
+        },
       });
     }
     if (replacement.requestOriginal !== sourceRun.requestOriginal || sha256(replacement.repository) !== sha256(replacementRepository)) {
@@ -782,7 +1269,8 @@ export class EngineerRunManager {
     if (!this.options.artifactStore) throw new Error("Engineer artifact store is not configured");
     const artifact = this.options.supervisor.listArtifacts(runId).find((item) => item.artifactId === artifactId);
     if (!artifact) throw new Error("Engineer artifact not found");
-    return previewEngineerArtifact(this.options.artifactStore, artifact);
+    return previewEngineerArtifact(this.options.artifactStore,artifact,undefined,
+      Boolean(this.options.supervisor.isOptionalHardeningChild?.(runId)));
   }
 
   claims(runId: string) {
@@ -800,12 +1288,14 @@ export class EngineerRunManager {
     this.assertOwner(runId, principal);
     if (!this.options.artifactStore) throw new Error("Engineer artifact store is required for a complete evidence export");
     const snapshot = this.options.supervisor.evidenceExportSnapshot(runId);
+    const strict=Boolean(this.options.supervisor.isOptionalHardeningChild?.(runId));
     const artifactPayloads = snapshot.artifacts.map((artifact) => ({
       artifactId: artifact.artifactId,
       sha256: artifact.sha256,
       sizeBytes: artifact.sizeBytes,
       encoding: "base64" as const,
-      content: this.options.artifactStore!.read(artifact).toString("base64"),
+      content:(strict?this.options.artifactStore!.readVerifiedExact(artifact):
+        this.options.artifactStore!.read(artifact)).toString("base64"),
     }));
     const content = {
       exportVersion: 2,
@@ -824,7 +1314,8 @@ export class EngineerRunManager {
       failures: snapshot.failures,
       decisions: snapshot.decisions,
     };
-    return { ...content, exportHash: sha256(content) };
+    const sanitized=withoutArtifactStorageReferences(content);
+    return { ...sanitized, exportHash: sha256(sanitized) };
   }
 
   evidenceExportStream(principal: EngineerPrincipal, runId: string): ReadableStream<Uint8Array> {
@@ -834,15 +1325,17 @@ export class EngineerRunManager {
     const snapshot = this.options.supervisor.evidenceExportSummary(runId);
     const supervisor = this.options.supervisor;
     const artifactStore = this.options.artifactStore;
+    const strict=Boolean(supervisor.isOptionalHardeningChild?.(runId));
     const hash = createHash("sha256");
     const encoder = new TextEncoder();
     const encoded = (value: string, checksum = true): Uint8Array => {
       if (checksum) hash.update(value, "utf8");
       return encoder.encode(value);
     };
-    const record = (value: Record<string, unknown>): Uint8Array => encoded(`${JSON.stringify(value)}\n`);
-    const stripStorageReferences = (value: unknown): string => JSON.stringify(value, (key, item) =>
-      key === "storage_reference" || key === "storageReference" ? undefined : item);
+    const record = (value: Record<string, unknown>): Uint8Array => encoded(
+      `${JSON.stringify(withoutArtifactStorageReferences(value))}\n`);
+    const stripStorageReferences = (value: unknown): string => JSON.stringify(
+      withoutArtifactStorageReferences(value));
 
     async function* chunks(): AsyncGenerator<Uint8Array> {
       const artifacts = snapshot.artifacts.map(({ storageReference: _privateStorageReference, ...artifact }) => artifact);
@@ -906,7 +1399,10 @@ export class EngineerRunManager {
         });
         yield encoded(`${prefix.slice(0, -1)},"content":"`);
         let carry = Buffer.alloc(0);
-        for await (const bytes of artifactStore.verifiedChunks(artifact)) {
+        const source=strict?(async function*(){const exact=artifactStore.readVerifiedExact(artifact);
+          for(let offset=0;offset<exact.byteLength;offset+=48*1024)yield exact.subarray(offset,offset+48*1024);})():
+          artifactStore.verifiedChunks(artifact);
+        for await (const bytes of source) {
           const combined = carry.byteLength === 0 ? bytes : Buffer.concat([carry, bytes]);
           const completeBytes = combined.byteLength - (combined.byteLength % 3);
           if (completeBytes > 0) yield encoded(combined.subarray(0, completeBytes).toString("base64"));
@@ -971,6 +1467,7 @@ export class EngineerRunManager {
   }) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     const resolution = this.options.supervisor.resolveDecision({
       runId,
@@ -1011,7 +1508,7 @@ export class EngineerRunManager {
     const afterDecision = this.options.supervisor.getRun(runId);
     const deferredRemaining = this.options.supervisor.listOpenDecisions(runId)
       .some((decision) => decision.classification === "DEFER");
-    if (this.options.publication && !deferredRemaining) {
+    if (this.options.publication && !deferredRemaining && !this.options.supervisor.isOptionalHardeningChild?.(runId)) {
       if (afterDecision.state === "REVIEW_APPROVED") {
         publication = await this.options.publication.start(runId, principal.reviewerId);
       } else if (afterDecision.state === "HUMAN_APPROVED") {
@@ -1060,39 +1557,46 @@ export class EngineerRunManager {
     return this.options.supervisor.latestApprovalRequest(runId);
   }
 
-  async approve(principal: EngineerPrincipal, runId: string, reason: string) {
+  async approve(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    this.assertRequiredLaneAction(runId);
     if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
-    return this.options.publication.approve(runId, principal.reviewerId, reason);
+    this.options.publication.assertApprovalAuthority(runId, expected);
+    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    return this.options.publication.approve(runId, principal.reviewerId, reason, expected);
   }
 
-  async requestChanges(principal: EngineerPrincipal, runId: string, reason: string): Promise<void> {
+  async requestChanges(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation): Promise<void> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    this.assertRequiredLaneAction(runId);
     if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
-    this.options.publication.requestChanges(runId, principal.reviewerId, reason);
+    this.options.publication.assertApprovalAuthority(runId, expected);
+    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    await this.options.publication.requestChanges(runId, principal.reviewerId, reason, expected);
   }
 
-  async reject(principal: EngineerPrincipal, runId: string, reason: string): Promise<void> {
+  async reject(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation): Promise<void> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
-    this.options.publication.reject(runId, principal.reviewerId, reason);
+    this.options.publication.assertApprovalAuthority(runId, expected);
+    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    await this.options.publication.reject(runId, principal.reviewerId, reason, expected);
   }
 
-  async resolveHumanReview(principal: EngineerPrincipal, runId: string, decision: "approve" | "reject", reason: string) {
+  async resolveHumanReview(principal: EngineerPrincipal, runId: string, decision: "reject" | "retry", reason: string) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
+    if ((decision as string) === "approve") throw new VerifiedCandidateRequiredError();
     // This is a control-plane decision over the immutable, hash-bound review
     // evidence already produced for the run. It must remain available when the
     // canonical branch advances after verification. Any configured publication
     // path performs its own current-base checks before a remote mutation.
     const run = this.options.supervisor.getRun(runId);
     if (run.state !== "HUMAN_REVIEW_REQUIRED") throw new Error(`human review requires HUMAN_REVIEW_REQUIRED, not ${run.state}`);
+    if(decision==="retry")this.assertRequiredLaneAction(runId);
     const flakeFailure = (this.options.supervisor.listFailures?.(runId) ?? [])
       .find((failure) => failure.reasonCode === "FLAKY_TEST_QUARANTINED");
     if (flakeFailure) {
@@ -1108,52 +1612,232 @@ export class EngineerRunManager {
       const recovery = this.options.supervisor.transition({
         runId, expectedStateVersion: run.stateVersion, nextState: "VERIFICATION_RECOVERY",
         reasonCode: "HUMAN_RETRY_FLAKY_TEST", actorType: "HUMAN", actorId: principal.reviewerId,
-        evidenceIds: flakeFailure.evidenceIds, manifestHash: run.manifestHash,
+        evidenceIds: flakeFailure.evidenceIds.length ? flakeFailure.evidenceIds : [flakeFailure.failureId], manifestHash: run.manifestHash,
         idempotencyKey: `human-flake:retry:${run.stateVersion}:${sha256(reason)}`,
+        facts: { reviewerRetryAuthorized: true },
       }).run;
       this.options.verification.resumeRecovered(runId);
       return { run: recovery, publication: null };
     }
     const bundle = this.options.supervisor.listEvidenceBundles(runId).at(-1);
-    if (!bundle) throw new Error("human review requires an immutable evidence bundle");
-    const evidenceIds = [bundle.evidenceBundleId];
     if (decision === "reject") {
+      const evidenceIds = bundle ? [bundle.evidenceBundleId] : [];
       return { run: this.options.supervisor.transition({
         runId, expectedStateVersion: run.stateVersion, nextState: "REJECTED",
         reasonCode: "HUMAN_REVIEW_REJECTED", actorType: "HUMAN", actorId: principal.reviewerId,
         evidenceIds, manifestHash: run.manifestHash, idempotencyKey: `human-review:reject:${run.stateVersion}:${sha256(reason)}`,
       }).run };
     }
-    const approved = this.options.supervisor.transition({
-      runId, expectedStateVersion: run.stateVersion, nextState: "REVIEW_APPROVED",
-      reasonCode: "HUMAN_REVIEW_APPROVED", actorType: "HUMAN", actorId: principal.reviewerId,
-      evidenceIds, manifestHash: run.manifestHash, idempotencyKey: `human-review:approve:${run.stateVersion}:${sha256(reason)}`,
-      facts: { reviewerDecisionValid: true, freshReviewerSession: true },
-    }).run;
-    if (!this.options.publication) return { run: approved, publication: null };
-    const publication = await this.options.publication.start(runId, principal.reviewerId);
-    return { run: approved, publication };
+    if (decision === "retry") {
+      if (!this.options.verification) throw new Error("Engineer verification is not configured for Reviewer recovery");
+      const sequence = this.options.supervisor.latestEventSequence(runId);
+      const latestEvent = sequence > 0 ? this.options.supervisor.listEvents(runId, sequence - 1, 1)[0] : undefined;
+      const reviewerFailure = [...(this.options.supervisor.listFailures(runId) ?? [])].reverse().find((failure) =>
+        failure.reasonCode === "PHASE3_UNEXPECTED_FAILURE" && failure.failureClass === "WORKFLOW_FAILURE");
+      if (!reviewerFailure || latestEvent?.reasonCode !== "PHASE3_UNEXPECTED_FAILURE" || latestEvent.previousState !== "REVIEWING") {
+        throw new Error("Reviewer retry requires a recorded failed Reviewer attempt");
+      }
+      const recovery = this.options.supervisor.transition({
+        runId, expectedStateVersion: run.stateVersion, nextState: "VERIFICATION_RECOVERY",
+        reasonCode: "HUMAN_RETRY_FAILED_REVIEWER", actorType: "HUMAN", actorId: principal.reviewerId,
+        evidenceIds: [reviewerFailure.failureId], manifestHash: run.manifestHash,
+        idempotencyKey: `human-review:retry:${run.stateVersion}:${sha256(reason)}`,
+        facts: { reviewerRetryAuthorized: true },
+      }).run;
+      this.options.supervisor.setLastError(runId, null);
+      this.options.verification.resumeRecovered(runId);
+      return { run: recovery, publication: null };
+    }
+    throw new Error("Reviewer retry requires a recorded failed Reviewer attempt");
   }
 
-  async extendApproval(principal: EngineerPrincipal, runId: string, reason: string, extensionSeconds: number) {
+  async extendApproval(principal: EngineerPrincipal, runId: string, reason: string, extensionSeconds: number, expected: ApprovalAuthorityExpectation) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    this.assertRequiredLaneAction(runId);
     if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
-    return this.options.publication.extend(runId, principal.reviewerId, reason, extensionSeconds);
+    this.options.publication.assertApprovalAuthority(runId, expected);
+    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    return this.options.publication.extend(runId, principal.reviewerId, reason, extensionSeconds, expected);
+  }
+
+  async expireApproval(principal: EngineerPrincipal, runId: string, expected: ApprovalAuthorityExpectation): Promise<void> {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    if (!this.options.publication) throw new Error("Engineer publication is not configured on this gateway");
+    this.options.publication.assertApprovalAuthority(runId, expected);
+    await this.options.publication.expire(runId, expected);
   }
 
   async cancel(principal: EngineerPrincipal, runId: string, reason: string): Promise<void> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    this.activePlanning.get(runId)?.abort(new EngineerPlanningCancelledError());
-    this.options.execution?.cancel(runId);
-    this.options.verification?.cancel(runId);
+    // Persist the user's stop authority before signalling any in-memory work.
+    // A process crash or an abort-ignoring transport therefore leaves an
+    // actionable CANCELLATION_PENDING record, never a misleading active run.
+    this.requestCancellationWithoutPublication(runId,principal.ownerId,reason);
+    if(this.options.supervisor.getRun(runId).state==="CANCELLED")return;
+    // All callers converge on the same cleanup/reconciliation operation after
+    // the durable stop intent exists. This includes a user double-click racing
+    // the boot/watchdog recovery path; neither may perform cleanup twice.
+    const existing=this.cancellationRecovery.get(runId);
+    if(existing){await existing;return;}
+    let operation!:Promise<void>;
+    operation=this.performCancellation(runId).finally(()=>{
+      if(this.cancellationRecovery.get(runId)===operation)this.cancellationRecovery.delete(runId);
+    });
+    this.cancellationRecovery.set(runId,operation);
+    await operation;
+  }
+
+  private async performCancellation(runId:string):Promise<void>{
+    let handedOff=false;
+    try{
+      this.activePlanningRevocations.get(runId)?.();
+      this.activePlanning.get(runId)?.abort(new EngineerPlanningCancelledError());
+      this.options.execution?.cancel?.(runId);
+      this.options.verification?.cancel?.(runId);
+      const drain=Promise.allSettled([
+        this.activePlanningSettled.get(runId)??Promise.resolve(),
+        this.options.execution?.waitForIdle?.(runId)??Promise.resolve(),
+        this.options.verification?.waitForIdle?.(runId)??Promise.resolve(),
+      ]);
+      const leaseBound=Math.max(1,this.options.leaseTtlMs??30_000);
+      const drainTimeout=Math.max(1,Math.min(this.options.cancellationDrainTimeoutMs??5_000,leaseBound));
+      let timer:ReturnType<typeof setTimeout>|null=null;
+      const drained=await Promise.race([drain.then(()=>true),new Promise<false>((resolve)=>{
+        timer=setTimeout(()=>resolve(false),drainTimeout);timer.unref?.();
+      })]);
+      if(timer)clearTimeout(timer);
+      if(!drained){
+        // All renewable authorities were synchronously revoked above. Finish
+        // cleanup off the request path so the UI returns promptly even when a
+        // provider transport ignores AbortSignal.
+        handedOff=true;
+        let job!:Promise<void>;
+        job=this.completeCancellation(runId)
+          .catch((error)=>{this.options.supervisor.setLastError(runId,
+            `Cancellation cleanup failed: ${error instanceof Error?error.message:String(error)}`);})
+          .finally(()=>{
+            this.options.execution?.finishCancellation?.(runId);this.options.verification?.finishCancellation?.(runId);
+            if(this.cancellationRecovery.get(runId)===job)this.cancellationRecovery.delete(runId);
+          });
+        // Replace the request-path promise with the durable convergence job so
+        // any later duplicate cancellation or recovery awaits the same owner.
+        this.cancellationRecovery.set(runId,job);
+        this.background.add(job);void job.finally(()=>this.background.delete(job));
+        return;
+      }
+      await this.completeCancellation(runId);
+    }finally{
+      if(!handedOff){this.options.execution?.finishCancellation?.(runId);this.options.verification?.finishCancellation?.(runId);}
+    }
+  }
+
+  private async completeCancellation(runId:string):Promise<void>{
+    const leaseManager=this.options.leaseManager;
+    if(!leaseManager){
+      await this.completeCancellationWithAuthority(runId,null,()=>undefined,(operation)=>operation());
+      const supervisor=this.options.supervisor as EngineerSupervisor&DurableCancellationSupervisor;
+      const expectedLastError=supervisor.getLastError(runId);
+      supervisor.finalizeRunCancellation({runId,outcome:"CANCELLED",expectedLastError,
+        lastError:this.cancellationCompletionLastError(expectedLastError)});
+      return;
+    }
+    const leaseTtlMs=Math.max(1,this.options.leaseTtlMs??30_000);
+    const ownerId=`gateway-cancel-${sha256({workerOwnerId:this.options.workerOwnerId??"gateway",instance:this.managerInstanceId})
+      .slice("sha256:".length)}`;
+    let lease:WorkerLeaseGrant;
+    try{
+      lease=leaseManager.acquire({resourceKey:`run:${runId}`,ownerId,ttlMs:leaseTtlMs,
+        idempotencyKey:`cancel-owner:${this.managerInstanceId}:${randomUUID()}`});
+    }catch(error){
+      if(error instanceof WorkerLeaseConflictError||error instanceof WorkerLeaseCapacityError){
+        // Another fenced gateway owns cleanup. The durable pending intent and
+        // periodic sweep are sufficient; a losing worker must not race the
+        // owner's final cancellation CAS with an unfenced diagnostic write.
+        return;
+      }
+      throw error;
+    }
+    let heartbeatFailure:unknown=null,heartbeatSequence=0;
+    const heartbeatEvery=Math.max(1,Math.min(this.options.heartbeatIntervalMs??10_000,Math.floor(leaseTtlMs/3)||1));
+    let heartbeat:ReturnType<typeof setInterval>|null=setInterval(()=>{
+      try{
+        heartbeatSequence+=1;
+        const renewed=leaseManager.heartbeat({leaseId:lease.lease.leaseId,ownerId,
+          fencingToken:lease.lease.fencingToken,leaseToken:lease.leaseToken,
+          idempotencyKey:`cancel-heartbeat:${this.managerInstanceId}:${heartbeatSequence}`});
+        lease={...lease,lease:renewed};
+      }catch(error){heartbeatFailure=error;if(heartbeat){clearInterval(heartbeat);heartbeat=null;}}
+    },heartbeatEvery);
+    heartbeat.unref?.();
+    const assertAuthority=()=>{
+      if(heartbeatFailure)throw heartbeatFailure;
+      const active=leaseManager.assertActive({leaseId:lease.lease.leaseId,ownerId,
+        fencingToken:lease.lease.fencingToken,leaseToken:lease.leaseToken});
+      lease={...lease,lease:active};
+    };
+    const proof=()=>({leaseId:lease.lease.leaseId,ownerId,fencingToken:lease.lease.fencingToken,
+      leaseToken:lease.leaseToken});
+    const guarded=<T>(operation:()=>T):T=>leaseManager.withActiveLease(proof(),()=>operation());
+    try{
+      await this.completeCancellationWithAuthority(runId,()=>({lease,ownerId}),assertAuthority,guarded);
+      if(heartbeat){clearInterval(heartbeat);heartbeat=null;}
+      if(heartbeatFailure)throw heartbeatFailure;
+      guarded(()=>{
+        const supervisor=this.options.supervisor as EngineerSupervisor&DurableCancellationSupervisor;
+        const expectedLastError=supervisor.getLastError(runId);
+        return supervisor.finalizeRunCancellation({runId,outcome:"CANCELLED",expectedLastError,
+          lastError:this.cancellationCompletionLastError(expectedLastError)});
+      });
+    }catch(error){
+      if(heartbeat){clearInterval(heartbeat);heartbeat=null;}
+      try{guarded(()=>this.options.supervisor.setLastError(runId,
+        `Cancellation cleanup failed: ${error instanceof Error?error.message:String(error)}`));}
+      catch{/* Stale authority leaves the durable pending intent for watchdog recovery. */}
+      throw error;
+    }finally{
+      if(heartbeat)clearInterval(heartbeat);
+      try{leaseManager.release({leaseId:lease.lease.leaseId,ownerId,fencingToken:lease.lease.fencingToken,
+        leaseToken:lease.leaseToken,idempotencyKey:`cancel-release:${this.managerInstanceId}`});}
+      catch{/* Expiry/watchdog recovery already revoked this generation. */}
+    }
+  }
+
+  private async completeCancellationWithAuthority(runId:string,
+    leaseAuthority:(()=>{lease:WorkerLeaseGrant;ownerId:string})|null,assertAuthority:()=>void,
+    guarded:<T>(operation:()=>T)=>T):Promise<void>{
+    // Reconcile paid-call uncertainty while the durable run still carries the
+    // CANCELLATION_PENDING intent. Only after accounting and outbox effects
+    // converge may the workflow become terminal CANCELLED.
+    if(this.options.supervisor.isOptionalHardeningChild(runId)){
+      const leaseManager=this.options.leaseManager;
+      const authority=leaseAuthority?.();
+      if(!leaseManager||!authority)throw new Error("hardening cancellation requires the fenced worker-lease authority");
+      assertAuthority();
+      const nowMs=(this.options.now??(()=>new Date()))().getTime();
+      this.options.supervisor.recoverHardeningPaidCallLifecycle({childRunId:runId,ownerId:authority.ownerId,
+        rawToken:sha256({namespace:"hardening-cancel-recovery-v1",runId,workerLeaseId:authority.lease.lease.leaseId}),nowMs,
+        recoveryWorkerLease:{leaseId:authority.lease.lease.leaseId,ownerId:authority.ownerId,
+          fencingToken:authority.lease.lease.fencingToken,leaseToken:authority.lease.leaseToken}});
+      assertAuthority();
+      if(this.options.supervisor.listOpenHardeningPaidCallReservations(runId).length>0||
+          this.options.supervisor.listPendingHardeningPaidCallFinalizations(runId).length>0){
+        throw new CancellationStillPendingError("Cancellation is waiting for the bounded paid-call fence to expire and reconcile.");
+      }
+    }
+    // Optional-hardening recovery must own orphan finalization first: its
+    // exact RECOVERY_TERMINAL proof is the audit successor for any paid call.
+    // Generic cancellation draining is safe only after every paid reservation
+    // and finalization has converged (and remains the normal-run path).
+    guarded(()=>this.options.supervisor.finalizeRunningAgentExecutions(runId,"FAILED","USER_CANCELLATION_DRAINED"));
     // Cancellation is a fail-safe control, not a new execution admission.
     // A run must remain stoppable after its base becomes stale or a connector
     // grant is revoked; ownership and publication cleanup fences still apply.
-    if (this.options.publication) return this.options.publication.cancel(runId, principal.ownerId, reason);
-    return this.cancelWithoutPublication(runId, principal.ownerId, reason);
+    assertAuthority();
+    await this.options.cleanupRun?.(runId);
+    assertAuthority();
   }
 
   private assertOwner(runId: string, principal: EngineerPrincipal): void {
@@ -1171,48 +1855,45 @@ export class EngineerRunManager {
     }
   }
 
-  private async cancelWithoutPublication(runId: string, actorId: string, reason: string): Promise<void> {
+  private requestCancellationWithoutPublication(runId:string,actorId:string,reason:string):void{
     const artifactStore = this.options.artifactStore;
     if (!artifactStore) throw new Error("Engineer control is not configured on this gateway");
     const run = this.options.supervisor.getRun(runId);
     if (actorId !== run.userId) throw new Error("cancellation actor does not own this run");
+    if(run.state==="CANCELLED"||run.state==="CANCELLATION_PENDING")return;
     if (run.terminalAt) throw new Error(`terminal run ${run.state} cannot be cancelled`);
-    const resumingPendingCleanup = run.state === "CANCELLATION_PENDING";
-    if (!resumingPendingCleanup && !isCancellationAllowed(run.state)) {
+    if (!isCancellationAllowed(run.state)) {
       throw new Error(`cancellation is fenced while publication state is ${run.state}; remote cleanup is not safely available`);
     }
     if (hasUnreconciledRemotePublication(this.options.supervisor.listGitOperations(runId))) {
       throw new Error("cancellation is fenced because remote publication was attempted and no durable remote cleanup is available");
     }
-    let current = run;
-    if (!resumingPendingCleanup) {
-      const artifact = this.options.supervisor.recordArtifact(artifactStore.put({
-        runId, type: "CANCELLATION_REQUEST",
-        bytes: JSON.stringify({ actorId, reason, requestedAt: new Date().toISOString() }),
-        producerType: "SYSTEM", producerId: "engineer-supervisor", trusted: true,
-      }));
-      current = this.options.supervisor.transition({
-        runId, expectedStateVersion: run.stateVersion, nextState: "CANCELLATION_PENDING",
-        reasonCode: "USER_CANCELLATION_REQUESTED", actorType: "HUMAN", actorId,
-        evidenceIds: [artifact.artifactId], manifestHash: run.manifestHash,
-        idempotencyKey: `control:cancel:${run.stateVersion}`,
-      }).run;
-    }
-    try {
-      await this.options.cleanupRun?.(runId);
-      current = this.options.supervisor.transition({
-        runId, expectedStateVersion: current.stateVersion, nextState: "CANCELLED",
-        reasonCode: "RUN_CLEANUP_COMPLETE", manifestHash: current.manifestHash,
-        idempotencyKey: `control:cancelled:${current.stateVersion}`,
-      }).run;
-    } catch (error) {
-      this.options.supervisor.transition({
-        runId, expectedStateVersion: current.stateVersion, nextState: "FAILED",
-        reasonCode: "CANCELLATION_CLEANUP_FAILED", manifestHash: current.manifestHash,
-        idempotencyKey: `control:cancel-failed:${current.stateVersion}`,
-      });
+    const artifact=artifactStore.put({runId,type:"CANCELLATION_REQUEST",
+      bytes:JSON.stringify({actorId,reason,requestedAt:(this.options.now??(()=>new Date()))().toISOString()}),
+      producerType:"SYSTEM",producerId:"engineer-supervisor",trusted:true});
+    try{
+      const result=(this.options.supervisor as EngineerSupervisor&DurableCancellationSupervisor)
+        .requestRunCancellation({runId,actorId,artifact});
+      if(!result.applied)this.removeUnreferencedCancellationArtifact(runId,artifact);
+    }catch(error){
+      this.removeUnreferencedCancellationArtifact(runId,artifact);
       throw error;
     }
+  }
+
+  private removeUnreferencedCancellationArtifact(runId:string,artifact:ArtifactRecord):void{
+    // LocalArtifactStore is content-addressed. A duplicate request can resolve
+    // to the exact same bytes as the elected artifact, so physical deletion is
+    // allowed only after the authoritative ledger proves no ArtifactRecord for
+    // this run references that storage path.
+    if(this.options.supervisor.listArtifacts(runId)
+      .some((record)=>record.storageReference===artifact.storageReference))return;
+    try{unlinkSync(artifact.storageReference);}catch{/* Missing cleanup candidate is already safe. */}
+  }
+
+  private cancellationCompletionLastError(current:string|null):string|null{
+    if(current?.startsWith("Cancellation cleanup pending:")||current?.startsWith("Cancellation cleanup failed:"))return null;
+    return current;
   }
 
   subscribe(runId: string, afterSequence = 0): ReadableStream<Uint8Array> {

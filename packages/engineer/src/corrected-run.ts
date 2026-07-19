@@ -68,6 +68,7 @@ export const CorrectedRunDirectiveSchema = z.object({
 });
 
 export type CorrectedRunDirective = z.infer<typeof CorrectedRunDirectiveSchema>;
+export type SafeCorrectionAction = z.infer<typeof SafeCorrectionActionSchema>;
 
 export function createCorrectedRunDirective(
   content: z.input<typeof CorrectedRunDirectiveContentSchema>,

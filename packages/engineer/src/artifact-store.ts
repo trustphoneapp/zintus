@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, openSync, closeSync, readFileSync, readSync, readdirSync, statSync, fstatSync, lstatSync, unlinkSync, writeFileSync, createReadStream } from "node:fs";
+import { chmodSync, mkdirSync, openSync, closeSync, readFileSync, readSync, readdirSync, statSync, fstatSync, lstatSync, unlinkSync, writeFileSync, createReadStream, realpathSync, constants } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { ArtifactRecordSchema, type ArtifactRecord } from "./execution-contracts.js";
 import { matchesSha256Bytes, sha256Bytes } from "./hash.js";
@@ -28,18 +28,22 @@ export interface ArtifactStoreOptions {
   maxRunArtifactBytes?: number;
   now?: () => Date;
   idFactory?: () => string;
+  /** Deterministic adversarial seam; never configured by production wiring. */
+  afterStrictReadStageForTest?:(stage:"ROOT_OPENED"|"RUN_OPENED"|"LEAF_VALIDATED"|"ARTIFACT_OPENED")=>void;
 }
 
 /** Content-addressed local storage. Bytes are immutable and verified again on read. */
 export class LocalArtifactStore {
   private readonly root: string;
+  private readonly rootIdentity: { dev: number; ino: number; uid: number };
   private readonly maxArtifactBytes: number;
   private readonly maxRunArtifactBytes: number;
   private readonly now: () => Date;
   private readonly idFactory: () => string;
+  private readonly afterStrictReadStageForTest:ArtifactStoreOptions["afterStrictReadStageForTest"];
 
   constructor(options: ArtifactStoreOptions) {
-    this.root = resolve(options.root);
+    const requestedRoot=resolve(options.root);
     this.maxArtifactBytes = options.maxArtifactBytes ?? DEFAULT_MAX_ARTIFACT_BYTES;
     this.maxRunArtifactBytes = Math.min(
       options.maxRunArtifactBytes ?? DEFAULT_MAX_RUN_ARTIFACT_BYTES,
@@ -47,7 +51,13 @@ export class LocalArtifactStore {
     );
     this.now = options.now ?? (() => new Date());
     this.idFactory = options.idFactory ?? randomUUID;
-    ensurePrivateDirectory(this.root);
+    this.afterStrictReadStageForTest=options.afterStrictReadStageForTest;
+    ensurePrivateDirectory(requestedRoot);
+    // Ancestor aliases such as macOS /var -> /private/var are legitimate at
+    // admission. All durable paths are minted from the one canonical root.
+    this.root=realpathSync(requestedRoot);
+    const rootStat=lstatSync(this.root);
+    this.rootIdentity={dev:rootStat.dev,ino:rootStat.ino,uid:rootStat.uid};
   }
 
   put(input: {
@@ -57,6 +67,7 @@ export class LocalArtifactStore {
     producerType: "EXECUTOR" | "SYSTEM";
     producerId: string;
     trusted: boolean;
+    createdAt?: string;
   }): ArtifactRecord {
     const runId = safeIdentifier(input.runId, "runId");
     const bytes = typeof input.bytes === "string" ? Buffer.from(input.bytes) : Buffer.from(input.bytes);
@@ -106,7 +117,7 @@ export class LocalArtifactStore {
       storageReference,
       sizeBytes: bytes.byteLength,
       trusted: input.trusted,
-      createdAt: this.now().toISOString(),
+      createdAt: input.createdAt ?? this.now().toISOString(),
     });
   }
 
@@ -121,6 +132,55 @@ export class LocalArtifactStore {
       throw new Error(`artifact integrity check failed: ${parsed.artifactId}`);
     }
     return bytes;
+  }
+
+  /** Strict trust-boundary read: no legacy canonical-object hash fallback. */
+  readVerifiedExact(record:ArtifactRecord):Buffer{
+    const parsed=ArtifactRecordSchema.parse(record),runRoot=join(this.root,safeIdentifier(parsed.runId,"runId")),
+      digestName=parsed.sha256.slice("sha256:".length),path=join(runRoot,digestName);
+    if(resolve(parsed.storageReference)!==path)
+      throw new Error("strict artifact reference is not its exact content-addressed run path");
+    let rootFd:number|null=null,runFd:number|null=null,artifactFd:number|null=null;
+    try{
+      const rootBefore=this.assertStrictDirectory(this.root,this.rootIdentity,"artifact root");
+      rootFd=openSync(this.root,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+      this.assertSameIdentity(fstatSync(rootFd),rootBefore,"artifact root changed during strict read");
+      this.afterStrictReadStageForTest?.("ROOT_OPENED");
+      const runBefore=this.assertStrictDirectory(runRoot,undefined,"artifact run directory");
+      runFd=openSync(runRoot,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);
+      this.assertSameIdentity(fstatSync(runFd),runBefore,"artifact run directory changed during strict read");
+      this.afterStrictReadStageForTest?.("RUN_OPENED");
+      const leafBefore=lstatSync(path);
+      if(!leafBefore.isFile()||leafBefore.isSymbolicLink()||(process.getuid&&leafBefore.uid!==process.getuid()))
+        throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
+      this.afterStrictReadStageForTest?.("LEAF_VALIDATED");
+      artifactFd=openSync(path,constants.O_RDONLY|constants.O_NOFOLLOW);
+      const opened=fstatSync(artifactFd);
+      if(!opened.isFile()||(process.getuid&&opened.uid!==process.getuid()))
+        throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
+      this.assertSameIdentity(opened,leafBefore,"artifact changed while opening strict read");
+      this.afterStrictReadStageForTest?.("ARTIFACT_OPENED");
+      const bytes=readFileSync(artifactFd),afterRead=fstatSync(artifactFd);
+      this.assertSameIdentity(afterRead,opened,"artifact changed during strict read");
+      if(bytes.byteLength!==parsed.sizeBytes||afterRead.size!==parsed.sizeBytes||sha256Bytes(bytes)!==parsed.sha256)
+        throw new Error(`artifact exact-byte integrity check failed: ${parsed.artifactId}`);
+      const rootAfter=this.assertStrictDirectory(this.root,this.rootIdentity,"artifact root"),
+        runAfter=this.assertStrictDirectory(runRoot,runBefore,"artifact run directory"),leafAfter=lstatSync(path);
+      this.assertSameIdentity(rootAfter,rootBefore,"artifact root changed during strict read");
+      this.assertSameIdentity(runAfter,runBefore,"artifact run directory changed during strict read");
+      this.assertSameIdentity(fstatSync(rootFd),rootBefore,"artifact root descriptor changed during strict read");
+      this.assertSameIdentity(fstatSync(runFd),runBefore,"artifact run descriptor changed during strict read");
+      this.assertSameIdentity(leafAfter,opened,"artifact path changed during strict read");
+      if(!leafAfter.isFile()||leafAfter.isSymbolicLink())throw new Error("artifact path changed during strict read");
+      return bytes;
+    }catch(error){
+      if(error instanceof Error&&error.message.includes(parsed.artifactId))throw error;
+      throw new Error(`artifact strict path integrity check failed: ${parsed.artifactId}`,{cause:error});
+    }finally{
+      if(artifactFd!==null)try{closeSync(artifactFd);}catch{/* best effort */}
+      if(runFd!==null)try{closeSync(runFd);}catch{/* best effort */}
+      if(rootFd!==null)try{closeSync(rootFd);}catch{/* best effort */}
+    }
   }
 
   /** Verifies the complete artifact while retaining only a bounded prefix. */
@@ -203,5 +263,18 @@ export class LocalArtifactStore {
       throw new Error(`artifact storage is not an owner-controlled regular file: ${parsed.artifactId}`);
     }
     return { parsed, path };
+  }
+
+  private assertStrictDirectory(path:string,expected:{dev:number;ino:number;uid?:number}|undefined,label:string){
+    const stat=lstatSync(path);
+    if(!stat.isDirectory()||stat.isSymbolicLink()||(process.getuid&&stat.uid!==process.getuid())||realpathSync(path)!==path)
+      throw new Error(`${label} is not an owner-controlled canonical directory`);
+    if(expected)this.assertSameIdentity(stat,expected,`${label} identity changed`);
+    return stat;
+  }
+
+  private assertSameIdentity(actual:{dev:number;ino:number;uid?:number},expected:{dev:number;ino:number;uid?:number},message:string):void{
+    if(actual.dev!==expected.dev||actual.ino!==expected.ino||
+      (expected.uid!==undefined&&actual.uid!==expected.uid))throw new Error(message);
   }
 }

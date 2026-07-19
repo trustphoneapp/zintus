@@ -39,17 +39,124 @@ function decodeGitPath(raw: string): string {
   return Buffer.from(bytes).toString("utf8");
 }
 
-function changedPathsFromDiff(diff: string): string[] {
-  const paths: string[] = [];
-  for (const match of diff.matchAll(/^\+\+\+ (.+)$/gm)) {
-    const raw = match[1]!;
-    if (raw === "/dev/null") continue;
-    const decoded = decodeGitPath(raw);
-    paths.push(decoded.startsWith("b/") ? decoded.slice(2) : decoded);
+const DIFF_GIT_HEADER = /^diff --git (.+)$/;
+
+/** Strip the `a/` or `b/` diff prefix that `diff --git`, `---`, and `+++` lines carry. */
+function stripDiffPrefix(path: string): string {
+  return path.replace(/^[ab]\//, "");
+}
+
+/**
+ * Recover the concrete repository paths for one `diff --git` file block.
+ *
+ * Git does NOT quote spaces in `diff --git` headers, so the `a/… b/…` split is
+ * genuinely ambiguous for unquoted paths that contain spaces. We therefore treat
+ * the space-safe body markers as authoritative wherever they exist:
+ *   - `rename from` / `rename to` and `copy from` / `copy to` (no `a/`,`b/` prefix)
+ *   - the `---` / `+++` file headers (each carries exactly one `a/` or `b/` path)
+ * These lines always appear before the first `@@`, so we stop scanning there to
+ * avoid mistaking a hunk content line such as `--- foo` for a file header.
+ *
+ * When a block has no authoritative body markers we fall back to parsing the
+ * `diff --git` header, but only when it can be split unambiguously (quoted sides,
+ * or unquoted sides that both contain no spaces). Anything else is reported as
+ * unresolved so callers can FAIL CLOSED instead of silently dropping the path.
+ */
+function resolveBlockPaths(headerBody: string, block: string[]): { paths: string[]; ambiguous: boolean } {
+  const paths = new Set<string>();
+  for (const line of block) {
+    if (line.startsWith("@@")) break;
+    let match: RegExpMatchArray | null;
+    if ((match = line.match(/^rename (?:from|to) (.+)$/)) || (match = line.match(/^copy (?:from|to) (.+)$/))) {
+      // rename/copy paths are repository-relative with no `a/`,`b/` prefix.
+      paths.add(decodeGitPath(match[1]!));
+    } else if ((match = line.match(/^(?:---|\+\+\+) (.+)$/))) {
+      const raw = match[1]!;
+      if (raw !== "/dev/null") paths.add(stripDiffPrefix(decodeGitPath(raw)));
+    }
   }
-  if (paths.length > 0) return paths;
-  return [...diff.matchAll(/^diff --git (?:a\/\S+|"a\/(?:\\.|[^"])*") (b\/\S+|"b\/(?:\\.|[^"])*")$/gm)]
-    .map((match) => decodeGitPath(match[1]!).replace(/^b\//, ""));
+  if (paths.size > 0) return { paths: [...paths], ambiguous: false };
+  const parsed = parseDiffGitHeader(headerBody);
+  return parsed ? { paths: parsed, ambiguous: false } : { paths: [], ambiguous: true };
+}
+
+/** Parse a `diff --git` header body, returning null when the split is ambiguous. */
+function parseDiffGitHeader(body: string): string[] | null {
+  // A quoted a-side has a well-defined closing quote, so the separator and the
+  // (quoted or unquoted) b-side are unambiguous even with embedded spaces.
+  const aQuoted = body.match(/^"a\/(?:\\.|[^"])*"/);
+  if (aQuoted) {
+    const aToken = aQuoted[0];
+    const rest = body.slice(aToken.length);
+    if (!rest.startsWith(" ")) return null;
+    const bToken = rest.slice(1);
+    if (!/^(?:"b\/(?:\\.|[^"])*"|b\/.+)$/.test(bToken)) return null;
+    return [stripDiffPrefix(decodeGitPath(aToken)), stripDiffPrefix(decodeGitPath(bToken))];
+  }
+  // Both sides unquoted: only safe when neither path contains a space, because a
+  // single space is then unambiguously the a/b separator.
+  const both = body.match(/^(a\/\S+) (b\/\S+)$/);
+  if (both) return [stripDiffPrefix(decodeGitPath(both[1]!)), stripDiffPrefix(decodeGitPath(both[2]!))];
+  return null;
+}
+
+export interface ChangedPathExtraction {
+  /** Concrete repository paths recovered from the diff (space- and rename-safe). */
+  paths: string[];
+  /**
+   * `diff --git` header bodies whose paths could not be recovered unambiguously.
+   * A non-empty list means the diff's scope is indeterminate and the run must be
+   * treated as a scope violation rather than promoted.
+   */
+  unresolved: string[];
+}
+
+/**
+ * Decode the final Git diff once for every policy that needs authoritative path
+ * scope. Includes BOTH sides of renames/copies and is safe for paths containing
+ * spaces; ambiguous unparseable headers are surfaced in `unresolved` so gates can
+ * fail closed.
+ */
+export function extractChangedPaths(diff: string): ChangedPathExtraction {
+  const lines = diff.split("\n");
+  const paths = new Set<string>();
+  const unresolved = new Set<string>();
+  let index = 0;
+  let sawHeader = false;
+  while (index < lines.length) {
+    const header = lines[index]!.match(DIFF_GIT_HEADER);
+    if (!header) { index += 1; continue; }
+    sawHeader = true;
+    let cursor = index + 1;
+    const block: string[] = [];
+    while (cursor < lines.length && !DIFF_GIT_HEADER.test(lines[cursor]!)) {
+      block.push(lines[cursor]!);
+      cursor += 1;
+    }
+    const resolved = resolveBlockPaths(header[1]!, block);
+    if (resolved.ambiguous) unresolved.add(header[1]!.trim());
+    else for (const path of resolved.paths) paths.add(path);
+    index = cursor;
+  }
+  // Plain unified diffs without `diff --git` headers still carry `---`/`+++`.
+  if (!sawHeader) {
+    for (const match of diff.matchAll(/^(?:\+\+\+|---) (.+)$/gm)) {
+      const raw = match[1]!;
+      if (raw === "/dev/null") continue;
+      paths.add(stripDiffPrefix(decodeGitPath(raw)));
+    }
+  }
+  return { paths: [...paths].sort(), unresolved: [...unresolved].sort() };
+}
+
+/**
+ * Flat list of every changed path for policies that only need path scope. Any
+ * ambiguous/unparseable `diff --git` header is folded in verbatim so it can never
+ * be silently dropped (it will not match a specific allowed glob).
+ */
+export function changedPathsFromDiff(diff: string): string[] {
+  const { paths, unresolved } = extractChangedPaths(diff);
+  return [...new Set([...paths, ...unresolved])].sort();
 }
 
 /** Derives deterministic floors from the actual patch and trusted verification records. */

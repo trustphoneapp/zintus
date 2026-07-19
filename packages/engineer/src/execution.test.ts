@@ -1,16 +1,20 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
   BuilderNoProgressError,
   BudgetPausedError,
+  buildIsolatedReviewerRequestPlan,
   CodexBuilder,
+  canonicalJson,
   DockerSandboxManager,
   EngineerExecutionManager,
-  EngineerWorkerLeaseManager,
+    EngineerWorkerLeaseManager,
+    HardeningGenericOperationForbiddenError,
+  StaleWorkerLeaseError,
   EngineerSupervisor,
   GitWorkspaceManager,
   LocalArtifactStore,
@@ -18,7 +22,9 @@ import {
   MAX_BUILDER_TOOL_CALLS_PER_RUN,
   BUILDER_CONTEXT_COMPACTION_THRESHOLD_TOKENS,
   BUILDER_MAX_OUTPUT_TOKENS,
+  builderInputContextHash,
   MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES,
+  MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION,
   OpenAIResponsesTransport,
   countResponseInputTokens,
   estimateResponseInputTokens,
@@ -32,16 +38,23 @@ import {
   isManifestPathAllowed,
   resolveEngineerModel,
   resolveManifestPath,
+  ReviewerInputSchema,
+  reviewerEvidenceBundleHash,
+  gitCommitLockfileHash,
   sha256,
   workspaceLockfileHash,
   hashDependencyTree,
   type ResponsesTransport,
   type BuilderContinuation,
+  type CheckpointAttestor,
   type SandboxRecord,
   type TaskManifest,
   type WorkspaceRecord,
 } from "./index.js";
+import type { OptionalHardeningStartPreparation } from "./ledger.js";
 import { transitionToPlanReadyForTest } from "./test-planning-evidence.js";
+import { hardeningCheckpointMilestoneKey,projectHardeningArtifactAuthority } from
+  "./hardening-verification-recovery.js";
 
 const roots: string[] = [];
 
@@ -166,6 +179,60 @@ describe("Phase 2 immutable artifacts", () => {
     expect(() => store.read(record)).toThrow("integrity check failed");
   });
 
+  test("strict reads reject an artifact-root symlink swap even when outside bytes have the exact hash",()=>{
+    const root=temporaryRoot(),artifactRoot=join(root,"artifacts"),outsideRoot=join(root,"outside-artifacts"),
+      originalRoot=join(root,"original-artifacts");let attack:(()=>void)|null=null;
+    const store=new LocalArtifactStore({root:artifactRoot,afterStrictReadStageForTest:(stage)=>{
+      if(stage==="ROOT_OPENED")attack?.();}}),record=store.put({runId:"root-swap",type:"LOG",bytes:"trusted",
+        producerType:"SYSTEM",producerId:"system",trusted:true}),digest=record.storageReference.split("/").at(-1)!;
+    mkdirSync(join(outsideRoot,"root-swap"),{recursive:true});writeFileSync(join(outsideRoot,"root-swap",digest),"trusted");
+    attack=()=>{attack=null;renameSync(artifactRoot,originalRoot);symlinkSync(outsideRoot,artifactRoot,"dir");};
+    expect(()=>store.readVerifiedExact(record)).toThrow("strict path integrity check failed");
+  });
+
+  test("canonicalizes a legitimate ancestor alias before minting strict artifact references",()=>{
+    const root=temporaryRoot(),realParent=join(root,"real-parent"),aliasParent=join(root,"alias-parent");
+    mkdirSync(realParent,{recursive:true});symlinkSync(realParent,aliasParent,"dir");
+    const store=new LocalArtifactStore({root:join(aliasParent,"artifacts")}),record=store.put({runId:"alias-run",type:"LOG",
+      bytes:"trusted",producerType:"SYSTEM",producerId:"system",trusted:true});
+    expect(record.storageReference.startsWith(`${realParent}/artifacts/alias-run/`)).toBe(true);
+    expect(store.readVerifiedExact(record).toString("utf8")).toBe("trusted");
+  });
+
+  test("strict reads reject a run-directory symlink swap while legacy reads retain compatibility",()=>{
+    const root=temporaryRoot(),artifactRoot=join(root,"artifacts"),outsideRun=join(root,"outside-run");let attack:(()=>void)|null=null;
+    const store=new LocalArtifactStore({root:artifactRoot,afterStrictReadStageForTest:(stage)=>{
+      if(stage==="RUN_OPENED")attack?.();}}),record=store.put({runId:"run-swap",type:"LOG",bytes:"trusted",
+        producerType:"SYSTEM",producerId:"system",trusted:true}),runRoot=dirname(record.storageReference),
+      originalRun=join(artifactRoot,"run-swap-original"),digest=record.storageReference.split("/").at(-1)!;
+    mkdirSync(outsideRun,{recursive:true});writeFileSync(join(outsideRun,digest),"trusted");
+    attack=()=>{attack=null;renameSync(runRoot,originalRun);symlinkSync(outsideRun,runRoot,"dir");};
+    expect(()=>store.readVerifiedExact(record)).toThrow("strict path integrity check failed");
+    expect(store.read(record).toString("utf8")).toBe("trusted");
+  });
+
+  test("strict reads reject leaf substitution between lstat and O_NOFOLLOW open",()=>{
+    const root=temporaryRoot(),outsideFile=join(root,"outside-leaf");let attack:(()=>void)|null=null;
+    const store=new LocalArtifactStore({root:join(root,"artifacts"),afterStrictReadStageForTest:(stage)=>{
+      if(stage==="LEAF_VALIDATED")attack?.();}}),record=store.put({runId:"leaf-swap",type:"LOG",bytes:"trusted",
+        producerType:"SYSTEM",producerId:"system",trusted:true});
+    writeFileSync(outsideFile,"trusted");attack=()=>{attack=null;renameSync(record.storageReference,
+      `${record.storageReference}.original`);symlinkSync(outsideFile,record.storageReference);};
+    expect(()=>store.readVerifiedExact(record)).toThrow("strict path integrity check failed");
+  });
+
+  test("strict reads reject a concurrent run-root swap after the artifact descriptor is open",()=>{
+    const root=temporaryRoot(),artifactRoot=join(root,"artifacts"),outsideRun=join(root,"concurrent-outside");
+    let attack:(()=>void)|null=null;
+    const store=new LocalArtifactStore({root:artifactRoot,afterStrictReadStageForTest:(stage)=>{
+      if(stage==="ARTIFACT_OPENED")attack?.();}}),record=store.put({runId:"concurrent-swap",type:"LOG",bytes:"trusted",
+        producerType:"SYSTEM",producerId:"system",trusted:true}),runRoot=dirname(record.storageReference),
+      originalRun=join(artifactRoot,"concurrent-swap-original"),digest=record.storageReference.split("/").at(-1)!;
+    mkdirSync(outsideRun,{recursive:true});writeFileSync(join(outsideRun,digest),"trusted");
+    attack=()=>{attack=null;renameSync(runRoot,originalRun);symlinkSync(outsideRun,runRoot,"dir");};
+    expect(()=>store.readVerifiedExact(record)).toThrow("strict path integrity check failed");
+  });
+
   test("enforces the configured artifact size cap", () => {
     const root = temporaryRoot();
     const store = new LocalArtifactStore({ root, maxArtifactBytes: 3 });
@@ -208,6 +275,365 @@ describe("Phase 2 exact-base Git workspaces", () => {
     expect(() => manager.create({
       runId: "run-1", repositoryRoot: repository.path, baseCommitSha: "0".repeat(40),
     })).toThrow();
+  });
+
+  test("materializes an exact verified candidate diff into a fresh base workspace", () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    writeFileSync(join(repository.path, "src", "value.ts"), "export const value = 2;\n");
+    const finalDiff = execFileSync("git", ["-C", repository.path, "diff", "--binary", repository.sha], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", repository.path, "checkout", "--", "src/value.ts"]);
+    const manager = new GitWorkspaceManager({ workspaceRoot: join(root, "seed-workspaces") });
+    const workspace = manager.create({ runId: "hardening-child", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+
+    const result = manager.materializeVerifiedSeed(workspace, {
+      baseCommitSha: repository.sha,
+      seedResultCommitSha: repository.sha,
+      finalDiff,
+      diffHash: sha256(finalDiff),
+    });
+
+    expect(result.headCommitSha).toBe(repository.sha);
+    expect(result.diff).toBe(finalDiff);
+    expect(result.diffHash).toBe(sha256(finalDiff));
+    expect(readFileSync(join(workspace.workspaceRoot, "src", "value.ts"), "utf8")).toBe("export const value = 2;\n");
+    manager.remove(workspace);
+  });
+
+  test("rejects changed or non-materializable verified seed authority", () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const manager = new GitWorkspaceManager({ workspaceRoot: join(root, "tamper-workspaces") });
+    const workspace = manager.create({ runId: "hardening-tamper", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const finalDiff = "diff --git a/src/missing.ts b/src/missing.ts\ninvalid";
+
+    expect(() => manager.materializeVerifiedSeed(workspace, {
+      baseCommitSha: repository.sha,
+      seedResultCommitSha: repository.sha,
+      finalDiff,
+      diffHash: sha256("different"),
+    })).toThrow("seed source diff hash mismatch");
+    expect(() => manager.materializeVerifiedSeed(workspace, {
+      baseCommitSha: repository.sha,
+      seedResultCommitSha: repository.sha,
+      finalDiff,
+      diffHash: sha256(finalDiff),
+    })).toThrow("verified seed diff could not be materialized");
+    manager.remove(workspace);
+  });
+});
+
+describe("optional hardening verified seed sandbox", () => {
+  test("uses a fresh cold sandbox, persists only after commit, and exactly reconstructs on replay", async () => {
+    const root=temporaryRoot();const repository=initRepository(root,true);const {workspace,sandbox}=records(repository.path,"hardening-seed",repository.sha);
+    const environmentDigest=sandbox.environmentDigest;let provisions=0,recoveries=0,destroys=0,recordsWritten=0;let durableArtifact:ReturnType<LocalArtifactStore["put"]>|null=null;
+    const artifactStore=new LocalArtifactStore({root:join(root,"artifacts")});
+    const sandboxManager={provisionColdAsync:async()=>{provisions+=1;return {workspace,record:sandbox};},
+      recoverAsync:async()=>{recoveries+=1;return {workspace,record:sandbox};},
+      workspaceManager:()=>({materializeVerifiedSeed:()=>({headCommitSha:repository.sha,treeHash:sha256("tree"),diffHash:sha256(""),diff:""}),
+        verifyMaterializedSeed:()=>({headCommitSha:repository.sha,treeHash:sha256("tree"),diffHash:sha256(""),diff:""})}),
+      destroyAsync:async()=>{destroys+=1;}};
+    const sandboxRow={id:sandbox.sandboxId,run_id:sandbox.runId,workspace_identity:sandbox.workspaceIdentity,image_digest:sandbox.imageDigest,
+      environment_digest:sandbox.environmentDigest,status:sandbox.status,created_at:sandbox.createdAt,destroyed_at:sandbox.destroyedAt};
+    const supervisor={getRun:()=>({manifestHash:sha256("manifest")}),recordSandboxWithCheckpoint:(_record:unknown,artifact:typeof durableArtifact)=>{recordsWritten+=1;durableArtifact=artifact;},
+      exportRunRecords:()=>({sandboxes:recordsWritten?[sandboxRow]:[]}),listArtifacts:()=>durableArtifact?[durableArtifact]:[]};
+    const manager=new EngineerExecutionManager({supervisor:supervisor as never,sandboxManager:sandboxManager as never,
+      artifactStore,repositoryRootFor:()=>repository.path,
+      transportForRun:async()=>({create:async()=>({id:"unused",output:[]})})});
+    const signer:CheckpointAttestor={algorithm:"test",keyId:"seed-test",sign:(payload)=>`test:${sha256(payload)}`,
+      verify:(payload,signature)=>signature===`test:${sha256(payload)}`};
+    const preparation={replay:false,operation:{operationId:sha256("operation-id"),operationHash:sha256("operation"),childRunId:"hardening-seed",
+      requesterUserId:"owner",expectedChildStateVersion:0,lineageId:sha256("lineage-id"),lineageHash:sha256("lineage"),idempotencyKey:"start",createdAt:"2026-07-18T12:00:00.000Z"},
+      lineage:{rootRunId:"parent",parentRunId:"parent",childRunId:"hardening-seed",requesterUserId:"owner",repositoryId:"repo-1",
+        lineageId:sha256("lineage-id"),lineageHash:sha256("lineage")},parentCheckpoint:{checkpointId:sha256("checkpoint-id"),checkpointHash:sha256("checkpoint")},
+      seed:{baseCommitSha:repository.sha,seedResultCommitSha:repository.sha,finalDiff:"",diffHash:sha256(""),environmentDigest},signedSeed:null} as unknown as OptionalHardeningStartPreparation;
+
+    const signed=await manager.materializeOptionalHardeningSeed(preparation,signer);
+    expect({provisions,destroys,recordsWritten}).toEqual({provisions:1,destroys:0,recordsWritten:0});
+    const durable=manager.prepareOptionalHardeningSeedCommit("hardening-seed",sha256("manifest"));
+    supervisor.recordSandboxWithCheckpoint(durable.sandbox,durable.checkpoint);manager.completeOptionalHardeningSeedCommit("hardening-seed");
+    expect(recordsWritten).toBe(1);
+    const durableCheckpoint=JSON.parse(artifactStore.read(durableArtifact!).toString("utf8"));
+    expect(durableCheckpoint).toMatchObject({checkpointVersion:2,runId:"hardening-seed",
+      hardeningLineageId:preparation.lineage.lineageId,hardeningLineageHash:preparation.lineage.lineageHash,
+      seedAttestationId:signed.attestation.seedAttestationId,seedAttestationHash:signed.attestation.seedAttestationHash});
+
+    const replayManager=new EngineerExecutionManager({supervisor:supervisor as never,sandboxManager:sandboxManager as never,
+      artifactStore,repositoryRootFor:()=>repository.path,
+      transportForRun:async()=>({create:async()=>({id:"unused",output:[]})})});
+    expect(await replayManager.recoverOptionalHardeningSeed({...preparation,replay:true,signedSeed:signed})).toBe(true);
+    expect({provisions,recoveries,recordsWritten,destroys}).toEqual({provisions:1,recoveries:1,recordsWritten:1,destroys:0});
+
+    const missingRowManager=new EngineerExecutionManager({supervisor:{...supervisor,exportRunRecords:()=>({sandboxes:[]})} as never,
+      sandboxManager:sandboxManager as never,artifactStore,repositoryRootFor:()=>repository.path,
+      transportForRun:async()=>({create:async()=>({id:"unused",output:[]})})});
+    await expect(missingRowManager.recoverOptionalHardeningSeed({...preparation,replay:true,signedSeed:signed}))
+      .rejects.toThrow("exactly one durable sandbox checkpoint");
+
+    const v1Content={checkpointVersion:1 as const,runId:"hardening-seed",manifestHash:sha256("manifest"),workspace,sandbox,
+      createdAt:"2026-07-18T12:01:00.000Z"};
+    const v1Artifact=artifactStore.put({runId:"hardening-seed",type:"SANDBOX_WORKSPACE_CHECKPOINT",
+      bytes:JSON.stringify({...v1Content,checkpointHash:sha256(v1Content)}),producerType:"SYSTEM",producerId:"legacy",trusted:true});
+    const legacyCheckpointManager=new EngineerExecutionManager({supervisor:{...supervisor,listArtifacts:()=>[v1Artifact]} as never,
+      sandboxManager:sandboxManager as never,artifactStore,repositoryRootFor:()=>repository.path,
+      transportForRun:async()=>({create:async()=>({id:"unused",output:[]})})});
+    await expect(legacyCheckpointManager.recoverOptionalHardeningSeed({...preparation,replay:true,signedSeed:signed}))
+      .rejects.toThrow("exactly one durable v2 seed checkpoint");
+
+    const staleRowManager=new EngineerExecutionManager({supervisor:{...supervisor,
+      exportRunRecords:()=>({sandboxes:[{...sandboxRow,status:"DESTROYED",destroyed_at:"2026-07-18T12:02:00.000Z"}]})} as never,
+      sandboxManager:sandboxManager as never,artifactStore,repositoryRootFor:()=>repository.path,
+      transportForRun:async()=>({create:async()=>({id:"unused",output:[]})})});
+    await expect(staleRowManager.recoverOptionalHardeningSeed({...preparation,replay:true,signedSeed:signed}))
+      .rejects.toThrow("projection is invalid");
+    expect({provisions,recoveries}).toEqual({provisions:1,recoveries:1});
+  });
+
+  test("destroys a cold sandbox before persistence when seed environment authority differs", async () => {
+    const root=temporaryRoot();const repository=initRepository(root);const {workspace,sandbox}=records(repository.path,"hardening-bad-seed",repository.sha);
+    let destroyed=0,recorded=0;const manager=new EngineerExecutionManager({supervisor:{recordSandbox:()=>{recorded+=1;}} as never,
+      sandboxManager:{provisionColdAsync:async()=>({workspace,record:sandbox}),workspaceManager:()=>({}),destroyAsync:async()=>{destroyed+=1;}} as never,
+      artifactStore:new LocalArtifactStore({root:join(root,"artifacts")}),repositoryRootFor:()=>repository.path,
+      transportForRun:async()=>({create:async()=>({id:"unused",output:[]})})});
+    const preparation={replay:false,operation:{childRunId:"hardening-bad-seed"},lineage:{},parentCheckpoint:{},
+      seed:{baseCommitSha:repository.sha,seedResultCommitSha:repository.sha,finalDiff:"",diffHash:sha256(""),environmentDigest:sha256("wrong")},signedSeed:null} as unknown as OptionalHardeningStartPreparation;
+    await expect(manager.materializeOptionalHardeningSeed(preparation,{algorithm:"test",keyId:"test",sign:()=>"x",verify:()=>true})).rejects.toThrow("environment differs");
+    expect({destroyed,recorded}).toEqual({destroyed:1,recorded:0});
+  });
+
+  test("prepares signed restart authority read-only and activates exact lease generations without provider calls",async()=>{
+    const root=temporaryRoot(),repository=initRepository(root,true),runId="hardening-stage-recovery";
+    const {workspace,sandbox}=records(repository.path,runId,repository.sha),hardeningManifest=manifest(runId,repository.sha),
+      manifestHash=hardeningManifest.manifestHash;
+    const artifactStore=new LocalArtifactStore({root:join(root,"stage-artifacts")});
+    const artifacts:ReturnType<LocalArtifactStore["put"]>[]=[];let sandboxRows:Record<string,unknown>[]=[],
+      runRecords:Record<string,Array<Record<string,unknown>>>={},events:Array<Record<string,unknown>>=[],classifiedReview:unknown=null;
+    let recoveries=0,destroys=0,providerCalls=0,resetToHead:unknown=null,invalidWorkspace=false,
+      loseAuthorityOnRecover=false,authorityLost=false;
+    const run={runId,state:"PLAN_FROZEN",stateVersion:4,manifestHash};let claim:Record<string,unknown>|null=null;
+    const sandboxManager={
+      provisionColdAsync:async()=>({workspace,record:sandbox}),
+      recoverAsync:async(input:{resetToHead:boolean})=>{recoveries+=1;resetToHead=input.resetToHead;
+        if(loseAuthorityOnRecover)authorityLost=true;return {workspace,record:sandbox};},
+      workspaceManager:()=>({
+        materializeVerifiedSeed:()=>({headCommitSha:repository.sha,treeHash:sha256("stage-tree"),diffHash:sha256(""),diff:""}),
+        verifyMaterializedSeed:()=>({headCommitSha:repository.sha,treeHash:invalidWorkspace?sha256("wrong-tree"):sha256("stage-tree"),
+          diffHash:sha256(""),diff:""}),
+      }),
+      destroyAsync:async()=>{destroys+=1;},
+    };
+    const supervisor={
+      isOptionalHardeningChild:()=>true,getRun:()=>run,getManifest:()=>hardeningManifest,latestRiskAssessment:()=>null,
+      getFinalizedOptionalHardeningStartClaim:()=>claim,exportRunRecords:()=>({sandboxes:sandboxRows,...runRecords,
+        artifacts:artifacts.map((artifact)=>({id:artifact.artifactId,run_id:artifact.runId,type:artifact.type,sha256:artifact.sha256,
+          storage_reference:artifact.storageReference,size_bytes:artifact.sizeBytes,producer_type:artifact.producerType,
+          producer_id:artifact.producerId,trusted:artifact.trusted?1:0,created_at:artifact.createdAt}))}),
+      listArtifacts:()=>[...artifacts],listEvents:()=>events,latestClassifiedReview:()=>classifiedReview,
+      hasExactHardeningReviewerSuccessor:()=>true,
+      recordArtifact:(artifact:typeof artifacts[number])=>{artifacts.push(artifact);return artifact;},
+      recordSandboxWithCheckpoint:(_record:unknown,artifact:typeof artifacts[number])=>{
+        sandboxRows=[{id:sandbox.sandboxId,run_id:runId,workspace_identity:sandbox.workspaceIdentity,image_digest:sandbox.imageDigest,
+          environment_digest:sandbox.environmentDigest,status:sandbox.status,created_at:sandbox.createdAt,destroyed_at:sandbox.destroyedAt}];
+        artifacts.push(artifact);
+      },
+    };
+    const signer:CheckpointAttestor={algorithm:"test",keyId:"stage-recovery",sign:(payload)=>`test:${sha256(payload)}`,
+      verify:(payload,signature)=>signature===`test:${sha256(payload)}`};
+    const basePreparation={replay:false,operation:{operationId:sha256("stage-operation-id"),operationHash:sha256("stage-operation"),
+      childRunId:runId,requesterUserId:"owner",expectedChildStateVersion:0,lineageId:sha256("stage-lineage-id"),
+      lineageHash:sha256("stage-lineage"),idempotencyKey:"stage-start",createdAt:"2026-07-18T12:00:00.000Z"},
+      lineage:{rootRunId:"parent",parentRunId:"parent",childRunId:runId,requesterUserId:"owner",repositoryId:"repo-1",
+        lineageId:sha256("stage-lineage-id"),lineageHash:sha256("stage-lineage")},
+      parentCheckpoint:{checkpointId:sha256("stage-parent-id"),checkpointHash:sha256("stage-parent")},
+      seed:{baseCommitSha:repository.sha,seedResultCommitSha:repository.sha,finalDiff:"",diffHash:sha256(""),
+        environmentDigest:sandbox.environmentDigest},signedSeed:null} as unknown as OptionalHardeningStartPreparation;
+    const initial=new EngineerExecutionManager({supervisor:supervisor as never,sandboxManager:sandboxManager as never,artifactStore,
+      repositoryRootFor:()=>repository.path,hardeningPromptCacheSecret:"0123456789abcdef0123456789abcdef",
+      transportForRun:async()=>{providerCalls+=1;return {create:async()=>({id:"forbidden",output:[]})};}});
+    const signed=await initial.materializeOptionalHardeningSeed(basePreparation,signer),durable=initial.prepareOptionalHardeningSeedCommit(runId,manifestHash);
+    supervisor.recordSandboxWithCheckpoint(durable.sandbox,durable.checkpoint);initial.completeOptionalHardeningSeedCommit(runId);
+    claim={claimId:sha256("stage-claim"),status:"FINALIZED",sandboxId:sandbox.sandboxId,
+      finalizedOperationId:basePreparation.operation.operationId,finalizedOperationHash:basePreparation.operation.operationHash,
+      seedAttestationId:signed.attestation.seedAttestationId,seedAttestationHash:signed.attestation.seedAttestationHash};
+    const preparation={...basePreparation,replay:true,signedSeed:signed} as OptionalHardeningStartPreparation;
+    const recovery=new EngineerExecutionManager({supervisor:supervisor as never,sandboxManager:sandboxManager as never,artifactStore,
+      repositoryRootFor:()=>repository.path,hardeningPromptCacheSecret:"0123456789abcdef0123456789abcdef",
+      transportForRun:async()=>{providerCalls+=1;return {create:async()=>({id:"forbidden",output:[]})};}});
+
+    const beforeArtifacts=artifacts.length,snapshot=recovery.prepareOptionalHardeningWorkspaceRecovery(preparation);
+    expect(snapshot).toMatchObject({runId,state:"PLAN_FROZEN",stateVersion:4,stage:{kind:"SEED"}});
+    expect({recoveries,destroys,providerCalls,artifactWrites:artifacts.length-beforeArtifacts}).toEqual({recoveries:0,destroys:0,providerCalls:0,artifactWrites:0});
+    const lease1={leaseId:"lease-stage-1",ownerId:"worker-stage",fencingToken:1};
+    await recovery.activateOptionalHardeningWorkspaceRecovery(snapshot,()=>undefined,()=>lease1);
+    expect({recoveries,destroys,providerCalls,resetToHead}).toEqual({recoveries:1,destroys:0,providerCalls:0,resetToHead:false});
+    expect(artifacts.filter((item)=>item.type==="SANDBOX_RECOVERY_ATTESTATION")).toHaveLength(1);
+    await recovery.activateOptionalHardeningWorkspaceRecovery(snapshot,()=>undefined,()=>lease1);
+    expect(artifacts.filter((item)=>item.type==="SANDBOX_RECOVERY_ATTESTATION")).toHaveLength(1);
+    await recovery.activateOptionalHardeningWorkspaceRecovery(snapshot,()=>undefined,
+      ()=>({leaseId:"lease-stage-2",ownerId:"worker-stage",fencingToken:2}));
+    expect(artifacts.filter((item)=>item.type==="SANDBOX_RECOVERY_ATTESTATION")).toHaveLength(2);
+
+    const validAttestation=artifacts.find((item)=>item.type==="SANDBOX_RECOVERY_ATTESTATION")!;
+    const malformedAttestation=artifactStore.put({runId,type:"SANDBOX_RECOVERY_ATTESTATION",
+      bytes:JSON.stringify({...JSON.parse(artifactStore.read(validAttestation).toString("utf8")),state:"FAILED"}),
+      producerType:"SYSTEM",producerId:"engineer-hardening-recovery",trusted:true});
+    artifacts.push(malformedAttestation);const malformed=new EngineerExecutionManager({supervisor:supervisor as never,
+      sandboxManager:sandboxManager as never,artifactStore,repositoryRootFor:()=>repository.path,
+      hardeningPromptCacheSecret:"0123456789abcdef0123456789abcdef",transportForRun:async()=>{providerCalls+=1;return {} as never;}});
+    const malformedSnapshot=malformed.prepareOptionalHardeningWorkspaceRecovery(preparation),destroysBeforeMalformed=destroys;
+    await expect(malformed.activateOptionalHardeningWorkspaceRecovery(malformedSnapshot,()=>undefined,
+      ()=>({leaseId:"lease-stage-malformed",ownerId:"worker-stage",fencingToken:3})))
+      .rejects.toBeInstanceOf(HardeningGenericOperationForbiddenError);
+    expect(destroys).toBe(destroysBeforeMalformed+1);artifacts.splice(artifacts.indexOf(malformedAttestation),1);
+
+    const raced=new EngineerExecutionManager({supervisor:supervisor as never,sandboxManager:sandboxManager as never,artifactStore,
+      repositoryRootFor:()=>repository.path,hardeningPromptCacheSecret:"0123456789abcdef0123456789abcdef",transportForRun:async()=>{providerCalls+=1;return {} as never;}});
+    const stale=raced.prepareOptionalHardeningWorkspaceRecovery(preparation),recoveriesBeforeRace=recoveries;run.stateVersion+=1;
+    await expect(raced.activateOptionalHardeningWorkspaceRecovery(stale,()=>undefined,()=>lease1))
+      .rejects.toBeInstanceOf(HardeningGenericOperationForbiddenError);
+    expect(recoveries).toBe(recoveriesBeforeRace);run.stateVersion-=1;
+
+    loseAuthorityOnRecover=true;const lostAuthority=new EngineerExecutionManager({supervisor:supervisor as never,
+      sandboxManager:sandboxManager as never,artifactStore,repositoryRootFor:()=>repository.path,
+      hardeningPromptCacheSecret:"0123456789abcdef0123456789abcdef",transportForRun:async()=>{providerCalls+=1;return {} as never;}});
+    const lostSnapshot=lostAuthority.prepareOptionalHardeningWorkspaceRecovery(preparation),destroysBeforeLoss=destroys;
+    await expect(lostAuthority.activateOptionalHardeningWorkspaceRecovery(lostSnapshot,
+      ()=>{if(authorityLost)throw new Error("lease replaced");},()=>lease1)).rejects.toThrow("lease replaced");
+    expect(destroys).toBe(destroysBeforeLoss);loseAuthorityOnRecover=false;authorityLost=false;
+
+    invalidWorkspace=true;const invalid=new EngineerExecutionManager({supervisor:supervisor as never,sandboxManager:sandboxManager as never,
+      artifactStore,repositoryRootFor:()=>repository.path,hardeningPromptCacheSecret:"0123456789abcdef0123456789abcdef",
+      transportForRun:async()=>{providerCalls+=1;return {} as never;}});
+    const invalidSnapshot=invalid.prepareOptionalHardeningWorkspaceRecovery(preparation);
+    await expect(invalid.activateOptionalHardeningWorkspaceRecovery(invalidSnapshot,()=>undefined,
+      ()=>({leaseId:"lease-stage-3",ownerId:"worker-stage",fencingToken:3})))
+      .rejects.toBeInstanceOf(HardeningGenericOperationForbiddenError);
+    expect({destroys,providerCalls}).toEqual({destroys:2,providerCalls:0});
+
+    invalidWorkspace=false;run.state="REVIEWING";run.stateVersion=11;
+    const finalDiff=artifactStore.put({runId,type:"FINAL_DIFF",bytes:"",producerType:"SYSTEM",
+      producerId:"engineer-verification",trusted:true});artifacts.push(finalDiff);
+    const securityReport=artifactStore.put({runId,type:"SECURITY_REPORT",bytes:"{}",producerType:"SYSTEM",
+      producerId:"engineer-independent-verifier",trusted:true});artifacts.push(securityReport);
+    const selectedEvent={eventId:"event-before-checkpoint",runId,sequence:10,stateVersion:10,
+      previousState:"FAST_CHECKS",nextState:"SECURITY_REVIEW",reasonCode:"ENTER_SECURITY_REVIEW",evidenceIds:[],
+      actorType:"SUPERVISOR",actorId:"engineer-supervisor",manifestHash,idempotencyKey:"phase3:security_review:10",
+      timestamp:"2026-07-18T12:10:00.000Z"};
+    const checkpointContent={version:2 as const,runId,manifestHash,diffHash:sha256(""),resultCommitSha:repository.sha,
+      diffArtifactId:finalDiff.artifactId,diffArtifactHash:finalDiff.sha256,selectedEventId:selectedEvent.eventId,
+      selectedEventSequence:selectedEvent.sequence,selectedEventStateVersion:selectedEvent.stateVersion,
+      selectedEventState:selectedEvent.nextState,selectedEventReasonCode:selectedEvent.reasonCode,
+      selectedEventEvidenceHash:sha256(selectedEvent.evidenceIds),selectedEventHash:sha256(selectedEvent),
+      verified:{executions:[],securityFindings:[],trustedEvidence:[],
+        securityReportArtifact:projectHardeningArtifactAuthority(securityReport)}};
+    const checkpointPayload={...checkpointContent,checkpointHash:sha256(checkpointContent)};
+    const independentCheckpoint=artifactStore.put({runId,type:"INDEPENDENT_VERIFICATION_CHECKPOINT",
+      bytes:canonicalJson(checkpointPayload),producerType:"SYSTEM",producerId:"engineer-verification",trusted:true,
+      createdAt:"2026-07-18T12:10:00.000Z"});
+    artifacts.push(independentCheckpoint);events=[selectedEvent];run.state="SECURITY_REVIEW";run.stateVersion=10;
+    runRecords={};classifiedReview=null;
+    const r0Manager=new EngineerExecutionManager({supervisor:supervisor as never,sandboxManager:sandboxManager as never,artifactStore,
+      repositoryRootFor:()=>repository.path,hardeningPromptCacheSecret:"0123456789abcdef0123456789abcdef",transportForRun:async()=>{providerCalls+=1;return {} as never;}});
+    const checkpointIndex=artifacts.indexOf(independentCheckpoint),noncanonicalCheckpoint=artifactStore.put({runId,
+      type:"INDEPENDENT_VERIFICATION_CHECKPOINT",bytes:JSON.stringify(checkpointPayload),producerType:"SYSTEM",
+      producerId:"engineer-verification",trusted:true,createdAt:"2026-07-18T12:10:00.000Z"});artifacts.splice(checkpointIndex,1,noncanonicalCheckpoint);
+    expect(()=>r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation))
+      .toThrow(HardeningGenericOperationForbiddenError);expect(providerCalls).toBe(0);
+    artifacts.splice(checkpointIndex,1,independentCheckpoint);
+    const r0=r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation);
+    expect(r0.stage).toMatchObject({kind:"INDEPENDENT",classified:null});expect(providerCalls).toBe(0);
+
+    const reviewerInputContent={reviewSessionId:"reviewer-session",runId,reviewAttempt:1,manifest:hardeningManifest,
+      manifestHash,finalDiff:"",diffHash:sha256(""),trustedEvidence:[],riskAssessment:null,
+      resultCommitSha:repository.sha,reviewPolicyVersion:"engineer-isolated-reviewer-v6",
+      createdAt:"2026-07-18T12:10:00.004Z"};
+    const reviewerInput=ReviewerInputSchema.parse({...reviewerInputContent,
+      evidenceBundleHash:reviewerEvidenceBundleHash(reviewerInputContent)});
+    const semanticProjection={riskTier:"MEDIUM" as const,humanGateRequired:true},semanticContent={
+      policyVersion:"engineer-hardening-review-semantic-authority-v1" as const,
+      ledgerSets:["agent_executions","audit_events","command_executions","engineer_run_lineage","git_operations",
+        "hardening_start_operations","required_lane_contracts","risk_assessments","security_findings",
+        "task_manifest_versions","test_executions"].map((table)=>({table,rows:[],
+          setHash:sha256([])})),
+      artifacts:[],artifactSetHash:sha256([]),runRiskProjection:{...semanticProjection,
+        projectionHash:sha256(semanticProjection)}},semanticAuthority={...semanticContent,
+          authorityHash:sha256(semanticContent)};
+    const authorityContent={version:2 as const,policyVersion:"engineer-hardening-review-input-authority-v2" as const,
+      runId,manifestHash,diffHash:sha256(""),resultCommitSha:repository.sha,
+      checkpointArtifactId:independentCheckpoint.artifactId,checkpointArtifactHash:independentCheckpoint.sha256,
+      checkpointHash:checkpointPayload.checkpointHash,reviewerInput,evidenceAuthority:[],evidenceAuthorityHash:sha256([]),
+      semanticAuthority,requestAuthority:buildIsolatedReviewerRequestPlan(reviewerInput,{hardeningPromptCacheIdentity:{
+        secret:"0123456789abcdef0123456789abcdef",requesterUserId:"owner",childRunId:runId}}).authority};
+    const reviewInputAuthority=artifactStore.put({runId,type:"HARDENING_REVIEW_INPUT_AUTHORITY",
+      bytes:canonicalJson({...authorityContent,authorityHash:sha256(authorityContent)}),producerType:"SYSTEM",
+      producerId:"engineer-verification",trusted:true,createdAt:"2026-07-18T12:10:00.004Z"});artifacts.push(reviewInputAuthority);
+    const completionKey=hardeningCheckpointMilestoneKey({kind:"COMPLETED",runId,artifactId:independentCheckpoint.artifactId,
+      artifactHash:independentCheckpoint.sha256,checkpointHash:checkpointPayload.checkpointHash,selectedEventId:selectedEvent.eventId,
+      selectedEventSequence:selectedEvent.sequence,selectedEventStateVersion:selectedEvent.stateVersion,
+      selectedEventHash:checkpointContent.selectedEventHash});
+    events=[selectedEvent,{eventId:"event-review-ready",runId,sequence:11,stateVersion:11,
+      previousState:"SECURITY_REVIEW",nextState:"REVIEWING",reasonCode:"INDEPENDENT_VERIFICATION_COMPLETE",
+      evidenceIds:[independentCheckpoint.artifactId,independentCheckpoint.sha256,checkpointPayload.checkpointHash,
+        reviewInputAuthority.artifactId,reviewInputAuthority.sha256],actorType:"SUPERVISOR",
+      actorId:"engineer-supervisor",manifestHash,idempotencyKey:completionKey,timestamp:"2026-07-18T12:10:00.005Z"}];
+    run.state="REVIEWING";run.stateVersion=11;
+    const completedEvents=events,authorityIndex=artifacts.indexOf(reviewInputAuthority);artifacts.splice(authorityIndex,1);
+    expect(()=>r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation))
+      .toThrow(HardeningGenericOperationForbiddenError);expect(providerCalls).toBe(0);artifacts.push(reviewInputAuthority);
+    events=[selectedEvent];run.state="SECURITY_REVIEW";run.stateVersion=10;
+    expect(()=>r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation))
+      .toThrow(HardeningGenericOperationForbiddenError);expect(providerCalls).toBe(0);
+    events=completedEvents;run.state="REVIEWING";run.stateVersion=11;
+    runRecords={agent_executions:[{id:"partial-reviewer",run_id:runId,role:"REVIEWER",status:"RUNNING"}]};
+    expect(()=>r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation))
+      .toThrow(HardeningGenericOperationForbiddenError);expect(providerCalls).toBe(0);runRecords={};
+
+    const reviewerAgentId="reviewer-agent",reviewerSessionId="reviewer-session",reservationId="reviewer-reservation",
+      finalizationId="reviewer-finalization",classificationHash=sha256("review-classification"),
+      reviewCompletedAt="2026-07-18T12:12:00.000Z",reviewOutput=artifactStore.put({runId,type:"REVIEWER_OUTPUT",
+        bytes:"{}",producerType:"SYSTEM",producerId:reviewerAgentId,trusted:false}),
+      rawOutput=artifactStore.put({runId,type:"REVIEWER_RAW_OUTPUT",bytes:"{}",producerType:"SYSTEM",
+        producerId:reviewerSessionId,trusted:true}),providerOutput=artifactStore.put({runId,type:"MODEL_PROVIDER_RESPONSE",
+        bytes:"{}",producerType:"SYSTEM",producerId:"engineer-provider-response-recorder",trusted:true});
+    artifacts.push(reviewOutput,rawOutput,providerOutput);
+    const session={reviewerSessionId,runId,attempt:1,modelTier:"GPT-5.6_SOL",resolvedModel:"gpt-5.6",
+      inputHash:sha256("review-input"),manifestHash,diffHash:sha256(""),evidenceBundleHash:sha256("review-evidence"),
+      policyVersion:"engineer-isolated-reviewer-v6",cacheKey:sha256("review-cache"),cacheHit:false,
+      startedAt:"2026-07-18T12:11:30.000Z",completedAt:reviewCompletedAt,decision:"READY",isolationVerified:true,output:{}};
+    const classification={runId,manifestHash,classificationHash,contractHash:sha256("review-contract"),policyVersion:"review-policy",
+      createdAt:reviewCompletedAt,result:"READY",normalizedOutputHash:sha256("normalized-review"),classifications:[],
+      rawOutput:{artifactId:rawOutput.artifactId,sha256:rawOutput.sha256,byteLength:rawOutput.sizeBytes,mediaType:"application/json"}};
+    classifiedReview={session,classification,findings:[],reviewerInput};
+    runRecords={
+      agent_executions:[{id:reviewerAgentId,run_id:runId,role:"REVIEWER",status:"SUCCEEDED",output_artifact_id:reviewOutput.artifactId}],
+      hardening_child_model_reservations:[{id:reservationId,child_run_id:runId,agent_execution_id:reviewerAgentId,role:"REVIEWER",
+        status:"SETTLED",provider_response_artifact_id:providerOutput.artifactId}],
+      hardening_paid_call_finalizations:[{id:finalizationId,child_run_id:runId,agent_execution_id:reviewerAgentId,role:"REVIEWER",
+        reservation_id:reservationId,status:"APPLIED"}],
+      model_routing_decisions:[{id:"review-route",agent_execution_id:reviewerAgentId,agent_role:"REVIEWER"}],
+      hardening_model_call_slots:[{id:"review-slot",child_run_id:runId,role:"REVIEWER"}],
+      model_calls:[{id:"review-call",agent_execution_id:reviewerAgentId}],
+      reviewer_sessions:[{id:reviewerSessionId}],
+      review_classification_batches:[{classification_hash:classificationHash,raw_output_artifact_id:rawOutput.artifactId}],
+      review_findings:[],review_finding_classifications:[],claim_evidence:[],evidence_bundles:[],
+      audit_events:[{id:"classification-audit",run_id:runId,action:"REVIEW_CLASSIFICATION_RECORDED",actor_type:"SYSTEM",
+        actor_id:classification.policyVersion,created_at:classification.createdAt,details_json:JSON.stringify({reviewerSessionId,
+          contractHash:classification.contractHash,classificationHash,rawOutputArtifactId:rawOutput.artifactId,
+          rawOutputHash:rawOutput.sha256,normalizedOutputHash:classification.normalizedOutputHash,result:classification.result})}],
+    };
+    const r2=r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation);
+    expect(r2.stage).toMatchObject({kind:"INDEPENDENT",classified:{reviewerSessionId,classificationHash,
+      agentExecutionId:reviewerAgentId,reservationId,finalizationId}});expect(providerCalls).toBe(0);
+    const sameIdBefore=r2.authorityHash;(runRecords.reviewer_sessions![0] as Record<string,unknown>).decision="BLOCKED";
+    const sameIdAfter=r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation).authorityHash;
+    expect(sameIdAfter).not.toBe(sameIdBefore);expect(()=>r0Manager.assertOptionalHardeningRecoveryAuthority(r2))
+      .toThrow(HardeningGenericOperationForbiddenError);
+    delete (runRecords.reviewer_sessions![0] as Record<string,unknown>).decision;
+    const extraRaw=artifactStore.put({runId,type:"REVIEWER_RAW_OUTPUT",bytes:"{\"extra\":true}",producerType:"SYSTEM",
+      producerId:"extra-session",trusted:true});artifacts.push(extraRaw);
+    expect(()=>r0Manager.prepareOptionalHardeningWorkspaceRecovery(preparation))
+      .toThrow(HardeningGenericOperationForbiddenError);artifacts.splice(artifacts.indexOf(extraRaw),1);
+    expect(providerCalls).toBe(0);
   });
 });
 
@@ -355,6 +781,17 @@ describe("Phase 2 Docker sandbox", () => {
 });
 
 describe("Phase 2 offline dependency bundle", () => {
+  test("derives dependency identity from the exact base instead of a dirty working tree", () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root, true);
+    const exactBaseHash = gitCommitLockfileHash(repository.path, repository.sha);
+    expect(exactBaseHash).toBe(workspaceLockfileHash(repository.path));
+
+    writeFileSync(join(repository.path, "bun.lock"), "dirty working-tree lockfile\n");
+    expect(workspaceLockfileHash(repository.path)).not.toBe(exactBaseHash);
+    expect(gitCommitLockfileHash(repository.path, repository.sha)).toBe(exactBaseHash);
+  });
+
   test("requires production bundles to match the exact repository commit", async () => {
     const root = temporaryRoot();
     const repository = initRepository(root, true);
@@ -442,6 +879,624 @@ describe("Phase 2 offline dependency bundle", () => {
 });
 
 describe("Phase 2 Codex Builder", () => {
+  test("binds a trusted correction action into the Builder input identity", () => {
+    const task = manifest("run-correction-context", "a".repeat(40));
+    const withoutCorrection = builderInputContextHash(task);
+    const withCorrection = builderInputContextHash(task, undefined, [{
+      code: "GENERATE_NON_SECRET_TEST_FIXTURES",
+      sourceRecordIds: ["finding-1"],
+      file: "test/value.test.ts",
+      lineStart: 6,
+      lineEnd: 6,
+    }]);
+    expect(withCorrection).not.toBe(withoutCorrection);
+  });
+
+  test("authority loss after reservation escapes before provider retry classification", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "authority-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-authority-fence", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-authority-fence", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "authority-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "tests passed", stderr: "" }),
+    });
+    let authorityChecks = 0;
+    let reservations = 0;
+    let providerCalls = 0;
+    let retryClassifications = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: {
+        async countInputTokens() { return 10; },
+        async create() { providerCalls += 1; throw new Error("provider must remain fenced"); },
+      },
+      assertAuthority: () => {
+        authorityChecks += 1;
+        if (authorityChecks === 3) throw new StaleWorkerLeaseError("authority revoked after reservation");
+      },
+      reserveModelCall: () => { reservations += 1; return "reservation-before-fence"; },
+      authorizeModelRetry: () => { retryClassifications += 1; return true; },
+    });
+    await expect(builder.run()).rejects.toBeInstanceOf(StaleWorkerLeaseError);
+    expect(authorityChecks).toBe(3);
+    expect(reservations).toBe(1);
+    expect(providerCalls).toBe(0);
+    expect(retryClassifications).toBe(0);
+    workspaceManager.remove(workspace);
+  });
+
+  test("a replayed hardening reservation fails closed before transport construction", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({
+      workspaceRoot: join(root, "reservation-replay-workspaces"),
+      gitSpawn: bunGitSpawn,
+    });
+    const workspace = workspaceManager.create({
+      runId: "run-reservation-replay",
+      repositoryRoot: repository.path,
+      baseCommitSha: repository.sha,
+    });
+    const task = manifest("run-reservation-replay", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "reservation-replay-artifacts") }),
+      workspace,
+      sandbox,
+      manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "tests passed", stderr: "" }),
+    });
+    let transportConstructions = 0;
+    let providerCalls = 0;
+    const builder = new CodexBuilder({
+      manifest: task,
+      workspace,
+      workspaceManager,
+      executor,
+      conservativeLocalInputAccounting: true,
+      hardeningPromptCacheIdentity: {
+        secret: "0123456789abcdef0123456789abcdef",
+        requesterUserId: "user-reservation-replay",
+        childRunId: task.runId,
+      },
+      reserveModelCall: () => ({ reservationId: "existing-reservation", dispatchAllowed: false }),
+      beforeModelDispatch: () => undefined,
+      onModelResponseReceived: () => undefined,
+      onReservedUnsentFailure: () => undefined,
+      transportAfterReservation: () => {
+        transportConstructions += 1;
+        return {
+          async create() {
+            providerCalls += 1;
+            throw new Error("provider transport must not be reached");
+          },
+        };
+      },
+    });
+
+    await expect(builder.run()).rejects.toThrow("reservation replay is not dispatchable");
+    expect(transportConstructions).toBe(0);
+    expect(providerCalls).toBe(0);
+    workspaceManager.remove(workspace);
+  });
+
+  test("rejects an incomplete hardening Builder dispatch protocol before reservation or provider construction", async () => {
+    for (const missing of ["beforeModelDispatch", "onModelResponseReceived", "onReservedUnsentFailure"] as const) {
+      const root = temporaryRoot();
+      const repository = initRepository(root);
+      const workspaceManager = new GitWorkspaceManager({
+        workspaceRoot: join(root, `incomplete-builder-${missing}-workspaces`),
+        gitSpawn: bunGitSpawn,
+      });
+      const workspace = workspaceManager.create({
+        runId: `run-incomplete-builder-${missing}`,
+        repositoryRoot: repository.path,
+        baseCommitSha: repository.sha,
+      });
+      const task = manifest(`run-incomplete-builder-${missing}`, repository.sha);
+      const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+      const executor = new TrustedCommandExecutor({
+        artifactStore: new LocalArtifactStore({ root: join(root, `incomplete-builder-${missing}-artifacts`) }),
+        workspace,
+        sandbox,
+        manifest: task,
+        currentCommit: () => workspaceManager.currentCommit(workspace),
+        runner: () => ({ status: 0, stdout: "tests passed", stderr: "" }),
+      });
+      let reservations = 0;
+      let transportConstructions = 0;
+      let providerCalls = 0;
+      let cleanupCalls = 0;
+      const builder = new CodexBuilder({
+        manifest: task,
+        workspace,
+        workspaceManager,
+        executor,
+        conservativeLocalInputAccounting: true,
+        hardeningPromptCacheIdentity: {
+          secret: "0123456789abcdef0123456789abcdef",
+          requesterUserId: "user-incomplete-builder",
+          childRunId: task.runId,
+        },
+        reserveModelCall: () => {
+          reservations += 1;
+          return {
+            reservationId: `incomplete-builder-${missing}-reservation`,
+            dispatchAllowed: true,
+            clientRequestId: `incomplete-builder-${missing}-request`,
+          };
+        },
+        ...(missing === "beforeModelDispatch" ? {} : { beforeModelDispatch: () => undefined }),
+        ...(missing === "onModelResponseReceived" ? {} : { onModelResponseReceived: () => undefined }),
+        ...(missing === "onReservedUnsentFailure" ? {} : {
+          onReservedUnsentFailure: () => { cleanupCalls += 1; },
+        }),
+        transportAfterReservation: () => {
+          transportConstructions += 1;
+          return {
+            async create() {
+              providerCalls += 1;
+              throw new Error("Builder provider transport must not be reached");
+            },
+          };
+        },
+      });
+
+      await expect(builder.run()).rejects.toThrow("hardening Builder dispatch protocol is incomplete");
+      expect({ missing, reservations, transportConstructions, providerCalls, cleanupCalls }).toEqual({
+        missing, reservations: 0, transportConstructions: 0, providerCalls: 0, cleanupCalls: 0,
+      });
+      workspaceManager.remove(workspace);
+    }
+  });
+
+  test("reports omitted provider cache details as explicit null after one hardening Builder dispatch", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({
+      workspaceRoot: join(root, "missing-cache-workspaces"),
+      gitSpawn: bunGitSpawn,
+    });
+    const workspace = workspaceManager.create({
+      runId: "run-builder-missing-cache",
+      repositoryRoot: repository.path,
+      baseCommitSha: repository.sha,
+    });
+    const task = manifest("run-builder-missing-cache", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "missing-cache-artifacts") }),
+      workspace,
+      sandbox,
+      manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "tests passed", stderr: "" }),
+    });
+    let providerCalls = 0;
+    const received: Array<{ cachedInputTokens: number | null; cacheWriteInputTokens: number | null }> = [];
+    const completed: Array<{ cachedInputTokens: number | null; cacheWriteInputTokens: number | null }> = [];
+    const builder = new CodexBuilder({
+      manifest: task,
+      workspace,
+      workspaceManager,
+      executor,
+      conservativeLocalInputAccounting: true,
+      hardeningPromptCacheIdentity: {
+        secret: "0123456789abcdef0123456789abcdef",
+        requesterUserId: "user-builder-missing-cache",
+        childRunId: task.runId,
+      },
+      reserveModelCall: () => ({
+        reservationId: "builder-missing-cache-reservation",
+        dispatchAllowed: true,
+        clientRequestId: "builder-missing-cache-request",
+      }),
+      beforeModelDispatch: () => undefined,
+      onReservedUnsentFailure: () => undefined,
+      transportAfterReservation: () => ({
+        async create() {
+          providerCalls += 1;
+          return {
+            id: "builder-missing-cache-response",
+            usage: { input_tokens: 100, output_tokens: 10 },
+            output: [
+              { type: "function_call", call_id: "missing-cache-write", name: "write_file", arguments: JSON.stringify({
+                path: "src/value.ts", content: "export const value = 2;\n",
+              }) },
+              { type: "function_call", call_id: "missing-cache-test", name: "run_command", arguments: JSON.stringify({
+                command: "bun run test",
+              }) },
+            ],
+          };
+        },
+      }),
+      onModelResponseReceived: (observation) => {
+        received.push({
+          cachedInputTokens: observation.cachedInputTokens,
+          cacheWriteInputTokens: observation.cacheWriteInputTokens,
+        });
+      },
+      onModelCall: (observation) => {
+        completed.push({
+          cachedInputTokens: observation.cachedInputTokens,
+          cacheWriteInputTokens: observation.cacheWriteInputTokens,
+        });
+      },
+    });
+    const result = await builder.run();
+    expect(result.changedFiles).toEqual(["src/value.ts"]);
+    expect(providerCalls).toBe(1);
+    expect(received).toEqual([{ cachedInputTokens: null, cacheWriteInputTokens: null }]);
+    expect(completed).toEqual(received);
+    workspaceManager.remove(workspace);
+  });
+
+  test("rechecks authority before every tool in one provider response", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "multi-tool-authority-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-multi-tool-authority", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-multi-tool-authority", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const originalBytes = readFileSync(join(workspace.workspaceRoot, "src/value.ts"));
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "multi-tool-authority-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "tests passed", stderr: "" }),
+    });
+    let authorityChecks = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() { return {
+        id: "multi-tool-response", usage: { input_tokens: 10, output_tokens: 10 },
+        output: [
+          { type: "function_call", call_id: "safe-read", name: "read_file", arguments: JSON.stringify({ path: "src/value.ts" }) },
+          { type: "function_call", call_id: "forbidden-write", name: "write_file", arguments: JSON.stringify({ path: "src/value.ts", content: "export const value = 999;\n" }) },
+        ],
+      }; } },
+      assertAuthority: () => {
+        authorityChecks += 1;
+        if (authorityChecks === 6) throw new StaleWorkerLeaseError("authority revoked between response tools");
+      },
+      reserveModelCall: () => "multi-tool-reservation",
+    });
+    await expect(builder.run()).rejects.toBeInstanceOf(StaleWorkerLeaseError);
+    expect(authorityChecks).toBe(6);
+    expect(readFileSync(join(workspace.workspaceRoot, "src/value.ts"))).toEqual(originalBytes);
+    workspaceManager.remove(workspace);
+  });
+
+  test("uses literal search and bounded line ranges to converge on an edit", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "targeted-discovery-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-targeted-discovery", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-targeted-discovery", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "targeted-discovery-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "tests passed", stderr: "" }),
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create(request) {
+        calls += 1;
+        if (calls === 1) {
+          expect(JSON.stringify(request.tools)).toContain("search_files");
+          expect(JSON.stringify(request.tools)).toContain("read_file_range");
+          expect(String(request.instructions)).toContain("Discovery must converge");
+          expect(request.parallel_tool_calls).toBe(true);
+          return { id: "targeted-search", output: [{
+            type: "function_call", call_id: "targeted-search-call", name: "search_files",
+            arguments: JSON.stringify({ query: "export const value" }),
+          }] };
+        }
+        if (calls === 2) {
+          expect(JSON.stringify(request.input)).toContain("src/value.ts");
+          expect(JSON.stringify(request.input)).toContain("line");
+          return { id: "targeted-range", output: [{
+            type: "function_call", call_id: "targeted-range-call", name: "read_file_range",
+            arguments: JSON.stringify({ path: "src/value.ts", startLine: 1, endLine: 1 }),
+          }] };
+        }
+        if (calls === 3) {
+          expect(JSON.stringify(request.input)).toContain("export const value = 1");
+          return { id: "targeted-write", output: [{
+            type: "function_call", call_id: "targeted-write-call", name: "write_file",
+            arguments: JSON.stringify({ path: "src/value.ts", content: "export const value = 2;\n" }),
+          }] };
+        }
+        return { id: "targeted-test", output: [{
+          type: "function_call", call_id: "targeted-test-call", name: "run_command",
+          arguments: JSON.stringify({ command: "bun run test" }),
+        }] };
+      } },
+    });
+    const result = await builder.run();
+    expect(calls).toBe(4);
+    expect(result.changedFiles).toEqual(["src/value.ts"]);
+    expect(await workspaceManager.diffAsync(workspace)).toContain("export const value = 2");
+    workspaceManager.remove(workspace);
+  });
+
+  test("keeps search and ranged reads inside the frozen manifest scope", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    writeFileSync(join(repository.path, "outside.txt"), "outside-marker classified-payload\n");
+    execFileSync("git", ["-C", repository.path, "add", "outside.txt"]);
+    execFileSync("git", ["-C", repository.path, "commit", "-m", "out-of-scope fixture"]);
+    const baseCommitSha = execFileSync("git", ["-C", repository.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "scoped-discovery-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-scoped-discovery", repositoryRoot: repository.path, baseCommitSha });
+    const task = manifest("run-scoped-discovery", baseCommitSha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, baseCommitSha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "scoped-discovery-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create(request) {
+        calls += 1;
+        const serialized = JSON.stringify(request.input);
+        if (calls === 1) return { id: "scoped-search", output: [{
+          type: "function_call", call_id: "scoped-search-call", name: "search_files",
+          arguments: JSON.stringify({ query: "outside-marker" }),
+        }] };
+        if (calls === 2) {
+          expect(serialized).not.toContain("classified-payload");
+          return { id: "scoped-range", output: [{
+            type: "function_call", call_id: "scoped-range-call", name: "read_file_range",
+            arguments: JSON.stringify({ path: "outside.txt", startLine: 1, endLine: 1 }),
+          }] };
+        }
+        expect(serialized).toContain("outside the frozen manifest scope");
+        expect(serialized).not.toContain("classified-payload");
+        return { id: "scoped-finish", output: [], output_text: "No authorized change made." };
+      } },
+    });
+    const result = await builder.run();
+    expect(calls).toBe(3);
+    expect(result.changedFiles).toEqual([]);
+    workspaceManager.remove(workspace);
+  });
+
+  test("suppresses repeated large-file evidence before stopping a no-progress loop", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    writeFileSync(join(repository.path, "src", "large.ts"), `needle\n${"x".repeat(MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES * 2)}`);
+    execFileSync("git", ["-C", repository.path, "add", "src/large.ts"]);
+    execFileSync("git", ["-C", repository.path, "commit", "-m", "large duplicate fixture"]);
+    const baseCommitSha = execFileSync("git", ["-C", repository.path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "duplicate-evidence-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-duplicate-evidence", repositoryRoot: repository.path, baseCommitSha });
+    const task = manifest("run-duplicate-evidence", baseCommitSha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, baseCommitSha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "duplicate-evidence-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let calls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create(request) {
+        calls += 1;
+        const serialized = JSON.stringify(request.input);
+        if (calls === 2) expect(serialized).toContain("MODEL_VIEW_TRUNCATED");
+        if (calls === 3) {
+          expect(serialized).toContain("duplicateEvidence");
+          expect(serialized.match(/MODEL_VIEW_TRUNCATED/g)?.length).toBe(1);
+          expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES * 2);
+        }
+        return { id: `duplicate-evidence-${calls}`, output: [{
+          type: "function_call", call_id: `duplicate-evidence-call-${calls}`, name: "read_file",
+          arguments: JSON.stringify({ path: "src/large.ts" }),
+        }] };
+      } },
+    });
+    await expect(builder.run()).rejects.toThrow("repeated evidence was suppressed");
+    expect(calls).toBe(3);
+    workspaceManager.remove(workspace);
+  });
+
+  test("stops unique read-only discovery before it can consume the full paid round budget", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "bounded-discovery-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-bounded-discovery", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-bounded-discovery", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "bounded-discovery-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let paidCalls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        paidCalls += 1;
+        return { id: `bounded-discovery-${paidCalls}`, output: [{
+          type: "function_call", call_id: `bounded-discovery-call-${paidCalls}`, name: "search_files",
+          arguments: JSON.stringify({ query: `unique-query-${paidCalls}` }),
+        }] };
+      } },
+    });
+    await expect(builder.run()).rejects.toThrow("paid discovery rounds without producing an authorized candidate diff");
+    expect(paidCalls).toBe(MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION);
+    expect(paidCalls).toBeLessThan(MAX_BUILDER_TOOL_CALLS_PER_RUN);
+    expect(await workspaceManager.diffAsync(workspace)).toBe("");
+    workspaceManager.remove(workspace);
+  });
+
+  test("does not let a reverted write reset the paid discovery ceiling", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "reverted-discovery-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-reverted-discovery", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-reverted-discovery", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "reverted-discovery-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let paidCalls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        paidCalls += 1;
+        if (paidCalls === 1) return { id: "reverted-discovery-write", output: [{
+          type: "function_call", call_id: "reverted-discovery-write-call", name: "write_file",
+          arguments: JSON.stringify({ path: "src/value.ts", content: "export const value = 1;\n" }),
+        }] };
+        return { id: `reverted-discovery-${paidCalls}`, output: [{
+          type: "function_call", call_id: `reverted-discovery-call-${paidCalls}`, name: "search_files",
+          arguments: JSON.stringify({ query: `reverted-query-${paidCalls}` }),
+        }] };
+      } },
+    });
+    await expect(builder.run()).rejects.toThrow("paid discovery rounds without producing an authorized candidate diff");
+    expect(paidCalls).toBe(MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION);
+    expect(await workspaceManager.diffAsync(workspace)).toBe("");
+    workspaceManager.remove(workspace);
+  });
+
+  test("preserves the discovery ceiling across a budget pause and resume", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "discovery-resume-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-discovery-resume", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-discovery-resume", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "discovery-resume-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    let paidCalls = 0;
+    let reservations = 0;
+    let continuation: BuilderContinuation | undefined;
+    const interrupted = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        paidCalls += 1;
+        return { id: `discovery-resume-${paidCalls}`, output: [{
+          type: "function_call", call_id: `discovery-resume-call-${paidCalls}`, name: "search_files",
+          arguments: JSON.stringify({ query: `resume-query-${paidCalls}` }),
+        }] };
+      } },
+      reserveModelCall: () => {
+        reservations += 1;
+        if (reservations === MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION) {
+          throw new BudgetPausedError(task.runId, "discovery resume checkpoint");
+        }
+        return `discovery-reservation-${reservations}`;
+      },
+      onContinuation: (checkpoint) => { continuation = checkpoint; },
+    });
+    await expect(interrupted.run()).rejects.toThrow("discovery resume checkpoint");
+    expect(paidCalls).toBe(MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION - 1);
+    expect(continuation?.discoveryRoundsBeforeMutation).toBe(MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION - 1);
+
+    let resumedCalls = 0;
+    const resumed = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor, continuation,
+      transport: { async create() {
+        paidCalls += 1;
+        resumedCalls += 1;
+        return { id: "discovery-resume-final", output: [{
+          type: "function_call", call_id: "discovery-resume-final-call", name: "search_files",
+          arguments: JSON.stringify({ query: "resume-final-query" }),
+        }] };
+      } },
+    });
+    await expect(resumed.run()).rejects.toThrow("paid discovery rounds without producing an authorized candidate diff");
+    expect(resumedCalls).toBe(1);
+    expect(paidCalls).toBe(MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION);
+    workspaceManager.remove(workspace);
+  });
+
+  test("rejects an exhausted legacy discovery checkpoint before another paid call", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "legacy-discovery-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-legacy-discovery", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-legacy-discovery", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "legacy-discovery-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 0, stdout: "", stderr: "" }),
+    });
+    const legacyContinuation: BuilderContinuation = {
+      version: 1, runId: task.runId, manifestHash: task.manifestHash,
+      inputContextHash: sha256(task.request.normalized), nextRound: 11,
+      input: [], responseIds: [], requestedCommands: [], commandExecutionIds: [],
+      mutations: 0, successfulEvidenceMutation: -1, successfulEvidenceCommand: null,
+      toolCallCount: 11, consecutiveNoProgressRounds: 0, candidateDiffHash: sha256(""),
+      seenSemanticEvidence: [], failedCommands: [],
+    };
+    let paidCalls = 0;
+    const builder = new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor, continuation: legacyContinuation,
+      transport: { async create() { paidCalls += 1; return { id: "must-not-run", output: [] }; } },
+    });
+    await expect(builder.run()).rejects.toThrow("no additional model call was admitted");
+    expect(paidCalls).toBe(0);
+    workspaceManager.remove(workspace);
+  });
+
+  test("never purchases a thirteenth Builder turn at the tool-round boundary", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "round-boundary-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-round-boundary", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-round-boundary", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "round-boundary-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => ({ status: 1, stdout: "", stderr: "still iterating" }),
+    });
+    let paidCalls = 0;
+    const result = await new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create() {
+        paidCalls += 1;
+        return { id: `round-boundary-${paidCalls}`, output: [{
+          type: "function_call", call_id: `round-boundary-call-${paidCalls}`, name: "write_file",
+          arguments: JSON.stringify({ path: "src/value.ts", content: `export const value = ${paidCalls + 1};\n` }),
+        }] };
+      } },
+    }).run();
+    expect(paidCalls).toBe(12);
+    expect(result.responseIds).toHaveLength(12);
+    expect(result.changedFiles).toEqual(["src/value.ts"]);
+    expect(result.implementationSummary).toContain("paid tool ceiling");
+    workspaceManager.remove(workspace);
+  });
+
   test("stops repeated identical command failures before exhausting tool rounds", async () => {
     const root = temporaryRoot();
     const repository = initRepository(root);
@@ -1085,6 +2140,44 @@ describe("Phase 2 authoritative execution worker", () => {
       workerOwnerId: "test-worker",
       leaseTtlMs: 30_000,
     });
+    const loserReceived = supervisor.receiveRequest({
+      runId: "run-worker-dispatch-loser", userId: "user-1",
+      repository: {
+        repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture",
+        baseBranch: "main", baseCommitSha: repository.sha,
+      },
+      request: "Change value",
+    });
+    const loserTask = manifest(loserReceived.runId, repository.sha);
+    const { manifestHash: _loserHash, ...loserProposal } = loserTask;
+    const loserPlanReady = transitionToPlanReadyForTest({
+      supervisor, received: loserReceived, normalizedRequest: loserProposal.request.normalized,
+      manifest: loserProposal, key: "worker-dispatch-loser",
+      artifactRoot: join(root, "planning-dispatch-loser-artifacts"),
+    });
+    const loserFrozen = supervisor.freezePlan({
+      runId: loserPlanReady.runId, expectedStateVersion: loserPlanReady.stateVersion,
+      manifest: loserProposal, actorId: "test-planner", idempotencyKey: "freeze-worker-dispatch-loser",
+    }).run;
+    const losingManager = createExecutionManager();
+    const loserQueued = losingManager.enqueue(loserFrozen.runId);
+    supervisor.claimBuilderDispatch({
+      agentExecutionId: "durable-builder-winner", runId: loserFrozen.runId, role: "BUILDER",
+      modelTier: "GPT-5.6_TERRA", status: "RUNNING",
+      inputHash: sha256({
+        manifestHash: loserQueued.manifestHash,
+        purpose: "initial-builder-dispatch",
+        dispatchStateVersion: loserQueued.stateVersion,
+      }),
+      outputArtifactId: null, startedAt: "2026-07-17T18:00:00.000Z", completedAt: null,
+    });
+    const durableBeforeClaimLoss = supervisor.exportRunRecords(loserFrozen.runId);
+    const callsBeforeClaimLoss = response;
+    await expect(losingManager.runQueued(loserFrozen.runId)).rejects.toThrow("owns the durable initial Builder dispatch");
+    expect(response).toBe(callsBeforeClaimLoss);
+    expect(supervisor.exportRunRecords(loserFrozen.runId)).toEqual(durableBeforeClaimLoss);
+    expect(supervisor.getRun(loserFrozen.runId).state).toBe("QUEUED");
+    expect(supervisor.listFailures(loserFrozen.runId)).toEqual([]);
     let manager = createExecutionManager();
     const result = await manager.execute(run.runId);
     expect(result.changedFiles).toEqual(["src/value.ts"]);
@@ -1098,7 +2191,15 @@ describe("Phase 2 authoritative execution worker", () => {
     expect(artifacts.map((artifact) => artifact.type)).toContain("TEST_INTEGRITY_COMPARISON");
     const auditDb = new Database(join(root, "engineer.db"), { readonly: true });
     expect((auditDb.query("SELECT COUNT(*) AS count FROM command_executions").get() as { count: number }).count).toBe(1);
-    expect((auditDb.query("SELECT COUNT(*) AS count FROM agent_executions").get() as { count: number }).count).toBe(1);
+    expect((auditDb.query("SELECT COUNT(*) AS count FROM agent_executions WHERE run_id = ?").get(run.runId) as { count: number }).count).toBe(1);
+    expect(auditDb.query(`SELECT d.agent_execution_id, d.model_tier, d.worker_owner_id, d.worker_fencing_token,
+      a.status, a.output_artifact_id FROM builder_dispatch_claims d
+      JOIN agent_executions a ON a.id = d.agent_execution_id AND a.run_id = d.run_id
+      WHERE d.run_id = ?`).all(run.runId)).toEqual([{
+        agent_execution_id: expect.any(String), model_tier: "GPT-5.6_TERRA",
+        worker_owner_id: "test-worker", worker_fencing_token: expect.any(Number),
+        status: "SUCCEEDED", output_artifact_id: expect.any(String),
+      }]);
     expect(auditDb.query("SELECT status, retry_count, budget_reservation_id FROM model_calls ORDER BY rowid").all()).toEqual([
       { status: "FAILED", retry_count: 0, budget_reservation_id: expect.any(String) },
       { status: "SUCCEEDED", retry_count: 1, budget_reservation_id: expect.any(String) },

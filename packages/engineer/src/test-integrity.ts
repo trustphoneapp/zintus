@@ -5,8 +5,8 @@ import { resolve, sep } from "node:path";
 import { z } from "zod";
 import type { LocalArtifactStore } from "./artifact-store.js";
 import type { TaskManifest } from "./contracts.js";
-import type { ArtifactRecord, WorkspaceRecord } from "./execution-contracts.js";
-import { sha256 } from "./hash.js";
+import { ArtifactRecordSchema, type ArtifactRecord, type WorkspaceRecord } from "./execution-contracts.js";
+import { canonicalJson, sha256 } from "./hash.js";
 import { isManifestPathAllowed, normalizeRepositoryPath } from "./manifest-files.js";
 import type { EngineerSupervisor } from "./supervisor.js";
 
@@ -142,11 +142,13 @@ function assertSurfaceBounds(entries: Array<{ byteLength: number }>): void {
   }
 }
 
-export function createTestBaseline(input: { runId: string; manifest: TaskManifest; workspace: WorkspaceRecord; now?: () => Date }): TestBaselineManifest {
+export function createTestBaseline(input: { runId: string; manifest: TaskManifest; workspace: WorkspaceRecord; now?: () => Date;
+  verifiedSeedHeadCommitSha?: string }): TestBaselineManifest {
   if (input.manifest.runId !== input.runId || input.workspace.runId !== input.runId) throw new Error("test baseline inputs belong to different runs");
   if (input.workspace.baseCommitSha.toLowerCase() !== input.manifest.repository.baseCommitSha.toLowerCase()) throw new Error("test baseline workspace does not match the frozen base");
   const head = runGit(input.workspace.workspaceRoot, ["rev-parse", "--verify", "HEAD^{commit}"]).trim();
-  if (head.toLowerCase() !== input.workspace.baseCommitSha.toLowerCase()) {
+  const expectedHead = (input.verifiedSeedHeadCommitSha ?? input.workspace.baseCommitSha).toLowerCase();
+  if (head.toLowerCase() !== expectedHead) {
     throw new TestIntegrityViolationError("TEST_BASELINE_TAMPERED", "test baseline workspace HEAD does not match the frozen base");
   }
   if (runGit(input.workspace.workspaceRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]).length > 0) {
@@ -195,7 +197,8 @@ export function compareTestBaseline(input: { baseline: TestBaselineManifest; wor
   return TestIntegrityComparisonSchema.parse({ ...content, comparisonHash: sha256(content) });
 }
 
-type GuardOptions = { supervisor: EngineerSupervisor; artifactStore: LocalArtifactStore; manifest: TaskManifest; workspace: WorkspaceRecord; now?: () => Date };
+type GuardOptions = { supervisor: EngineerSupervisor; artifactStore: LocalArtifactStore; manifest: TaskManifest; workspace: WorkspaceRecord;
+  now?: () => Date; verifiedSeedHeadCommitSha?: string;strictArtifactReads?:boolean };
 
 export class TestIntegrityGuard {
   private commandMutationChecks = 0;
@@ -206,7 +209,8 @@ export class TestIntegrityGuard {
   }
 
   static createAndRecord(options: GuardOptions): TestIntegrityGuard {
-    const baseline = createTestBaseline({ runId: options.manifest.runId, manifest: options.manifest, workspace: options.workspace, now: options.now });
+    const baseline = createTestBaseline({ runId: options.manifest.runId, manifest: options.manifest, workspace: options.workspace, now: options.now,
+      ...(options.verifiedSeedHeadCommitSha ? { verifiedSeedHeadCommitSha: options.verifiedSeedHeadCommitSha } : {}) });
     const guard = new TestIntegrityGuard(options, baseline);
     guard.record("TEST_BASELINE_MANIFEST", baseline);
     return guard;
@@ -216,7 +220,8 @@ export class TestIntegrityGuard {
     const artifact = options.supervisor.listArtifacts(options.manifest.runId).filter((candidate) => candidate.type === "TEST_BASELINE_MANIFEST" && candidate.trusted).at(-1);
     if (!artifact) throw new TestIntegrityViolationError("TEST_BASELINE_TAMPERED", "trusted test baseline manifest is unavailable");
     try {
-      const baseline = TestBaselineManifestSchema.parse(JSON.parse(options.artifactStore.read(artifact).toString("utf8")));
+      const bytes=options.strictArtifactReads?options.artifactStore.readVerifiedExact(artifact):options.artifactStore.read(artifact);
+      const baseline = TestBaselineManifestSchema.parse(JSON.parse(bytes.toString("utf8")));
       return new TestIntegrityGuard(options, baseline);
     } catch (error) {
       if (error instanceof TestIntegrityViolationError) throw error;
@@ -237,17 +242,36 @@ export class TestIntegrityGuard {
   }
 
   attest(stage: string): { comparison: TestIntegrityComparison; artifact: ArtifactRecord } {
-    const comparison = compareTestBaseline({ baseline: this.baseline, workspaceRoot: this.options.workspace.workspaceRoot, stage, commandMutationChecks: this.commandMutationChecks, now: this.options.now });
-    const artifact = this.record("TEST_INTEGRITY_COMPARISON", comparison);
+    const prepared=this.prepareAttestation(stage),comparison=prepared.comparison,
+      artifact=this.options.supervisor.recordArtifact(prepared.artifact);
+    this.options.supervisor.recordTestIntegrityAttestation(artifact.artifactId, comparison);
     if (!comparison.passed) throw new TestIntegrityViolationError("TEST_BASELINE_TAMPERED", `immutable test surface changed at ${stage}: ${comparison.immutableChanges.join(", ")}`, artifact.artifactId);
     return { comparison, artifact };
+  }
+
+  /**
+   * Builds a content-addressed comparison without making it authoritative.
+   * Optional-hardening uses this to include PRE_REVIEW in the single atomic
+   * Reviewer-ingress transaction; a crash can leave only an unreferenced file.
+   */
+  prepareAttestation(stage:string,options:{comparedAt?:string;artifactId?:string}={}):{
+    comparison:TestIntegrityComparison;artifact:ArtifactRecord}{
+    const comparedAt=options.comparedAt,
+      comparison=compareTestBaseline({baseline:this.baseline,workspaceRoot:this.options.workspace.workspaceRoot,
+        stage,commandMutationChecks:this.commandMutationChecks,
+        now:comparedAt===undefined?this.options.now:()=>new Date(comparedAt)}),
+      pending=this.options.artifactStore.put({runId:this.options.manifest.runId,type:"TEST_INTEGRITY_COMPARISON",
+        bytes:canonicalJson(comparison),producerType:"SYSTEM",producerId:"engineer-supervisor-test-integrity",trusted:true,
+        createdAt:comparison.comparedAt}),artifact=ArtifactRecordSchema.parse({
+          ...pending,...(options.artifactId===undefined?{}:{artifactId:options.artifactId})});
+    return {comparison,artifact};
   }
 
   manifest(): TestBaselineManifest { return this.baseline; }
 
   private record(type: string, value: unknown): ArtifactRecord {
     return this.options.supervisor.recordArtifact(this.options.artifactStore.put({
-      runId: this.options.manifest.runId, type, bytes: JSON.stringify(value), producerType: "SYSTEM",
+      runId: this.options.manifest.runId, type, bytes: canonicalJson(value), producerType: "SYSTEM",
       producerId: "engineer-supervisor-test-integrity", trusted: true,
     }));
   }

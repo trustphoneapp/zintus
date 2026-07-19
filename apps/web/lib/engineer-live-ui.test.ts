@@ -24,11 +24,14 @@ describe("Engineer live UI lifecycle guards", () => {
   });
 
   it("locks a budget top-up synchronously and exposes an applying state", () => {
-    expect(source).toContain("if (!run || !budget || topUpPendingRef.current) return");
+    expect(source).toContain('if (!run || !budget || run.state !== "PAUSED_BUDGET" || topUpPendingRef.current) return');
     expect(source).toContain("topUpPendingRef.current = true");
     expect(source).toContain('"Applying one top-up…"');
     expect(source).toContain("Allowance added once. New ceiling:");
-    expect(source).toContain('topUpNotice ? "Prepare another top-up"');
+    expect(source).toContain("No action needed · active top-ups are locked");
+    expect(source).toContain("Allowance was added exactly once, but resume did not complete");
+    expect(source).toContain('topUpNotice ? "Allowance already added"');
+    expect(source).toContain("canRetryLegacyReservation || Boolean(budget?.topUpPendingResume)");
   });
 
   it("locks run mutations before awaiting and exposes action-specific progress", () => {
@@ -36,8 +39,30 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain('withRunMutation("freeze-start"');
     expect(source).toContain('withRunMutation(`decision:${decisionId}`');
     expect(source).toContain('pendingAction === "freeze-start" ? "Starting…"');
-    expect(source).toContain('pendingAction === "human-review:approve" ? "Applying…"');
-    expect(source).toContain('pendingAction === "approval:approve" ? "Publishing…"');
+    expect(source).toContain('pendingAction === "human-review:retry" ? "Retrying review…"');
+    expect(source).not.toContain('resolveHumanReview("approve")');
+    expect(source).not.toContain("Continue to approval");
+    expect(source).toContain('"Retry reviewer from checkpoint"');
+    expect(source).toContain('resolveEngineerDecision(run, decisionId, optionId, "Selected through the Zintus decision inbox.")');
+  });
+
+  it("refreshes the authoritative snapshot on promotion and approval SSE events", () => {
+    expect(source).toContain('event.reasonCode === "VERIFIED_CANDIDATE_PROMOTED"');
+    expect(source).toContain("void refresh(runId)");
+  });
+
+  it("maps the machine-only REVIEW_APPROVED fallback to truthful publication copy", () => {
+    expect(source).toContain('latestState === "REVIEW_APPROVED" && !approval ? <PublicationUnavailableNotice /> : null');
+    expect(source).not.toContain("The candidate passed human review");
+    expect(source).not.toContain('<span className="engineer-kicker">Review approved</span>');
+  });
+
+  it("scopes stale approval conflicts to one run and clears them only on full snapshot paths", () => {
+    expect(source).toContain("candidateConflictAppliesToRun(candidateStaleRunId, run?.runId ?? null)");
+    expect(source).toContain("setCandidateStaleRunId(run.runId)");
+    expect(source.match(/setCandidateStaleRunId\(null\)/g)?.length).toBeGreaterThanOrEqual(3);
+    const liveSummary = source.slice(source.indexOf("const refreshLiveSummary"), source.indexOf("useEffect(() => () =>", source.indexOf("const refreshLiveSummary")));
+    expect(liveSummary).not.toContain("setCandidateStaleRunId");
   });
 
   it("separates active reservations from ambiguous provider outcomes", () => {
@@ -51,5 +76,24 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("FOLDER_INVENTORY_MAX_ENTRIES = 10_000");
     expect(source).toContain("FOLDER_INVENTORY_MAX_DEPTH = 32");
     expect(source).toContain('item.name === ".git" || item.name === "node_modules"');
+    expect(source).toContain("FOLDER_TREE_MAX_NODES = 160");
+    expect(source).toContain("<FolderTree nodes={folderSnapshot.tree}");
+  });
+
+  it("renders compact controls from real connector and workflow state", () => {
+    expect(source).toContain("listGithubConnectorRepositories()");
+    expect(source).toContain("getGithubBranchCommit(owner, name, candidate.defaultBranch)");
+    expect(source).toContain("<BudgetSlider index={budgetPresetIndex}");
+    expect(source).toContain("const targetIndex = chip.label === \"Recommended\" ? recommendedIndex : chip.presetIndex");
+    expect(source).toContain("stage={stage}");
+    expect(source).toContain("const visibleEvidenceErrors = reachedVerification ? (data?.errors ?? []) : []");
+    expect(source).toContain("engineer-run-task${expanded ? \" expanded\" : \"\"}");
+  });
+
+  it("reconnects automatically when the local gateway starts after the page", () => {
+    expect(source).toContain('if (gatewayState !== "offline") return');
+    expect(source).toContain("window.setInterval(reconnect, 3_000)");
+    expect(source).toContain('window.addEventListener("focus", reconnect)');
+    expect(source).toContain('window.removeEventListener("focus", reconnect)');
   });
 });

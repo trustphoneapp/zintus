@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   IdempotencyConflictError,
   InvalidTransitionError,
@@ -14,6 +18,10 @@ import type { RepositoryReference, TaskManifestContent } from "./contracts.js";
 import { RetryBudgetsSchema, RiskFeaturesSchema } from "./contracts.js";
 import { MAX_BUILDER_TOOL_ROUNDS } from "./codex-builder.js";
 import { sha256 } from "./hash.js";
+import { LocalArtifactStore } from "./artifact-store.js";
+import { AgentExecutionRecordSchema } from "./execution-contracts.js";
+import { EngineerLedger } from "./ledger.js";
+import { PlanProposalSchema, planProposalContentHash } from "./planning.js";
 import { transitionReplanToPlanReadyForTest, transitionToPlanReadyForTest } from "./test-planning-evidence.js";
 
 const repository: RepositoryReference = {
@@ -108,12 +116,76 @@ function freeze(supervisor: EngineerSupervisor, runId = "run-1") {
 }
 
 describe("Engineer Supervisor foundation", () => {
+  test("does not expose legacy raw Reviewer persistence or recovery authority", () => {
+    const supervisor = createSupervisor() as unknown as Record<string, unknown>;
+    for (const name of [
+      "recordReviewerSession", "reviewerPersistenceRecoveryCandidate",
+      "recoverReviewerSession", "recordedReviewerOutput",
+    ]) expect(name in supervisor).toBe(false);
+    (supervisor as unknown as EngineerSupervisor).close();
+  });
+
   test("the durable Builder-call backstop covers the default bounded workflow", () => {
     const retries = RetryBudgetsSchema.parse({});
     const completeWorkflowEnvelope =
-      (1 + retries.builderRepairAttempts) * (MAX_BUILDER_TOOL_ROUNDS + 1)
+      (1 + retries.builderRepairAttempts) * MAX_BUILDER_TOOL_ROUNDS
       + retries.transientModelAttempts;
     expect(MAX_BUILDER_MODEL_CALLS_PER_RUN).toBeGreaterThanOrEqual(completeWorkflowEnvelope);
+  });
+
+  test("atomically elects one immutable Builder dispatch winner and rejects counterfeit or stale rewrites", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-builder-dispatch-claim-"));
+    const dbPath = join(root, "engineer.db");
+    const supervisor = createEngineerSupervisor({ dbPath, now: () => new Date("2026-07-17T12:00:00.000Z") });
+    receiveAndPlan(supervisor, "run-builder-claim");
+    const firstLedger = new EngineerLedger(dbPath);
+    const secondLedger = new EngineerLedger(dbPath);
+    const inputHash = sha256("same-repair-authority");
+    const firstRecord = {
+      agentExecutionId: "builder-winner", runId: "run-builder-claim", role: "BUILDER" as const,
+      modelTier: "GPT-5.6_TERRA" as const, status: "RUNNING" as const, inputHash,
+      outputArtifactId: null, startedAt: "2026-07-17T12:00:01.000Z", completedAt: null,
+    };
+    const secondRecord = { ...firstRecord, agentExecutionId: "builder-loser", startedAt: "2026-07-17T12:00:02.000Z" };
+    for (const malformed of [
+      { ...firstRecord, outputArtifactId: "unexpected-output" },
+      { ...firstRecord, status: "SUCCEEDED", completedAt: null },
+      { ...firstRecord, status: "FAILED", outputArtifactId: "unexpected-output", completedAt: "2026-07-17T12:00:03.000Z" },
+      { ...firstRecord, status: "PAUSED", completedAt: null },
+    ]) expect(() => AgentExecutionRecordSchema.parse(malformed)).toThrow();
+    expect(() => firstLedger.recordAgentExecution({
+      ...firstRecord, agentExecutionId: "terminal-without-running", status: "FAILED", completedAt: "2026-07-17T12:00:01.000Z",
+    })).toThrow("missing-running-origin");
+    const winner = firstLedger.claimBuilderDispatch(firstRecord, { ownerId: "worker-old", fencingToken: 1 });
+    const loser = secondLedger.claimBuilderDispatch(secondRecord, { ownerId: "worker-new", fencingToken: 2 });
+    expect(winner).toMatchObject({ won: true, claim: { agentExecutionId: "builder-winner", workerOwnerId: "worker-old", workerFencingToken: 1 } });
+    expect(loser).toMatchObject({ won: false, claim: { agentExecutionId: "builder-winner" }, execution: { agentExecutionId: "builder-winner" } });
+    expect(secondLedger.builderRepairExecutions("run-builder-claim", inputHash)).toHaveLength(1);
+
+    const store = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const output = supervisor.recordArtifact(store.put({
+      runId: "run-builder-claim", type: "BUILDER_REPAIR_RESULT", bytes: "{}",
+      producerType: "SYSTEM", producerId: "builder-winner", trusted: false,
+    }));
+    firstLedger.recordAgentExecution({ ...firstRecord, status: "SUCCEEDED", outputArtifactId: output.artifactId, completedAt: "2026-07-17T12:00:03.000Z" });
+    expect(() => secondLedger.recordAgentExecution(firstRecord)).toThrow(IdempotencyConflictError);
+    expect(() => secondLedger.recordAgentExecution({
+      ...firstRecord, status: "SUCCEEDED", outputArtifactId: "counterfeit-output", completedAt: "2026-07-17T12:00:03.000Z",
+    })).toThrow(IdempotencyConflictError);
+
+    const counterfeit = new Database(dbPath);
+    expect(() => counterfeit.query(`INSERT INTO builder_dispatch_claims
+      (run_id, input_hash, agent_execution_id, model_tier, worker_owner_id, worker_fencing_token, claimed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+      "run-builder-claim", sha256("counterfeit"), "builder-winner", "GPT-5.6_TERRA", null, null, "2026-07-17T12:00:04.000Z",
+    )).toThrow();
+    expect(() => counterfeit.query("UPDATE builder_dispatch_claims SET claimed_at = ? WHERE run_id = ? AND input_hash = ?")
+      .run("2026-07-17T12:00:05.000Z", "run-builder-claim", inputHash)).toThrow("immutable");
+    counterfeit.close();
+    firstLedger.close();
+    secondLedger.close();
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
   });
 
   test("rejects invalid intake before it can poison the durable ledger", () => {
@@ -210,11 +282,214 @@ describe("Engineer Supervisor foundation", () => {
 
     const fetched = supervisor.getManifest("run-1");
     expect(fetched?.acceptanceCriteria[0]?.statement).toBe("Every state promotion is recorded.");
+    const contract = supervisor.getRequiredLaneContract("run-1");
+    expect(contract).toMatchObject({
+      runId: "run-1",
+      manifestHash: first.run.manifestHash,
+      requiredCriterionIds: ["criterion-1"],
+      requiredTestIds: ["test-1"],
+    });
+    expect(contract?.planningBinding.contextManifestHash).toMatch(/^sha256:[a-f0-9]{64}$/);
     if (fetched) fetched.acceptanceCriteria[0]!.statement = "tampered in caller memory";
     expect(supervisor.getManifest("run-1")?.acceptanceCriteria[0]?.statement).toBe(
       "Every state promotion is recorded.",
     );
     supervisor.close();
+  });
+
+  test("never tightens the budget for a rejected or conflicting freeze", () => {
+    const supervisor = createSupervisor();
+    const planned = receiveAndPlan(supervisor, "run-budget-freeze");
+    const before = supervisor.getBudget(planned.runId);
+    const tighter = manifestFor(planned.runId, 1, { costBudgetUsd: 1, tokenBudget: 1_000 });
+
+    expect(() => supervisor.freezePlan({
+      runId: planned.runId,
+      expectedStateVersion: planned.stateVersion,
+      manifest: tighter,
+      actorId: "planner-supervisor",
+      idempotencyKey: "rejected-tight-budget",
+    })).toThrow("persisted plan proposal");
+    expect(supervisor.getBudget(planned.runId)).toMatchObject({ limits: before.limits, revision: before.revision });
+    expect(supervisor.listManifestVersions(planned.runId)).toEqual([]);
+    expect(supervisor.getRequiredLaneContract(planned.runId)).toBeNull();
+
+    const frozen = freeze(supervisor, planned.runId);
+    const afterFreeze = supervisor.getBudget(planned.runId);
+    expect(() => supervisor.freezePlan({
+      runId: planned.runId,
+      expectedStateVersion: frozen.run.stateVersion,
+      manifest: tighter,
+      actorId: "planner-supervisor",
+      idempotencyKey: `${planned.runId}:freeze`,
+    })).toThrow();
+    expect(supervisor.getBudget(planned.runId)).toMatchObject({
+      limits: afterFreeze.limits,
+      revision: afterFreeze.revision,
+    });
+    expect(supervisor.listManifestVersions(planned.runId)).toHaveLength(1);
+    supervisor.close();
+  });
+
+  test("rolls back the entire freeze when Required Lane contract persistence fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-required-lane-freeze-"));
+    const dbPath = join(root, "engineer.db");
+    let id = 0;
+    const supervisor = createEngineerSupervisor({
+      dbPath,
+      idFactory: () => `atomic-${++id}`,
+      now: () => new Date("2026-07-17T12:00:00.000Z"),
+    });
+    const planned = receiveAndPlan(supervisor, "run-atomic-freeze");
+    const fault = new Database(dbPath);
+    fault.exec(`CREATE TRIGGER reject_required_lane_contract
+      BEFORE INSERT ON required_lane_contracts
+      BEGIN SELECT RAISE(ABORT, 'injected contract persistence failure'); END;`);
+
+    expect(() => supervisor.freezePlan({
+      runId: planned.runId,
+      expectedStateVersion: planned.stateVersion,
+      manifest: manifestFor(planned.runId),
+      actorId: "planner-supervisor",
+      idempotencyKey: "atomic-freeze",
+    })).toThrow("injected contract persistence failure");
+    expect(supervisor.getRun(planned.runId)).toMatchObject({ state: "PLAN_READY", manifestHash: null });
+    expect(supervisor.listManifestVersions(planned.runId)).toEqual([]);
+    expect(supervisor.getRequiredLaneContract(planned.runId)).toBeNull();
+    expect(supervisor.listEvents(planned.runId).at(-1)?.nextState).toBe("PLAN_READY");
+
+    fault.close();
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("rolls back a tightened budget when state promotion fails after the budget update", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-required-lane-budget-rollback-"));
+    const dbPath = join(root, "engineer.db");
+    let id = 0;
+    const supervisor = createEngineerSupervisor({
+      dbPath,
+      idFactory: () => `budget-atomic-${++id}`,
+      now: () => new Date("2026-07-17T12:00:00.000Z"),
+    });
+    const runId = "run-budget-atomic-freeze";
+    const received = supervisor.receiveRequest({
+      runId, userId: "user-1", repository, request: "Add evidence-bound Engineer workflow",
+    });
+    const tighter = manifestFor(runId, 1, { costBudgetUsd: 1, tokenBudget: 1_000, timeBudgetSeconds: 300 });
+    const planned = transitionToPlanReadyForTest({
+      supervisor,
+      received,
+      normalizedRequest: "Add an evidence-bound Engineer workflow.",
+      manifest: tighter,
+      key: "budget-atomic",
+    });
+    const before = supervisor.getBudget(runId);
+    const beforeEvents = supervisor.listEvents(runId).length;
+    const fault = new Database(dbPath);
+    fault.exec(`CREATE TRIGGER reject_plan_frozen_event
+      BEFORE INSERT ON run_state_events
+      WHEN NEW.next_state = 'PLAN_FROZEN'
+      BEGIN SELECT RAISE(ABORT, 'injected state promotion failure'); END;`);
+
+    expect(() => supervisor.freezePlan({
+      runId,
+      expectedStateVersion: planned.stateVersion,
+      manifest: tighter,
+      actorId: "planner-supervisor",
+      idempotencyKey: "budget-atomic-freeze",
+    })).toThrow("injected state promotion failure");
+    expect(supervisor.getBudget(runId)).toMatchObject({ limits: before.limits, revision: before.revision });
+    expect(supervisor.getRun(runId)).toMatchObject({ state: "PLAN_READY", manifestHash: null });
+    expect(supervisor.listManifestVersions(runId)).toEqual([]);
+    expect(supervisor.getRequiredLaneContract(runId)).toBeNull();
+    expect(supervisor.listEvents(runId)).toHaveLength(beforeEvents);
+    for (const table of ["task_manifest_versions", "required_lane_contracts", "acceptance_criteria"] as const) {
+      expect(fault.query(`SELECT COUNT(*) AS count FROM ${table} WHERE run_id = ?`).get(runId))
+        .toEqual({ count: 0 });
+    }
+
+    fault.close();
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("rejects a plan proposal writer that lost the planning state race", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-plan-proposal-race-"));
+    const dbPath = join(root, "engineer.db");
+    let id = 0;
+    const supervisor = createEngineerSupervisor({
+      dbPath,
+      idFactory: () => `proposal-race-${++id}`,
+      now: () => new Date("2026-07-17T12:00:00.000Z"),
+    });
+    const planned = receiveAndPlan(supervisor, "run-proposal-race");
+    const original = supervisor.latestPlanProposal(planned.runId)!;
+    const planningAnalysis = { ...original.planningAnalysis, architectureSummary: "Late competing proposal" };
+    const proposalHash = planProposalContentHash({
+      manifest: original.manifest,
+      planningAnalysis,
+      contextManifestHash: original.contextManifestHash,
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "late-artifacts") });
+    const artifact = supervisor.recordArtifact(artifactStore.put({
+      runId: planned.runId,
+      type: "PLAN_PROPOSAL",
+      bytes: JSON.stringify({
+        proposalSchemaVersion: original.proposalSchemaVersion,
+        plannerPolicyVersion: original.plannerPolicyVersion,
+        manifest: original.manifest,
+        planningAnalysis,
+        contextManifestHash: original.contextManifestHash,
+      }),
+      producerType: "SYSTEM",
+      producerId: "race-fixture",
+      trusted: true,
+    }));
+    const lateProposal = PlanProposalSchema.parse({
+      ...original,
+      planProposalId: "late-proposal",
+      planningAnalysis,
+      proposalHash,
+      artifactId: artifact.artifactId,
+    });
+    const stalePlanningVersion = planned.stateVersion - 1;
+    const competingLedger = new EngineerLedger(dbPath);
+
+    expect(() => competingLedger.recordPlanProposal(lateProposal, stalePlanningVersion))
+      .toThrow(StateVersionConflictError);
+    expect(supervisor.latestPlanProposal(planned.runId)?.proposalHash).toBe(original.proposalHash);
+
+    competingLedger.close();
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("detects swapped Required Lane JSON instead of trusting relational metadata", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-required-lane-binding-"));
+    const dbPath = join(root, "engineer.db");
+    let id = 0;
+    const supervisor = createEngineerSupervisor({
+      dbPath,
+      idFactory: () => `binding-${++id}`,
+      now: () => new Date("2026-07-17T12:00:00.000Z"),
+    });
+    receiveAndPlan(supervisor, "run-binding-one");
+    freeze(supervisor, "run-binding-one");
+    receiveAndPlan(supervisor, "run-binding-two");
+    freeze(supervisor, "run-binding-two");
+
+    const tamper = new Database(dbPath);
+    const other = tamper.query("SELECT contract_json FROM required_lane_contracts WHERE run_id = ?")
+      .get("run-binding-two") as { contract_json: string };
+    tamper.query("UPDATE required_lane_contracts SET contract_json = ? WHERE run_id = ?")
+      .run(other.contract_json, "run-binding-one");
+    expect(() => supervisor.getRequiredLaneContract("run-binding-one"))
+      .toThrow("does not match its relational binding");
+
+    tamper.close();
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
   });
 
   test("rejects stale writers, illegal transitions, and semantic idempotency-key reuse", () => {
@@ -320,7 +595,7 @@ describe("Engineer Supervisor foundation", () => {
     supervisor.close();
   });
 
-  test("enforces Reviewer evidence, human gate, and supervisor-owned PR preflight", () => {
+  test("reserves REVIEW_APPROVED exclusively for verified-candidate promotion", () => {
     const supervisor = createSupervisor();
     receiveAndPlan(supervisor);
     let run = freeze(supervisor).run;
@@ -345,89 +620,62 @@ describe("Engineer Supervisor foundation", () => {
         idempotencyKey: `run-1:${nextState}`,
       }).run;
     }
+    for (const actorType of ["HUMAN", "SUPERVISOR"] as const) {
+      expect(() => supervisor.transition({
+        runId: run.runId,
+        expectedStateVersion: run.stateVersion,
+        nextState: "REVIEW_APPROVED",
+        reasonCode: "REVIEW_APPROVED",
+        actorType,
+        actorId: `${actorType.toLowerCase()}-actor`,
+        manifestHash: run.manifestHash,
+        idempotencyKey: `run-1:review-no-proof:${actorType}`,
+      })).toThrow("verified-candidate promotion");
+    }
     expect(() => supervisor.transition({
-      runId: run.runId,
-      expectedStateVersion: run.stateVersion,
-      nextState: "REVIEW_APPROVED",
-      reasonCode: "REVIEW_APPROVED",
-      manifestHash: run.manifestHash,
-      idempotencyKey: "run-1:review-no-proof",
-    })).toThrow(InvalidTransitionError);
-    run = supervisor.transition({
       runId: run.runId,
       expectedStateVersion: run.stateVersion,
       nextState: "REVIEW_APPROVED",
       reasonCode: "REVIEW_APPROVED",
       evidenceIds: ["review-decision-1"],
+      actorType: "SUPERVISOR",
       manifestHash: run.manifestHash,
       facts: { reviewerDecisionValid: true, freshReviewerSession: true },
       idempotencyKey: "run-1:review-approved",
-    }).run;
+    })).toThrow("verified-candidate promotion");
+    expect(supervisor.getRun(run.runId)).toMatchObject({ state: "REVIEWING", stateVersion: run.stateVersion });
+    expect(supervisor.listEvents(run.runId).filter((event) => event.nextState === "REVIEW_APPROVED")).toHaveLength(0);
+    supervisor.close();
+  });
+
+  test("requires explicit human authority and failure evidence for Reviewer recovery", () => {
+    const supervisor = createSupervisor();
+    receiveAndPlan(supervisor);
+    let run = freeze(supervisor).run;
+    for (const nextState of [
+      "SANDBOX_COLD_PROVISIONING", "SANDBOX_PREFLIGHT", "SANDBOX_READY", "IMPLEMENTING",
+      "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "SECURITY_REVIEW", "REVIEWING",
+      "HUMAN_REVIEW_REQUIRED",
+    ] as const) {
+      run = supervisor.transition({
+        runId: run.runId, expectedStateVersion: run.stateVersion, nextState,
+        reasonCode: `ENTER_${nextState}`, manifestHash: run.manifestHash,
+        idempotencyKey: `reviewer-recovery:${nextState}`,
+      }).run;
+    }
     expect(() => supervisor.transition({
-      runId: run.runId,
-      expectedStateVersion: run.stateVersion,
-      nextState: "PR_PREFLIGHT",
-      reasonCode: "BYPASS_HUMAN",
-      evidenceIds: ["bundle-1"],
-      manifestHash: run.manifestHash,
-      facts: {
-        reviewerDecisionValid: true,
-        allRequiredChecksPassed: true,
-        noCriticalSecurityFindings: true,
-        evidenceBundleComplete: true,
-        baseBranchCurrent: true,
-      },
-      idempotencyKey: "run-1:bypass",
-    })).toThrow("only policy-approved low-risk work");
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "VERIFICATION_RECOVERY",
+      reasonCode: "HUMAN_RETRY_FAILED_REVIEWER", actorType: "HUMAN", actorId: "reviewer-user",
+      evidenceIds: ["reviewer-failure"], manifestHash: run.manifestHash,
+      idempotencyKey: "reviewer-recovery:no-fact",
+    })).toThrow("reviewerRetryAuthorized");
     run = supervisor.transition({
-      runId: run.runId,
-      expectedStateVersion: run.stateVersion,
-      nextState: "HUMAN_APPROVAL_PENDING",
-      reasonCode: "HUMAN_GATE_REQUIRED",
-      manifestHash: run.manifestHash,
-      idempotencyKey: "run-1:human-pending",
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "VERIFICATION_RECOVERY",
+      reasonCode: "HUMAN_RETRY_FAILED_REVIEWER", actorType: "HUMAN", actorId: "reviewer-user",
+      evidenceIds: ["reviewer-failure"], manifestHash: run.manifestHash,
+      facts: { reviewerRetryAuthorized: true }, idempotencyKey: "reviewer-recovery:authorized",
     }).run;
-    expect(() => supervisor.transition({
-      runId: run.runId,
-      expectedStateVersion: run.stateVersion,
-      nextState: "HUMAN_APPROVED",
-      reasonCode: "HUMAN_APPROVED",
-      actorType: "SUPERVISOR",
-      evidenceIds: ["approval-1"],
-      manifestHash: run.manifestHash,
-      facts: { humanApprovalValid: true },
-      idempotencyKey: "run-1:fake-human",
-    })).toThrow("human actor");
-    run = supervisor.transition({
-      runId: run.runId,
-      expectedStateVersion: run.stateVersion,
-      nextState: "HUMAN_APPROVED",
-      reasonCode: "HUMAN_APPROVED",
-      actorType: "HUMAN",
-      actorId: "reviewer-user",
-      evidenceIds: ["approval-1"],
-      manifestHash: run.manifestHash,
-      facts: { humanApprovalValid: true },
-      idempotencyKey: "run-1:human-approved",
-    }).run;
-    run = supervisor.transition({
-      runId: run.runId,
-      expectedStateVersion: run.stateVersion,
-      nextState: "PR_PREFLIGHT",
-      reasonCode: "PR_PREFLIGHT_PASSED",
-      evidenceIds: ["bundle-1", "approval-1", "review-decision-1"],
-      manifestHash: run.manifestHash,
-      facts: {
-        reviewerDecisionValid: true,
-        humanApprovalValid: true,
-        allRequiredChecksPassed: true,
-        noCriticalSecurityFindings: true,
-        evidenceBundleComplete: true,
-        baseBranchCurrent: true,
-      },
-      idempotencyKey: "run-1:pr-preflight",
-    }).run;
-    expect(run.state).toBe("PR_PREFLIGHT");
+    expect(run.state).toBe("VERIFICATION_RECOVERY");
     supervisor.close();
   });
 
@@ -466,7 +714,7 @@ describe("Engineer Supervisor foundation", () => {
     supervisor.close();
   });
 
-  test("durable Git operations reject duplicate active claims and terminal status regression", () => {
+  test("durable Git operations reject new unbound publication claims at the v22 storage boundary", () => {
     const supervisor = createSupervisor();
     supervisor.receiveRequest({ runId: "run-git-fence", userId: "user-1", repository, request: "Publish safely" });
     const started = {
@@ -477,16 +725,8 @@ describe("Engineer Supervisor foundation", () => {
       status: "STARTED" as const, remoteReference: null,
       startedAt: "2026-07-15T12:00:00.000Z", completedAt: null, errorCode: null,
     };
-    supervisor.recordGitOperation(started);
-    expect(() => supervisor.recordGitOperation(started)).toThrow(IdempotencyConflictError);
-    const succeeded = {
-      ...started, status: "SUCCEEDED" as const, remoteReference: "refs/heads/zintus/run-git-fence",
-      completedAt: "2026-07-15T12:00:01.000Z",
-    };
-    supervisor.recordGitOperation(succeeded);
-    expect(() => supervisor.recordGitOperation({ ...started, startedAt: "2026-07-15T12:00:02.000Z" }))
-      .toThrow(IdempotencyConflictError);
-    expect(supervisor.findGitOperation("run-git-fence", started.idempotencyKey)).toEqual(succeeded);
+    expect(() => supervisor.recordGitOperation(started as never)).toThrow();
+    expect(supervisor.findGitOperation("run-git-fence", started.idempotencyKey)).toBeNull();
     supervisor.close();
   });
 

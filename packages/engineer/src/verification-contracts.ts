@@ -25,6 +25,7 @@ export const VerificationCoverageMatrixSchema = z.object({
   allPlanItemsExecutable: z.boolean(),
   securityGateRequired: z.boolean(),
   executableSecurityTestIds: z.array(IdentifierSchema),
+  deterministicSecurityGateCovered: z.boolean(),
   securityGateCovered: z.boolean(),
   allMustCriteriaCovered: z.boolean(),
   matrixHash: HashSchema,
@@ -42,12 +43,12 @@ export const VerificationCoverageMatrixSchema = z.object({
   if (matrix.allPlanItemsExecutable !== (matrix.nonExecutableTestIds.length === 0)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "test-plan executability summary does not match matrix", path: ["allPlanItemsExecutable"] });
   }
-  if (matrix.securityGateCovered !== (!matrix.securityGateRequired || matrix.executableSecurityTestIds.length > 0)) {
+  if (matrix.securityGateCovered !== (!matrix.securityGateRequired || matrix.executableSecurityTestIds.length > 0 || matrix.deterministicSecurityGateCovered)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "security gate summary does not match matrix", path: ["securityGateCovered"] });
   }
 });
 
-export function buildVerificationCoverageMatrix(manifest: TaskManifest) {
+export function buildVerificationCoverageMatrix(manifest: TaskManifest, options: { deterministicSecurityGateCovered?: boolean } = {}) {
   const criteria = manifest.acceptanceCriteria.map((criterion) => {
     const tests = manifest.testPlan.filter((test) => test.criterionIds.includes(criterion.criterionId));
     const executable = tests.filter((test) => Boolean(test.command));
@@ -70,8 +71,10 @@ export function buildVerificationCoverageMatrix(manifest: TaskManifest) {
     executableSecurityTestIds: manifest.testPlan
       .filter((test) => test.type === "SECURITY" && Boolean(test.command))
       .map((test) => test.testId),
+    deterministicSecurityGateCovered: options.deterministicSecurityGateCovered === true,
     securityGateCovered: manifest.riskTier !== "HIGH" && manifest.riskTier !== "CRITICAL"
-      || manifest.testPlan.some((test) => test.type === "SECURITY" && Boolean(test.command)),
+      || manifest.testPlan.some((test) => test.type === "SECURITY" && Boolean(test.command))
+      || options.deterministicSecurityGateCovered === true,
     allMustCriteriaCovered: criteria
       .filter((criterion) => criterion.priority === "MUST")
       .every((criterion) => criterion.status === "COVERED"),
@@ -82,12 +85,21 @@ export function buildVerificationCoverageMatrix(manifest: TaskManifest) {
 /** Only a successful independent executor record can substantiate a criterion. */
 export function trustedEvidenceSupportsCriterion(evidence: TrustedEvidence, criterionId: string): boolean {
   const criterionIds = evidence.payload.criterionIds;
-  return evidence.eventType === "INDEPENDENT_VERIFICATION"
+  const independentlyExecuted = evidence.eventType === "INDEPENDENT_VERIFICATION"
     && evidence.producerType === "EXECUTOR"
     && evidence.payload.status === "SUCCEEDED"
     && Array.isArray(criterionIds)
     && criterionIds.every((value) => typeof value === "string")
     && criterionIds.includes(criterionId);
+  const scopeAttested = evidence.eventType === "FINAL_CHANGE_SCOPE_ATTESTATION"
+    && evidence.producerType === "SYSTEM"
+    && evidence.producerId === "final-change-scope-policy"
+    && evidence.payload.status === "SUCCEEDED"
+    && evidence.payload.credentialedGitOperationCount === 0
+    && Array.isArray(criterionIds)
+    && criterionIds.every((value) => typeof value === "string")
+    && criterionIds.includes(criterionId);
+  return independentlyExecuted || scopeAttested;
 }
 
 export const VerificationExecutionRecordSchema = z.object({

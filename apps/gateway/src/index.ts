@@ -50,20 +50,24 @@ import {
   EngineerSupervisor,
   GitWorkspaceManager,
   GitHubGitService,
-  LocalArtifactStore,
+  gitCommitLockfileHash,
   OpenAIResponsesTransport,
   OfflineDependencyBundle,
   NO_LOCKFILE_HASH,
   resolveEngineerModel,
   WarmSandboxPool,
-  workspaceLockfileHash,
 } from "@zintus/engineer";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { EngineerRunManager } from "./engineer.js";
+import { createBoundEngineerArtifactStore } from "./engineer-artifact-store.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight } from "./engineer-preflight.js";
 import { DurableEngineerRepositoryAdmissionRegistry, resolveLocalRepositoryHead } from "./engineer-repository-registry.js";
 import { canEnableEngineerPublication, loadOrCreateEngineerPrincipal, loadOrCreateEngineerWorkerLeaseSecret } from "./engineer-identity.js";
+import { recoverHardeningPaidCallsOnce, recoverOptionalHardeningAfterPaidReconciliation,
+  type HardeningPaidCallRecoverySweepResult } from "./hardening-recovery.js";
+import { loadEngineerPromptCacheAuthority } from "./engineer-prompt-cache-authority.js";
 
 export interface StartGatewayOptions {
   /** Override GATEWAY_HOST (e.g. from a CLI flag). */
@@ -146,7 +150,17 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // immutable Docker image are explicitly configured. Additional repositories
   // require a server-verified connector admission and trusted local checkout.
   const engineerRoot = join(homedir(), ".zintus", "engineer");
-  const engineerSupervisor = new EngineerSupervisor({ dbPath: join(engineerRoot, "engineer.db") });
+  const engineerDbPath=join(engineerRoot,"engineer.db");
+  const hardeningPromptCacheAuthority=loadEngineerPromptCacheAuthority({
+    secretPath:join(engineerRoot,"prompt-cache.secret"),dbPath:engineerDbPath,
+  });
+  const hardeningPromptCacheSecret=hardeningPromptCacheAuthority.status==="READY"?
+    hardeningPromptCacheAuthority.secret:undefined;
+  const hardeningPromptCacheReadiness=hardeningPromptCacheAuthority.status==="READY"?
+    {state:"READY" as const,code:null,message:null}:
+    {state:"DEGRADED" as const,code:hardeningPromptCacheAuthority.status,
+      message:"Optional hardening is temporarily unavailable. Restore the local prompt-cache authority, run bun run doctor:engineer, then restart the gateway. Existing runs and history remain available."};
+  const engineerSupervisor = new EngineerSupervisor({ dbPath: engineerDbPath, hardeningPromptCacheSecret });
   const engineerRepositoryRoot = process.env.ZINTUS_ENGINEER_REPOSITORY_ROOT;
   const engineerRepositoryId = process.env.ZINTUS_ENGINEER_REPOSITORY_ID;
   const engineerImage = process.env.ZINTUS_ENGINEER_IMAGE;
@@ -162,12 +176,23 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   const engineerOriginUrl = process.env.ZINTUS_ENGINEER_REPOSITORY_ORIGIN_URL;
   const engineerDependencyBundleRoot = process.env.ZINTUS_ENGINEER_DEPENDENCY_BUNDLE_ROOT;
   const engineerToolchainHash = process.env.ZINTUS_ENGINEER_TOOLCHAIN_HASH;
-  const engineerRepositoryLockfileHash = engineerRepositoryRoot
-    ? workspaceLockfileHash(engineerRepositoryRoot)
-    : NO_LOCKFILE_HASH;
-  const engineerDependenciesReady = engineerRepositoryLockfileHash === NO_LOCKFILE_HASH ||
-    Boolean(engineerDependencyBundleRoot && engineerToolchainHash);
-  const engineerArtifactStore = new LocalArtifactStore({ root: join(engineerRoot, "artifacts") });
+  let engineerRepositoryLockfileHash: string = NO_LOCKFILE_HASH;
+  let engineerDependencyLockfileError: string | null = null;
+  if (engineerRepositoryRoot && engineerBaseCommitSha) {
+    try {
+      engineerRepositoryLockfileHash = gitCommitLockfileHash(engineerRepositoryRoot, engineerBaseCommitSha);
+    } catch (error) {
+      engineerDependencyLockfileError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  const engineerDependenciesReady = !engineerDependencyLockfileError && (
+    engineerRepositoryLockfileHash === NO_LOCKFILE_HASH ||
+    Boolean(engineerDependencyBundleRoot && engineerToolchainHash)
+  );
+  const engineerArtifactStore = createBoundEngineerArtifactStore(
+    engineerSupervisor,
+    join(engineerRoot, "artifacts"),
+  );
   const engineerPrincipal = loadOrCreateEngineerPrincipal(join(engineerRoot, "identity.json"));
   const transportForRole = async () => {
     const apiKey = await getProviderKey("openai");
@@ -215,6 +240,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerWarmPool: WarmSandboxPool | undefined;
   let engineerSandboxManager: DockerSandboxManager | undefined;
   let engineerPrewarmConfig: { repositoryId: string; repositoryRoot: string; getBaseCommitSha: () => string } | undefined;
+  let recoverHardeningPaidCalls: (() => HardeningPaidCallRecoverySweepResult) | undefined;
   const unavailablePreflight = new EngineerCapabilityPreflight({
     models: [], publicationEnabled: false,
     repository: { repositoryId: "unconfigured", provider: "local", owner: "unconfigured", name: "unconfigured", baseBranch: "unconfigured", baseCommitSha: "0".repeat(40), originUrl: "unconfigured" },
@@ -323,9 +349,22 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     const configuredWorkerConcurrency = Number(process.env.ZINTUS_ENGINEER_WORKER_CONCURRENCY ?? "2");
     const workerConcurrency = Number.isInteger(configuredWorkerConcurrency) && configuredWorkerConcurrency > 0
       ? configuredWorkerConcurrency : 2;
+    const workerLeaseSecret = loadOrCreateEngineerWorkerLeaseSecret(join(engineerRoot, "worker-lease.secret"));
+    const checkpointSecret = loadOrCreateEngineerWorkerLeaseSecret(join(engineerRoot, "verified-candidate.secret"));
+    const checkpointKeyId = `local-checkpoint-${createHash("sha256").update(checkpointSecret).digest("hex").slice(0, 24)}`;
+    const checkpointAttestor = {
+      algorithm: "hmac-sha256",
+      keyId: checkpointKeyId,
+      sign: (payload: Uint8Array) => `hmac-sha256:${createHmac("sha256", checkpointSecret).update(payload).digest("hex")}`,
+      verify: (payload: Uint8Array, signature: string) => {
+        const expected = `hmac-sha256:${createHmac("sha256", checkpointSecret).update(payload).digest("hex")}`;
+        return expected.length === signature.length && timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+      },
+    };
+    engineerSupervisor.configureCheckpointAttestor(checkpointAttestor);
     engineerWorkerLeases = new EngineerWorkerLeaseManager({
       dbPath: join(engineerRoot, "worker-leases.db"),
-      tokenSecret: loadOrCreateEngineerWorkerLeaseSecret(join(engineerRoot, "worker-lease.secret")),
+      tokenSecret: workerLeaseSecret,
       maxConcurrentLeases: workerConcurrency,
       watchdogIntervalMs: 10_000,
       recoverExpiredLease: async (lease) => {
@@ -333,6 +372,27 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         if (!runId) return;
         const run = engineerSupervisor.getRun(runId);
         if (run.terminalAt) return;
+        // Optional hardening is a paid lane whose durable cache identity is
+        // part of the reservation authority. Never mutate or resume that lane
+        // while the local authority is degraded; ordinary Engineer recovery
+        // remains available.
+        if (engineerSupervisor.isOptionalHardeningChild(runId)) {
+          if (hardeningPromptCacheReadiness.state !== "READY") return;
+          // Paid-call reconciliation owns every outstanding reservation,
+          // finalization, and pre-reservation crash boundary. The generic
+          // watchdog must not finalize that generation or spend its retries.
+          if (engineerSupervisor.hasOutstandingHardeningPaidCallRecoveryWork(runId)) return;
+          if(run.state!=="CANCELLATION_PENDING"){
+            for(const recovery of recoverOptionalHardeningAfterPaidReconciliation({runIds:[runId],
+              supervisor:engineerSupervisor,runs:engineerRuns,execution:engineerExecution}))
+              recovery.promise.catch(()=>undefined);
+            return;
+          }
+        }
+        if (run.state === "CANCELLATION_PENDING") {
+          engineerRuns.resumeCancellation(runId);
+          return;
+        }
         if (run.state === "PLANNING" || run.state === "REPLANNING") {
           engineerRuns.resumePlanning(runId);
           return;
@@ -346,6 +406,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         else if (outcome === "IGNORED") engineerVerification?.resumeRecovered(runId);
       },
     });
+    engineerSupervisor.configureRecoveryWorkerLeaseAuthority(engineerWorkerLeases);
     engineerExecution = new EngineerExecutionManager({
       supervisor: engineerSupervisor,
       sandboxManager,
@@ -356,6 +417,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       transportForRun: transportForRole,
       leaseManager: engineerWorkerLeases,
       workerOwnerId: `gateway:${process.pid}`,
+      hardeningPromptCacheSecret,
       builderOptions: {
         modelConfiguration: engineerModelConfiguration,
       },
@@ -374,6 +436,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       modelConfiguration: engineerModelConfiguration,
       leaseManager: engineerWorkerLeases,
       workerOwnerId: `gateway:${process.pid}:verification`,
+      hardeningPromptCacheSecret,
+      checkpointAttestor,
       safetyIdentifierForUser: (userId) => {
         if (userId !== engineerPrincipal.ownerId) throw new Error("unknown Engineer safety subject");
         return engineerPrincipal.safetyIdentifier;
@@ -388,12 +452,14 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
             refreshToken: () => currentGithubToken(true),
           }),
           artifactStore: engineerArtifactStore,
+          checkpointAttestor,
           diffForRun: (runId) => {
             const sandbox = engineerExecution?.getSandbox(runId);
             if (!sandbox) {
               const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF" && item.trusted).at(-1);
               if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
-              return engineerArtifactStore.read(artifact).toString("utf8");
+              return (engineerSupervisor.isOptionalHardeningChild(runId)
+                ?engineerArtifactStore.readVerifiedExact(artifact):engineerArtifactStore.read(artifact)).toString("utf8");
             }
             return workspaceManager.diff(sandbox.workspace);
           },
@@ -411,6 +477,8 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       artifactStore: engineerArtifactStore,
       preflight: engineerPreflight,
       principal: engineerPrincipal,
+      checkpointAttestor,
+      hardeningPromptCacheReadiness,
       leaseManager: engineerWorkerLeases,
       workerOwnerId: `gateway:${process.pid}:planning`,
       cleanupRun: (runId) => { engineerExecution?.destroy(runId); },
@@ -420,11 +488,16 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         if (!sandbox) {
           const artifact = engineerSupervisor.listArtifacts(runId).filter((item) => item.type === "FINAL_DIFF" && item.trusted).at(-1);
           if (!artifact) throw new Error("Engineer reviewed diff is unavailable");
-          return engineerArtifactStore.read(artifact).toString("utf8");
+          return (engineerSupervisor.isOptionalHardeningChild(runId)
+            ?engineerArtifactStore.readVerifiedExact(artifact):engineerArtifactStore.read(artifact)).toString("utf8");
         }
         return workspaceManager.diff(sandbox.workspace);
       },
     });
+    recoverHardeningPaidCalls = () => {
+      if(!engineerWorkerLeases||!hardeningPromptCacheSecret)return {recovered:[],errors:[]};
+      return recoverHardeningPaidCallsOnce({supervisor:engineerSupervisor,workerLeases:engineerWorkerLeases,workerLeaseSecret});
+    };
   }
 
   const log: LogFn = (level, message, fields = {}) => {
@@ -456,6 +529,53 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     );
   }
 
+  // Cancellation is the first recovery lane. It must converge before queued,
+  // planning, verification, or paid-call recovery can revive ordinary work.
+  for (const recovery of engineerRuns.recoverPendingCancellations()) {
+    recovery.promise.catch((error) => {
+      log("error", "engineer.cancellation_recovery_failed", {
+        runId: recovery.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  // A hardening start may have committed its immutable seed authority just
+  // before a process interruption. Reconstruct that exact cold seed and
+  // finish the deterministic start before ordinary queued recovery scans.
+  for (const recovery of engineerRuns.recoverOptionalHardeningStarts()) {
+    recovery.promise.catch((error) => {
+      log("error", "engineer.hardening_start_recovery_failed", {
+        runId: recovery.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+  // Reconcile paid-call crash windows before any ordinary workflow recovery.
+  // This path has no provider transport and skips every child with a live
+  // independent worker lease or paid-call execution fence.
+  try {
+    const sweep = recoverHardeningPaidCalls?.() ?? {recovered:[],errors:[]};
+    if (sweep.recovered.length > 0) log("info", "engineer.hardening_paid_call_recovery", { recovered:sweep.recovered });
+    for(const error of sweep.errors)log("error","engineer.hardening_paid_call_recovery_run_failed",{...error});
+    for(const recovery of recoverOptionalHardeningAfterPaidReconciliation({runIds:sweep.recovered.map((item)=>item.runId),
+      supervisor:engineerSupervisor,runs:engineerRuns,execution:engineerExecution}))
+      recovery.promise.catch((error)=>log("error","engineer.hardening_post_recovery_resume_failed",{
+        runId:recovery.runId,error:error instanceof Error?error.message:String(error),
+      }));
+  } catch (error) {
+    log("error", "engineer.hardening_paid_call_recovery_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  // Optional verification recovery is a separate authority lane: reconstruct
+  // and verify its signed start/seed/stage snapshot read-only, then acquire the
+  // worker lease inside VerificationManager before any sandbox or state work.
+  for(const recovery of engineerRuns.recoverOptionalHardeningVerification()){
+    recovery.promise.catch((error)=>log("error","engineer.hardening_verification_recovery_failed",{
+      runId:recovery.runId,error:error instanceof Error?error.message:String(error),
+    }));
+  }
   // QUEUED is the durable dispatch record. A gateway restart reclaims queued
   // work only after reading that committed state; failures are handled by the
   // execution manager's deterministic environment/Builder terminal paths.
@@ -546,6 +666,68 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let probeTimer: ReturnType<typeof setInterval> | null = null;
   let engineerApprovalTimer: ReturnType<typeof setInterval> | null = null;
   let engineerWarmPoolTimer: ReturnType<typeof setInterval> | null = null;
+  let engineerHardeningRecoveryTimer: ReturnType<typeof setInterval> | null = null;
+  let engineerCancellationTimer: ReturnType<typeof setInterval> | null = null;
+  if(engineerWorkerLeases){
+    let sweepRunning=false;
+    const sweep=()=>{
+      if(sweepRunning)return;
+      sweepRunning=true;
+      let recoveries:ReturnType<EngineerRunManager["recoverPendingCancellations"]>;
+      try{recoveries=engineerRuns.recoverPendingCancellations();}
+      catch(error){
+        sweepRunning=false;
+        log("error","engineer.cancellation_recovery_failed",{
+          error:error instanceof Error?error.message:String(error),
+        });
+        return;
+      }
+      void Promise.allSettled(recoveries.map((recovery)=>recovery.promise)).then((results)=>{
+        results.forEach((result,index)=>{
+          if(result.status!=="rejected")return;
+          log("error","engineer.cancellation_recovery_failed",{
+            runId:recoveries[index]?.runId,
+            error:result.reason instanceof Error?result.reason.message:String(result.reason),
+          });
+        });
+      }).finally(()=>{sweepRunning=false;});
+    };
+    engineerCancellationTimer=setInterval(sweep,10_000);
+    engineerCancellationTimer.unref?.();
+  }
+  if (recoverHardeningPaidCalls) {
+    let recoveryRunning = false;
+    const sweep = () => {
+      if (recoveryRunning) return;
+      recoveryRunning = true;
+      try {
+        const result = recoverHardeningPaidCalls?.() ?? {recovered:[],errors:[]};
+        if (result.recovered.length > 0) log("info", "engineer.hardening_paid_call_recovery", { recovered:result.recovered });
+        for(const error of result.errors)log("error","engineer.hardening_paid_call_recovery_run_failed",{...error});
+        for(const item of result.recovered){
+          try{
+            const run=engineerSupervisor.getRun(item.runId);
+            if(run.state==="CANCELLATION_PENDING")engineerRuns.resumeCancellation(item.runId);
+            else if(!run.terminalAt&&run.state!=="HUMAN_REVIEW_REQUIRED")
+              for(const recovery of recoverOptionalHardeningAfterPaidReconciliation({runIds:[item.runId],
+                supervisor:engineerSupervisor,runs:engineerRuns,execution:engineerExecution}))
+                recovery.promise.catch((error)=>log("error","engineer.hardening_post_recovery_resume_failed",{
+                  runId:recovery.runId,error:error instanceof Error?error.message:String(error),
+                }));
+          }catch(error){
+            log("error","engineer.hardening_post_recovery_resume_failed",{runId:item.runId,
+              error:error instanceof Error?error.message:String(error)});
+          }
+        }
+      } catch (error) {
+        log("error", "engineer.hardening_paid_call_recovery_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally { recoveryRunning = false; }
+    };
+    engineerHardeningRecoveryTimer = setInterval(sweep, 10_000);
+    engineerHardeningRecoveryTimer.unref?.();
+  }
   if (engineerWarmPool) {
     const configuredMinimum = Number(process.env.ZINTUS_ENGINEER_WARM_POOL_MIN);
     const configuredMaximum = Number(process.env.ZINTUS_ENGINEER_WARM_POOL_MAX);
@@ -595,7 +777,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
             log("info", "engineer.publication_recovery", recovered);
           }
         }
-        const expired = engineerPublication?.sweepExpired() ?? [];
+        const expired = await engineerPublication?.sweepExpired() ?? [];
         if (expired.length > 0) log("info", "engineer.approvals_expired", { runIds: expired.join(",") });
       } catch (error) {
         log("error", "engineer.approval_sweep_failed", { error: error instanceof Error ? error.message : String(error) });
@@ -679,6 +861,14 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       if (engineerWarmPoolTimer) {
         clearInterval(engineerWarmPoolTimer);
         engineerWarmPoolTimer = null;
+      }
+      if (engineerHardeningRecoveryTimer) {
+        clearInterval(engineerHardeningRecoveryTimer);
+        engineerHardeningRecoveryTimer = null;
+      }
+      if (engineerCancellationTimer) {
+        clearInterval(engineerCancellationTimer);
+        engineerCancellationTimer = null;
       }
       // Drain hosted MCP connections (stop the idle sweep + disconnect every
       // cached client, killing any stdio children) so a deploy doesn't leak them.

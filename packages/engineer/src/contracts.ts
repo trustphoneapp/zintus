@@ -540,6 +540,12 @@ export const ClaimEvidenceSchema = z.object({
 export const EvidenceBundleSchema = z.object({
   bundleVersion: z.number().int().positive(),
   runId: IdentifierSchema,
+  // Added after bundle v1 shipped. Older bundles remain readable, but only
+  // bundles carrying this Supervisor-authored binding may authorize a new
+  // publication decision.
+  reviewerSessionId: IdentifierSchema.optional(),
+  classificationHash: HashSchema.optional(),
+  classificationResult: z.enum(["REPAIR_REQUIRED", "BLOCKED", "HUMAN_REVIEW_REQUIRED", "READY_WITH_ADVISORIES", "READY"]).optional(),
   manifestHash: HashSchema,
   baseCommitSha: ShaSchema,
   resultCommitSha: ShaSchema,
@@ -555,9 +561,13 @@ export const EvidenceBundleSchema = z.object({
   claims: z.array(ClaimEvidenceSchema),
   finalDecision: z.string().min(1).max(200),
   createdAt: IsoTimestampSchema,
-}).strict();
+}).strict().superRefine((bundle, context) => {
+  if (bundle.bundleVersion >= 2 && (!bundle.reviewerSessionId || !bundle.classificationHash || !bundle.classificationResult)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "v2 evidence bundles require classified Reviewer authority" });
+  }
+});
 
-export const SupervisorPrCommandSchema = z.object({
+const SupervisorPrCommandBaseSchema = z.object({
   runId: IdentifierSchema,
   repositoryId: IdentifierSchema,
   baseBranch: z.string().min(1).max(250),
@@ -566,9 +576,23 @@ export const SupervisorPrCommandSchema = z.object({
   manifestHash: HashSchema,
   evidenceBundleHash: HashSchema,
   reviewDecisionId: IdentifierSchema,
+  classificationHash: HashSchema,
+  classificationResult: z.enum(["READY_WITH_ADVISORIES", "READY"]),
   humanApprovalId: IdentifierSchema.nullable(),
   riskTier: RiskTierSchema,
-  idempotencyKey: z.string().regex(/^pr:create:[^:]+:[a-f0-9]{40,64}$/i),
+  idempotencyKey: z.string().regex(/^pr:create:[^:]+:[a-f0-9]{64}:[a-f0-9]{40,64}$/i),
+}).strict();
+
+/** v22+ publication authority must name the exact signed candidate checkpoint. */
+export const SupervisorPrCommandSchema = SupervisorPrCommandBaseSchema.extend({
+  verifiedCheckpointId: HashSchema,
+  verifiedCheckpointHash: HashSchema,
+}).strict();
+
+/** Read/verification compatibility only; C4.2 removes this from new publication writes. */
+export const LegacySupervisorPrCommandSchema = SupervisorPrCommandBaseSchema.extend({
+  verifiedCheckpointId: z.null().optional(),
+  verifiedCheckpointHash: z.null().optional(),
 }).strict();
 
 export const ModelRoutingDecisionSchema = z.object({
@@ -608,4 +632,5 @@ export type RepairContext = z.infer<typeof RepairContextSchema>;
 export type ClaimEvidence = z.infer<typeof ClaimEvidenceSchema>;
 export type EvidenceBundle = z.infer<typeof EvidenceBundleSchema>;
 export type SupervisorPrCommand = z.infer<typeof SupervisorPrCommandSchema>;
+export type LegacySupervisorPrCommand = z.infer<typeof LegacySupervisorPrCommandSchema>;
 export type ModelRoutingDecision = z.infer<typeof ModelRoutingDecisionSchema>;

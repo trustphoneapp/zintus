@@ -53,7 +53,8 @@ export const EngineerBudgetSnapshotSchema = z.object({
   warningThreshold: z.number().min(0.5).max(0.99),
   pauseReason: BudgetPauseReasonSchema.nullable(),
   resumeState: RunStateSchema.nullable(),
-  revision: z.number().int().positive(),
+  topUpPendingResume: z.boolean(),
+  revision: z.number().int().nonnegative(),
   updatedAt: IsoTimestampSchema,
 }).strict();
 

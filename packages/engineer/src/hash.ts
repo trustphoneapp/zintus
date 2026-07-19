@@ -3,6 +3,11 @@ import { createHash } from "node:crypto";
 type JsonPrimitive = string | number | boolean | null;
 type CanonicalJson = JsonPrimitive | CanonicalJson[] | { [key: string]: CanonicalJson };
 
+/** Locale-independent ordering for every hash-bound array or durable byte sequence. */
+export function compareCodeUnits(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function canonicalize(value: unknown, path: string): CanonicalJson {
   if (value === null || typeof value === "string" || typeof value === "boolean") {
     return value;

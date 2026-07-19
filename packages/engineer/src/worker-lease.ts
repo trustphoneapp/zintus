@@ -95,6 +95,14 @@ export class WorkerLeaseCapacityError extends Error {
 export class StaleWorkerLeaseError extends Error {
   constructor(message = "worker lease is stale, expired, released, or fenced") { super(message); this.name = "StaleWorkerLeaseError"; }
 }
+
+/** Authority loss is control flow, never an operational/provider failure. */
+export function isWorkerAuthorityLoss(error: unknown, signal?: AbortSignal): boolean {
+  if (error instanceof StaleWorkerLeaseError || error instanceof WorkerLeaseConflictError) return true;
+  if (!signal?.aborted) return false;
+  const reason = signal.reason;
+  return reason instanceof StaleWorkerLeaseError || reason instanceof WorkerLeaseConflictError;
+}
 export class WorkerLeaseRenewalLimitError extends Error {
   constructor(limit: number) { super(`worker lease renewal limit reached (${limit})`); this.name = "WorkerLeaseRenewalLimitError"; }
 }
@@ -338,6 +346,64 @@ export class EngineerWorkerLeaseManager {
       if (row.status !== "ACTIVE") throw new StaleWorkerLeaseError();
       return rowToLease(row);
     });
+  }
+
+  /**
+   * Executes one strictly synchronous local recovery while an authenticated
+   * run lease is protected by BEGIN IMMEDIATE on the worker-lease database.
+   *
+   * Global recovery lock order is always worker-leases.db -> engineer.db. The
+   * callback may enter the Engineer ledger once, but must never call back into
+   * this WorkerLeaseManager or return a Promise/thenable. Holding the outer
+   * lock prevents expiry, release, or replacement from committing in the
+   * separate production lease database until the Engineer transaction commits.
+   */
+  withActiveLease<T>(
+    raw: Omit<WorkerLeaseCommand, "idempotencyKey">,
+    operation: (lease: WorkerLeaseRecord) => T,
+  ): T {
+    const input = {
+      leaseId: parseIdentifier(raw.leaseId, "leaseId"),
+      ownerId: parseIdentifier(raw.ownerId, "ownerId"),
+      fencingToken: raw.fencingToken,
+      leaseToken: raw.leaseToken,
+    };
+    if (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1 ||
+        typeof input.leaseToken !== "string" || input.leaseToken.length < 1 || input.leaseToken.length > 512) {
+      throw new TypeError("worker lease proof is invalid");
+    }
+    if (typeof operation !== "function") throw new TypeError("worker lease operation must be a function");
+    this.db.exec("BEGIN IMMEDIATE");
+    let transactionOpen = true;
+    try {
+      const now = this.nowMs();
+      this.expireDue(now);
+      let row: LeaseRow;
+      try {
+        row = this.requireRow(input.leaseId);
+        this.authenticate(row, input);
+        if (row.status !== "ACTIVE") throw new StaleWorkerLeaseError();
+      } catch (error) {
+        // Expiry is durable authority loss. Commit the expiry mutation before
+        // surfacing the stale proof; rolling it back would resurrect a lease.
+        this.db.exec("COMMIT");
+        transactionOpen = false;
+        throw error;
+      }
+      const result = operation(rowToLease(row));
+      if ((typeof result === "object" || typeof result === "function") && result !== null &&
+          typeof (result as { then?: unknown }).then === "function") {
+        throw new TypeError("worker lease operation must be strictly synchronous");
+      }
+      this.db.exec("COMMIT");
+      transactionOpen = false;
+      return result;
+    } catch (error) {
+      if (transactionOpen) {
+        try { this.db.exec("ROLLBACK"); } catch { /* Preserve the original error. */ }
+      }
+      throw error;
+    }
   }
 
   get(leaseId: string): WorkerLeaseRecord {

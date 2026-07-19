@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hashDependencyTree, OFFLINE_DEPENDENCY_MANIFEST, sha256, workspaceLockfileHash } from "../packages/engineer/src/index.js";
+import { gitCommitLockfileHash, hashDependencyTree, OFFLINE_DEPENDENCY_MANIFEST, sha256 } from "../packages/engineer/src/index.js";
 import { runEngineerDoctor } from "./engineer-doctor.js";
+import { Database } from "bun:sqlite";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -16,32 +18,78 @@ function root(): string {
 
 describe("Phase 2 activation doctor", () => {
   test("fails closed when Docker and canonical configuration are absent", async () => {
+    const uninitialized=join(root(),"missing-engineer.db");
     const result = await runEngineerDoctor({
       env: {},
+      engineerDbPath:uninitialized,
       runner: async () => ({ status: null, signal: null, stdout: "", stderr: "", error: Object.assign(new Error("docker missing"), { code: "ENOENT" }) }),
     });
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.name === "Docker daemon")).toMatchObject({ ok: false, detail: "docker missing" });
     expect(result.checks.find((check) => check.name === "live hardened offline container")?.ok).toBe(false);
+    expect(result.checks.find((check)=>check.name==="Engineer database integrity"))
+      .toEqual({name:"Engineer database integrity",ok:true,detail:`not initialized: ${uninitialized}`});
+  });
+
+  test("inspects the Engineer database read-only and reports exact foreign-key corruption",async()=>{
+    const directory=root(),dbPath=join(directory,"engineer.db");
+    const db=new Database(dbPath);
+    db.exec(`PRAGMA foreign_keys=OFF;
+      CREATE TABLE parent(id TEXT PRIMARY KEY);
+      CREATE TABLE child(id TEXT PRIMARY KEY,parent_id TEXT NOT NULL REFERENCES parent(id));
+      INSERT INTO child(id,parent_id) VALUES('child-1','missing-parent');`);
+    db.close();
+    const before=readFileSync(dbPath);
+    const result=await runEngineerDoctor({env:{},engineerDbPath:dbPath,
+      runner:async()=>({status:null,signal:null,stdout:"",stderr:"",error:new Error("unavailable")})});
+    const check=result.checks.find((item)=>item.name==="Engineer database integrity");
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toContain("DATABASE_INTEGRITY_CORRUPTION");
+    expect(check?.detail).toContain("foreign_key_check found 1 violation");
+    expect(readFileSync(dbPath)).toEqual(before);
+    const verify=new Database(dbPath,{readonly:true});
+    expect(verify.query("SELECT name FROM sqlite_master WHERE name='schema_migrations'").get()).toBeNull();
+    verify.close();
+  });
+
+  test("reports an unsafe prompt-cache authority directory without mutating it",async()=>{
+    const directory=root(),secretPath=join(directory,"prompt-cache.secret"),dbPath=join(directory,"engineer.db");
+    chmodSync(directory,0o755);
+    const result=await runEngineerDoctor({env:{},engineerDbPath:dbPath,promptCacheSecretPath:secretPath,
+      runner:async()=>({status:null,signal:null,stdout:"",stderr:"",error:new Error("unavailable")})});
+    expect(result.checks.find((item)=>item.name==="Hardening prompt-cache authority")).toMatchObject({
+      ok:false,detail:expect.stringContaining("chmod 700"),
+    });
+    expect(()=>readFileSync(secretPath)).toThrow();
   });
 
   test("requires a real hardened container probe and verified offline dependency bytes", async () => {
     const repositoryRoot = root();
     writeFileSync(join(repositoryRoot, "bun.lock"), '{"lockfileVersion":1}\n');
+    execFileSync("git", ["init", "-b", "main"], { cwd: repositoryRoot });
+    execFileSync("git", ["config", "user.name", "Zintus Test"], { cwd: repositoryRoot });
+    execFileSync("git", ["config", "user.email", "test@zintus.local"], { cwd: repositoryRoot });
+    execFileSync("git", ["add", "bun.lock"], { cwd: repositoryRoot });
+    execFileSync("git", ["commit", "-m", "exact base"], { cwd: repositoryRoot });
+    const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).trim();
     const bundleRoot = join(repositoryRoot, "bundle");
     mkdirSync(join(bundleRoot, "node_modules", "fixture"), { recursive: true });
     writeFileSync(join(bundleRoot, "node_modules", "fixture", "index.js"), "export {};\n");
-    const lockfileHash = workspaceLockfileHash(repositoryRoot);
+    const lockfileHash = gitCommitLockfileHash(repositoryRoot, base);
     const toolchainHash = sha256("toolchain");
     writeFileSync(join(bundleRoot, OFFLINE_DEPENDENCY_MANIFEST), JSON.stringify({
-      schemaVersion: 2, lockfileHash, toolchainHash, repositoryCommit: "a".repeat(40),
+      schemaVersion: 2, lockfileHash, toolchainHash, repositoryCommit: base,
       contentHash: await hashDependencyTree(join(bundleRoot, "node_modules")), nodeModulesPath: "node_modules",
     }));
-    const base = "a".repeat(40);
+    // A local install or security pin may legitimately dirty the checkout after
+    // the run's exact base was selected. Doctor must verify the immutable base,
+    // matching the sandbox, rather than this mutable file.
+    writeFileSync(join(repositoryRoot, "bun.lock"), '{"lockfileVersion":2,"dirty":true}\n');
     const digest = `sha256:${"b".repeat(64)}`;
     const image = `example.invalid/zintus-engineer@${digest}`;
     const calls: Array<{ executable: string; args: string[] }> = [];
     const result = await runEngineerDoctor({
+      engineerDbPath:join(repositoryRoot,"not-initialized-engineer.db"),
       env: {
         ZINTUS_ENGINEER_REPOSITORY_ROOT: repositoryRoot,
         ZINTUS_ENGINEER_REPOSITORY_ID: "repo-1",

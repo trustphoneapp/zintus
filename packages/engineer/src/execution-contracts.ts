@@ -47,7 +47,7 @@ export const SandboxRecordSchema = z.object({
   destroyedAt: IsoTimestampSchema.nullable(),
 }).strict();
 
-export const SandboxWorkspaceCheckpointSchema = z.object({
+const SandboxWorkspaceCheckpointV1Schema = z.object({
   checkpointVersion: z.literal(1),
   runId: IdentifierSchema,
   manifestHash: HashSchema,
@@ -67,6 +67,26 @@ export const SandboxWorkspaceCheckpointSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, message: "sandbox checkpoint hash mismatch", path: ["checkpointHash"] });
   }
 });
+
+const SandboxWorkspaceCheckpointV2Schema = z.object({
+  checkpointVersion:z.literal(2),runId:IdentifierSchema,manifestHash:HashSchema,workspace:WorkspaceRecordSchema,sandbox:SandboxRecordSchema,
+  hardeningLineageId:HashSchema,hardeningLineageHash:HashSchema,seedAttestationId:HashSchema,seedAttestationHash:HashSchema,
+  createdAt:IsoTimestampSchema,checkpointHash:HashSchema,
+}).strict().superRefine((checkpoint,context)=>{
+  if(checkpoint.workspace.runId!==checkpoint.runId||checkpoint.sandbox.runId!==checkpoint.runId)context.addIssue({code:z.ZodIssueCode.custom,
+    message:"sandbox checkpoint run binding mismatch",path:["runId"]});
+  if(checkpoint.sandbox.workspaceIdentity!==checkpoint.workspace.workspaceIdentity)context.addIssue({code:z.ZodIssueCode.custom,
+    message:"sandbox checkpoint workspace binding mismatch",path:["sandbox","workspaceIdentity"]});
+  const {checkpointHash,...content}=checkpoint;if(sha256(content)!==checkpointHash)context.addIssue({code:z.ZodIssueCode.custom,
+    message:"sandbox checkpoint hash mismatch",path:["checkpointHash"]});
+});
+
+// Both version arms carry cross-field refinements and are therefore ZodEffects,
+// which cannot be passed to discriminatedUnion(). A strict union preserves the
+// closed versioned contract without crashing at module initialization.
+export const SandboxWorkspaceCheckpointSchema=z.union([
+  SandboxWorkspaceCheckpointV1Schema,SandboxWorkspaceCheckpointV2Schema,
+]);
 
 export const CommandExecutionRecordSchema = z.object({
   commandExecutionId: IdentifierSchema,
@@ -115,7 +135,27 @@ export const AgentExecutionRecordSchema = z.object({
   if (modelTierForRole(record.role) !== record.modelTier) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "agent role/model tier violates central routing policy", path: ["modelTier"] });
   }
+  if (record.status === "RUNNING" && (record.outputArtifactId !== null || record.completedAt !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "RUNNING execution cannot have output or completion identity", path: ["status"] });
+  }
+  if (record.status === "SUCCEEDED" && (record.outputArtifactId === null || record.completedAt === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "SUCCEEDED execution requires output and completion identity", path: ["status"] });
+  }
+  if ((record.status === "FAILED" || record.status === "PAUSED") &&
+      (record.outputArtifactId !== null || record.completedAt === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: `${record.status} execution requires completion and cannot have output identity`, path: ["status"] });
+  }
 });
+
+export const BuilderDispatchClaimSchema = z.object({
+  runId: IdentifierSchema,
+  inputHash: HashSchema,
+  agentExecutionId: IdentifierSchema,
+  modelTier: z.literal("GPT-5.6_TERRA"),
+  workerOwnerId: IdentifierSchema.nullable(),
+  workerFencingToken: z.number().int().positive().nullable(),
+  claimedAt: IsoTimestampSchema,
+}).strict();
 
 export const ModelCallRecordSchema = z.object({
   modelCallId: IdentifierSchema,
@@ -149,4 +189,5 @@ export type SandboxWorkspaceCheckpoint = z.infer<typeof SandboxWorkspaceCheckpoi
 export type CommandExecutionRecord = z.infer<typeof CommandExecutionRecordSchema>;
 export type BuilderResult = z.infer<typeof BuilderResultSchema>;
 export type AgentExecutionRecord = z.infer<typeof AgentExecutionRecordSchema>;
+export type BuilderDispatchClaim = z.infer<typeof BuilderDispatchClaimSchema>;
 export type ModelCallRecord = z.infer<typeof ModelCallRecordSchema>;

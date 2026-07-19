@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { LocalArtifactStore } from "@zintus/engineer";
 import { previewEngineerArtifact } from "./engineer-artifact-preview.js";
 
@@ -49,5 +49,20 @@ describe("Engineer artifact preview", () => {
       writeFileSync(artifact.storageReference, bytes);
       expect(() => previewEngineerArtifact(store, artifact)).toThrow("integrity check failed");
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("uses the strict root-confined reader for optional-hardening previews",()=>{
+    const root=mkdtempSync(join(tmpdir(),"zintus-artifact-preview-strict-")),artifactRoot=join(root,"artifacts"),
+      outsideRun=join(root,"outside-run");let attack:(()=>void)|null=null;
+    try{
+      const store=new LocalArtifactStore({root:artifactRoot,afterStrictReadStageForTest:(stage)=>{
+        if(stage==="RUN_OPENED")attack?.();}}),artifact=store.put({runId:"strict-preview",type:"COMMAND_STDOUT",
+          bytes:"trusted preview",producerType:"EXECUTOR",producerId:"executor",trusted:true}),
+        runRoot=dirname(artifact.storageReference),originalRun=join(artifactRoot,"strict-preview-original"),
+        digest=artifact.storageReference.split("/").at(-1)!;
+      mkdirSync(outsideRun,{recursive:true});writeFileSync(join(outsideRun,digest),"trusted preview");
+      attack=()=>{attack=null;renameSync(runRoot,originalRun);symlinkSync(outsideRun,runRoot,"dir");};
+      expect(()=>previewEngineerArtifact(store,artifact,32,true)).toThrow("strict path integrity check failed");
+    }finally{rmSync(root,{recursive:true,force:true});}
   });
 });

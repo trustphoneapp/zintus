@@ -21,6 +21,7 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "gpt-tokenizer": "3.4.0"
   }
 }

@@ -6,15 +6,17 @@ import {
   type EngineerDecisionItem,
 } from "@/lib/engineer-decisions";
 
-export function DecisionPresentation({ decisions, onResolve, disabled = false }: {
+export function DecisionPresentation({ decisions, onResolve, disabled = false, stage }: {
   decisions: EngineerDecisionItem[];
   onResolve?: (decisionId: string, optionId: string) => void | Promise<void>;
   disabled?: boolean;
+  stage?: { index: number; total: number; label: string; complete?: boolean };
 }) {
   if (!decisions.length) return null;
 
   return (
     <section className="engineer-card engineer-decisions" aria-labelledby="engineer-decisions-heading">
+      {stage ? <div className="engineer-decision-stage"><span>{stage.complete ? "Workflow complete" : `Stage ${stage.index} of ${stage.total}`}</span><progress max={stage.total} value={stage.complete ? stage.total : stage.index} /><strong>{stage.label}</strong></div> : null}
       <div className="engineer-card-heading">
         <div>
           <span className="engineer-kicker">Decision inbox</span>
@@ -65,7 +67,7 @@ function DecisionCard({ decision, onResolve, disabled = false }: {
         {options.map((option) => {
           const selected = decision.selectedOptionId === option.optionId;
           return (
-            <div className={`engineer-decision-option${option.recommended ? " is-recommended" : ""}${selected ? " is-selected" : ""}`} role="listitem" key={option.optionId}>
+            <div className={`engineer-decision-option risk-${option.riskTier.toLowerCase()}${option.recommended ? " is-recommended" : ""}${selected ? " is-selected" : ""}`} role="listitem" key={option.optionId}>
               <div className="engineer-decision-option-title">
                 <strong>{option.label}</strong>
                 {option.recommended ? <span>Recommended</span> : null}

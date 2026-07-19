@@ -30,6 +30,7 @@ export function previewEngineerArtifact(
   store: LocalArtifactStore,
   artifact: ArtifactRecord,
   maximumBytes = ENGINEER_ARTIFACT_PREVIEW_BYTES,
+  exactBytes = false,
 ): EngineerArtifactPreview {
   const { storageReference: _privateStorageReference, ...publicArtifact } = artifact;
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1 || maximumBytes > ENGINEER_ARTIFACT_PREVIEW_BYTES) {
@@ -38,8 +39,10 @@ export function previewEngineerArtifact(
   if (!SAFE_TEXT_TYPES.has(artifact.type)) {
     return { artifact: publicArtifact, encoding: "unavailable", content: null, truncated: false, previewBytes: 0 };
   }
-  const verified = store.readVerifiedPrefix(artifact, maximumBytes);
-  const preview = verified.bytes;
+  const verified = exactBytes
+    ? { bytes: store.readVerifiedExact(artifact), totalBytes: artifact.sizeBytes }
+    : store.readVerifiedPrefix(artifact, maximumBytes);
+  const preview = verified.bytes.subarray(0, maximumBytes);
   let content: string;
   try { content = new TextDecoder("utf-8", { fatal: true }).decode(preview); }
   catch { return { artifact: publicArtifact, encoding: "unavailable", content: null, truncated: false, previewBytes: 0 }; }

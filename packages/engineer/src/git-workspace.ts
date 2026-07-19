@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { WorkspaceRecordSchema, type WorkspaceRecord } from "./execution-contracts.js";
 import { runProcessAsync } from "./async-process.js";
+import { sha256 } from "./hash.js";
 
 type GitSpawn = typeof spawnSync;
 
@@ -217,6 +218,33 @@ export class GitWorkspaceManager {
 
   currentCommitAsync(workspace: WorkspaceRecord): Promise<string> {
     return this.gitAsync(workspace.workspaceRoot, ["rev-parse", "HEAD"]);
+  }
+
+  /** Materialize one immutable verified candidate into a fresh exact-base worktree. */
+  materializeVerifiedSeed(workspace: WorkspaceRecord,input:{baseCommitSha:string;seedResultCommitSha:string;finalDiff:string;diffHash:string}):{
+    headCommitSha:string;treeHash:string;diffHash:string;diff:string}{
+    const strict=WorkspaceRecordSchema.parse(workspace);if(strict.baseCommitSha.toLowerCase()!==input.baseCommitSha.toLowerCase())throw new Error("seed workspace base mismatch");
+    if(sha256(input.finalDiff)!==input.diffHash)throw new Error("seed source diff hash mismatch");
+    const current=this.git(strict.workspaceRoot,["rev-parse","HEAD"]);if(current.toLowerCase()!==input.baseCommitSha.toLowerCase())throw new Error("fresh seed workspace HEAD mismatch");
+    if(input.seedResultCommitSha.toLowerCase()!==input.baseCommitSha.toLowerCase()){
+      const candidate=this.git(strict.repositoryRoot,["rev-parse","--verify",`${input.seedResultCommitSha}^{commit}`]);
+      if(candidate.toLowerCase()!==input.seedResultCommitSha.toLowerCase())throw new Error("seed result commit did not resolve exactly");
+      const ancestor=this.runGit(strict.repositoryRoot,["merge-base","--is-ancestor",input.baseCommitSha,input.seedResultCommitSha]);
+      if(ancestor.status!==0)throw new Error("seed result commit does not descend from parent base");
+      this.git(strict.workspaceRoot,["reset","--hard",input.seedResultCommitSha]);
+    }else if(input.finalDiff){const applied=this.gitSpawn("git",["-C",strict.workspaceRoot,"apply","--index","--whitespace=nowarn","-"],{
+      shell:false,encoding:"utf8",input:`${input.finalDiff}\n`,maxBuffer:8*1024*1024,stdio:["pipe","pipe","pipe"]});
+      if(applied.status!==0)throw new Error(`verified seed diff could not be materialized: ${applied.stderr||applied.error?.message||"unknown error"}`);}
+    return this.verifyMaterializedSeed(strict,input);
+  }
+
+  verifyMaterializedSeed(workspace:WorkspaceRecord,input:{baseCommitSha:string;seedResultCommitSha:string;finalDiff:string;diffHash:string}):{
+    headCommitSha:string;treeHash:string;diffHash:string;diff:string}{
+    const strict=WorkspaceRecordSchema.parse(workspace);if(strict.baseCommitSha.toLowerCase()!==input.baseCommitSha.toLowerCase())throw new Error("seed workspace base mismatch");
+    if(sha256(input.finalDiff)!==input.diffHash)throw new Error("seed source diff hash mismatch");
+    const head=this.git(strict.workspaceRoot,["rev-parse","HEAD"]);if(head.toLowerCase()!==input.seedResultCommitSha.toLowerCase())throw new Error("materialized seed HEAD mismatch");
+    const diff=this.git(strict.workspaceRoot,["diff","--binary",input.baseCommitSha]);if(sha256(diff)!==input.diffHash||diff!==input.finalDiff)throw new Error("materialized seed diff mismatch");
+    const tree=this.git(strict.workspaceRoot,["write-tree"]);return {headCommitSha:head,treeHash:sha256(tree),diffHash:sha256(diff),diff};
   }
 
   /** Creates a local evidence checkpoint only; this never pushes or contacts a remote. */
