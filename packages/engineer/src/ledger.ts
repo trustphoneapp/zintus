@@ -1058,7 +1058,7 @@ export class EngineerLedger {
         ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`)
         .run(parsed.ownerUserId, input.now, input.now);
       const existingConnection = this.db.query(`SELECT user_id, provider, owner, name, url
-        FROM repository_connections WHERE id = ?`).get(parsed.repository.repositoryId) as {
+        FROM repository_connections WHERE id = ? AND org_id = ?`).get(parsed.repository.repositoryId, this.tenantOrgId) as {
           user_id: string; provider: string; owner: string; name: string; url: string | null;
         } | null;
       if (existingConnection) {
@@ -1069,15 +1069,15 @@ export class EngineerLedger {
         }
       } else {
         this.db.query(`INSERT INTO repository_connections
-          (id, user_id, provider, owner, name, url, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          (id, user_id, provider, owner, name, url, created_at, updated_at, org_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             parsed.repository.repositoryId, parsed.ownerUserId, parsed.repository.provider,
             parsed.repository.owner, parsed.repository.name, parsed.repository.url ?? null,
-            input.now, input.now,
+            input.now, input.now, this.tenantOrgId,
           );
       }
-      const existing = this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? AND a.repository_id = ?`)
-        .get(parsed.ownerUserId, parsed.repository.repositoryId) as RepositoryAdmissionRow | null;
+      const existing = this.db.query(`${REPOSITORY_ADMISSION_SELECT} WHERE a.owner_user_id = ? AND a.repository_id = ? AND a.org_id = ?`)
+        .get(parsed.ownerUserId, parsed.repository.repositoryId, this.tenantOrgId) as RepositoryAdmissionRow | null;
       if (existing) {
         const record = rowToRepositoryAdmission(existing);
         if (record.status !== "ACTIVE") throw new Error("revoked repository admission cannot be reactivated implicitly");
@@ -1096,12 +1096,12 @@ export class EngineerLedger {
       this.db.query(`INSERT INTO repository_admissions
         (admission_id, repository_id, owner_user_id, base_branch, base_commit_sha, source,
          authorization_subject, authorization_evidence_hash, authorization_expires_at,
-         authorization_generation, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`).run(
+         authorization_generation, status, created_at, updated_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`).run(
           parsed.admissionId, parsed.repository.repositoryId, parsed.ownerUserId,
           parsed.repository.baseBranch, parsed.repository.baseCommitSha, parsed.source,
           parsed.authorizationSubject, parsed.authorizationEvidenceHash.toLowerCase(), parsed.authorizationExpiresAt,
-          parsed.authorizationGeneration, input.now, input.now,
+          parsed.authorizationGeneration, input.now, input.now, this.tenantOrgId,
         );
     })();
     return this.getRepositoryAdmission(parsed.ownerUserId, parsed.repository.repositoryId)!;
@@ -1121,9 +1121,9 @@ export class EngineerLedger {
     }
     const exactLegacyHash = sha256({ source: "gateway-environment", repository: admission.repository });
     const result = this.db.query(`UPDATE repository_admissions SET authorization_evidence_hash = lower(?), updated_at = ?
-      WHERE owner_user_id = ? AND repository_id = ? AND source = 'CONFIGURED_CANONICAL' AND status = 'ACTIVE'
+      WHERE owner_user_id = ? AND repository_id = ? AND org_id = ? AND source = 'CONFIGURED_CANONICAL' AND status = 'ACTIVE'
         AND lower(authorization_evidence_hash) = lower(?)`)
-      .run(nextHash, now, ownerUserId, repositoryId, exactLegacyHash);
+      .run(nextHash, now, ownerUserId, repositoryId, this.tenantOrgId, exactLegacyHash);
     if (result.changes !== 1) throw new Error("configured repository admission evidence changed concurrently or is inactive");
     return this.getRepositoryAdmission(ownerUserId, repositoryId)!;
   }
@@ -1135,10 +1135,10 @@ export class EngineerLedger {
     const result = this.db.query(`UPDATE repository_admissions SET authorization_subject = ?,
       authorization_evidence_hash = lower(?), authorization_expires_at = ?, authorization_generation = ?,
       status = 'ACTIVE', updated_at = ?
-      WHERE owner_user_id = ? AND repository_id = ? AND source = 'CONNECTOR_AUTHORIZED'
+      WHERE owner_user_id = ? AND repository_id = ? AND org_id = ? AND source = 'CONNECTOR_AUTHORIZED'
         AND authorization_generation = ? AND ? > authorization_generation`).run(
           input.authorizationSubject, input.authorizationEvidenceHash, input.authorizationExpiresAt,
-          input.nextGeneration, input.now, input.ownerUserId, input.repositoryId,
+          input.nextGeneration, input.now, input.ownerUserId, input.repositoryId, this.tenantOrgId,
           input.previousGeneration, input.nextGeneration,
         );
     if (result.changes !== 1) throw new Error("connector repository reauthorization generation is stale or admission is unavailable");
@@ -1153,15 +1153,15 @@ export class EngineerLedger {
 
   advanceRepositoryAdmissionBase(ownerUserId: string, repositoryId: string, previousSha: string, nextSha: string, now: string): RepositoryAdmission {
     const result = this.db.query(`UPDATE repository_admissions SET base_commit_sha = ?, updated_at = ?
-      WHERE owner_user_id = ? AND repository_id = ? AND status = 'ACTIVE' AND lower(base_commit_sha) = lower(?)`)
-      .run(nextSha, now, ownerUserId, repositoryId, previousSha);
+      WHERE owner_user_id = ? AND repository_id = ? AND org_id = ? AND status = 'ACTIVE' AND lower(base_commit_sha) = lower(?)`)
+      .run(nextSha, now, ownerUserId, repositoryId, this.tenantOrgId, previousSha);
     if (result.changes !== 1) throw new Error("repository admission base advanced concurrently or is inactive");
     return this.getRepositoryAdmission(ownerUserId, repositoryId)!;
   }
 
   revokeRepositoryAdmission(ownerUserId: string, repositoryId: string, now: string): RepositoryAdmission {
     const result = this.db.query(`UPDATE repository_admissions SET status = 'REVOKED', updated_at = ?
-      WHERE owner_user_id = ? AND repository_id = ? AND status = 'ACTIVE'`).run(now, ownerUserId, repositoryId);
+      WHERE owner_user_id = ? AND repository_id = ? AND org_id = ? AND status = 'ACTIVE'`).run(now, ownerUserId, repositoryId, this.tenantOrgId);
     if (result.changes !== 1) throw new Error("active repository admission not found");
     return this.getRepositoryAdmission(ownerUserId, repositoryId)!;
   }
@@ -1174,8 +1174,8 @@ export class EngineerLedger {
         .run(input.userId, input.userEmail ?? null, input.now, input.now);
       this.db
         .query(`INSERT OR IGNORE INTO repository_connections
-                (id, user_id, provider, owner, name, url, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+                (id, user_id, provider, owner, name, url, created_at, updated_at, org_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(
           input.repository.repositoryId,
           input.userId,
@@ -1185,10 +1185,11 @@ export class EngineerLedger {
           input.repository.url ?? null,
           input.now,
           input.now,
+          this.tenantOrgId,
         );
       const repositoryConnection = this.db
-        .query("SELECT user_id, provider, owner, name, url FROM repository_connections WHERE id = ?")
-        .get(input.repository.repositoryId) as { user_id: string; provider: string; owner: string; name: string; url: string | null } | null;
+        .query("SELECT user_id, provider, owner, name, url FROM repository_connections WHERE id = ? AND org_id = ?")
+        .get(input.repository.repositoryId, this.tenantOrgId) as { user_id: string; provider: string; owner: string; name: string; url: string | null } | null;
       if (!repositoryConnection || repositoryConnection.user_id !== input.userId) {
         throw new Error("repository connection is not owned by the run user");
       }
@@ -1201,8 +1202,8 @@ export class EngineerLedger {
         .query(`INSERT INTO engineer_runs
                 (id, user_id, repository_id, base_branch, base_commit_sha,
                  request_original, request_normalized, state, state_version,
-                 risk_tier, human_gate_required, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, '', 'REQUEST_RECEIVED', 0, ?, ?, ?, ?)`)
+                 risk_tier, human_gate_required, created_at, updated_at, org_id)
+                VALUES (?, ?, ?, ?, ?, ?, '', 'REQUEST_RECEIVED', 0, ?, ?, ?, ?, ?)`)
         .run(
           input.runId,
           input.userId,
@@ -1214,15 +1215,16 @@ export class EngineerLedger {
           input.humanGateRequired ? 1 : 0,
           input.now,
           input.now,
+          this.tenantOrgId,
         );
       const budget = EngineerBudgetSelectionSchema.parse(input.budget);
       this.db.query(`INSERT INTO run_budgets
         (run_id, cost_limit_usd, token_limit, time_limit_seconds, lifetime_cost_limit_usd,
-         lifetime_token_limit, lifetime_time_limit_seconds, status, active_since, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`)
+         lifetime_token_limit, lifetime_time_limit_seconds, status, active_since, created_at, updated_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?)`)
         .run(input.runId, budget.costBudgetUsd, budget.tokenBudget, budget.timeBudgetSeconds,
           budget.lifetimeCostBudgetUsd, budget.lifetimeTokenBudget, budget.lifetimeTimeBudgetSeconds,
-          input.now, input.now, input.now);
+          input.now, input.now, input.now, this.tenantOrgId);
       this.insertAudit(input.runId, "RUN_CREATED", "USER", input.userId, {
         repositoryId: input.repository.repositoryId,
         baseCommitSha: input.repository.baseCommitSha,
@@ -1253,20 +1255,20 @@ export class EngineerLedger {
   }
 
   getLastError(runId: string): string | null {
-    const row = this.db.query("SELECT last_error FROM engineer_runs WHERE id = ?").get(runId) as { last_error: string | null } | null;
+    const row = this.db.query("SELECT last_error FROM engineer_runs WHERE id = ? AND org_id = ?").get(runId, this.tenantOrgId) as { last_error: string | null } | null;
     if (!row) throw new EngineerNotFoundError("run", runId);
     return row.last_error;
   }
 
   setLastError(runId: string, message: string | null, now: string): void {
-    const result = this.db.query("UPDATE engineer_runs SET last_error = ?, updated_at = ? WHERE id = ?").run(message, now, runId);
+    const result = this.db.query("UPDATE engineer_runs SET last_error = ?, updated_at = ? WHERE id = ? AND org_id = ?").run(message, now, runId, this.tenantOrgId);
     if (Number(result.changes) !== 1) throw new EngineerNotFoundError("run", runId);
   }
 
   clearLastErrorIfExact(runId:string,expected:string,now:string):boolean{
     if(!expected)throw new TypeError("expected last error is required");
-    const result=this.db.query("UPDATE engineer_runs SET last_error=NULL,updated_at=? WHERE id=? AND last_error=?")
-      .run(now,runId,expected);
+    const result=this.db.query("UPDATE engineer_runs SET last_error=NULL,updated_at=? WHERE id=? AND org_id=? AND last_error=?")
+      .run(now,runId,this.tenantOrgId,expected);
     return Number(result.changes)===1;
   }
 
@@ -1289,27 +1291,27 @@ export class EngineerLedger {
     this.db.query(`UPDATE run_budgets SET used_cost_usd = ?, used_tokens = ?, used_time_seconds = ?,
       reserved_cost_usd = ?, reserved_tokens = ?, ambiguous_cost_usd = ?, ambiguous_tokens = ?,
       active_since = CASE WHEN active_since IS NULL THEN NULL ELSE ? END,
-      updated_at = ? WHERE run_id = ?`)
+      updated_at = ? WHERE run_id = ? AND org_id = ?`)
       .run(settledCost, settledTokens, Math.floor(usage.elapsedSeconds), reservedCost, reservedTokens,
-        Number(reservations.ambiguous_cost), Number(reservations.ambiguous_tokens), now, now, runId);
-    const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(runId) as BudgetRow | null;
+        Number(reservations.ambiguous_cost), Number(reservations.ambiguous_tokens), now, now, runId, this.tenantOrgId);
+    const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ? AND org_id = ?").get(runId, this.tenantOrgId) as BudgetRow | null;
     if (!row) throw new EngineerNotFoundError("run budget", runId);
     return this.budgetSnapshot(row);
   }
 
   topUpBudget(input: { runId: string; expectedRevision: number; topUp: BudgetTopUp; actorId: string; idempotencyKey: string; createdAt: string }): EngineerBudgetSnapshot {
     return this.atomic(() => {
-      const replay = this.db.query("SELECT details_json FROM budget_events WHERE run_id = ? AND idempotency_key = ?")
-        .get(input.runId, input.idempotencyKey) as { details_json: string } | null;
+      const replay = this.db.query("SELECT details_json FROM budget_events WHERE run_id = ? AND idempotency_key = ? AND org_id = ?")
+        .get(input.runId, input.idempotencyKey, this.tenantOrgId) as { details_json: string } | null;
       if (replay) {
         if (sha256(JSON.parse(replay.details_json)) !== sha256(input.topUp)) {
           throw new Error("budget top-up idempotency key was reused with different allowance values");
         }
         return this.getBudget(input.runId, input.createdAt);
       }
-      const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(input.runId) as BudgetRow | null;
+      const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ? AND org_id = ?").get(input.runId, this.tenantOrgId) as BudgetRow | null;
       if (!row) throw new EngineerNotFoundError("run budget", input.runId);
-      const run = this.db.query("SELECT state FROM engineer_runs WHERE id = ?").get(input.runId) as { state: RunState } | null;
+      const run = this.db.query("SELECT state FROM engineer_runs WHERE id = ? AND org_id = ?").get(input.runId, this.tenantOrgId) as { state: RunState } | null;
       if (!run) throw new EngineerNotFoundError("run", input.runId);
       if (run.state !== "PAUSED_BUDGET" || row.status !== "PAUSED") {
         throw new Error("new budget top-ups are allowed only while the run is paused for budget review");
@@ -1321,8 +1323,8 @@ export class EngineerLedger {
       if (nextCost > row.lifetime_cost_limit_usd + Number.EPSILON || nextTokens > row.lifetime_token_limit || nextTime > row.lifetime_time_limit_seconds) {
         throw new Error("top-up exceeds the run lifetime budget cap");
       }
-      this.db.query(`UPDATE run_budgets SET cost_limit_usd = ?, token_limit = ?, time_limit_seconds = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND revision = ?`)
-        .run(nextCost, nextTokens, nextTime, input.createdAt, input.runId, input.expectedRevision);
+      this.db.query(`UPDATE run_budgets SET cost_limit_usd = ?, token_limit = ?, time_limit_seconds = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND org_id = ? AND revision = ?`)
+        .run(nextCost, nextTokens, nextTime, input.createdAt, input.runId, this.tenantOrgId, input.expectedRevision);
       this.insertBudgetEvent(input.runId, "BUDGET_TOPPED_UP", input.actorId, input.idempotencyKey, input.topUp, input.createdAt);
       this.insertAudit(input.runId, "BUDGET_TOPPED_UP", "HUMAN", input.actorId, { topUp: input.topUp }, input.createdAt);
       return this.getBudget(input.runId, input.createdAt);
@@ -1339,7 +1341,7 @@ export class EngineerLedger {
       }
       const result = this.appendTransition(command);
       this.db.query(`UPDATE run_budgets SET status = 'PAUSED', pause_reason = ?, resume_state = ?, active_since = NULL,
-        revision = revision + 1, updated_at = ? WHERE run_id = ?`).run(reason, command.previousState, command.timestamp, command.runId);
+        revision = revision + 1, updated_at = ? WHERE run_id = ? AND org_id = ?`).run(reason, command.previousState, command.timestamp, command.runId, this.tenantOrgId);
       this.insertBudgetEvent(command.runId, "BUDGET_PAUSED", command.actorId, `budget:${command.idempotencyKey}`,
         { reason, resumeState: command.previousState }, command.timestamp);
       return result;
@@ -1348,7 +1350,7 @@ export class EngineerLedger {
 
   resumeFromBudget(command: LedgerTransitionCommand): LedgerTransitionResult {
     return this.atomic(() => {
-      const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ?").get(command.runId) as BudgetRow | null;
+      const row = this.db.query("SELECT * FROM run_budgets WHERE run_id = ? AND org_id = ?").get(command.runId, this.tenantOrgId) as BudgetRow | null;
       if (!row || row.status !== "PAUSED" || row.resume_state !== command.nextState) throw new IdempotencyConflictError(command.runId, command.idempotencyKey);
       const snapshot = this.budgetSnapshot(row);
       if (snapshot.remaining.costUsd === 0 || snapshot.remaining.tokens === 0 || snapshot.remaining.timeSeconds === 0) {
@@ -1356,7 +1358,7 @@ export class EngineerLedger {
       }
       const result = this.appendTransition(command);
       this.db.query(`UPDATE run_budgets SET status = 'ACTIVE', pause_reason = NULL, resume_state = NULL,
-        active_since = ?, revision = revision + 1, updated_at = ? WHERE run_id = ?`).run(command.timestamp, command.timestamp, command.runId);
+        active_since = ?, revision = revision + 1, updated_at = ? WHERE run_id = ? AND org_id = ?`).run(command.timestamp, command.timestamp, command.runId, this.tenantOrgId);
       this.insertBudgetEvent(command.runId, "BUDGET_RESUMED", command.actorId, `budget:${command.idempotencyKey}`,
         { resumedState: command.nextState }, command.timestamp);
       return result;
@@ -1364,9 +1366,10 @@ export class EngineerLedger {
   }
 
   listRuns(states?: RunState[]): EngineerRun[] {
+    // P10: org-scope run listing (default org today), preserving any state filter.
     const rows = states && states.length > 0
-      ? this.db.query(`${RUN_SELECT} WHERE r.state IN (${states.map(() => "?").join(",")}) ORDER BY r.created_at`).all(...states)
-      : this.db.query(`${RUN_SELECT} ORDER BY r.created_at`).all();
+      ? this.db.query(`${RUN_SELECT} WHERE r.org_id = ? AND r.state IN (${states.map(() => "?").join(",")}) ORDER BY r.created_at`).all(this.tenantOrgId, ...states)
+      : this.db.query(`${RUN_SELECT} WHERE r.org_id = ? ORDER BY r.created_at`).all(this.tenantOrgId);
     return (rows as RunRow[]).map(rowToRun);
   }
 
@@ -1453,7 +1456,7 @@ export class EngineerLedger {
         COALESCE(evidence.evidence_complete, 0) AS evidence_complete
       FROM engineer_runs r
       JOIN selected_runs selected ON selected.id = r.id
-      JOIN repository_connections rc ON rc.id = r.repository_id
+      JOIN repository_connections rc ON rc.id = r.repository_id AND rc.org_id = r.org_id
       LEFT JOIN pending ON pending.run_id = r.id
       LEFT JOIN failures ON failures.run_id = r.id
       LEFT JOIN retries ON retries.run_id = r.id
@@ -1501,8 +1504,8 @@ export class EngineerLedger {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new TypeError("event cursor must be a non-negative safe integer");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10_000) throw new TypeError("event page limit must be between 1 and 10000");
     const rows = this.db
-      .query("SELECT * FROM run_state_events WHERE run_id = ? AND sequence > ? ORDER BY sequence LIMIT ?")
-      .all(runId, afterSequence, limit) as EventRow[];
+      .query("SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ? AND sequence > ? ORDER BY sequence LIMIT ?")
+      .all(runId, this.tenantOrgId, afterSequence, limit) as EventRow[];
     return rows.map(rowToEvent);
   }
 
@@ -1558,8 +1561,12 @@ export class EngineerLedger {
     if (!Number.isSafeInteger(offset) || offset < 0) throw new TypeError("run export offset must be a non-negative safe integer");
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) throw new TypeError("run export page limit must be between 1 and 1000");
     if ((DIRECT_RUN_EXPORT_TABLES as readonly string[]).includes(table)) {
-      return this.db.query(`SELECT * FROM ${table} WHERE run_id = ? ORDER BY rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+      // Contract §2: every DIRECT_RUN_EXPORT_TABLES entry is tenant-owned (has
+      // org_id), so this generic run-scoped page is org-scoped for all of them
+      // (this spans several buckets' tables; the org predicate is universally
+      // correct here). getRun() above already funnels a foreign/absent runId.
+      return this.db.query(`SELECT * FROM ${table} WHERE run_id = ? AND org_id = ? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "sandbox_heartbeats") {
       return this.db.query(`SELECT h.* FROM sandbox_heartbeats h JOIN sandboxes s ON s.id = h.sandbox_id WHERE s.run_id = ? ORDER BY h.rowid LIMIT ? OFFSET ?`)
@@ -1623,8 +1630,8 @@ export class EngineerLedger {
 
   latestEventSequence(runId: string): number {
     this.getRun(runId);
-    const row = this.db.query("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM run_state_events WHERE run_id = ?")
-      .get(runId) as { sequence: number };
+    const row = this.db.query("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM run_state_events WHERE run_id = ? AND org_id = ?")
+      .get(runId, this.tenantOrgId) as { sequence: number };
     return Number(row.sequence);
   }
 
@@ -1638,8 +1645,8 @@ export class EngineerLedger {
     evidenceIds: string[];
     manifestHash: string | null;
   }): LedgerTransitionResult | null {
-    const row = this.db.query("SELECT * FROM run_state_events WHERE run_id = ? AND idempotency_key = ?")
-      .get(input.runId, input.idempotencyKey) as EventRow | null;
+    const row = this.db.query("SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ? AND idempotency_key = ?")
+      .get(input.runId, this.tenantOrgId, input.idempotencyKey) as EventRow | null;
     if (!row) return null;
     const event = rowToEvent(row);
     const same =
@@ -1655,8 +1662,8 @@ export class EngineerLedger {
 
   getManifest(runId: string, version?: number): TaskManifest | null {
     const row = version === undefined
-      ? this.db.query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? ORDER BY version DESC LIMIT 1").get(runId)
-      : this.db.query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? AND version = ?").get(runId, version);
+      ? this.db.query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? AND org_id = ? ORDER BY version DESC LIMIT 1").get(runId, this.tenantOrgId)
+      : this.db.query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? AND org_id = ? AND version = ?").get(runId, this.tenantOrgId, version);
     if (!row) return null;
     return TaskManifestSchema.parse(JSON.parse((row as { manifest_json: string }).manifest_json));
   }
@@ -1664,8 +1671,8 @@ export class EngineerLedger {
   listManifestVersions(runId: string): TaskManifest[] {
     this.getRun(runId);
     const rows = this.db
-      .query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? ORDER BY version")
-      .all(runId) as Array<{ manifest_json: string }>;
+      .query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? AND org_id = ? ORDER BY version")
+      .all(runId, this.tenantOrgId) as Array<{ manifest_json: string }>;
     return rows.map((row) => TaskManifestSchema.parse(JSON.parse(row.manifest_json)));
   }
 
@@ -1674,8 +1681,8 @@ export class EngineerLedger {
     const boundManifestHash = manifestHash ?? run.manifestHash;
     if (!boundManifestHash) return null;
     const row = this.db.query(`SELECT contract_hash, run_id, manifest_hash, schema_version, contract_json, created_at
-      FROM required_lane_contracts WHERE run_id = ? AND manifest_hash = ?`)
-      .get(runId, boundManifestHash) as {
+      FROM required_lane_contracts WHERE run_id = ? AND org_id = ? AND manifest_hash = ?`)
+      .get(runId, this.tenantOrgId, boundManifestHash) as {
         contract_hash: string; run_id: string; manifest_hash: string; schema_version: number;
         contract_json: string; created_at: string;
       } | null;
@@ -1716,8 +1723,8 @@ export class EngineerLedger {
       throw new TypeError("plan proposal artifact does not match its hash-bound proposal content");
     }
     return this.atomic(() => {
-      const existing = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? AND proposal_hash = ?")
-        .get(proposal.runId, proposal.proposalHash) as Record<string, unknown> | null;
+      const existing = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? AND org_id = ? AND proposal_hash = ?")
+        .get(proposal.runId, this.tenantOrgId, proposal.proposalHash) as Record<string, unknown> | null;
       if (existing) return this.planProposalFromRow(existing);
       const run = this.getRun(proposal.runId);
       if (run.stateVersion !== expectedStateVersion) {
@@ -1727,15 +1734,15 @@ export class EngineerLedger {
         throw new InvalidTransitionError("plan proposals may only be recorded while PLANNING or REPLANNING");
       }
       const context = this.db.query(`SELECT manifest_hash FROM context_manifests
-        WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(proposal.runId) as { manifest_hash: string } | null;
+        WHERE run_id = ? AND org_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(proposal.runId, this.tenantOrgId) as { manifest_hash: string } | null;
       if (!context || context.manifest_hash !== proposal.contextManifestHash) {
         throw new TypeError("plan proposal is not bound to the latest persisted context manifest");
       }
-      this.db.query(`INSERT INTO plan_proposals (id, run_id, proposal_json, planning_analysis_json, proposal_hash, context_manifest_hash, artifact_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      this.db.query(`INSERT INTO plan_proposals (id, run_id, proposal_json, planning_analysis_json, proposal_hash, context_manifest_hash, artifact_id, created_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           proposal.planProposalId, proposal.runId, canonicalJson(proposal.manifest),
           canonicalJson(proposal.planningAnalysis), proposal.proposalHash,
-          proposal.contextManifestHash, proposal.artifactId, proposal.createdAt,
+          proposal.contextManifestHash, proposal.artifactId, proposal.createdAt, this.tenantOrgId,
         );
       return proposal;
     });
@@ -1743,8 +1750,8 @@ export class EngineerLedger {
 
   latestPlanProposal(runId: string): PlanProposal | null {
     this.getRun(runId);
-    const row = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
-      .get(runId) as Record<string, unknown> | null;
+    const row = this.db.query("SELECT * FROM plan_proposals WHERE run_id = ? AND org_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(runId, this.tenantOrgId) as Record<string, unknown> | null;
     return row ? this.planProposalFromRow(row) : null;
   }
 
@@ -1766,14 +1773,14 @@ export class EngineerLedger {
     if (!matchesSha256Bytes(artifactBytes, artifact.sha256)) throw new Error("context artifact content hash mismatch");
     const artifactManifest = ContextManifestSchema.parse(JSON.parse(artifactBytes.toString("utf8")));
     if (canonicalJson(artifactManifest) !== canonicalJson(parsed.manifest)) throw new Error("context artifact bytes do not match the persisted manifest");
-    const existing = this.db.query("SELECT manifest_json, artifact_id, created_at FROM context_manifests WHERE manifest_hash = ?")
-      .get(parsed.manifest.manifestHash) as { manifest_json: string; artifact_id: string; created_at: string } | null;
+    const existing = this.db.query("SELECT manifest_json, artifact_id, created_at FROM context_manifests WHERE manifest_hash = ? AND org_id = ?")
+      .get(parsed.manifest.manifestHash, this.tenantOrgId) as { manifest_json: string; artifact_id: string; created_at: string } | null;
     if (existing) {
       const replay = StoredContextSnapshotSchema.parse({ manifest: JSON.parse(existing.manifest_json), artifactId: existing.artifact_id, createdAt: existing.created_at });
       if (canonicalJson(replay) !== canonicalJson(parsed)) throw new IdempotencyConflictError(parsed.manifest.runId, parsed.manifest.manifestHash);
       return replay;
     }
-    const runExisting = this.db.query("SELECT manifest_hash FROM context_manifests WHERE run_id = ?").get(parsed.manifest.runId) as { manifest_hash: string } | null;
+    const runExisting = this.db.query("SELECT manifest_hash FROM context_manifests WHERE run_id = ? AND org_id = ?").get(parsed.manifest.runId, this.tenantOrgId) as { manifest_hash: string } | null;
     if (runExisting) throw new IdempotencyConflictError(parsed.manifest.runId, "context-manifest-already-frozen");
     const transaction = this.db.transaction(() => {
       const run = this.getRun(parsed.manifest.runId);
@@ -1783,30 +1790,30 @@ export class EngineerLedger {
       if (run.state !== "REQUEST_RECEIVED" && run.state !== "PLANNING") {
         throw new InvalidTransitionError("context may only be recorded before or during planning");
       }
-      const concurrentExisting = this.db.query("SELECT manifest_hash FROM context_manifests WHERE run_id = ?")
-        .get(parsed.manifest.runId) as { manifest_hash: string } | null;
+      const concurrentExisting = this.db.query("SELECT manifest_hash FROM context_manifests WHERE run_id = ? AND org_id = ?")
+        .get(parsed.manifest.runId, this.tenantOrgId) as { manifest_hash: string } | null;
       if (concurrentExisting) throw new IdempotencyConflictError(parsed.manifest.runId, "context-manifest-already-frozen");
       this.db.query(`INSERT INTO context_manifests
-        (manifest_hash, run_id, repository_id, base_commit_sha, request_hash, manifest_json, artifact_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        (manifest_hash, run_id, repository_id, base_commit_sha, request_hash, manifest_json, artifact_id, created_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         parsed.manifest.manifestHash, parsed.manifest.runId, parsed.manifest.repositoryId,
         parsed.manifest.baseCommitSha, parsed.manifest.requestHash, canonicalJson(parsed.manifest),
-        parsed.artifactId, parsed.createdAt,
+        parsed.artifactId, parsed.createdAt, this.tenantOrgId,
       );
       const sourceInsert = this.db.query(`INSERT INTO context_sources
-        (source_id, manifest_hash, run_id, path, kind, trust, object_id, content_hash, byte_size, excerpt_truncated, source_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+        (source_id, manifest_hash, run_id, path, kind, trust, object_id, content_hash, byte_size, excerpt_truncated, source_json, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const source of parsed.manifest.sources) {
         sourceInsert.run(source.sourceId, parsed.manifest.manifestHash, parsed.manifest.runId, source.path,
           source.kind, source.trust, source.objectId, source.contentHash, source.byteSize,
-          source.excerptTruncated ? 1 : 0, canonicalJson(source));
+          source.excerptTruncated ? 1 : 0, canonicalJson(source), this.tenantOrgId);
       }
       const warningInsert = this.db.query(`INSERT INTO context_warnings
-        (warning_id, manifest_hash, run_id, code, path, source_id, trust, warning_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+        (warning_id, manifest_hash, run_id, code, path, source_id, trust, warning_json, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const warning of parsed.manifest.warnings) {
         warningInsert.run(warning.warningId, parsed.manifest.manifestHash, parsed.manifest.runId,
-          warning.code, warning.path, warning.sourceId, warning.trust, canonicalJson(warning));
+          warning.code, warning.path, warning.sourceId, warning.trust, canonicalJson(warning), this.tenantOrgId);
       }
     });
     try {
@@ -1815,8 +1822,8 @@ export class EngineerLedger {
     } catch (error) {
       // A separate Supervisor/process may have committed the same immutable
       // snapshot after our pre-check. Converge only on byte-identical identity.
-      const winner = this.db.query("SELECT manifest_json, artifact_id, created_at FROM context_manifests WHERE run_id = ?")
-        .get(parsed.manifest.runId) as { manifest_json: string; artifact_id: string; created_at: string } | null;
+      const winner = this.db.query("SELECT manifest_json, artifact_id, created_at FROM context_manifests WHERE run_id = ? AND org_id = ?")
+        .get(parsed.manifest.runId, this.tenantOrgId) as { manifest_json: string; artifact_id: string; created_at: string } | null;
       if (winner) {
         const replay = StoredContextSnapshotSchema.parse({
           manifest: JSON.parse(winner.manifest_json), artifactId: winner.artifact_id, createdAt: winner.created_at,
@@ -1831,7 +1838,7 @@ export class EngineerLedger {
   latestContextSnapshot(runId: string): StoredContextSnapshot | null {
     this.getRun(runId);
     const row = this.db.query(`SELECT manifest_json, artifact_id, created_at FROM context_manifests
-      WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(runId) as
+      WHERE run_id = ? AND org_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(runId, this.tenantOrgId) as
       { manifest_json: string; artifact_id: string; created_at: string } | null;
     if (!row) return null;
     return StoredContextSnapshotSchema.parse({
@@ -1979,14 +1986,14 @@ export class EngineerLedger {
       const result = command.normalizedRequest === undefined
         ? this.db.query(`UPDATE engineer_runs
                          SET state = ?, state_version = ?, updated_at = ?, terminal_at = ?
-                         WHERE id = ? AND state_version = ? AND state = ?`)
+                         WHERE id = ? AND org_id = ? AND state_version = ? AND state = ?`)
             .run(command.nextState, nextVersion, command.timestamp, command.terminalAt,
-              command.runId, command.expectedStateVersion, command.previousState)
+              command.runId, this.tenantOrgId, command.expectedStateVersion, command.previousState)
         : this.db.query(`UPDATE engineer_runs
                          SET state = ?, state_version = ?, updated_at = ?, terminal_at = ?, request_normalized = ?
-                         WHERE id = ? AND state_version = ? AND state = ?`)
+                         WHERE id = ? AND org_id = ? AND state_version = ? AND state = ?`)
             .run(command.nextState, nextVersion, command.timestamp, command.terminalAt,
-              command.normalizedRequest, command.runId, command.expectedStateVersion, command.previousState);
+              command.normalizedRequest, command.runId, this.tenantOrgId, command.expectedStateVersion, command.previousState);
       if (Number(result.changes) !== 1) {
         throw new StateVersionConflictError(command.runId, command.expectedStateVersion, this.getRun(command.runId).stateVersion);
       }
@@ -2018,7 +2025,7 @@ export class EngineerLedger {
     const nextMetered = !EXECUTION_CLOCK_WAIT_STATES.has(nextState);
     if (previousMetered === nextMetered) return;
     const row = this.db.query(`SELECT status, used_time_seconds, active_since
-      FROM run_budgets WHERE run_id = ?`).get(runId) as {
+      FROM run_budgets WHERE run_id = ? AND org_id = ?`).get(runId, this.tenantOrgId) as {
         status: "ACTIVE" | "WARNING" | "PAUSED" | "EXHAUSTED";
         used_time_seconds: number;
         active_since: string | null;
@@ -2029,12 +2036,12 @@ export class EngineerLedger {
         ? Math.max(0, Math.floor((Date.parse(timestamp) - Date.parse(row.active_since)) / 1_000))
         : 0;
       this.db.query(`UPDATE run_budgets SET used_time_seconds = ?, active_since = NULL, updated_at = ?
-        WHERE run_id = ?`).run(Number(row.used_time_seconds) + elapsed, timestamp, runId);
+        WHERE run_id = ? AND org_id = ?`).run(Number(row.used_time_seconds) + elapsed, timestamp, runId, this.tenantOrgId);
       return;
     }
     if (!previousMetered && nextMetered && row.status !== "PAUSED" && row.status !== "EXHAUSTED") {
-      this.db.query(`UPDATE run_budgets SET active_since = ?, updated_at = ? WHERE run_id = ?`)
-        .run(timestamp, timestamp, runId);
+      this.db.query(`UPDATE run_budgets SET active_since = ?, updated_at = ? WHERE run_id = ? AND org_id = ?`)
+        .run(timestamp, timestamp, runId, this.tenantOrgId);
     }
   }
 
@@ -2051,7 +2058,7 @@ export class EngineerLedger {
       const run = this.getRun(command.runId);
       this.assertExpectedRun(run, command);
       const latestProposal = this.db.query(`SELECT proposal_hash, context_manifest_hash FROM plan_proposals
-        WHERE run_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(command.runId) as {
+        WHERE run_id = ? AND org_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(command.runId, this.tenantOrgId) as {
           proposal_hash: string; context_manifest_hash: string | null;
         } | null;
       if ((latestProposal?.proposal_hash ?? null) !== requiredLaneAuthority.planningBinding.planProposalHash ||
@@ -2060,19 +2067,20 @@ export class EngineerLedger {
       }
       this.db
         .query(`INSERT INTO task_manifest_versions
-                (id, run_id, version, manifest_hash, manifest_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)`)
+                (id, run_id, version, manifest_hash, manifest_json, created_at, org_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .run(randomUUID(), manifest.runId, manifest.manifestVersion, manifest.manifestHash,
-          canonicalJson(manifest), manifest.createdAt);
+          canonicalJson(manifest), manifest.createdAt, this.tenantOrgId);
       this.db.query(`INSERT INTO required_lane_contracts
-        (contract_hash, run_id, manifest_hash, schema_version, contract_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)`).run(
+        (contract_hash, run_id, manifest_hash, schema_version, contract_json, created_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
           contract.contractHash,
           contract.runId,
           contract.manifestHash,
           contract.schemaVersion,
           canonicalJson(contract),
           contract.createdAt,
+          this.tenantOrgId,
         );
       const criterionStatement = this.db.query(`INSERT INTO acceptance_criteria
         (id, run_id, manifest_hash, criterion_id, statement, verification_method, priority, created_at)
@@ -2093,7 +2101,7 @@ export class EngineerLedger {
       // ceiling. Keeping this inside the freeze transaction ensures a rejected
       // contract, stale writer, or failed state promotion cannot mutate cost.
       const budget = this.db.query(`SELECT cost_limit_usd, token_limit, time_limit_seconds
-        FROM run_budgets WHERE run_id = ?`).get(command.runId) as {
+        FROM run_budgets WHERE run_id = ? AND org_id = ?`).get(command.runId, this.tenantOrgId) as {
           cost_limit_usd: number; token_limit: number; time_limit_seconds: number;
         } | null;
       if (!budget) throw new EngineerNotFoundError("run budget", command.runId);
@@ -2105,8 +2113,8 @@ export class EngineerLedger {
         const budgetUpdate = this.db.query(`UPDATE run_budgets
           SET cost_limit_usd = ?, token_limit = ?, time_limit_seconds = ?,
               revision = revision + 1, updated_at = ?
-          WHERE run_id = ?`).run(
-            constrainedCost, constrainedTokens, constrainedTime, command.timestamp, command.runId,
+          WHERE run_id = ? AND org_id = ?`).run(
+            constrainedCost, constrainedTokens, constrainedTime, command.timestamp, command.runId, this.tenantOrgId,
           );
         if (Number(budgetUpdate.changes) !== 1) throw new EngineerNotFoundError("run budget", command.runId);
       }
@@ -2115,7 +2123,7 @@ export class EngineerLedger {
       const result = this.db.query(`UPDATE engineer_runs
         SET state = ?, state_version = ?, manifest_hash = ?, risk_tier = ?,
             human_gate_required = ?, updated_at = ?
-        WHERE id = ? AND state_version = ? AND state = ?`)
+        WHERE id = ? AND org_id = ? AND state_version = ? AND state = ?`)
         .run(
           command.nextState,
           nextVersion,
@@ -2124,6 +2132,7 @@ export class EngineerLedger {
           manifest.humanGateRequired ? 1 : 0,
           command.timestamp,
           command.runId,
+          this.tenantOrgId,
           command.expectedStateVersion,
           command.previousState,
         );
@@ -2161,9 +2170,9 @@ export class EngineerLedger {
           canonicalJson(assessment.features),
           assessment.assessedAt,
         );
-      this.db.query("UPDATE engineer_runs SET risk_tier = ?, human_gate_required = ?, updated_at = ? WHERE id = ? AND state_version = ?")
+      this.db.query("UPDATE engineer_runs SET risk_tier = ?, human_gate_required = ?, updated_at = ? WHERE id = ? AND org_id = ? AND state_version = ?")
         .run(assessment.riskTier, assessment.humanGateRequired ? 1 : 0,
-          assessment.assessedAt, assessment.runId, expectedStateVersion);
+          assessment.assessedAt, assessment.runId, this.tenantOrgId, expectedStateVersion);
       this.insertAudit(assessment.runId, "RISK_ASSESSED", "SUPERVISOR", "risk-engine", {
         assessmentId: assessment.assessmentId,
         riskTier: assessment.riskTier,
@@ -2632,9 +2641,9 @@ export class EngineerLedger {
           providerResponse.usage?.output_tokens!==modelCall.outputTokens||
           (providerResponse.usage?.input_tokens_details?.cached_tokens??null)!==modelCall.cachedInputTokens||
           (providerResponse.usage?.input_tokens_details?.cache_write_tokens??null)!==modelCall.cacheWriteInputTokens)return false;
-      const events=(this.db.query(`SELECT * FROM run_state_events WHERE run_id=? AND previous_state=? AND next_state='FAST_CHECKS'
+      const events=(this.db.query(`SELECT * FROM run_state_events WHERE run_id=? AND org_id=? AND previous_state=? AND next_state='FAST_CHECKS'
         AND reason_code='BUILDER_IMPLEMENTATION_FINISHED' AND state_version=? ORDER BY sequence`).all(
-          input.childRunId,input.expectedRunState,input.expectedStateVersion+1) as EventRow[]).map(rowToEvent);
+          input.childRunId,this.tenantOrgId,input.expectedRunState,input.expectedStateVersion+1) as EventRow[]).map(rowToEvent);
       return events.length===1&&events[0]!.actorType==="SUPERVISOR"&&events[0]!.actorId==="engineer-supervisor"&&
         events[0]!.manifestHash===run.manifestHash&&events[0]!.evidenceIds.includes(artifact.artifactId);
     }catch{return false;}
@@ -2971,8 +2980,8 @@ export class EngineerLedger {
   }
 
   runtimeBudgetUsage(runId: string, now = new Date()): RunBudgetUsage {
-    const budget = this.db.query("SELECT used_time_seconds, active_since FROM run_budgets WHERE run_id = ?")
-      .get(runId) as { used_time_seconds: number; active_since: string | null } | null;
+    const budget = this.db.query("SELECT used_time_seconds, active_since FROM run_budgets WHERE run_id = ? AND org_id = ?")
+      .get(runId, this.tenantOrgId) as { used_time_seconds: number; active_since: string | null } | null;
     if (!budget) throw new EngineerNotFoundError("run budget", runId);
     const models = this.db.query(`SELECT COUNT(*) AS calls,
       COALESCE(SUM(input_tokens), 0) AS input_tokens,
@@ -3173,17 +3182,17 @@ export class EngineerLedger {
         }
         return recovered;
       }
-      const runRow = this.db.query("SELECT state, manifest_hash FROM engineer_runs WHERE id = ?")
-        .get(parsed.runId) as { state: string; manifest_hash: string | null } | null;
+      const runRow = this.db.query("SELECT state, manifest_hash FROM engineer_runs WHERE id = ? AND org_id = ?")
+        .get(parsed.runId, this.tenantOrgId) as { state: string; manifest_hash: string | null } | null;
       const manifestRow = this.db.query(`SELECT manifest_json FROM task_manifest_versions
-        WHERE run_id = ? AND manifest_hash = ?`).get(parsed.runId, parsed.manifestHash) as { manifest_json: string } | null;
+        WHERE run_id = ? AND org_id = ? AND manifest_hash = ?`).get(parsed.runId, this.tenantOrgId, parsed.manifestHash) as { manifest_json: string } | null;
       if (!runRow || runRow.state !== "REVIEWING" || runRow.manifest_hash !== parsed.manifestHash || !manifestRow ||
           canonicalJson(TaskManifestSchema.parse(JSON.parse(manifestRow.manifest_json))) !== canonicalJson(reviewerInput.manifest)) {
         throw new IdempotencyConflictError(parsed.runId, `classified-reviewer-current-run:${parsed.reviewerSessionId}`);
       }
       const contractRow = this.db.query(`SELECT contract_json FROM required_lane_contracts
-        WHERE contract_hash = ? AND run_id = ? AND manifest_hash = ? AND schema_version = 2`).get(
-          batch.contractHash, parsed.runId, parsed.manifestHash,
+        WHERE contract_hash = ? AND run_id = ? AND org_id = ? AND manifest_hash = ? AND schema_version = 2`).get(
+          batch.contractHash, parsed.runId, this.tenantOrgId, parsed.manifestHash,
         ) as { contract_json: string } | null;
       if (!contractRow) throw new IdempotencyConflictError(parsed.runId, `classified-reviewer-contract:${parsed.reviewerSessionId}`);
       const contract = RequiredLaneContractSchema.parse(JSON.parse(contractRow.contract_json));
@@ -3341,8 +3350,8 @@ export class EngineerLedger {
         evidence_bundle_hash: string; policy_version: string;
       } | null;
     const contractRow = this.db.query(`SELECT contract_json FROM required_lane_contracts
-      WHERE contract_hash = ? AND run_id = ? AND manifest_hash = ? AND schema_version = 2`)
-      .get(batch.contractHash, batch.runId, batch.manifestHash) as { contract_json: string } | null;
+      WHERE contract_hash = ? AND run_id = ? AND org_id = ? AND manifest_hash = ? AND schema_version = 2`)
+      .get(batch.contractHash, batch.runId, this.tenantOrgId, batch.manifestHash) as { contract_json: string } | null;
     if (!session || session.run_id !== batch.runId || session.manifest_hash !== batch.manifestHash || !contractRow) {
       throw new Error("persisted review classification authority binding is invalid");
     }
@@ -4039,9 +4048,9 @@ export class EngineerLedger {
     historical?: VerifiedCandidateCheckpoint["prePromotionEventChainSummary"],
   ): VerifiedCandidateCheckpointInput["prePromotionEventChainSummary"] {
     const run = this.getRun(runId);
-    const rows = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ?
+    const rows = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ?
       ${historical ? "AND sequence <= ?" : ""} ORDER BY sequence`)
-      .all(...(historical ? [runId, historical.headSequence] : [runId])) as EventRow[];
+      .all(...(historical ? [runId, this.tenantOrgId, historical.headSequence] : [runId, this.tenantOrgId])) as EventRow[];
     const events = rows.map(rowToEvent).map((event) => ({
       ...event,
       evidenceIds: [...event.evidenceIds].sort(compareCodeUnits),
@@ -4464,8 +4473,8 @@ export class EngineerLedger {
     // P7 fail-closed gate: a replacement run may never be promoted to
     // REVIEW_APPROVED unless its complete resolution lineage verifies.
     this.assertReplacementLineageAuthority(input.runId);
-    const priorEvents = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ?
-      AND reason_code = 'VERIFIED_CANDIDATE_PROMOTED' AND next_state = 'REVIEW_APPROVED'`).all(input.runId) as EventRow[];
+    const priorEvents = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ?
+      AND reason_code = 'VERIFIED_CANDIDATE_PROMOTED' AND next_state = 'REVIEW_APPROVED'`).all(input.runId, this.tenantOrgId) as EventRow[];
     if (priorEvents.length > 0) {
       if (priorEvents.length !== 1) throw new Error("verified candidate promotion authority is ambiguous");
       const event = rowToEvent(priorEvents[0]!);
@@ -4489,8 +4498,8 @@ export class EngineerLedger {
     const created = await createVerifiedCandidateCheckpoint(snapshotContent, input.attestor);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const eventRows = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ?
-        AND reason_code = 'VERIFIED_CANDIDATE_PROMOTED' AND next_state = 'REVIEW_APPROVED'`).all(input.runId) as EventRow[];
+      const eventRows = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ?
+        AND reason_code = 'VERIFIED_CANDIDATE_PROMOTED' AND next_state = 'REVIEW_APPROVED'`).all(input.runId, this.tenantOrgId) as EventRow[];
       if (eventRows.length > 0) {
         if (eventRows.length !== 1) throw new Error("verified candidate promotion authority is ambiguous");
         const event = rowToEvent(eventRows[0]!);
@@ -4547,8 +4556,8 @@ export class EngineerLedger {
         throw new Error("verified candidate event authority mismatch");
       }
       const updated = this.db.query(`UPDATE engineer_runs SET state = 'REVIEW_APPROVED', state_version = ?, updated_at = ?
-        WHERE id = ? AND state = 'REVIEWING' AND state_version = ?`).run(
-          expectedStateVersion + 1, checkpoint.createdAt, input.runId, expectedStateVersion,
+        WHERE id = ? AND org_id = ? AND state = 'REVIEWING' AND state_version = ?`).run(
+          expectedStateVersion + 1, checkpoint.createdAt, input.runId, this.tenantOrgId, expectedStateVersion,
         );
       if (Number(updated.changes) !== 1) throw new StateVersionConflictError(input.runId, expectedStateVersion, this.getRun(input.runId).stateVersion);
       this.updateExecutionClockForTransition(input.runId, "REVIEWING", "REVIEW_APPROVED", checkpoint.createdAt);
@@ -4607,8 +4616,8 @@ export class EngineerLedger {
     readArtifact?:ArtifactByteReader):Promise<VerifiedHardeningCandidatePromotionResult>{
     const strictReader=readArtifact??this.hardeningArtifactReader;
     if(!strictReader)throw new HardeningAuthorityInvalidError();
-    const prior=this.db.query(`SELECT * FROM run_state_events WHERE run_id=? AND reason_code='HARDENING_CANDIDATE_VERIFIED'
-      AND next_state='HUMAN_REVIEW_REQUIRED'`).all(input.runId) as EventRow[];
+    const prior=this.db.query(`SELECT * FROM run_state_events WHERE run_id=? AND org_id=? AND reason_code='HARDENING_CANDIDATE_VERIFIED'
+      AND next_state='HUMAN_REVIEW_REQUIRED'`).all(input.runId, this.tenantOrgId) as EventRow[];
     if(prior.length){if(prior.length!==1)throw new Error("verified hardening candidate promotion authority is ambiguous");
       const event=rowToEvent(prior[0]!);if(event.evidenceIds.length!==1)throw new Error("verified hardening candidate transition authority is malformed");
       const existing=await this.getVerifiedHardeningCandidateCheckpoint({checkpointId:event.evidenceIds[0]!},input.attestor,strictReader);
@@ -4623,8 +4632,8 @@ export class EngineerLedger {
     const snapshotContent=this.verifiedHardeningCandidateContent(input,authority,undefined,strictReader);
     const created=await createVerifiedHardeningCandidateCheckpoint(snapshotContent,input.attestor);
     this.db.exec("BEGIN IMMEDIATE");try{
-      const events=this.db.query(`SELECT * FROM run_state_events WHERE run_id=? AND reason_code='HARDENING_CANDIDATE_VERIFIED'
-        AND next_state='HUMAN_REVIEW_REQUIRED'`).all(input.runId) as EventRow[];
+      const events=this.db.query(`SELECT * FROM run_state_events WHERE run_id=? AND org_id=? AND reason_code='HARDENING_CANDIDATE_VERIFIED'
+        AND next_state='HUMAN_REVIEW_REQUIRED'`).all(input.runId, this.tenantOrgId) as EventRow[];
       if(events.length){if(events.length!==1)throw new Error("verified hardening candidate promotion authority is ambiguous");
         const event=rowToEvent(events[0]!);if(event.evidenceIds.length!==1)throw new Error("verified hardening candidate transition authority is malformed");
         this.db.exec("COMMIT");const existing=await this.getVerifiedHardeningCandidateCheckpoint({checkpointId:event.evidenceIds[0]!},input.attestor,strictReader);
@@ -4684,7 +4693,7 @@ export class EngineerLedger {
         manifestHash:checkpoint.manifestHash,idempotencyKey:`verified-hardening-candidate:${checkpoint.checkpointId}`,eventId:checkpoint.checkpointId,
         timestamp:checkpoint.createdAt,terminalAt:null};this.insertStateEvent(command,expectedStateVersion+1);
       const updated=this.db.query(`UPDATE engineer_runs SET state='HUMAN_REVIEW_REQUIRED',state_version=?,updated_at=?
-        WHERE id=? AND state='REVIEWING' AND state_version=?`).run(expectedStateVersion+1,checkpoint.createdAt,input.runId,expectedStateVersion);
+        WHERE id=? AND org_id=? AND state='REVIEWING' AND state_version=?`).run(expectedStateVersion+1,checkpoint.createdAt,input.runId,this.tenantOrgId,expectedStateVersion);
       if(Number(updated.changes)!==1)throw new StateVersionConflictError(input.runId,expectedStateVersion,this.getRun(input.runId).stateVersion);
       this.verifyHardeningBudgetUnderLock(input.runId,Date.parse(checkpoint.createdAt));
       this.updateExecutionClockForTransition(input.runId,"REVIEWING","HUMAN_REVIEW_REQUIRED",checkpoint.createdAt);
@@ -4833,8 +4842,8 @@ export class EngineerLedger {
   }
 
   private promotedCheckpointForAdvisories(runId: string): VerifiedCandidateCheckpoint {
-    const events = this.db.query(`SELECT evidence_ids_json FROM run_state_events WHERE run_id=?
-      AND reason_code='VERIFIED_CANDIDATE_PROMOTED' AND next_state='REVIEW_APPROVED'`).all(runId) as Array<{evidence_ids_json:string}>;
+    const events = this.db.query(`SELECT evidence_ids_json FROM run_state_events WHERE run_id=? AND org_id=?
+      AND reason_code='VERIFIED_CANDIDATE_PROMOTED' AND next_state='REVIEW_APPROVED'`).all(runId, this.tenantOrgId) as Array<{evidence_ids_json:string}>;
     if (events.length !== 1) throw new AdvisoryIntegrityError();
     let evidenceIds: unknown;
     try { evidenceIds = JSON.parse(events[0]!.evidence_ids_json); } catch { throw new AdvisoryIntegrityError(); }
@@ -4858,7 +4867,7 @@ export class EngineerLedger {
 
   async listAdvisoryBacklogForOwner(ownerId:string,runId:string,options:{limit?:number;cursor?:string;status?:"OPEN"|"DEFERRED"|"DISMISSED";actionability?:"ACTIONABLE"|"AUDIT_ONLY"}={},attestor:CheckpointAttestor):Promise<AdvisoryBacklogPage> {
     const limit=options.limit??20; if(!Number.isInteger(limit)||limit<1||limit>50) throw new TypeError("advisory page limit must be between 1 and 50");
-    const runRow=this.db.query("SELECT user_id FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId) as {user_id:string}|null;
+    const runRow=this.db.query("SELECT user_id FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId) as {user_id:string}|null;
     if(!runRow) throw new EngineerNotFoundError("advisory backlog",runId);
     const checkpoint=this.promotedCheckpointForAdvisories(runId);
     const materialized=this.assertAdvisoryMaterialization(checkpoint);
@@ -4893,7 +4902,7 @@ export class EngineerLedger {
 
   async applyAdvisoryOwnerAction(ownerId:string,runId:string,advisoryId:string,action:"DEFER"|"DISMISS"|"REOPEN",command:AdvisoryOwnerCommand,attestor:CheckpointAttestor){
     const parsed=AdvisoryOwnerCommandSchema.parse(command);
-    const preOwned=this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId);if(!preOwned)throw new EngineerNotFoundError("advisory",advisoryId);
+    const preOwned=this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId);if(!preOwned)throw new EngineerNotFoundError("advisory",advisoryId);
     const signedCheckpoint=this.promotedCheckpointForAdvisories(runId);
     const materializedAuthority=this.assertAdvisoryMaterialization(signedCheckpoint);
     const readArtifact=materializedAuthority===null?undefined:this.hardeningArtifactReader;
@@ -4904,7 +4913,7 @@ export class EngineerLedger {
       if(!signed||canonicalJson(signed.checkpoint)!==canonicalJson(signedCheckpoint))throw new AdvisoryIntegrityError();signedAuthority=signed;}
     catch(error){if(error instanceof AdvisoryIntegrityError)throw error;throw new AdvisoryIntegrityError();}
     this.db.exec("BEGIN IMMEDIATE");
-    try{const owned=this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId);if(!owned)throw new EngineerNotFoundError("advisory",advisoryId);
+    try{const owned=this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId);if(!owned)throw new EngineerNotFoundError("advisory",advisoryId);
       const signedRow=this.db.query(`SELECT checkpoint_json,statement_json,statement_hash,signature_algorithm,signature_key_id,signature
         FROM verified_candidate_checkpoints WHERE id=? AND run_id=?`).get(signedCheckpoint.checkpointId,runId) as Record<string,unknown>|null;
       if(!signedRow||signedRow.checkpoint_json!==canonicalJson(signedAuthority.checkpoint)||
@@ -5116,11 +5125,11 @@ export class EngineerLedger {
 
   async createHardeningQuoteForOwner(ownerId:string,rawInput:HardeningQuoteRequest,attestor:CheckpointAttestor):Promise<HardeningQuoteView>{
     const input=HardeningQuoteRequestSchema.parse(rawInput);
-    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(input.runId,ownerId))throw new EngineerNotFoundError("hardening quote",input.runId);
+    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(input.runId,this.tenantOrgId,ownerId))throw new EngineerNotFoundError("hardening quote",input.runId);
     const signed=await this.signedHardeningParent(input.runId,attestor);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const run=this.db.query("SELECT user_id,repository_id,state_version FROM engineer_runs WHERE id=? AND user_id=?").get(input.runId,ownerId) as {user_id:string;repository_id:string;state_version:number}|null;
+      const run=this.db.query("SELECT user_id,repository_id,state_version FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(input.runId,this.tenantOrgId,ownerId) as {user_id:string;repository_id:string;state_version:number}|null;
       if(!run)throw new EngineerNotFoundError("hardening quote",input.runId);
       // P10: hardening requester-scoped idempotency read, org-scoped (default org today).
       const existingRequest=this.db.query("SELECT * FROM hardening_quote_requests WHERE requester_user_id=? AND idempotency_key=? AND org_id=?").get(ownerId,input.idempotencyKey,this.tenantOrgId) as Record<string,unknown>|null;
@@ -5201,10 +5210,10 @@ export class EngineerLedger {
   }
 
   async getHardeningQuoteForOwner(ownerId:string,runId:string,quoteId:string,attestor:CheckpointAttestor):Promise<HardeningQuoteView>{
-    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId))throw new EngineerNotFoundError("hardening quote",quoteId);
+    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId))throw new EngineerNotFoundError("hardening quote",quoteId);
     const signed=await this.signedHardeningParent(runId,attestor);this.db.exec("BEGIN");
     try {
-      const run=this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId) as Record<string,unknown>|null;
+      const run=this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId) as Record<string,unknown>|null;
       if(!run)throw new EngineerNotFoundError("hardening quote",quoteId);
       const checkpoint=this.assertSignedHardeningParent(runId,signed);
       const row=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND parent_run_id=? AND requester_user_id=?").get(quoteId,runId,ownerId) as Record<string,unknown>|null;
@@ -5221,10 +5230,10 @@ export class EngineerLedger {
 
   async acceptHardeningConsentForOwner(ownerId:string,runId:string,rawInput:HardeningConsentRequest,attestor:CheckpointAttestor):Promise<HardeningConsent>{
     const input=HardeningConsentRequestSchema.parse(rawInput);
-    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId))throw new EngineerNotFoundError("hardening consent",input.quoteId);
+    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId))throw new EngineerNotFoundError("hardening consent",input.quoteId);
     const signed=await this.signedHardeningParent(runId,attestor);this.db.exec("BEGIN IMMEDIATE");
     try {
-      const run=this.db.query("SELECT state_version FROM engineer_runs WHERE id=? AND user_id=?").get(runId,ownerId) as {state_version:number}|null;
+      const run=this.db.query("SELECT state_version FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId) as {state_version:number}|null;
       if(!run)throw new EngineerNotFoundError("hardening consent",input.quoteId);
       // P10: hardening requester-scoped idempotency read, org-scoped (default org today).
       const existingRow=this.db.query("SELECT * FROM hardening_consents WHERE requester_user_id=? AND idempotency_key=? AND org_id=?").get(ownerId,input.idempotencyKey,this.tenantOrgId) as Record<string,unknown>|null;
@@ -5322,13 +5331,13 @@ export class EngineerLedger {
       lineage.parentCheckpointHash!==authority.parentCheckpointHash||lineage.parentBaseCommitSha!==parent.base_commit_sha||
       lineage.seedResultCommitSha!==authority.seedResultCommitSha||lineage.quoteId!==authority.quoteId||lineage.quoteHash!==authority.quoteHash||
       lineage.consentId!==authority.consentId||lineage.consentHash!==authority.consentHash||lineage.selectionHash!==authority.selectionHash)throw new HardeningAuthorityInvalidError();
-    const child=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.user_id=?`).get(lineage.childRunId,lineage.requesterUserId) as RunRow|null;
+    const child=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.org_id=? AND r.user_id=?`).get(lineage.childRunId,this.tenantOrgId,lineage.requesterUserId) as RunRow|null;
     if(!child||child.repository_id!==parent.repository_id||child.provider!==parent.provider||child.owner!==parent.owner||
       child.repository_name!==parent.repository_name||child.repository_url!==parent.repository_url||child.base_branch!==parent.base_branch||
       child.base_commit_sha!==parent.base_commit_sha||child.request_original!==canonicalJson(authority)||child.request_normalized!==canonicalJson(authority)||
       child.state!=="REQUEST_RECEIVED"||child.state_version!==0||child.manifest_hash!==null||child.risk_tier!==riskTier||child.human_gate_required!==1||
       child.created_at!==lineage.createdAt||child.updated_at!==lineage.createdAt||child.terminal_at!==null)throw new HardeningAuthorityInvalidError();
-    const budget=this.db.query("SELECT * FROM run_budgets WHERE run_id=?").get(child.id) as BudgetRow|null;
+    const budget=this.db.query("SELECT * FROM run_budgets WHERE run_id=? AND org_id=?").get(child.id,this.tenantOrgId) as BudgetRow|null;
     const cost=lineage.budget.costMicrousd/1_000_000;
     if(!budget||budget.cost_limit_usd!==cost||budget.token_limit!==lineage.budget.tokens||budget.time_limit_seconds!==lineage.budget.timeSeconds||
       budget.lifetime_cost_limit_usd!==cost||budget.lifetime_token_limit!==lineage.budget.tokens||budget.lifetime_time_limit_seconds!==lineage.budget.timeSeconds||
@@ -5336,6 +5345,8 @@ export class EngineerLedger {
       budget.ambiguous_cost_usd!==0||budget.ambiguous_tokens!==0||budget.status!=="ACTIVE"||budget.pause_reason!==null||budget.resume_state!==null||
       budget.warning_threshold!==0.8||budget.revision!==0||budget.active_since!==lineage.createdAt||budget.created_at!==lineage.createdAt||
       budget.updated_at!==lineage.createdAt)throw new HardeningAuthorityInvalidError();
+    // Contract §2: every table in this emptiness guard is tenant-owned (has org_id),
+    // so the org predicate is universally correct here (spans several buckets' tables).
     for(const table of ["task_manifest_versions","plan_proposals","run_state_events","agent_executions","sandboxes","artifacts","approval_requests","git_operations"] as const){
       const count=this.db.query(`SELECT COUNT(*) AS count FROM ${table} WHERE run_id=? AND org_id=?`).get(child.id,this.tenantOrgId) as {count:number};if(count.count!==0)throw new HardeningAuthorityInvalidError();}
     return OptionalHardeningChildCreationSchema.parse({child:this.optionalHardeningChildView(lineage,riskTier),lineage:{
@@ -5350,9 +5361,9 @@ export class EngineerLedger {
   async createOptionalHardeningChildForOwner(ownerId:string,parentRunId:string,rawInput:OptionalHardeningChildRequest,
     attestor:CheckpointAttestor):Promise<OptionalHardeningChildCreation>{
     const input=OptionalHardeningChildRequestSchema.parse(rawInput);
-    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(parentRunId,ownerId))throw new EngineerNotFoundError("hardening child",parentRunId);
+    if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(parentRunId,this.tenantOrgId,ownerId))throw new EngineerNotFoundError("hardening child",parentRunId);
     const signed=await this.signedHardeningParent(parentRunId,attestor);this.db.exec("BEGIN IMMEDIATE");
-    try{const parent=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.user_id=?`).get(parentRunId,ownerId) as RunRow|null;
+    try{const parent=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.org_id=? AND r.user_id=?`).get(parentRunId,this.tenantOrgId,ownerId) as RunRow|null;
       if(!parent)throw new EngineerNotFoundError("hardening child",parentRunId);const checkpoint=this.assertSignedHardeningParent(parentRunId,signed);
       if(parent.repository_id!==checkpoint.repositoryId||parent.base_commit_sha!==checkpoint.baseCommitSha)throw new HardeningAuthorityInvalidError();
       const consentRow=this.db.query("SELECT * FROM hardening_consents WHERE id=? AND consent_hash=? AND parent_run_id=? AND requester_user_id=?")
@@ -5374,21 +5385,21 @@ export class EngineerLedger {
         const authority=this.optionalHardeningAuthority({rootRunId,parentRunId,childRunId,ownerId,repositoryId:parent.repository_id,checkpoint,quote,consent,advisories,createdAt:lineage.createdAt});
         const risk=this.optionalHardeningRisk(parent.risk_tier,advisories);const view=this.assertOptionalHardeningChild(lineage,authority,parent,risk);this.db.exec("COMMIT");return view;}
       const advisories=this.assertDeterministicQuoteAuthority(quote,checkpoint,true);
-      if(this.db.query("SELECT 1 FROM engineer_runs WHERE id=?").get(childRunId))throw new HardeningAuthorityInvalidError();
+      if(this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=?").get(childRunId,this.tenantOrgId))throw new HardeningAuthorityInvalidError();
       const active=this.db.query(`SELECT 1 FROM engineer_run_lineage l JOIN engineer_runs r ON r.id=l.child_run_id
-        WHERE l.parent_checkpoint_id=? AND r.state NOT IN (${TERMINAL_STATES.map(()=>"?").join(",")}) LIMIT 1`).get(checkpoint.checkpointId,...TERMINAL_STATES);
+        WHERE l.parent_checkpoint_id=? AND r.org_id=? AND r.state NOT IN (${TERMINAL_STATES.map(()=>"?").join(",")}) LIMIT 1`).get(checkpoint.checkpointId,this.tenantOrgId,...TERMINAL_STATES);
       if(active)throw new HardeningSelectionInvalidError();
       const createdAt=this.now().toISOString();const risk=this.optionalHardeningRisk(parent.risk_tier,advisories);
       const authority=this.optionalHardeningAuthority({rootRunId,parentRunId,childRunId,ownerId,repositoryId:parent.repository_id,checkpoint,quote,consent,advisories,createdAt});
       const requestBytes=canonicalJson(authority);const cost=consent.authorizedBudget.costMicrousd/1_000_000;
       this.db.query(`INSERT INTO engineer_runs(id,user_id,repository_id,base_branch,base_commit_sha,request_original,request_normalized,state,state_version,
-        manifest_hash,risk_tier,human_gate_required,created_at,updated_at,terminal_at) VALUES(?,?,?,?,?,?,?,'REQUEST_RECEIVED',0,NULL,?,1,?,?,NULL)`).run(
-        childRunId,ownerId,parent.repository_id,parent.base_branch,parent.base_commit_sha,requestBytes,requestBytes,risk,createdAt,createdAt);
+        manifest_hash,risk_tier,human_gate_required,created_at,updated_at,terminal_at,org_id) VALUES(?,?,?,?,?,?,?,'REQUEST_RECEIVED',0,NULL,?,1,?,?,NULL,?)`).run(
+        childRunId,ownerId,parent.repository_id,parent.base_branch,parent.base_commit_sha,requestBytes,requestBytes,risk,createdAt,createdAt,this.tenantOrgId);
       this.db.query(`INSERT INTO run_budgets(run_id,cost_limit_usd,token_limit,time_limit_seconds,lifetime_cost_limit_usd,lifetime_token_limit,
         lifetime_time_limit_seconds,used_cost_usd,used_tokens,used_time_seconds,reserved_cost_usd,reserved_tokens,ambiguous_cost_usd,ambiguous_tokens,
-        status,pause_reason,resume_state,revision,active_since,created_at,updated_at) VALUES(?,?,?,?,?,?,?,0,0,0,0,0,0,0,'ACTIVE',NULL,NULL,0,?,?,?)`).run(
+        status,pause_reason,resume_state,revision,active_since,created_at,updated_at,org_id) VALUES(?,?,?,?,?,?,?,0,0,0,0,0,0,0,'ACTIVE',NULL,NULL,0,?,?,?,?)`).run(
         childRunId,cost,consent.authorizedBudget.tokens,consent.authorizedBudget.timeSeconds,cost,consent.authorizedBudget.tokens,
-        consent.authorizedBudget.timeSeconds,createdAt,createdAt,createdAt);
+        consent.authorizedBudget.timeSeconds,createdAt,createdAt,createdAt,this.tenantOrgId);
       const lineage=createEngineerRunLineage({schemaVersion:1,policyVersion:"engineer-hardening-lineage-v1",relation:"OPTIONAL_HARDENING",rootRunId,
         parentRunId,childRunId,requesterUserId:ownerId,repositoryId:parent.repository_id,parentCheckpointId:checkpoint.checkpointId,
         parentCheckpointHash:checkpoint.checkpointHash,parentBaseCommitSha:checkpoint.baseCommitSha,seedResultCommitSha:checkpoint.resultCommitSha,
@@ -5416,7 +5427,7 @@ export class EngineerLedger {
     if(rows.length!==1)throw new HardeningAuthorityInvalidError();const lineage=this.hardeningLineageFromRow(rows[0]!);
     if(lineage.parentRunId!==parentRunId||lineage.requesterUserId!==ownerId||lineage.lineageId!==input.lineageId||lineage.lineageHash!==input.lineageHash||
       lineage.parentCheckpointId!==checkpoint.checkpointId||lineage.parentCheckpointHash!==checkpoint.checkpointHash)throw new HardeningAuthorityInvalidError();
-    const parent=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.user_id=?`).get(parentRunId,ownerId) as RunRow|null;
+    const parent=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.org_id=? AND r.user_id=?`).get(parentRunId,this.tenantOrgId,ownerId) as RunRow|null;
     if(!parent||parent.repository_id!==checkpoint.repositoryId||parent.base_commit_sha!==checkpoint.baseCommitSha)throw new HardeningAuthorityInvalidError();
     const consentRow=this.db.query("SELECT * FROM hardening_consents WHERE id=? AND consent_hash=? AND parent_run_id=? AND requester_user_id=?")
       .get(lineage.consentId,lineage.consentHash,parentRunId,ownerId) as Record<string,unknown>|null;
@@ -5434,11 +5445,11 @@ export class EngineerLedger {
       checkpoint,quote,consent,advisories,createdAt:lineage.createdAt});
     const risk=this.optionalHardeningRisk(parent.risk_tier,advisories);
     if(requireOpen)this.assertOptionalHardeningChild(lineage,authority,parent,risk);
-    else {const child=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.user_id=?`).get(childRunId,ownerId) as RunRow|null;
+    else {const child=this.db.query(`${RUN_SELECT} WHERE r.id=? AND r.org_id=? AND r.user_id=?`).get(childRunId,this.tenantOrgId,ownerId) as RunRow|null;
       if(!child||child.repository_id!==parent.repository_id||child.base_branch!==parent.base_branch||child.base_commit_sha!==parent.base_commit_sha||
         child.request_original!==canonicalJson(authority)||child.request_normalized!==canonicalJson(authority)||child.risk_tier!==risk||child.human_gate_required!==1||
         child.created_at!==lineage.createdAt)throw new HardeningAuthorityInvalidError();
-      const budget=this.db.query("SELECT * FROM run_budgets WHERE run_id=?").get(childRunId) as BudgetRow|null;const cost=lineage.budget.costMicrousd/1_000_000;
+      const budget=this.db.query("SELECT * FROM run_budgets WHERE run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as BudgetRow|null;const cost=lineage.budget.costMicrousd/1_000_000;
       if(!budget||budget.cost_limit_usd!==cost||budget.token_limit!==lineage.budget.tokens||budget.time_limit_seconds!==lineage.budget.timeSeconds||
         budget.lifetime_cost_limit_usd!==cost||budget.lifetime_token_limit!==lineage.budget.tokens||budget.lifetime_time_limit_seconds!==lineage.budget.timeSeconds||
         budget.created_at!==lineage.createdAt)throw new HardeningAuthorityInvalidError();}
@@ -5482,7 +5493,7 @@ export class EngineerLedger {
     const rows=this.db.query(`SELECT o.*,l.parent_run_id FROM hardening_start_operations o
       JOIN engineer_run_lineage l ON l.id=o.lineage_id AND l.lineage_hash=o.lineage_hash
       JOIN engineer_runs c ON c.id=o.child_run_id
-      WHERE o.requester_user_id=? AND c.user_id=? ORDER BY o.created_at,o.id`).all(ownerId,ownerId) as Array<Record<string,unknown>>;
+      WHERE o.requester_user_id=? AND c.org_id=? AND c.user_id=? ORDER BY o.created_at,o.id`).all(ownerId,this.tenantOrgId,ownerId) as Array<Record<string,unknown>>;
     return rows.map((row)=>({parentRunId:String(row.parent_run_id),operation:this.hardeningStartOperationFromRow(row)}));
   }
 
@@ -5882,7 +5893,7 @@ export class EngineerLedger {
       String(row.reservation_idempotency_key).length>200||typeof row.fence_owner_id!=="string"||!row.fence_owner_id||
       !/^sha256:[a-f0-9]{64}$/.test(String(row.fence_token_hash))||!Number.isSafeInteger(Number(row.fence_generation))||
       Number(row.fence_generation)<=0)throw new HardeningBudgetAuthorityInvalidError();
-    const run=this.db.query("SELECT user_id,manifest_hash FROM engineer_runs WHERE id=?").get(reservation.childRunId) as
+    const run=this.db.query("SELECT user_id,manifest_hash FROM engineer_runs WHERE id=? AND org_id=?").get(reservation.childRunId,this.tenantOrgId) as
       {user_id:string;manifest_hash:string|null}|null;
     const expectedDescriptor=run?canonicalHardeningPromptCacheMaterial({secret:this.hardeningPromptCacheSecret,
       requesterUserId:run.user_id,childRunId:reservation.childRunId,role:reservation.role,resolvedModel:reservation.resolvedModel}).descriptor:null;
@@ -6215,7 +6226,7 @@ export class EngineerLedger {
       const existing=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE child_run_id=? AND role=?")
         .get(input.childRunId,role) as Record<string,unknown>|null;
       if(!this.hardeningPromptCacheSecret)throw new HardeningPromptCacheAuthorityUnavailableError();
-      const ownerRow=this.db.query("SELECT user_id,state,state_version FROM engineer_runs WHERE id=?").get(input.childRunId) as
+      const ownerRow=this.db.query("SELECT user_id,state,state_version FROM engineer_runs WHERE id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as
         {user_id:string;state:string;state_version:number}|null;
       const expectedRunState=role==="BUILDER"?"IMPLEMENTING":"REVIEWING";
       if(!ownerRow||ownerRow.state!==expectedRunState)throw new HardeningBudgetAuthorityInvalidError();
@@ -7075,7 +7086,7 @@ export class EngineerLedger {
 
   async prepareOptionalHardeningStartForOwner(ownerId:string,parentRunId:string,childRunId:string,rawInput:HardeningStartRequest,
     attestor:CheckpointAttestor):Promise<OptionalHardeningStartPreparation>{
-    const input=HardeningStartRequestSchema.parse(rawInput);if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND user_id=?").get(childRunId,ownerId))
+    const input=HardeningStartRequestSchema.parse(rawInput);if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(childRunId,this.tenantOrgId,ownerId))
       throw new EngineerNotFoundError("hardening child",childRunId);
     const existingRow=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
     const signedParent=await this.signedHardeningParent(parentRunId,attestor);this.db.exec("BEGIN IMMEDIATE");
@@ -7091,8 +7102,8 @@ export class EngineerLedger {
         await verifySignedHardeningSeedAttestation(signedSeed,attestor);return {...preparation,replay:true,signedSeed};}
       const preparation=this.optionalHardeningStartPreparationUnderLock(ownerId,parentRunId,childRunId,input,checkpoint,true,this.now().toISOString());
       const sibling=this.db.query(`SELECT 1 FROM engineer_run_lineage l JOIN engineer_runs r ON r.id=l.child_run_id
-        WHERE l.parent_checkpoint_id=? AND l.child_run_id<>? AND r.state NOT IN (${TERMINAL_STATES.map(()=>"?").join(",")}) LIMIT 1`)
-        .get(checkpoint.checkpointId,childRunId,...TERMINAL_STATES);if(sibling)throw new HardeningSelectionInvalidError();
+        WHERE l.parent_checkpoint_id=? AND l.child_run_id<>? AND r.org_id=? AND r.state NOT IN (${TERMINAL_STATES.map(()=>"?").join(",")}) LIMIT 1`)
+        .get(checkpoint.checkpointId,childRunId,this.tenantOrgId,...TERMINAL_STATES);if(sibling)throw new HardeningSelectionInvalidError();
       this.db.exec("COMMIT");return preparation;
     }catch(error){try{this.db.exec("ROLLBACK");}catch{}throw error;}
   }
@@ -7183,8 +7194,8 @@ export class EngineerLedger {
     const strictReader=readArtifact??this.hardeningArtifactReader;
     if(!strictReader)throw new HardeningAuthorityInvalidError();
     let checkpointId="checkpointId" in reference?reference.checkpointId:null;let promotedRunId:string|null=null;
-    if("runId" in reference){const events=this.db.query(`SELECT * FROM run_state_events WHERE run_id=?
-      AND reason_code='HARDENING_CANDIDATE_VERIFIED' AND next_state='HUMAN_REVIEW_REQUIRED'`).all(reference.runId) as EventRow[];
+    if("runId" in reference){const events=this.db.query(`SELECT * FROM run_state_events WHERE run_id=? AND org_id=?
+      AND reason_code='HARDENING_CANDIDATE_VERIFIED' AND next_state='HUMAN_REVIEW_REQUIRED'`).all(reference.runId,this.tenantOrgId) as EventRow[];
       if(events.length===0)return null;if(events.length!==1)throw new Error("verified hardening candidate transition authority is ambiguous");
       const event=rowToEvent(events[0]!);if(event.evidenceIds.length!==1||event.previousState!=="REVIEWING"||event.actorType!=="SUPERVISOR"||
         event.actorId!=="engineer-supervisor")throw new Error("verified hardening candidate transition authority is malformed");
@@ -7214,8 +7225,8 @@ export class EngineerLedger {
       strictReader);
     const {checkpointId:_id,checkpointHash:_hash,...content}=checkpoint;
     if(canonicalJson(expected)!==canonicalJson(content))throw new Error("persisted verified hardening candidate no longer matches durable authority records");
-    const run=this.getRun(checkpoint.runId);const events=(this.db.query("SELECT * FROM run_state_events WHERE run_id=? ORDER BY sequence")
-      .all(checkpoint.runId) as EventRow[]).map(rowToEvent);const promotion=events.filter((event)=>event.reasonCode==="HARDENING_CANDIDATE_VERIFIED"||
+    const run=this.getRun(checkpoint.runId);const events=(this.db.query("SELECT * FROM run_state_events WHERE run_id=? AND org_id=? ORDER BY sequence")
+      .all(checkpoint.runId,this.tenantOrgId) as EventRow[]).map(rowToEvent);const promotion=events.filter((event)=>event.reasonCode==="HARDENING_CANDIDATE_VERIFIED"||
         event.eventId===checkpoint.checkpointId);const event=promotion.length===1?promotion[0]:null;const index=event?events.indexOf(event):-1;
     const predecessor=index>0?events[index-1]:null;
     for(const [eventIndex,candidate] of events.entries()){const expected=eventIndex+1;
@@ -7254,8 +7265,8 @@ export class EngineerLedger {
     let checkpointId: string | null = "checkpointId" in reference ? reference.checkpointId : null;
     let promotedRunId: string | null = null;
     if ("runId" in reference) {
-      const events = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ?
-        AND reason_code = 'VERIFIED_CANDIDATE_PROMOTED' AND next_state = 'REVIEW_APPROVED'`).all(reference.runId) as EventRow[];
+      const events = this.db.query(`SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ?
+        AND reason_code = 'VERIFIED_CANDIDATE_PROMOTED' AND next_state = 'REVIEW_APPROVED'`).all(reference.runId, this.tenantOrgId) as EventRow[];
       if (events.length === 0) return null;
       if (events.length !== 1) throw new Error("verified candidate transition authority is ambiguous");
       const event = rowToEvent(events[0]!);
@@ -7313,8 +7324,8 @@ export class EngineerLedger {
 
   private assertVerifiedCandidateEventChain(checkpoint: VerifiedCandidateCheckpoint): RunStateEvent {
     const run = this.getRun(checkpoint.runId);
-    const events = (this.db.query("SELECT * FROM run_state_events WHERE run_id = ? ORDER BY sequence")
-      .all(checkpoint.runId) as EventRow[]).map(rowToEvent);
+    const events = (this.db.query("SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ? ORDER BY sequence")
+      .all(checkpoint.runId, this.tenantOrgId) as EventRow[]).map(rowToEvent);
     if (events.length !== run.stateVersion || events.length === 0) {
       throw new Error("verified candidate transition authority has an incomplete event chain");
     }
@@ -7830,12 +7841,12 @@ export class EngineerLedger {
       if(conflictRow){
         const exactConflict=this.exactHardeningFatalRow(conflictRow,expectedConflict);
         if(exactConflict){
-          this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND (last_error IS NULL OR last_error!=?)")
-            .run(HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE,runId,HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE);
+          this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND org_id=? AND (last_error IS NULL OR last_error!=?)")
+            .run(HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE,runId,this.tenantOrgId,HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE);
           return {kind:"CONFLICT" as const,failure:exactConflict};
         }
-        this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND (last_error IS NULL OR last_error!=?)")
-          .run(HARDENING_DATABASE_INTEGRITY_MARKER_AUTHORITY_INVALID_GUIDANCE,runId,
+        this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND org_id=? AND (last_error IS NULL OR last_error!=?)")
+          .run(HARDENING_DATABASE_INTEGRITY_MARKER_AUTHORITY_INVALID_GUIDANCE,runId,this.tenantOrgId,
             HARDENING_DATABASE_INTEGRITY_MARKER_AUTHORITY_INVALID_GUIDANCE);
         return {kind:"CONFLICT_AUTHORITY_INVALID" as const};
       }
@@ -7849,13 +7860,13 @@ export class EngineerLedger {
         const insertedConflict=this.db.query("SELECT * FROM failure_records WHERE id=?").get(expectedConflict.failureId) as Record<string,unknown>|null;
         const exactConflict=this.exactHardeningFatalRow(insertedConflict,expectedConflict);
         if(!exactConflict){
-          this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND (last_error IS NULL OR last_error!=?)")
-            .run(HARDENING_DATABASE_INTEGRITY_MARKER_AUTHORITY_INVALID_GUIDANCE,runId,
+          this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND org_id=? AND (last_error IS NULL OR last_error!=?)")
+            .run(HARDENING_DATABASE_INTEGRITY_MARKER_AUTHORITY_INVALID_GUIDANCE,runId,this.tenantOrgId,
               HARDENING_DATABASE_INTEGRITY_MARKER_AUTHORITY_INVALID_GUIDANCE);
           return {kind:"CONFLICT_AUTHORITY_INVALID" as const};
         }
-        this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND (last_error IS NULL OR last_error!=?)")
-          .run(HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE,runId,HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE);
+        this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND org_id=? AND (last_error IS NULL OR last_error!=?)")
+          .run(HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE,runId,this.tenantOrgId,HARDENING_DATABASE_INTEGRITY_MARKER_CONFLICT_GUIDANCE);
         return {kind:"CONFLICT" as const,failure:exactConflict};
       }
       const inserted=primaryRow?{changes:0}:this.db.query(`INSERT INTO failure_records
@@ -7865,8 +7876,8 @@ export class EngineerLedger {
       const persisted=this.db.query("SELECT * FROM failure_records WHERE id=?").get(expected.failureId) as Record<string,unknown>|null;
       const exact=this.exactHardeningFatalRow(persisted,expected);
       if(!exact)throw new DatabaseIntegrityFatalMarkerConflictError(runId);
-      this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND (last_error IS NULL OR last_error!=?)")
-        .run(HARDENING_DATABASE_INTEGRITY_GUIDANCE,runId,HARDENING_DATABASE_INTEGRITY_GUIDANCE);
+      this.db.query("UPDATE engineer_runs SET last_error=? WHERE id=? AND org_id=? AND (last_error IS NULL OR last_error!=?)")
+        .run(HARDENING_DATABASE_INTEGRITY_GUIDANCE,runId,this.tenantOrgId,HARDENING_DATABASE_INTEGRITY_GUIDANCE);
       return {kind:"FATAL" as const,status:(inserted.changes===1?"APPLIED":"REPLAYED") as "APPLIED"|"REPLAYED",failure:exact};
     }).immediate();
     if(outcome.kind==="CONFLICT")throw new DatabaseIntegrityFatalMarkerConflictError(runId);
@@ -7903,7 +7914,7 @@ export class EngineerLedger {
       return;
     }
     if (evidence.sourceType === "CONTEXT_SOURCE") {
-      const row = this.db.query("SELECT run_id FROM context_sources WHERE source_id = ?").get(evidence.evidenceId) as { run_id: string } | null;
+      const row = this.db.query("SELECT run_id FROM context_sources WHERE source_id = ? AND org_id = ?").get(evidence.evidenceId, this.tenantOrgId) as { run_id: string } | null;
       if (!row || row.run_id !== runId || evidence.trust !== "UNTRUSTED_REPOSITORY") {
         throw new EngineerNotFoundError("decision context evidence", evidence.evidenceId);
       }
@@ -8005,8 +8016,8 @@ export class EngineerLedger {
   }
 
   private findIdempotentEvent(command: LedgerTransitionCommand): RunStateEvent | null {
-    const row = this.db.query("SELECT * FROM run_state_events WHERE run_id = ? AND idempotency_key = ?")
-      .get(command.runId, command.idempotencyKey) as EventRow | null;
+    const row = this.db.query("SELECT * FROM run_state_events WHERE run_id = ? AND org_id = ? AND idempotency_key = ?")
+      .get(command.runId, this.tenantOrgId, command.idempotencyKey) as EventRow | null;
     if (!row) return null;
     const event = rowToEvent(row);
     const same =
@@ -8040,8 +8051,8 @@ export class EngineerLedger {
     this.db.query(`INSERT INTO run_state_events
       (event_id, run_id, sequence, previous_state, next_state, reason_code,
        actor_type, actor_id, timestamp, evidence_ids_json, manifest_hash,
-       state_version, idempotency_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       state_version, idempotency_key, org_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         event.eventId,
         event.runId,
@@ -8056,6 +8067,7 @@ export class EngineerLedger {
         event.manifestHash,
         event.stateVersion,
         event.idempotencyKey,
+        this.tenantOrgId,
       );
     return event;
   }
@@ -8083,7 +8095,7 @@ export class EngineerLedger {
       row.token_limit === 0 ? 1 : row.used_tokens / row.token_limit, row.used_time_seconds / row.time_limit_seconds];
     const status = row.status === "PAUSED" ? "PAUSED" : Math.max(...ratios) >= row.warning_threshold ? "WARNING" : "ACTIVE";
     const latestBudgetEvent = this.db.query(`SELECT event_type FROM budget_events
-      WHERE run_id = ? ORDER BY budget_revision DESC, rowid DESC LIMIT 1`).get(row.run_id) as { event_type: string } | null;
+      WHERE run_id = ? AND org_id = ? ORDER BY budget_revision DESC, rowid DESC LIMIT 1`).get(row.run_id, this.tenantOrgId) as { event_type: string } | null;
     return EngineerBudgetSnapshotSchema.parse({
       runId: row.run_id, status,
       limits: { costUsd: row.cost_limit_usd, tokens: row.token_limit, timeSeconds: row.time_limit_seconds },
@@ -8099,10 +8111,10 @@ export class EngineerLedger {
   }
 
   private insertBudgetEvent(runId: string, eventType: string, actorId: string, idempotencyKey: string, details: unknown, createdAt: string): void {
-    const row = this.db.query("SELECT revision FROM run_budgets WHERE run_id = ?").get(runId) as { revision: number } | null;
+    const row = this.db.query("SELECT revision FROM run_budgets WHERE run_id = ? AND org_id = ?").get(runId, this.tenantOrgId) as { revision: number } | null;
     if (!row) throw new EngineerNotFoundError("run budget", runId);
     this.db.query(`INSERT INTO budget_events
-      (id, run_id, event_type, actor_id, idempotency_key, budget_revision, details_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), runId, eventType, actorId, idempotencyKey, row.revision, canonicalJson(details), createdAt);
+      (id, run_id, event_type, actor_id, idempotency_key, budget_revision, details_json, created_at, org_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), runId, eventType, actorId, idempotencyKey, row.revision, canonicalJson(details), createdAt, this.tenantOrgId);
   }
 }
