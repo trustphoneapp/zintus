@@ -726,6 +726,68 @@ export class PublicationAuthorityService {
   }
 
   /**
+   * REMOTE RECHECK (R7-3, finding #4). An operator-driven, READ-ONLY re-discovery
+   * of a RECONCILING publication's remote outcome. It re-runs the SAME
+   * side-effect-free existing-PR discovery the restart/resume path uses and — only
+   * when the provider positively confirms the exact OPEN DRAFT PR for this
+   * publication — auto-resolves RECONCILING -> RECEIPTED through the ONE central
+   * validator (`centralReceiptBinding`, R7-1: commit binding + provider
+   * confirmation). It NEVER re-dispatches (discovery is side-effect-free), NEVER
+   * trusts an operator-supplied URL, and does NOT weaken any receipt invariant.
+   *
+   * When the provider cannot confirm — no discovery seam, remote access throws, or
+   * no matching open-draft PR — this is NOT an error: the publication simply stays
+   * RECONCILING and the current view is returned (no fabricated progress). This is
+   * the honest "try to auto-confirm, else stay RECONCILING" the RECONCILING screen
+   * surfaces. On a non-RECONCILING publication it is an idempotent no-op returning
+   * the current view (a concurrent resolution already settled it).
+   */
+  async recheckReconciliation(publicationId: string): Promise<PublicationView> {
+    const current = this.requireCurrentOperation(publicationId);
+    if (current.state !== "RECONCILING") return this.getPublication(publicationId);
+    const discovery = this.deps.receiptDiscovery;
+    // No provider seam ⇒ cannot confirm ⇒ stay RECONCILING (fail closed, no throw).
+    if (!discovery) return this.getPublication(publicationId);
+    const expectedCommitSha = this.selectionResultCommit(current);
+    let discovered: ActuatorOutcome | null = null;
+    try {
+      discovered = await discovery.discoverExistingReceipt({
+        runId: current.run_id, publicationId, repositoryId: current.repository_id,
+        baseCommitSha: current.base_commit_sha, resultCommitSha: expectedCommitSha,
+        idempotencyKey: current.idempotency_key,
+      });
+    } catch {
+      discovered = null; // remote unknown ⇒ cannot confirm ⇒ stay RECONCILING (fail closed)
+    }
+    if (!discovered || discovered.kind !== "RECEIPT") return this.getPublication(publicationId);
+    // Re-read under the current row: only settle if it is STILL RECONCILING (a
+    // concurrent resolution may have already resolved it — then return that view).
+    const live = this.requireCurrentOperation(publicationId);
+    if (live.state !== "RECONCILING") return this.getPublication(publicationId);
+    // Route the discovered receipt through the SAME central validator every path
+    // uses. A foreign discovered commit (≠ the verified candidate) is REJECTED here
+    // (fail closed, PublicationReceiptBindingError) and never becomes a receipt.
+    const bound = this.centralReceiptBinding(live, {
+      via: "DISCOVERED", prUrl: discovered.prUrl, commitSha: discovered.commitSha,
+    });
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const receipted = this.appendTransitionLocked(
+        live, "RECEIPTED", "RECONCILING", "operator remote recheck: provider-confirmed open-draft PR", "RESOLVED_RECEIPTED");
+      this.db.query(`INSERT INTO publication_remote_receipts_v33
+        (id, publication_id, publication_revision, idempotency_key, pr_url, commit_sha, observed_at, created_at)
+        VALUES (?,?,?,?,?,?,?,?)`).run(
+          this.id(), live.publication_id, receipted.revision, live.idempotency_key,
+          bound.prUrl, bound.commitSha, this.now(), this.now());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try { this.db.exec("ROLLBACK"); } catch { /* preserve recheck failure */ }
+      throw error;
+    }
+    return this.getPublication(publicationId);
+  }
+
+  /**
    * Advances PREFLIGHT -> DISPATCHED, then invokes the credentialed actuator.
    * Credentials are fetched ONLY here, after the approval is revalidated live,
    * and passed ONLY to the actuator — never to candidate/selection reads or the
@@ -750,13 +812,27 @@ export class PublicationAuthorityService {
       throw new ApprovalAuthorityInvalidError("approval is no longer live at dispatch");
     }
 
-    // CAS PREFLIGHT -> DISPATCHED (append-only), committed before any remote call.
-    this.appendTransition(current, "DISPATCHED", "PREFLIGHT", null);
-
-    const dispatched = this.requireCurrentOperation(publicationId);
+    // Sol P2-4: fetch/validate the actuator credentials while STILL PREFLIGHT,
+    // BEFORE committing DISPATCHED. A transient token fetch/refresh failure here
+    // must fail the dispatch CLEANLY — the operation stays PREFLIGHT and remains
+    // re-driveable — rather than strand a durable DISPATCHED phantom that never
+    // reached the remote. (Previously credentials were fetched AFTER the DISPATCHED
+    // commit, so a token failure left a durable DISPATCHED row with no remote PR:
+    // boot recovery found no PR and parked it in human-only RECONCILING with the
+    // approval already consumed.) Fetching credentials is NOT the remote mutation,
+    // so the DISPATCHED-before-remote invariant for the REAL remote call (the
+    // actuator below) is preserved — a pre-commit token fetch cannot create a
+    // phantom PR. The [HUMAN] credential boundary is unchanged: creds are still
+    // fetched only here, after live approval revalidation, and passed only to the
+    // actuator.
     const credentials = await this.deps.credentialProvider.getPublicationCredentials({
       approvalId: approval.approval_id, repositoryId: approval.repository_id,
     });
+
+    // CAS PREFLIGHT -> DISPATCHED (append-only), committed before the remote call.
+    this.appendTransition(current, "DISPATCHED", "PREFLIGHT", null);
+
+    const dispatched = this.requireCurrentOperation(publicationId);
     let outcome: ActuatorOutcome;
     try {
       outcome = await this.deps.actuator.createBranchPr({

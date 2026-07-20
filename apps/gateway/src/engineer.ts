@@ -4,6 +4,7 @@ import {
   type EngineerExecutionManager,
   type EngineerContextManager,
   type EngineerPublicationManager,
+  type PublicationStartResult,
   type EngineerPlanningManager,
   type EngineerVerificationManager,
   type EngineerRun,
@@ -1561,7 +1562,11 @@ export class EngineerRunManager {
         }
       }
     }
-    let publication: Awaited<ReturnType<EngineerPublicationManager["start"]>> | null = null;
+    // Sol P2-2/#8: name the retired manager's result via the barrel `PublicationStartResult`
+    // type rather than `ReturnType<EngineerPublicationManager["start"]>`, which forces
+    // declaration emit to reference the retired module's physical path (TS2742) once the
+    // `./publication-manager` value subpath is removed. Same runtime type, portable name.
+    let publication: PublicationStartResult | null = null;
     const afterDecision = this.options.supervisor.getRun(runId);
     const deferredRemaining = this.options.supervisor.listOpenDecisions(runId)
       .some((decision) => decision.classification === "DEFER");
@@ -1614,7 +1619,7 @@ export class EngineerRunManager {
     return this.options.supervisor.latestApprovalRequest(runId);
   }
 
-  async approve(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation) {
+  async approve(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation): Promise<PublicationStartResult> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     this.assertRequiredLaneAction(runId);

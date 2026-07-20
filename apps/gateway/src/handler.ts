@@ -851,6 +851,9 @@ export interface EngineerPublicationAuthorityFacade {
   dispatch(principal: unknown, publicationId: string): unknown | Promise<unknown>;
   resume(principal: unknown, publicationId: string): unknown | Promise<unknown>;
   resolveReconciliation(principal: unknown, publicationId: string, body: unknown): unknown | Promise<unknown>;
+  // R7-3: read-only re-discovery of a RECONCILING publication (auto-confirm to
+  // RECEIPTED on a provider-confirmed exact open-draft PR, else stay RECONCILING).
+  recheckReconciliation(principal: unknown, publicationId: string): unknown | Promise<unknown>;
 }
 
 /** Hard cap on SERVER-SIDE MCP tool-loop rounds (model calls) per request. Each
@@ -3108,6 +3111,14 @@ export function createGatewayHandler(
           if (limited) return limited;
           const body = await request.json().catch(() => ({}));
           return json(request, await publicationAuthority.resolveReconciliation(engineerPrincipal!, decodeURIComponent(parts[4]), body), 200, { "Cache-Control": "no-store" });
+        }
+        // POST /v1/engineer/publications/:publicationId/reconcile-discovery  (R7-3
+        // REMOTE RECHECK: read-only re-discovery; no body. Auto-confirms to RECEIPTED
+        // on a provider-confirmed exact open-draft PR, else stays RECONCILING.)
+        if (parts[3] === "publications" && parts[4] && parts[5] === "reconcile-discovery" && !parts[6] && request.method === "POST") {
+          const limited = enforceRateLimit(request, requestId, url.pathname);
+          if (limited) return limited;
+          return json(request, await publicationAuthority.recheckReconciliation(engineerPrincipal!, decodeURIComponent(parts[4])), 200, { "Cache-Control": "no-store" });
         }
         return json(request, { error: { message: "Publication resource not found" } }, 404);
       } catch (error) {

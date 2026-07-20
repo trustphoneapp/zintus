@@ -502,6 +502,67 @@ export async function getPublication(publicationId: string): Promise<EngineerPub
   return request<EngineerPublication>(`/v1/engineer/publications/${encodeURIComponent(publicationId)}`);
 }
 
+// ---------------------------------------------------------------------------
+// R7-3 (finding #4) — RECONCILING operator controls. A RECONCILING publication
+// (remote outcome unknown) is resolvable ONLY through the reconcile routes; the
+// server is the sole authority. Every call below returns the DURABLE server view
+// so the UI state follows the server, never a fabricated success.
+// ---------------------------------------------------------------------------
+
+/**
+ * VERIFIED RECEIPT. Submits an operator-established receipt ({prUrl, commitSha})
+ * to the reconcile route as a RECEIPTED resolution. Present it HONESTLY: the
+ * server REJECTS this unless (R7-1) the commit equals the publication's verified
+ * candidate result commit AND read-only discovery confirms the exact open-draft
+ * PR — an unbound/foreign receipt fails with a typed `ResolutionApiError`
+ * (`PUBLICATION_RECEIPT_BINDING`, 409), never a silent success. The reconcile
+ * route derives all authority server-side; the body carries only the operator's
+ * claimed receipt + an optional detail note.
+ */
+export async function reconcilePublicationReceipt(
+  publicationId: string,
+  input: { prUrl: string; commitSha: string; detail?: string },
+): Promise<EngineerPublication> {
+  return request<EngineerPublication>(`/v1/engineer/publications/${encodeURIComponent(publicationId)}/reconcile`, {
+    method: "POST",
+    body: JSON.stringify({
+      resolution: "RECEIPTED",
+      prUrl: input.prUrl,
+      commitSha: input.commitSha,
+      ...(input.detail && input.detail.trim() ? { detail: input.detail } : {}),
+    }),
+  });
+}
+
+/**
+ * MARK FAILED. Records the operator's terminal decision that this publication did
+ * not land (a FAILED resolution with a reason). The server transitions
+ * RECONCILING -> FAILED durably and returns the resulting view.
+ */
+export async function markPublicationFailed(
+  publicationId: string,
+  input: { detail: string },
+): Promise<EngineerPublication> {
+  return request<EngineerPublication>(`/v1/engineer/publications/${encodeURIComponent(publicationId)}/reconcile`, {
+    method: "POST",
+    body: JSON.stringify({ resolution: "FAILED", detail: input.detail }),
+  });
+}
+
+/**
+ * REMOTE RECHECK. Asks the server to re-run its READ-ONLY existing-PR discovery
+ * for a RECONCILING publication. If the provider now confirms the exact open-draft
+ * PR the server auto-resolves to RECEIPTED (routed through the same central
+ * validator); otherwise it stays RECONCILING. No body — the operator supplies
+ * nothing; the outcome is entirely server-derived. The returned view reflects the
+ * durable server state (RECEIPTED on auto-confirm, still RECONCILING otherwise).
+ */
+export async function recheckPublicationReconciliation(publicationId: string): Promise<EngineerPublication> {
+  return request<EngineerPublication>(`/v1/engineer/publications/${encodeURIComponent(publicationId)}/reconcile-discovery`, {
+    method: "POST",
+  });
+}
+
 /**
  * R7-2: read-only durable projection of the run's CURRENT publication. The
  * Approval & publication screen hydrates from this on load/refresh so a

@@ -3415,3 +3415,35 @@ audit-clean; a real ship requires the [HUMAN] tail above.
   adoption tests failed pre-fix. No raw SQL / no state-mutation — the desk's
   ledger-honest append-only path. Combined gates engineer 863/gateway 472/web
   576/typecheck/diff.
+
+### R7-3 + R7-5 — RECONCILING UI + prod provenance/credential/hide-legacy (Fable-gated, 2026-07-19)
+
+- R7-3 (finding #4): RECONCILING is operable. PublicationReconcilingControls
+  (remote-recheck / verified-receipt / mark-failed) each with pending+typed-error
+  feedback; client reconcilePublicationReceipt/markPublicationFailed/
+  recheckPublicationReconciliation return the durable server view (no fabricated
+  success). New service recheckReconciliation + POST /publications/:id/
+  reconcile-discovery (owner-fenced): read-only re-discovery that auto-confirms
+  RECONCILING→RECEIPTED ONLY through R7-1's centralReceiptBinding (Fable-confirmed
+  at :770 — does NOT weaken R7-1); no seam / remote-unknown / non-RECEIPT → stay
+  RECONCILING fail-closed. The receipt-binding rejection is surfaced HONESTLY
+  ("receipt does not match the verified candidate / no confirmed PR"), client
+  pre-gate never substitutes for the server check. RED-first (client/service/
+  facade/route all fail pre-fix).
+- R7-5 (#7): provenance now REQUIRED by default — deployment fails closed unless
+  ENGINEER_PROVENANCE_ATTESTATION_REQUIRED=0 (loud boot warning
+  engineer.publication_attestation_opt_out); required+no-signer → authority
+  withheld, required+unsourced-tree-hash → APPROVE 503. Stale "tree hash
+  unavailable" comments corrected (it IS wired, R5F-2). (#8): removed the
+  ./publication-manager subpath from package.json — the retired class is not a
+  value import; type-only PublicationStartResult barrel + repointed engineer.ts
+  (fixed a latent TS2742 declaration leak). Sol P2-4: credentials fetched BEFORE
+  the DISPATCHED commit (still PREFLIGHT) — a token failure fails the dispatch
+  cleanly (re-driveable), no phantom DISPATCHED; DISPATCHED-before-remote +
+  [HUMAN] boundary preserved. Fable mutation-verified: swallowing the credential
+  failure reds the P2-4 phantom-DISPATCHED test.
+- Both agents edited shared files (publication-authority.ts, facade, handler,
+  engineer.ts, barrel) — Fable verified NO interleaving loss (both recheck +
+  credential-ordering survive). Combined gates engineer 869/gateway 475/web 586/
+  workspace-typecheck/diff clean. REMAINING: R7-6 (OpenAPI/docs align) → R7-7
+  (live gate: refresh/restart/crash-after-PR/2-person ceremony).

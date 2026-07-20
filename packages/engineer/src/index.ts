@@ -45,6 +45,12 @@ export * from "./git-service.js";
 // solely via the explicit "@zintus/engineer/publication-manager" legacy subpath
 // (used only by the retirement/historical tests), never through the main barrel.
 export type { EngineerPublicationManager } from "./publication-manager.js";
+// Sol P2-2/#8: the retired manager's public result TYPE is re-exported (type-only)
+// so gateway code that historically consumed it can name it portably via the
+// `@zintus/engineer` barrel — WITHOUT any runtime/value import path to the retired
+// class (the `./publication-manager` value subpath is removed). Naming this type
+// through the barrel keeps declaration emit portable once the value subpath is gone.
+export type { PublicationStartResult } from "./publication-manager.js";
 export * from "./publication-authority.js";
 export * from "./git-publication-mechanics.js";
 export * from "./planning.js";

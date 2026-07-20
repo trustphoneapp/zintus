@@ -10,7 +10,12 @@ import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
 // The retired legacy authority is no longer a public-API value export (Sol P2-2);
 // this historical test imports the concrete class from its explicit legacy subpath.
-import { EngineerPublicationManager } from "@zintus/engineer/publication-manager";
+// Sol P2-2/#8: the retired legacy publication authority is no longer a public
+// value subpath export (removed from @zintus/engineer package.json exports). This
+// historical/retirement test reaches the concrete class via a direct relative
+// import into the engineer package source — never through a public import path —
+// so external consumers still cannot `new` the retired authority.
+import { EngineerPublicationManager } from "../../../packages/engineer/src/publication-manager.js";
 import {
   ApprovalAuthorityConflictError,
   EngineerSupervisor,
@@ -3288,6 +3293,7 @@ describe("P8 publication-authority HTTP routes", () => {
       dispatch: method("dispatch", { publicationId: "pub-1", state: "RECEIPTED", receipt: { prUrl: "https://github.com/o/r/pull/1", commitSha: "d".repeat(40) } }),
       resume: method("resume", { publicationId: "pub-1", state: "RECONCILING", reconciliation: { reason: "RESTART_UNCERTAIN_DISPATCH", observedRemoteState: "unknown" } }),
       resolveReconciliation: method("resolveReconciliation", { publicationId: "pub-1", state: "FAILED" }),
+      recheckReconciliation: method("recheckReconciliation", { publicationId: "pub-1", state: "RECEIPTED", receipt: { prUrl: "https://github.com/o/r/pull/1", commitSha: "d".repeat(40) } }),
     } as unknown as GatewayHandlerDeps["publicationAuthority"];
     const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
     return { handler: makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns, publicationAuthority }), calls };
@@ -3464,6 +3470,14 @@ describe("P8 publication-authority HTTP routes", () => {
     expect(response.status).toBe(200);
     expect((await response.json() as { state: string }).state).toBe("FAILED");
     expect(calls[0]).toEqual({ method: "resolveReconciliation", args: [principal, "pub-1", body] });
+  });
+
+  test("R7-3: POST /publications/:id/reconcile-discovery forwards principal + publicationId (no body) and returns the server view (200)", async () => {
+    const { handler, calls } = makePublicationHandler();
+    const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/reconcile-discovery", { method: "POST", headers: authorized }));
+    expect(response.status).toBe(200);
+    expect((await response.json() as { state: string }).state).toBe("RECEIPTED");
+    expect(calls[0]).toEqual({ method: "recheckReconciliation", args: [principal, "pub-1"] });
   });
 
   test("a cross-owner/unknown publication dispatch collapses to the single 404 CANDIDATE_NOT_FOUND (no ownership oracle)", async () => {

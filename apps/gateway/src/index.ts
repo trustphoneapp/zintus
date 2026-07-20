@@ -845,17 +845,31 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // ALL authority server-side (requester from the principal owner, approver from the
   // principal reviewer, idempotency from the header).
   //
-  // Attestation posture (P12 Finding A): the v35 attestation binds a result git
-  // TREE hash that is NOT durably recorded for a verified candidate and cannot be
-  // sourced at publication time here, so attestation is FORMALLY DEFERRED behind
-  // the explicit `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` flag (default OFF =
-  // deferred; documented in KNOWN-LIMITATIONS.md). When ON, a durable APPROVE must
-  // emit a v35 attestation or FAIL CLOSED (503, no P8 approval written), and if it
-  // is ON without a configured signer the publication authority is WITHHELD
-  // entirely (never fail-open). `resultTreeHashFor` still returns null (unsourced),
-  // so with the flag ON, APPROVE fails closed until a real tree hash is wired.
-  const provenanceAttestationRequired =
-    /^(1|true)$/i.test(process.env.ENGINEER_PROVENANCE_ATTESTATION_REQUIRED ?? "");
+  // Attestation posture (Sol #7 / P12 Finding A): the v35 attestation binds a result
+  // git TREE hash. That tree hash IS now wired (R5F-2): `resultTreeHashFor` below
+  // sources it from the verified candidate's result commit via
+  // `GitHubGitService.resolveResultTreeHash` (read-only local git), failing CLOSED to
+  // null when git cannot source it. Attestation is therefore REQUIRED BY DEFAULT: a
+  // real deployment binds a v35 attestation (approver ledger decision + sourced tree
+  // hash) on every durable APPROVE or FAILS CLOSED — it never silently publishes
+  // unattested. When required (the default) WITHOUT a configured signer, the
+  // publication authority is WITHHELD ENTIRELY (never fail-open); with a signer but
+  // an unsourced tree hash, APPROVE fails closed (503, no P8 approval written). The
+  // ONLY way to run without attestation is the loud, EXPLICIT, documented opt-out
+  // `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED=0` (0/false/no/off) — an audited
+  // deferral (docs/zintus-engineer/KNOWN-LIMITATIONS.md), logged loudly at boot,
+  // never a silent default.
+  const provenanceFlag = process.env.ENGINEER_PROVENANCE_ATTESTATION_REQUIRED?.trim();
+  const provenanceOptOut = /^(0|false|no|off)$/i.test(provenanceFlag ?? "");
+  const provenanceAttestationRequired = !provenanceOptOut;
+  if (provenanceOptOut) {
+    // Surface a clear, audited "provenance intentionally disabled" state at startup
+    // rather than silently allowing unattested publishes.
+    log("warn", "engineer.publication_attestation_opt_out", {
+      detail:
+        "ENGINEER_PROVENANCE_ATTESTATION_REQUIRED explicitly disables v35 provenance attestation; durable APPROVEs will publish UNATTESTED. This is an audited deferral (KNOWN-LIMITATIONS.md), not the default posture.",
+    });
+  }
   let publicationAuthority: EngineerPublicationAuthorityFacade | undefined;
   if (engineerPublicationAuthorityService && provenanceAttestationRequired && resolutionSigning.status !== "READY") {
     // Fail closed: attestation is REQUIRED by config but no signer authority is

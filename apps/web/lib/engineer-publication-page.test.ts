@@ -42,6 +42,20 @@ describe("Approval/publication page wiring", () => {
     expect(source).not.toContain("createPublication(runId, { approvalId: approval.approvalId, operation: \"BRANCH_PR\" });\n    });\n  }, [runId, approval, withMutation]);\n\n  const disabled");
   });
 
+  it("R7-3 (FINDING #4): wires the RECONCILING operator controls (remote recheck, verified receipt, mark failed) through the reconcile client — RECONCILING is no longer unoperable", () => {
+    expect(source).toContain("PublicationReconcilingControls");
+    expect(source).toContain('publication.state === "RECONCILING"');
+    // Each control drives its reconcile route via the typed client (server is authority).
+    expect(source).toContain("recheckPublicationReconciliation(publicationId)");
+    expect(source).toContain("reconcilePublicationReceipt(publicationId");
+    expect(source).toContain("markPublicationFailed(publicationId");
+    // The server's typed rejection is surfaced honestly, and the view follows the server response.
+    expect(source).toContain("reconciliationErrorDetail(cause)");
+    expect(source).toContain("setPublication(next)");
+    // Still no raw fetch — everything routes through the typed client.
+    expect(source).not.toContain("fetch(");
+  });
+
   it("renders the degraded readiness banner using the existing shared component", () => {
     expect(source).toContain("HardeningReadinessBanner state={readiness}");
   });

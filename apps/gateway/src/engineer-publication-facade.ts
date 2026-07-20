@@ -44,16 +44,18 @@ import type { EngineerPublicationAuthorityFacade } from "./handler.js";
  * Attestation last-mile (item 2 / P11 + P12 Finding A). The v35 provenance
  * attestation binds a ledger `approval_decision`
  * (provenance_attestations.approval_decision_id is UNIQUE + trigger-bound) AND a
- * `resultTreeHash` — the git TREE hash, which is NOT durably recorded for a
- * verified candidate (only `result_commit_sha` is) and cannot be sourced at
- * publication time today. Attestation is therefore FORMALLY DEFERRED behind an
- * explicit config flag threaded here as `attestationRequired`
- * (`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED`, default not-required):
+ * `resultTreeHash` — the git TREE hash. That tree hash IS now wired (R5F-2): the
+ * gateway sources it from the verified candidate's result commit via
+ * `GitHubGitService.resolveResultTreeHash` and threads it in through
+ * `resultTreeHashFor`, failing CLOSED to null when git cannot source it. Attestation
+ * is therefore REQUIRED BY DEFAULT (Sol #7); it is threaded here as
+ * `attestationRequired` (`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED`, default
+ * REQUIRED; the only escape is the explicit opt-out `=0`):
  *
- *   - attestationRequired = false (default, deferred): the pure P8 approval path
- *     runs unchanged. This is a documented deliberate deferral, NOT a silent
- *     fail-open (see docs/zintus-engineer/KNOWN-LIMITATIONS.md).
- *   - attestationRequired = true: a durable APPROVE MUST emit + persist the v35
+ *   - attestationRequired = false (EXPLICIT opt-out only, deferred): the pure P8
+ *     approval path runs unchanged. This is a documented, audited deferral, NOT a
+ *     silent fail-open (see docs/zintus-engineer/KNOWN-LIMITATIONS.md).
+ *   - attestationRequired = true (default): a durable APPROVE MUST emit + persist the v35
  *     attestation or fail closed. Feasibility (a PENDING approval_request bound to
  *     this exact verified checkpoint, and a sourced `resultTreeHash`) is checked
  *     BEFORE any write, so an infeasible required-attestation APPROVE fails closed
@@ -140,6 +142,8 @@ interface PublicationAuthorityServiceLike {
     detail: string,
     receipt?: { prUrl: string; commitSha: string },
   ): Promise<{ publicationId: string; state: string }>;
+  /** R7-3: read-only re-discovery of a RECONCILING publication (auto-confirm or stay). */
+  recheckReconciliation(publicationId: string): Promise<{ publicationId: string; state: string }>;
 }
 
 /**
@@ -207,12 +211,13 @@ export interface PublicationFacadeDeps {
   credentialAvailable?: boolean;
   /**
    * True when v35 provenance attestation is REQUIRED for a durable APPROVE
-   * (`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` true AND a signer is configured).
-   * When true, the P8 approval and its v35 attestation are persisted in ONE
-   * transaction over the shared connection (atomic): an APPROVE that cannot emit
-   * its attestation fails closed with NOTHING persisted (the approval INSERT is
-   * rolled back with the attestation). When false (default), attestation is
-   * formally deferred and the pure P8 approval path runs unchanged.
+   * (REQUIRED BY DEFAULT — `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` not explicitly
+   * opted out AND a signer is configured). When true, the P8 approval and its v35
+   * attestation are persisted in ONE transaction over the shared connection (atomic):
+   * an APPROVE that cannot emit its attestation fails closed with NOTHING persisted
+   * (the approval INSERT is rolled back with the attestation). When false (the
+   * EXPLICIT opt-out only), attestation is formally deferred and the pure P8 approval
+   * path runs unchanged.
    */
   attestationRequired: boolean;
   /** Reads the run's latest ledger approval_request (the bridge target for the attestation). */
@@ -583,6 +588,17 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
         throw new PublicationReconciliationReceiptError();
       }
       return service.resolveReconciliation(publicationId, resolution, detail, { prUrl: prUrl.trim(), commitSha: commitSha.trim().toLowerCase() });
+    },
+
+    // R7-3 (finding #4): REMOTE RECHECK — an owner-scoped, read-only re-discovery
+    // of a RECONCILING publication. No body: the operator supplies nothing; the
+    // service re-runs the side-effect-free existing-PR discovery and auto-confirms
+    // to RECEIPTED only on a provider-confirmed exact open-draft PR (routed through
+    // the same central validator), else leaves it RECONCILING. Ownership is derived
+    // from the durable row (never the URL), same 404 collapse as the others.
+    async recheckReconciliation(_p, publicationId) {
+      if (!isOwnedPublication(publicationId)) throw new CandidateNotFoundError();
+      return service.recheckReconciliation(publicationId);
     },
   };
 }

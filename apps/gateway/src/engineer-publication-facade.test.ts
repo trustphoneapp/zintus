@@ -690,6 +690,47 @@ describe("P8 publication facade — R3 dispatch / restart / reconcile (owner-sco
     await expect(facade.dispatch(principal, "not-a-real-publication")).rejects.toBeInstanceOf(CandidateNotFoundError);
     expect(() => facade.resume(principal, "not-a-real-publication")).toThrow(CandidateNotFoundError);
     await expect(facade.resolveReconciliation(principal, "not-a-real-publication", { resolution: "FAILED" })).rejects.toThrow(CandidateNotFoundError);
+    // R7-3: recheckReconciliation is likewise owner-fenced with the same 404.
+    await expect(facade.recheckReconciliation(principal, "not-a-real-publication")).rejects.toBeInstanceOf(CandidateNotFoundError);
+  });
+
+  // R7-3 (FINDING #4): the REMOTE RECHECK the operator drives from the RECONCILING
+  // screen — a read-only re-discovery that auto-confirms to RECEIPTED when (and only
+  // when) the provider confirms the exact open-draft PR, else leaves it RECONCILING.
+  test("recheckReconciliation auto-confirms RECONCILING → RECEIPTED when the provider now confirms the exact open-draft PR", async () => {
+    const db = scratchDb();
+    const CONFIRMED_PR = "https://github.test/pull/77";
+    const ambiguousService = new PublicationAuthorityService(db, {
+      actuator: { async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "receipt lost" }; } },
+      preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+      credentialProvider: { getPublicationCredentials: () => ({ token: "ghp_x" }) },
+      receiptDiscovery: { discoverExistingReceipt: async (input) => ({ kind: "RECEIPT", prUrl: CONFIRMED_PR, commitSha: input.resultCommitSha }) },
+      now: () => new Date(AT), idFactory: () => `rck-${(counter += 1)}`,
+    });
+    const { facade } = makeFacade(db, { service: ambiguousService });
+    const publicationId = await seedStartedPublication(facade);
+    expect((await facade.dispatch(principal, publicationId) as { state: string }).state).toBe("RECONCILING");
+    const rechecked = await facade.recheckReconciliation(principal, publicationId) as { state: string; receipt?: { prUrl: string } };
+    expect(rechecked.state).toBe("RECEIPTED");
+    expect(rechecked.receipt?.prUrl).toBe(CONFIRMED_PR);
+    expect((db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(1);
+  });
+
+  test("recheckReconciliation with no provider confirmation leaves the publication RECONCILING (no throw, no receipt row)", async () => {
+    const db = scratchDb();
+    const ambiguousService = new PublicationAuthorityService(db, {
+      actuator: { async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "receipt lost" }; } },
+      preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
+      credentialProvider: { getPublicationCredentials: () => ({ token: "ghp_x" }) },
+      receiptDiscovery: { discoverExistingReceipt: async () => ({ kind: "AMBIGUOUS", observedRemoteState: "none", detail: "no PR yet" }) },
+      now: () => new Date(AT), idFactory: () => `rck2-${(counter += 1)}`,
+    });
+    const { facade } = makeFacade(db, { service: ambiguousService });
+    const publicationId = await seedStartedPublication(facade);
+    expect((await facade.dispatch(principal, publicationId) as { state: string }).state).toBe("RECONCILING");
+    const rechecked = await facade.recheckReconciliation(principal, publicationId) as { state: string };
+    expect(rechecked.state).toBe("RECONCILING");
+    expect((db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
   });
 });
 

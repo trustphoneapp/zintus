@@ -397,6 +397,40 @@ describe("v33 publication flow — RECONCILING is durable & typed", () => {
     expect(h.actuatorCalls).toBe(1);
   });
 
+  // Sol P2-4: a transient credential (token fetch/refresh) failure must NOT strand
+  // a durable DISPATCHED phantom. Credentials are validated while still PREFLIGHT,
+  // BEFORE the DISPATCHED commit, so a token failure fails the dispatch cleanly and
+  // the operation stays PREFLIGHT / re-driveable — the remote actuator is never
+  // reached, and a later dispatch drives it to RECEIPTED without human reconciliation.
+  test("Sol P2-4: credential fetch failure stays PREFLIGHT (no phantom DISPATCHED), re-driveable", async () => {
+    const h = harness();
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    expect(started.state).toBe("PREFLIGHT");
+
+    // Rebind over the SAME db with a credential provider whose token fetch fails
+    // transiently and an actuator that records whether the remote was ever reached.
+    let actuatorReached = 0;
+    const flaky = new PublicationAuthorityService(h.db, {
+      actuator: { async createBranchPr() { actuatorReached += 1; return { kind: "RECEIPT", prUrl: "https://example/pr/1", commitSha: RESULT_COMMIT }; } },
+      preflight: { probe: (i) => ({ repositoryId: i.repositoryId, baseCommitSha: i.baseCommitSha }) },
+      credentialProvider: { getPublicationCredentials: () => { throw new Error("token refresh failed"); } },
+      now: () => new Date(AT), idFactory: deterministicId,
+    });
+
+    await expect(flaky.dispatch(started.publicationId)).rejects.toThrow(/token refresh failed/);
+    // No phantom: the credential failure did NOT commit DISPATCHED. It stays
+    // PREFLIGHT (re-driveable), and the remote actuator was never reached.
+    expect(flaky.getPublication(started.publicationId).state).toBe("PREFLIGHT");
+    expect(actuatorReached).toBe(0);
+
+    // Re-driveable: a subsequent healthy dispatch proceeds cleanly to RECEIPTED —
+    // the approval was not stranded and no human reconciliation was required.
+    const settled = await h.draft.dispatch(started.publicationId);
+    expect(settled.state).toBe("RECEIPTED");
+    expect(h.actuatorCalls).toBe(1);
+  });
+
   // A4 (P2): RECONCILING only accepts an explicit typed resolution transition.
   test("A4: a non-resolution successor to RECONCILING is rejected at the DB layer", async () => {
     const h = harness({ outcome: { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" } });
@@ -539,6 +573,83 @@ describe("F-L1 — manual RECEIPTED receipt must BIND to the publication (proven
     expect(h.draft.getPublication(publicationId).state).toBe("RECONCILING");
     expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
     expect(h.discoveryCalls).toBe(0);
+  });
+});
+
+// R7-3 (FINDING #4): REMOTE RECHECK. A RECONCILING publication must be
+// operable from the UI. `recheckReconciliation` re-runs the READ-ONLY existing-PR
+// discovery on a RECONCILING publication and — only when the provider confirms the
+// exact open-draft PR — auto-resolves it to RECEIPTED, routing through the SAME
+// central validator every receipt path uses (R7-1). When the provider cannot
+// confirm (no seam, remote throws, no matching PR) it stays RECONCILING with NO
+// error and NO fabricated progress. It NEVER re-dispatches (discovery is
+// side-effect-free) and never trusts an operator URL. RED on today's code:
+// `recheckReconciliation` does not exist.
+describe("R7-3 — recheckReconciliation re-runs read-only discovery on RECONCILING (auto-confirm or stay)", () => {
+  const AMBIGUOUS: ActuatorOutcome = { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" };
+  const DISCOVERED_PR = "https://example/pr/rechecked";
+  const confirmingDiscovery: PublicationReceiptDiscovery = {
+    discoverExistingReceipt: async (input) => ({ kind: "RECEIPT", prUrl: DISCOVERED_PR, commitSha: input.resultCommitSha }),
+  };
+  async function seedReconciling(h: Harness) {
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await h.draft.dispatch(started.publicationId); // AMBIGUOUS actuator parks RECONCILING
+    expect(h.draft.getPublication(started.publicationId).state).toBe("RECONCILING");
+    return started.publicationId;
+  }
+
+  test("a provider-confirmed open-draft PR auto-resolves RECONCILING → RECEIPTED via the central validator (persists the DISCOVERED reference + server-derived commit)", async () => {
+    const h = harness({ outcome: AMBIGUOUS, receiptDiscovery: confirmingDiscovery });
+    const publicationId = await seedReconciling(h);
+    const resolved = await h.draft.recheckReconciliation(publicationId);
+    expect(resolved.state).toBe("RECEIPTED");
+    expect(resolved.receipt).toEqual({ prUrl: DISCOVERED_PR, commitSha: RESULT_COMMIT });
+    expect(h.discoveryCalls).toBe(1);
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(1);
+  });
+
+  test("no matching PR (provider returns non-RECEIPT): stays RECONCILING, no error, no receipt row", async () => {
+    const h = harness({
+      outcome: AMBIGUOUS,
+      receiptDiscovery: { discoverExistingReceipt: async () => ({ kind: "AMBIGUOUS", observedRemoteState: "none", detail: "no PR yet" }) },
+    });
+    const publicationId = await seedReconciling(h);
+    const resolved = await h.draft.recheckReconciliation(publicationId);
+    expect(resolved.state).toBe("RECONCILING");
+    expect(h.discoveryCalls).toBe(1);
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
+  });
+
+  test("no discovery seam: recheck cannot confirm, so it stays RECONCILING (fail closed, no throw)", async () => {
+    const h = harness({ outcome: AMBIGUOUS });
+    const publicationId = await seedReconciling(h);
+    const resolved = await h.draft.recheckReconciliation(publicationId);
+    expect(resolved.state).toBe("RECONCILING");
+    expect(h.discoveryCalls).toBe(0);
+  });
+
+  test("a foreign discovered commit (≠ verified candidate) is REJECTED by the central binding — never becomes a receipt", async () => {
+    const h = harness({
+      outcome: AMBIGUOUS,
+      receiptDiscovery: { discoverExistingReceipt: async () => ({ kind: "RECEIPT", prUrl: DISCOVERED_PR, commitSha: "9".repeat(40) }) },
+    });
+    const publicationId = await seedReconciling(h);
+    await expect(h.draft.recheckReconciliation(publicationId)).rejects.toThrow(PublicationReceiptBindingError);
+    expect(h.draft.getPublication(publicationId).state).toBe("RECONCILING");
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
+  });
+
+  test("recheck on a non-RECONCILING publication is an idempotent no-op that returns the current view (never re-dispatches)", async () => {
+    const h = harness({ outcome: { kind: "RECEIPT", prUrl: "https://example/pr/ok", commitSha: RESULT_COMMIT }, receiptDiscovery: confirmingDiscovery });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    const receipted = await h.draft.dispatch(started.publicationId);
+    expect(receipted.state).toBe("RECEIPTED");
+    const actuatorCallsBefore = h.actuatorCalls;
+    const rechecked = await h.draft.recheckReconciliation(started.publicationId);
+    expect(rechecked.state).toBe("RECEIPTED");
+    expect(h.actuatorCalls).toBe(actuatorCallsBefore); // never re-dispatched
   });
 });
 

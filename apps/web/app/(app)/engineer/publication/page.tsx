@@ -20,11 +20,15 @@ import {
   createPublication,
   dispatchPublication,
   getPublication,
+  markPublicationFailed,
+  recheckPublicationReconciliation,
+  reconcilePublicationReceipt,
   type EngineerPublication,
   type PublicationCandidate,
   type PublicationApprovalResult,
 } from "@/lib/engineer-resolution";
 import { hydratePublicationDesk } from "@/lib/engineer-publication-hydrate";
+import type { ActionErrorDetail } from "../EngineerActionErrorNotice";
 import {
   ApprovalRationaleControls,
   PREFLIGHT_MISMATCH_ERROR,
@@ -32,7 +36,9 @@ import {
   PublicationEmptyState,
   PublicationErrorNotice,
   PublicationErrorState,
+  PublicationReconcilingControls,
   PublicationStateTimeline,
+  reconciliationErrorDetail,
 } from "./PublicationControls";
 
 const POLL_INTERVAL_MS = 4_000;
@@ -54,6 +60,7 @@ function PublicationDeskInner() {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [selfApprovalError, setSelfApprovalError] = useState(false);
   const [preflightMismatch, setPreflightMismatch] = useState(false);
+  const [reconcileError, setReconcileError] = useState<ActionErrorDetail | null>(null);
 
   const actionLockRef = useRef(new EngineerActionLock());
 
@@ -166,6 +173,43 @@ function PublicationDeskInner() {
     });
   }, [publicationId, withMutation]);
 
+  // R7-3 (finding #4): RECONCILING is operable. Each control drives a reconcile
+  // route under the SAME desk action-lock, surfaces its own typed error via
+  // `reconciliationErrorDetail`, and sets the publication to the DURABLE view the
+  // server returns — no control fakes a success (a rejected verified receipt stays
+  // RECONCILING with the binding error shown). The read-only poll keeps refreshing.
+  const runReconcileAction = useCallback(async (action: string, work: () => Promise<EngineerPublication>) => {
+    await actionLockRef.current.run("publication-desk", async () => {
+      setPendingAction(action);
+      setReconcileError(null);
+      try {
+        const next = await work();
+        setPublication(next);
+      } catch (cause) {
+        setReconcileError(reconciliationErrorDetail(cause));
+      } finally {
+        setPendingAction((current) => (current === action ? null : current));
+      }
+    });
+  }, []);
+
+  const recheck = useCallback(async () => {
+    if (!publicationId) return;
+    await runReconcileAction("reconcile:recheck", () => recheckPublicationReconciliation(publicationId));
+  }, [publicationId, runReconcileAction]);
+
+  const submitReceipt = useCallback(async (input: { prUrl: string; commitSha: string; detail: string }) => {
+    if (!publicationId) return;
+    await runReconcileAction("reconcile:receipt", () => reconcilePublicationReceipt(publicationId, {
+      prUrl: input.prUrl, commitSha: input.commitSha, detail: input.detail || undefined,
+    }));
+  }, [publicationId, runReconcileAction]);
+
+  const markFailed = useCallback(async (detail: string) => {
+    if (!publicationId) return;
+    await runReconcileAction("reconcile:mark-failed", () => markPublicationFailed(publicationId, { detail }));
+  }, [publicationId, runReconcileAction]);
+
   const disabled = pendingAction !== null;
 
   return (
@@ -236,6 +280,17 @@ function PublicationDeskInner() {
         ) : null}
 
         {publication ? <PublicationStateTimeline state={publication.state} receipt={publication.receipt} reconciliation={publication.reconciliation} budget={budget} /> : null}
+
+        {publication && publication.state === "RECONCILING" ? (
+          <PublicationReconcilingControls
+            disabled={disabled}
+            pendingAction={pendingAction}
+            error={reconcileError}
+            onRecheck={() => void recheck()}
+            onSubmitReceipt={(input) => void submitReceipt(input)}
+            onMarkFailed={(detail) => void markFailed(detail)}
+          />
+        ) : null}
       </> : null}
     </main>
   );
