@@ -1750,8 +1750,13 @@ export class EngineerLedger {
 
   recordContextSnapshot(snapshot: StoredContextSnapshot, expectedStateVersion: number): StoredContextSnapshot {
     const parsed = StoredContextSnapshotSchema.parse(snapshot);
-    const artifact = this.db.query("SELECT run_id, type, sha256, storage_reference FROM artifacts WHERE id = ?").get(parsed.artifactId) as
-      { run_id: string; type: string; sha256: string; storage_reference: string } | null;
+    // Contract §2/§8: scope the artifact row by org BEFORE the byte read below.
+    // A foreign-org artifact id and an absent id both funnel to the IDENTICAL
+    // "context artifact" not-found, so `readFileSync(storage_reference)` can never
+    // reach another org's FILE BYTES.
+    const artifact = this.findTenantOwnedRow<{ run_id: string; type: string; sha256: string; storage_reference: string }>(
+      "artifacts", "id", parsed.artifactId,
+    );
     if (!artifact || artifact.run_id !== parsed.manifest.runId || artifact.type !== "CONTEXT_MANIFEST") {
       throw new EngineerNotFoundError("context artifact", parsed.artifactId);
     }
@@ -2279,20 +2284,20 @@ export class EngineerLedger {
   recordArtifact(record: ArtifactRecord): ArtifactRecord {
     const parsed = ArtifactRecordSchema.parse(record);
     this.getRun(parsed.runId);
-    const existing = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ? AND type = ?")
-      .get(parsed.runId, parsed.sha256, parsed.type) as Record<string, unknown> | null;
+    const existing = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ? AND type = ? AND org_id = ?")
+      .get(parsed.runId, parsed.sha256, parsed.type, this.tenantOrgId) as Record<string, unknown> | null;
     if (existing) return this.artifactFromRow(existing);
     try {
       this.db.query(`INSERT INTO artifacts
-        (id, run_id, type, sha256, producer_type, producer_id, storage_reference, size_bytes, trusted, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        (id, run_id, type, sha256, producer_type, producer_id, storage_reference, size_bytes, trusted, created_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         parsed.artifactId, parsed.runId, parsed.type, parsed.sha256, parsed.producerType,
-        parsed.producerId, parsed.storageReference, parsed.sizeBytes, parsed.trusted ? 1 : 0, parsed.createdAt,
+        parsed.producerId, parsed.storageReference, parsed.sizeBytes, parsed.trusted ? 1 : 0, parsed.createdAt, this.tenantOrgId,
       );
       return parsed;
     } catch (error) {
-      const winner = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ? AND type = ?")
-        .get(parsed.runId, parsed.sha256, parsed.type) as Record<string, unknown> | null;
+      const winner = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND sha256 = ? AND type = ? AND org_id = ?")
+        .get(parsed.runId, parsed.sha256, parsed.type, this.tenantOrgId) as Record<string, unknown> | null;
       if (winner) return this.artifactFromRow(winner);
       throw error;
     }
@@ -2300,16 +2305,16 @@ export class EngineerLedger {
 
   listArtifacts(runId: string): ArtifactRecord[] {
     this.getRun(runId);
-    const rows = this.db.query("SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, rowid")
-      .all(runId) as Array<Record<string, unknown>>;
+    const rows = this.db.query("SELECT * FROM artifacts WHERE run_id = ? AND org_id = ? ORDER BY created_at, rowid")
+      .all(runId, this.tenantOrgId) as Array<Record<string, unknown>>;
     return rows.map((row) => this.artifactFromRow(row));
   }
 
   recordTestIntegrityAttestation(artifactId: string, comparisonInput: unknown, auditEventId?:string,
     readArtifact?:ArtifactByteReader): void {
     const comparison = TestIntegrityComparisonSchema.parse(comparisonInput);
-    const row = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-      .get(artifactId, comparison.runId) as Record<string, unknown> | null;
+    const row = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+      .get(artifactId, comparison.runId, this.tenantOrgId) as Record<string, unknown> | null;
     if (!row) throw new EngineerNotFoundError("test integrity artifact", artifactId);
     const artifact = this.artifactFromRow(row);
     if (artifact.type !== "TEST_INTEGRITY_COMPARISON" || !artifact.trusted || artifact.producerType !== "SYSTEM" ||
@@ -2538,8 +2543,8 @@ export class EngineerLedger {
         outputArtifactId:agentRow.output_artifact_id,startedAt:agentRow.started_at,completedAt:agentRow.completed_at});
       if(agent.role!=="BUILDER"||agent.modelTier!=="GPT-5.6_TERRA"||agent.status!=="SUCCEEDED"||
           !agent.outputArtifactId||!agent.completedAt)return false;
-      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-        .get(agent.outputArtifactId,input.childRunId) as Record<string,unknown>|null;
+      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+        .get(agent.outputArtifactId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!artifactRow)return false;const artifact=this.artifactFromRow(artifactRow);
       if(artifact.type!=="BUILDER_RESULT"||artifact.producerType!=="SYSTEM"||artifact.producerId!=="codex-builder-adapter"||
           artifact.trusted||artifact.sizeBytes<=0||(!readArtifact&&!existsSync(artifact.storageReference)))return false;
@@ -2607,8 +2612,8 @@ export class EngineerLedger {
           modelCall.cacheWriteInputTokens!==reconciliation.actualCacheWriteInputTokens||
           modelCall.inputTokens===null||modelCall.outputTokens===null||modelCall.cachedInputTokens===null||
           modelCall.cacheWriteInputTokens===null||modelCall.cacheHit!==(modelCall.cachedInputTokens>0))return false;
-      const providerArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-        .get(providerResponseArtifactId,input.childRunId) as Record<string,unknown>|null;
+      const providerArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+        .get(providerResponseArtifactId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!providerArtifactRow)return false;
       const providerArtifact=this.artifactFromRow(providerArtifactRow);
       if(providerArtifact.type!=="MODEL_PROVIDER_RESPONSE"||providerArtifact.producerType!=="SYSTEM"||
@@ -2663,8 +2668,8 @@ export class EngineerLedger {
         outputArtifactId:agentRow.output_artifact_id,startedAt:agentRow.started_at,completedAt:agentRow.completed_at});
       if(agent.role!=="REVIEWER"||agent.modelTier!=="GPT-5.6_SOL"||agent.status!=="SUCCEEDED"||
           !agent.outputArtifactId||!agent.completedAt)return false;
-      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-        .get(agent.outputArtifactId,input.childRunId) as Record<string,unknown>|null;
+      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+        .get(agent.outputArtifactId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!artifactRow)return false;const artifact=this.artifactFromRow(artifactRow);
       if(artifact.type!=="REVIEWER_OUTPUT"||artifact.producerType!=="SYSTEM"||artifact.producerId!==agent.agentExecutionId||
           artifact.trusted||artifact.sizeBytes<=0||(!readArtifact&&!existsSync(artifact.storageReference)))return false;
@@ -2673,8 +2678,8 @@ export class EngineerLedger {
       if(bytes.byteLength!==artifact.sizeBytes||!matchesSha256Bytes(bytes,artifact.sha256))return false;
       const output=ReviewerOutputSchema.parse(JSON.parse(bytes.toString("utf8")));
       const authority=this.latestClassifiedReview(input.childRunId,readArtifact);if(!authority)return false;
-      const rawArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-        .get(authority.classification.rawOutput.artifactId,input.childRunId) as Record<string,unknown>|null;
+      const rawArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+        .get(authority.classification.rawOutput.artifactId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!rawArtifactRow)return false;
       const rawArtifact=this.artifactFromRow(rawArtifactRow);
       if(rawArtifact.type!=="REVIEWER_RAW_OUTPUT"||rawArtifact.producerType!=="SYSTEM"||
@@ -2724,8 +2729,8 @@ export class EngineerLedger {
           modelCall.cacheWriteInputTokens!==reconciliation.actualCacheWriteInputTokens||
           modelCall.inputTokens===null||modelCall.outputTokens===null||modelCall.cachedInputTokens===null||
           modelCall.cacheWriteInputTokens===null||modelCall.cacheHit!==(modelCall.cachedInputTokens>0))return false;
-      const providerArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-        .get(providerResponseArtifactId,input.childRunId) as Record<string,unknown>|null;
+      const providerArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+        .get(providerResponseArtifactId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!providerArtifactRow)return false;
       const providerArtifact=this.artifactFromRow(providerArtifactRow);
       if(providerArtifact.type!=="MODEL_PROVIDER_RESPONSE"||providerArtifact.producerType!=="SYSTEM"||
@@ -2990,8 +2995,8 @@ export class EngineerLedger {
       .get(runId) as { count: number; input_tokens: number; output_tokens: number };
     const commands = this.db.query("SELECT started_at, finished_at FROM command_executions WHERE run_id = ?").all(runId) as Array<{ started_at: string; finished_at: string | null }>;
     const artifact = this.db.query(`SELECT COALESCE(SUM(size_bytes), 0) AS bytes FROM (
-      SELECT MAX(size_bytes) AS size_bytes FROM artifacts WHERE run_id = ? GROUP BY sha256
-    )`).get(runId) as { bytes: number };
+      SELECT MAX(size_bytes) AS size_bytes FROM artifacts WHERE run_id = ? AND org_id = ? GROUP BY sha256
+    )`).get(runId, this.tenantOrgId) as { bytes: number };
     const agents = this.db.query("SELECT COUNT(*) AS count FROM agent_executions WHERE run_id = ? AND status = 'RUNNING'").get(runId) as { count: number };
     const longestCommandSeconds = commands.reduce((longest, command) => command.finished_at
       ? Math.max(longest, Math.max(0, (Date.parse(command.finished_at) - Date.parse(command.started_at)) / 1_000))
@@ -3160,8 +3165,8 @@ export class EngineerLedger {
           throw new IdempotencyConflictError(parsed.runId, `classified-reviewer:${parsed.reviewerSessionId}`);
         }
         const recovered = this.getReviewClassification(parsed.reviewerSessionId, readArtifact);
-        const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-          .get(rawArtifact.artifactId, parsed.runId) as Record<string, unknown> | null;
+        const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+          .get(rawArtifact.artifactId, parsed.runId, this.tenantOrgId) as Record<string, unknown> | null;
         if (!recovered || canonicalJson(recovered) !== batchJson || !artifactRow ||
             canonicalJson(this.artifactFromRow(artifactRow)) !== canonicalJson(rawArtifact)) {
           throw new IdempotencyConflictError(parsed.runId, `classified-reviewer:${parsed.reviewerSessionId}`);
@@ -3189,8 +3194,8 @@ export class EngineerLedger {
           sha256(reviewerInput) !== parsed.inputHash) {
         throw new IdempotencyConflictError(parsed.runId, `classified-reviewer-input:${parsed.reviewerSessionId}`);
       }
-      const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-        .get(rawArtifact.artifactId, parsed.runId) as Record<string, unknown> | null;
+      const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+        .get(rawArtifact.artifactId, parsed.runId, this.tenantOrgId) as Record<string, unknown> | null;
       if (!artifactRow) throw new IdempotencyConflictError(parsed.runId, `classified-reviewer-artifact:${parsed.reviewerSessionId}`);
       const recordedArtifact = this.artifactFromRow(artifactRow);
       if (canonicalJson(recordedArtifact) !== canonicalJson(rawArtifact) || rawArtifact.type !== "REVIEWER_RAW_OUTPUT" ||
@@ -3354,8 +3359,8 @@ export class EngineerLedger {
         throw new Error("persisted review finding classification does not match its hash-bound JSON");
       }
     }
-    const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-      .get(batch.rawOutput.artifactId, batch.runId) as Record<string, unknown> | null;
+    const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+      .get(batch.rawOutput.artifactId, batch.runId, this.tenantOrgId) as Record<string, unknown> | null;
     if (!artifactRow) throw new Error("persisted review raw output artifact is missing");
     const artifact = this.artifactFromRow(artifactRow);
     if (artifact.type !== "REVIEWER_RAW_OUTPUT" || artifact.sha256 !== batch.rawOutput.sha256 ||
@@ -3532,8 +3537,8 @@ export class EngineerLedger {
         throw new IdempotencyConflictError(input.runId, `reviewer-evidence-domain-producer:${evidence.evidenceId}`);
       }
       const rows = this.db.query(`SELECT a.*, a.rowid AS artifact_rowid FROM artifacts a
-        WHERE a.run_id = ? AND a.type = ? AND a.producer_type = 'SYSTEM' AND a.producer_id = ?`)
-        .all(input.runId, artifactType, expectedProducer) as Array<Record<string, unknown>>;
+        WHERE a.run_id = ? AND a.type = ? AND a.producer_type = 'SYSTEM' AND a.producer_id = ? AND a.org_id = ?`)
+        .all(input.runId, artifactType, expectedProducer, this.tenantOrgId) as Array<Record<string, unknown>>;
       if (!rows.some((row) => row.id === evidence.evidenceId)) {
         throw new IdempotencyConflictError(input.runId, `reviewer-evidence-missing:${evidence.evidenceId}`);
       }
@@ -3609,10 +3614,10 @@ export class EngineerLedger {
         const row = rows[0]!;
         const details = JSON.parse(String(row.details_json)) as Record<string, unknown>;
         const payload = evidence.payload;
-        const stdoutRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-          .get(String(row.stdout_artifact_id), input.runId) as Record<string, unknown> | null;
-        const stderrRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-          .get(String(row.stderr_artifact_id), input.runId) as Record<string, unknown> | null;
+        const stdoutRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+          .get(String(row.stdout_artifact_id), input.runId, this.tenantOrgId) as Record<string, unknown> | null;
+        const stderrRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+          .get(String(row.stderr_artifact_id), input.runId, this.tenantOrgId) as Record<string, unknown> | null;
         const validateExecutionArtifact = (artifactRow: Record<string, unknown> | null, expectedType: string): ArtifactRecord | null => {
           if (!artifactRow) return null;
           const artifact = this.artifactFromRow(artifactRow);
@@ -3666,8 +3671,8 @@ export class EngineerLedger {
         "FINAL_CHANGE_SCOPE_ATTESTATION"].includes(artifactType)) {
         assertLatestDomainArtifact(evidence, artifactType);
       }
-      const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND type = ?")
-        .get(evidence.evidenceId, input.runId, artifactType) as Record<string, unknown> | null;
+      const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND type = ? AND org_id = ?")
+        .get(evidence.evidenceId, input.runId, artifactType, this.tenantOrgId) as Record<string, unknown> | null;
       if (!artifactRow) throw new IdempotencyConflictError(input.runId, `reviewer-evidence-missing:${evidence.evidenceId}`);
       const artifact = this.artifactFromRow(artifactRow);
       if (!artifact.trusted || artifact.producerType !== evidence.producerType || artifact.producerId !== evidence.producerId ||
@@ -3700,18 +3705,18 @@ export class EngineerLedger {
           const report = AdversarialCoverageReportSchema.parse(evidence.payload);
           if (this.db.query(`SELECT 1 FROM artifacts a JOIN agent_executions e
             ON e.output_artifact_id = a.id AND e.run_id = a.run_id AND e.id = a.producer_id
-            WHERE a.run_id = ? AND a.type = 'TEST_ADVISORY'
-              AND (julianday(a.created_at) IS NULL OR julianday(e.completed_at) IS NULL) LIMIT 1`).get(input.runId)) {
+            WHERE a.run_id = ? AND a.org_id = ? AND a.type = 'TEST_ADVISORY'
+              AND (julianday(a.created_at) IS NULL OR julianday(e.completed_at) IS NULL) LIMIT 1`).get(input.runId, this.tenantOrgId)) {
             throw new IdempotencyConflictError(input.runId, "reviewer-evidence-time:test-advisory");
           }
           const advisoryRows = this.db.query(`SELECT a.*, e.input_hash AS tester_input_hash FROM artifacts a
             JOIN agent_executions e ON e.output_artifact_id = a.id AND e.run_id = a.run_id
               AND e.id = a.producer_id AND e.role = 'TESTER' AND e.status = 'SUCCEEDED'
-            WHERE a.run_id = ? AND a.type = 'TEST_ADVISORY' AND a.trusted = 0
+            WHERE a.run_id = ? AND a.org_id = ? AND a.type = 'TEST_ADVISORY' AND a.trusted = 0
               AND a.producer_type = 'SYSTEM'
               AND julianday(a.created_at) IS NOT NULL AND julianday(e.completed_at) IS NOT NULL
               AND julianday(a.created_at) <= julianday(?) AND julianday(e.completed_at) <= julianday(?)
-            ORDER BY julianday(a.created_at) DESC, a.rowid DESC`).all(input.runId, input.createdAt, input.createdAt) as Array<Record<string, unknown>>;
+            ORDER BY julianday(a.created_at) DESC, a.rowid DESC`).all(input.runId, this.tenantOrgId, input.createdAt, input.createdAt) as Array<Record<string, unknown>>;
           const matchingAdvisories = advisoryRows.flatMap((row) => {
             const advisoryArtifact = this.artifactFromRow(row);
             if (!readArtifact && (!existsSync(advisoryArtifact.storageReference) ||
@@ -3744,9 +3749,9 @@ export class EngineerLedger {
         }
         case "TEST_INTEGRITY_ATTESTATION": {
           const comparison = TestIntegrityComparisonSchema.parse(evidence.payload);
-          if (this.db.query(`SELECT 1 FROM artifacts WHERE run_id = ?
+          if (this.db.query(`SELECT 1 FROM artifacts WHERE run_id = ? AND org_id = ?
               AND type IN ('TEST_BASELINE_MANIFEST', 'TEST_INTEGRITY_COMPARISON')
-              AND julianday(created_at) IS NULL LIMIT 1`).get(input.runId) ||
+              AND julianday(created_at) IS NULL LIMIT 1`).get(input.runId, this.tenantOrgId) ||
               this.db.query(`SELECT 1 FROM audit_events WHERE run_id = ?
               AND action = 'TEST_INTEGRITY_ATTESTED' AND julianday(created_at) IS NULL LIMIT 1`).get(input.runId)) {
             throw new IdempotencyConflictError(input.runId, "reviewer-evidence-time:test-integrity");
@@ -3759,9 +3764,9 @@ export class EngineerLedger {
           }
           integrityStages.add(comparison.stage);
           const baselineRow = this.db.query(`SELECT * FROM artifacts
-            WHERE run_id = ? AND type = 'TEST_BASELINE_MANIFEST' AND trusted = 1
+            WHERE run_id = ? AND org_id = ? AND type = 'TEST_BASELINE_MANIFEST' AND trusted = 1
               AND julianday(created_at) IS NOT NULL AND julianday(created_at) <= julianday(?)
-            ORDER BY julianday(created_at) DESC, rowid DESC LIMIT 1`).get(input.runId, input.createdAt) as Record<string, unknown> | null;
+            ORDER BY julianday(created_at) DESC, rowid DESC LIMIT 1`).get(input.runId, this.tenantOrgId, input.createdAt) as Record<string, unknown> | null;
           if (!baselineRow) throw new IdempotencyConflictError(input.runId, `reviewer-evidence-baseline:${evidence.evidenceId}`);
           const baselineArtifact = this.artifactFromRow(baselineRow);
           const baselineBytes = readArtifact ? readArtifact(baselineArtifact) : readFileSync(baselineArtifact.storageReference);
@@ -3787,14 +3792,14 @@ export class EngineerLedger {
           const latestForStage = this.db.query(`SELECT a.id FROM artifacts a
             JOIN audit_events e ON e.run_id = a.run_id AND e.action = 'TEST_INTEGRITY_ATTESTED'
               AND json_extract(e.details_json, '$.artifactId') = a.id
-            WHERE a.run_id = ? AND a.type = 'TEST_INTEGRITY_COMPARISON' AND a.trusted = 1
+            WHERE a.run_id = ? AND a.org_id = ? AND a.type = 'TEST_INTEGRITY_COMPARISON' AND a.trusted = 1
               AND a.producer_type = 'SYSTEM' AND a.producer_id = 'engineer-supervisor-test-integrity'
               AND json_extract(e.details_json, '$.baselineHash') = ?
               AND json_extract(e.details_json, '$.stage') = ?
               AND julianday(a.created_at) IS NOT NULL AND julianday(e.created_at) IS NOT NULL
               AND julianday(a.created_at) <= julianday(?) AND julianday(e.created_at) <= julianday(?)
             ORDER BY julianday(a.created_at) DESC, a.rowid DESC LIMIT 1`).get(
-              input.runId, comparison.baselineHash, comparison.stage, input.createdAt, input.createdAt,
+              input.runId, this.tenantOrgId, comparison.baselineHash, comparison.stage, input.createdAt, input.createdAt,
             ) as { id: string } | null;
           if (attestationRows.length !== 1 || attestationRows[0]!.actor_type !== "SUPERVISOR" ||
               attestationRows[0]!.actor_id !== "engineer-supervisor-test-integrity" ||
@@ -3954,7 +3959,7 @@ export class EngineerLedger {
     const parsed = ClaimEvidenceRecordSchema.parse(record);
     this.getRun(parsed.runId);
     const existing = this.db.query(`SELECT id, run_id, criterion_id, claim, status,
-      evidence_ids_json, notes, created_at FROM claim_evidence WHERE id = ?`).get(parsed.claimId) as Record<string, unknown> | null;
+      evidence_ids_json, notes, created_at FROM claim_evidence WHERE id = ? AND org_id = ?`).get(parsed.claimId, this.tenantOrgId) as Record<string, unknown> | null;
     if (existing) {
       const current = ClaimEvidenceRecordSchema.parse({
         claimId: existing.id, runId: existing.run_id, criterionId: existing.criterion_id,
@@ -3965,10 +3970,10 @@ export class EngineerLedger {
       return current;
     }
     this.db.query(`INSERT INTO claim_evidence
-      (id, run_id, criterion_id, claim, status, evidence_ids_json, notes, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      (id, run_id, criterion_id, claim, status, evidence_ids_json, notes, created_at, org_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       parsed.claimId, parsed.runId, parsed.criterionId, parsed.claim, parsed.status,
-      canonicalJson(parsed.evidenceIds), parsed.notes, parsed.createdAt,
+      canonicalJson(parsed.evidenceIds), parsed.notes, parsed.createdAt, this.tenantOrgId,
     );
     return parsed;
   }
@@ -3977,7 +3982,7 @@ export class EngineerLedger {
     this.getRun(runId);
     const rows = this.db.query(`SELECT id, run_id, criterion_id, claim, status,
       evidence_ids_json, notes, created_at FROM claim_evidence
-      WHERE run_id = ? ORDER BY created_at ASC, id ASC`).all(runId) as Array<Record<string, unknown>>;
+      WHERE run_id = ? AND org_id = ? ORDER BY created_at ASC, id ASC`).all(runId, this.tenantOrgId) as Array<Record<string, unknown>>;
     return rows.map((row) => ClaimEvidenceRecordSchema.parse({
       claimId: row.id,
       runId: row.run_id,
@@ -4139,8 +4144,8 @@ export class EngineerLedger {
       throw new Error("verified candidate Evidence Bundle v2 binding mismatch");
     }
     for (const bundled of bundle.artifacts) {
-      const row = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-        .get(bundled.artifactId, input.runId) as Record<string, unknown> | null;
+      const row = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+        .get(bundled.artifactId, input.runId, this.tenantOrgId) as Record<string, unknown> | null;
       if (!row) throw new Error(`verified candidate bundled artifact is missing: ${bundled.artifactId}`);
       const artifact = this.artifactFromRow(row);
       if (artifact.type !== bundled.type || artifact.sha256 !== bundled.sha256 || artifact.createdAt !== bundled.createdAt ||
@@ -4213,8 +4218,8 @@ export class EngineerLedger {
         throw new Error(`verified candidate required-test binding mismatch: ${gate.testId}`);
       }
       const commandArtifact = (artifactId: unknown) => {
-        const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-          .get(String(artifactId), input.runId) as Record<string, unknown> | null;
+        const artifactRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+          .get(String(artifactId), input.runId, this.tenantOrgId) as Record<string, unknown> | null;
         if (!artifactRow) throw new Error(`verified candidate command artifact is missing: ${String(artifactId)}`);
         const artifact = this.artifactFromRow(artifactRow);
         if (!readArtifact&&!existsSync(artifact.storageReference)) throw new Error("verified candidate command artifact bytes are missing");
@@ -4293,8 +4298,8 @@ export class EngineerLedger {
     const scopeEvidence = reviewerInput.trustedEvidence.filter((evidence) => evidence.eventType === "FINAL_CHANGE_SCOPE_ATTESTATION");
     if (scopeEvidence.length !== 1) throw new Error("verified candidate requires exactly one final scope attestation");
     const scope = scopeEvidence[0]!;
-    const scopeRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND type = 'FINAL_CHANGE_SCOPE_ATTESTATION'")
-      .get(scope.evidenceId, input.runId) as Record<string, unknown> | null;
+    const scopeRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND type = 'FINAL_CHANGE_SCOPE_ATTESTATION' AND org_id = ?")
+      .get(scope.evidenceId, input.runId, this.tenantOrgId) as Record<string, unknown> | null;
     if (!scopeRow) throw new Error("verified candidate final scope artifact is missing");
     const scopeArtifact = this.artifactFromRow(scopeRow);
     const scopeBytes = readArtifact?readArtifact(scopeArtifact):readFileSync(scopeArtifact.storageReference);
@@ -4353,8 +4358,8 @@ export class EngineerLedger {
         throw new Error("verified candidate Builder execution does not match its dispatch claim");
       }
       if (row.status === "SUCCEEDED") {
-        const outputRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
-          .get(String(row.output_artifact_id), input.runId) as Record<string, unknown> | null;
+        const outputRow = this.db.query("SELECT * FROM artifacts WHERE id = ? AND run_id = ? AND org_id = ?")
+          .get(String(row.output_artifact_id), input.runId, this.tenantOrgId) as Record<string, unknown> | null;
         if (!outputRow) throw new Error("verified candidate successful Builder output is missing");
         const output = this.artifactFromRow(outputRow);
         const expectedProducer = output.type === "BUILDER_RESULT" ? "codex-builder-adapter" : String(row.id);
@@ -5332,7 +5337,7 @@ export class EngineerLedger {
       budget.warning_threshold!==0.8||budget.revision!==0||budget.active_since!==lineage.createdAt||budget.created_at!==lineage.createdAt||
       budget.updated_at!==lineage.createdAt)throw new HardeningAuthorityInvalidError();
     for(const table of ["task_manifest_versions","plan_proposals","run_state_events","agent_executions","sandboxes","artifacts","approval_requests","git_operations"] as const){
-      const count=this.db.query(`SELECT COUNT(*) AS count FROM ${table} WHERE run_id=?`).get(child.id) as {count:number};if(count.count!==0)throw new HardeningAuthorityInvalidError();}
+      const count=this.db.query(`SELECT COUNT(*) AS count FROM ${table} WHERE run_id=? AND org_id=?`).get(child.id,this.tenantOrgId) as {count:number};if(count.count!==0)throw new HardeningAuthorityInvalidError();}
     return OptionalHardeningChildCreationSchema.parse({child:this.optionalHardeningChildView(lineage,riskTier),lineage:{
       schemaVersion:lineage.schemaVersion,policyVersion:lineage.policyVersion,relation:lineage.relation,lineageId:lineage.lineageId,
       lineageHash:lineage.lineageHash,rootRunId:lineage.rootRunId,parentRunId:lineage.parentRunId,childRunId:lineage.childRunId,
@@ -5924,7 +5929,7 @@ export class EngineerLedger {
     if(responseRecorded!==null&&strictResponseReceipt&&!(row.status==="AMBIGUOUS"&&Number(row.recovery_generation)>0)){
       if(!strictReader)throw new HardeningBudgetAuthorityInvalidError();
       const responseModel=this.db.query("SELECT * FROM model_calls WHERE id=? AND run_id=?").get(String(row.model_call_id),reservation.childRunId) as Record<string,unknown>|null;
-      const responseArtifact=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?").get(String(row.provider_response_artifact_id),reservation.childRunId) as Record<string,unknown>|null;
+      const responseArtifact=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?").get(String(row.provider_response_artifact_id),reservation.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!responseModel||!responseArtifact)throw new HardeningBudgetAuthorityInvalidError();
       const persisted=this.hardeningModelCallFromRow(responseModel),artifact=this.artifactFromRow(responseArtifact);
       const providerInputHash=persisted.inputContextRefs[1];
@@ -6065,8 +6070,8 @@ export class EngineerLedger {
         canonicalJson(selectedModel.inputContextRefs)!==canonicalJson(expectedRefs)||observation.observedModelCallCount!==1||
         observation.observedReservationModelCallCount!==1)
         throw new HardeningBudgetAuthorityInvalidError();
-      const invalidArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-        .get(observation.providerResponseArtifactId,reservation.childRunId) as Record<string,unknown>|null;
+      const invalidArtifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+        .get(observation.providerResponseArtifactId,reservation.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!invalidArtifactRow)throw new HardeningBudgetAuthorityInvalidError();
       const invalidArtifact=this.artifactFromRow(invalidArtifactRow);
       if(observation.artifactSha256!==invalidArtifact.sha256||observation.artifactSizeBytes!==invalidArtifact.sizeBytes||
@@ -6106,7 +6111,7 @@ export class EngineerLedger {
         Number(row.actual_uncached_input_tokens)!==Number(row.actual_input_tokens)-Number(row.actual_cached_input_tokens)-Number(row.actual_cache_write_input_tokens))
         throw new HardeningBudgetAuthorityInvalidError();
       if(typeof row.provider_response_artifact_id!=="string"||typeof row.provider_response_id!=="string")throw new HardeningBudgetAuthorityInvalidError();
-      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?").get(row.provider_response_artifact_id,reservation.childRunId) as Record<string,unknown>|null;
+      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?").get(row.provider_response_artifact_id,reservation.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       const modelCall=this.db.query("SELECT * FROM model_calls WHERE id=? AND run_id=?").get(modelCallId as string,reservation.childRunId) as Record<string,unknown>|null;
       if(!artifactRow||!modelCall)throw new HardeningBudgetAuthorityInvalidError();const artifact=this.artifactFromRow(artifactRow);
       const persistedCall=this.hardeningModelCallFromRow(modelCall);
@@ -6169,7 +6174,7 @@ export class EngineerLedger {
       if(row.provider_response_artifact_id!==null&&!recoveredInvalidReceipt){
         if(!strictReader)throw new HardeningBudgetAuthorityInvalidError();
         if(typeof row.provider_response_artifact_id!=="string"||!row.provider_response_artifact_id)throw new HardeningBudgetAuthorityInvalidError();
-        const artifact=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?").get(row.provider_response_artifact_id,reservation.childRunId) as Record<string,unknown>|null;
+        const artifact=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?").get(row.provider_response_artifact_id,reservation.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
         if(!artifact)throw new HardeningBudgetAuthorityInvalidError();const record=this.artifactFromRow(artifact);
         if(record.type!=="MODEL_PROVIDER_RESPONSE"||!record.trusted||record.producerType!=="SYSTEM"||
           record.producerId!=="engineer-provider-response-recorder")throw new HardeningBudgetAuthorityInvalidError();
@@ -6522,7 +6527,7 @@ export class EngineerLedger {
         return;
       }
       if(row.status!=="RESERVED"||row.dispatch_status!=="DISPATCHING")throw new HardeningReservationConflictError();
-      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?").get(input.providerResponseArtifactId,input.childRunId) as Record<string,unknown>|null;
+      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?").get(input.providerResponseArtifactId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!artifactRow)throw new HardeningBudgetAuthorityInvalidError();const artifact=this.artifactFromRow(artifactRow);
       if(artifact.type!=="MODEL_PROVIDER_RESPONSE"||!artifact.trusted||artifact.producerType!=="SYSTEM"||
         artifact.producerId!=="engineer-provider-response-recorder")throw new HardeningBudgetAuthorityInvalidError();
@@ -6631,8 +6636,8 @@ export class EngineerLedger {
       if(row.status==="RESERVED"&&row.dispatch_status==="RESPONSE_RECORDED"){
         const modelRow=typeof row.model_call_id==="string"?this.db.query("SELECT * FROM model_calls WHERE id=? AND run_id=?")
           .get(row.model_call_id,input.childRunId) as Record<string,unknown>|null:null;
-        const artifactRow=typeof row.provider_response_artifact_id==="string"?this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-          .get(row.provider_response_artifact_id,input.childRunId) as Record<string,unknown>|null:null;
+        const artifactRow=typeof row.provider_response_artifact_id==="string"?this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+          .get(row.provider_response_artifact_id,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null:null;
         try{
           if(!modelRow||!artifactRow||typeof row.provider_response_id!=="string")throw new Error("missing durable response authority");
           const model=this.hardeningModelCallFromRow(modelRow),artifact=this.artifactFromRow(artifactRow),run=this.getRun(input.childRunId);
@@ -6754,8 +6759,8 @@ export class EngineerLedger {
       const responseRecordedModelCallId=row.model_call_id;
       const modelRow=this.db.query("SELECT * FROM model_calls WHERE id=? AND run_id=?")
         .get(responseRecordedModelCallId,input.childRunId) as Record<string,unknown>|null;
-      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-        .get(row.provider_response_artifact_id,input.childRunId) as Record<string,unknown>|null;
+      const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+        .get(row.provider_response_artifact_id,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       const recoveryRun=this.getRun(input.childRunId);
       if(!recoveryRun.manifestHash)throw new HardeningBudgetAuthorityInvalidError();
       let modelCall:ModelCallRecord|null=null,receiptArtifact:ArtifactRecord|null=null,receiptValid=false;
@@ -6977,8 +6982,8 @@ export class EngineerLedger {
         record.cacheWriteInputTokens!==undefined&&record.cacheWriteInputTokens!==null&&[record.inputTokens,record.outputTokens,
           record.cachedInputTokens,record.cacheWriteInputTokens].every((value)=>Number.isSafeInteger(value)&&value>=0);
       let artifactValid=false;
-      if(hasCompleteUsage&&input.providerResponseArtifactId){const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=?")
-          .get(input.providerResponseArtifactId,input.childRunId) as Record<string,unknown>|null;
+      if(hasCompleteUsage&&input.providerResponseArtifactId){const artifactRow=this.db.query("SELECT * FROM artifacts WHERE id=? AND run_id=? AND org_id=?")
+          .get(input.providerResponseArtifactId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
         if(artifactRow){const artifact=this.artifactFromRow(artifactRow);if(artifact.type==="MODEL_PROVIDER_RESPONSE"&&artifact.trusted&&artifact.producerType==="SYSTEM"){
           const bytes=strictReader(artifact);
           if(bytes.byteLength===artifact.sizeBytes&&matchesSha256Bytes(bytes,artifact.sha256)){
@@ -7891,7 +7896,7 @@ export class EngineerLedger {
   private assertDecisionEvidence(runId: string, evidence: DecisionRecord["sourceEvidence"][number]): void {
     if (evidence.runId !== runId) throw new TypeError("cross-run decision evidence rejected");
     if (evidence.sourceType === "ARTIFACT") {
-      const row = this.db.query("SELECT run_id, trusted FROM artifacts WHERE id = ?").get(evidence.evidenceId) as { run_id: string; trusted: number } | null;
+      const row = this.db.query("SELECT run_id, trusted FROM artifacts WHERE id = ? AND org_id = ?").get(evidence.evidenceId, this.tenantOrgId) as { run_id: string; trusted: number } | null;
       if (!row || row.run_id !== runId) throw new EngineerNotFoundError("decision artifact evidence", evidence.evidenceId);
       const expectedTrust = row.trusted === 1 ? "TRUSTED_SYSTEM" : "UNTRUSTED_REPOSITORY";
       if (evidence.trust !== expectedTrust) throw new TypeError("decision artifact evidence trust mismatch");
