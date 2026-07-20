@@ -3465,3 +3465,30 @@ audit-clean; a real ship requires the [HUMAN] tail above.
   typecheck/diff clean. Residual (intentional): no zod for the reconcile body
   (server validates manually + client TS types match). 6 of 7 findings + Sol P2-4
   now closed; NEXT R7-7 live gate.
+
+### R7-8 — structurally-honest prUrl validation + hardening (Fable-gated, 2026-07-19)
+
+- Closes the finding BOTH R7-7 auditors converged on (Luna F-R7-1 / Sol P2-2):
+  centralReceiptBinding bound the commit centrally but trusted the actuator/
+  discovery prUrl verbatim (my overstated "all paths" claim). Fixed two layers:
+  A.1 createPullRequest re-asserts head.ref===branchName + head.sha===resultCommitSha
+  + base.ref===baseBranch + open + !merged (resultCommitSha threaded through
+  callers) — the actuator can only return a prUrl for an EXACT-matching PR; A.2
+  the AUTHORITY re-confirms the ACTUATOR_CREATED prUrl through the same read-only
+  discoverExistingReceipt seam the resume/recheck/manual paths use
+  (confirmActuatorReceiptViaDiscovery) — persists the DISCOVERED html_url, never
+  the actuator-echoed one; a foreign/non-matching prUrl throws (stays DISPATCHED,
+  no receipt). Fable mutation-verified: skipping A.2 re-confirmation reds 3 tests
+  (Luna probe 1b foreign prUrl); restore clean. Prod always wires discovery
+  (index.ts:591); absent discovery (unit only) → A.1 structural hardening backs it.
+- B (Luna F-R7-2 → structural): deriveCaseCreationInput refuses to adopt a stranded
+  legacy run that carries ANY live P8 artifact (publication_candidate_selections_v33
+  or publication_git_operations_v33) — hasLiveP8Publication — enforced against
+  DURABLE state not the retired-manager wiring argument. RED-first.
+- C (Sol P2-1): ownedCurrentPublicationId reduces to max-revision-per-publication
+  then orders active(non-terminal)-first then recency — a late transition of an
+  older terminal publication can't out-sort a newer active one. RED-first.
+- Gates engineer 876/gateway 476/web 586/typecheck/diff. R7-7 ADVERSARIAL HALF
+  COMPLETE: both independent auditors GO (no P0/P1), converged finding + 2 notes
+  closed. REMAINING = R7-7 [HUMAN] live tail: live browser refresh/restart,
+  crash-after-PR against real GitHub, two-person approval ceremony.

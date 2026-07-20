@@ -445,6 +445,7 @@ export class GitPublicationMechanics {
         repository: context.repository,
         branchName: branch.branchName,
         baseBranch: context.repository.baseBranch,
+        resultCommitSha: input.resultCommitSha,
         title: context.title,
         body,
         idempotencyKey: input.idempotencyKey,

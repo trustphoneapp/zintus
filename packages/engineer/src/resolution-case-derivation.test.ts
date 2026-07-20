@@ -83,6 +83,24 @@ function insertCandidate(runId: string): string {
   return hash;
 }
 
+/** Insert a live P8 candidate-selection row for a run (FINDING B guard fixture). */
+function insertPublicationSelection(runId: string): void {
+  fixture.db.query(`INSERT INTO publication_candidate_selections_v33
+    (id,selection_hash,schema_version,policy_version,run_id,candidate_run_id,requester_user_id,repository_id,checkpoint_id,checkpoint_hash,result_commit_sha,lineage,lineage_verified,is_hardening_child,parent_selection_id,selection_json,created_at)
+    VALUES (?,?,1,'engineer-publication-authority-v33',?,?,'user-1','repo-1',?,?,?, 'ORIGINAL',1,0,NULL,'{}',?)`)
+    .run(sha256({ sel: runId }), sha256({ selh: runId }), runId, runId,
+      sha256({ ck: runId }), sha256({ ckh: runId }), "b".repeat(40), NOW);
+}
+
+/** Insert a live P8 genesis (PREFLIGHT) git-operation row for a run. */
+function insertPublicationOperation(runId: string): void {
+  fixture.db.query(`INSERT INTO publication_git_operations_v33
+    (publication_id,revision,run_id,approval_id,operation_type,idempotency_key,requester_actor_id,implementation_actor_id,repository_id,base_commit_sha,checkpoint_id,checkpoint_hash,state,prev_state,resolution_type,detail,created_at)
+    VALUES (?,0,?,?, 'BRANCH_PR',?,'user-1','engineer-agent','repo-1',?,?,?, 'PREFLIGHT',NULL,NULL,NULL,?)`)
+    .run(`pub-${runId}`, runId, `appr-${runId}`, `idem-${runId}`, "a".repeat(40),
+      sha256({ ck: runId }), sha256({ ckh: runId }), NOW);
+}
+
 /** Build the case via the real desk so the assertions run through the real law. */
 function deskCase(runId: string) {
   const desk = new ResolutionDesk(fixture.db, SECRET, KEY_ID, () => new Date(NOW));
@@ -249,6 +267,29 @@ describe("stranded legacy non-terminal run adoption (Finding #6)", () => {
   test("a stranded BASE_BRANCH_STALE legacy run adopts into a correctable case with a corrected-run route", () => {
     insertRun("run-1", "BASE_BRANCH_STALE");
     driveCorrectedRunEndToEnd("run-1", "LEGACY_BASE_BRANCH_STALE");
+  });
+
+  // FINDING B (Luna F-R7-2 → structural). Adoption of an adoptable legacy state
+  // must be REFUSED when the run carries a live P8 publication — proving the
+  // adoption invariant is enforced against durable state, not merely argued from
+  // the retired-manager wiring. RED on the pre-guard code, which adopted any run
+  // in HUMAN_APPROVAL_PENDING / BASE_BRANCH_STALE regardless of P8 state.
+  test("FINDING B: a legacy-adoptable run with a live P8 candidate selection is REFUSED adoption", () => {
+    insertRun("run-1", "HUMAN_APPROVAL_PENDING");
+    insertPublicationSelection("run-1");
+    expect(() => deriveCaseCreationInput(fixture.db, "run-1")).toThrow(/live P8 publication|cannot be adopted/i);
+  });
+
+  test("FINDING B: a legacy-adoptable run with a live P8 git-operation row is REFUSED adoption", () => {
+    insertRun("run-1", "BASE_BRANCH_STALE");
+    insertPublicationOperation("run-1");
+    expect(() => deriveCaseCreationInput(fixture.db, "run-1")).toThrow(/live P8 publication|cannot be adopted/i);
+  });
+
+  test("FINDING B: a legacy-adoptable run with NO P8 publication still adopts (guard is scoped)", () => {
+    insertRun("run-1", "HUMAN_APPROVAL_PENDING");
+    // No P8 selection/operation rows: genuinely stranded => adoption proceeds.
+    expect(() => deriveCaseCreationInput(fixture.db, "run-1")).not.toThrow();
   });
 
   test("adoption is bounded: a genuinely live non-terminal run (not one of the two legacy gates) is still refused", () => {

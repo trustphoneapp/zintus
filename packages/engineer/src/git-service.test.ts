@@ -24,7 +24,7 @@ describe("Phase 4 credentialed Git publication", () => {
       }) as typeof fetch,
     });
     await expect(service.createPullRequest({
-      runId: "run-1", repository, branchName: "zintus/engineer/run-1",
+      runId: "run-1", repository, branchName: "zintus/engineer/run-1", resultCommitSha: "b".repeat(40),
       baseBranch: "main", title: "Title", body: "Body", idempotencyKey: "pr-1",
     })).rejects.toThrow("GitHub returned an invalid pull request result");
     expect(tokens).toEqual(["Bearer expired-token", "Bearer fresh-token", "Bearer expired-token", "Bearer fresh-token"]);
@@ -127,30 +127,70 @@ describe("Phase 4 credentialed Git publication", () => {
 
   test("recovers an already-created pull request instead of posting a duplicate", async () => {
     const methods: string[] = [];
+    const branchName = "zintus/engineer/run-1";
+    const resultCommitSha = "b".repeat(40);
     const service = new GitHubGitService({
       repositoryRoot: "/trusted/repository", token: () => "token",
       fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
         methods.push(init?.method ?? "GET");
-        return new Response(JSON.stringify([{ id: 91, number: 12, html_url: "https://github.test/pull/12", draft: true }]), { status: 200 });
+        return new Response(JSON.stringify([{
+          id: 91, number: 12, html_url: "https://github.test/pull/12", state: "open", draft: true,
+          head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
+        }]), { status: 200 });
       }) as unknown as typeof fetch,
     });
     const pullRequest = await service.createPullRequest({
-      runId: "run-1", repository, branchName: "zintus/engineer/run-1", baseBranch: "main",
+      runId: "run-1", repository, branchName, resultCommitSha, baseBranch: "main",
       title: "Verified change", body: "trusted body", idempotencyKey: "pr:create:run-1",
     });
     expect(pullRequest).toEqual({ id: "91", number: 12, url: "https://github.test/pull/12" });
     expect(methods).toEqual(["GET"]);
   });
 
+  // RED (A.1): the existing-PR short-circuit must re-assert head.sha, not merely
+  // draft===true. An OPEN DRAFT PR on the exact head ref but at a DIFFERENT
+  // (foreign) commit is NOT the verified publication and must NOT be returned —
+  // the shape-only code returned existing[0] on the draft flag alone.
+  test("does NOT short-circuit to an open-draft PR whose head.sha is a different commit", async () => {
+    const methods: string[] = [];
+    const branchName = "zintus/engineer/run-1";
+    const resultCommitSha = "b".repeat(40);
+    const foreignCommitSha = "9".repeat(40);
+    const service = new GitHubGitService({
+      repositoryRoot: "/trusted/repository", token: () => "token",
+      fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
+        const method = init?.method ?? "GET";
+        methods.push(method);
+        if (method === "GET") {
+          return new Response(JSON.stringify([{
+            id: 91, number: 12, html_url: "https://github.test/pull/12", state: "open", draft: true,
+            head: { ref: branchName, sha: foreignCommitSha }, base: { ref: "main" },
+          }]), { status: 200 });
+        }
+        return new Response(JSON.stringify({ id: 93, number: 99, html_url: "https://github.test/pull/99" }), { status: 201 });
+      }) as unknown as typeof fetch,
+    });
+    const pullRequest = await service.createPullRequest({
+      runId: "run-1", repository, branchName, resultCommitSha, baseBranch: "main",
+      title: "Verified change", body: "trusted body", idempotencyKey: "pr:create:run-1",
+    });
+    // The foreign-sha PR (#12) is ignored; the exact publication PR is created (#99).
+    expect(pullRequest).toEqual({ id: "93", number: 99, url: "https://github.test/pull/99" });
+    expect(methods).toEqual(["GET", "POST"]);
+  });
+
   test("fails closed when idempotent recovery finds a publication PR already marked ready", async () => {
+    const branchName = "zintus/engineer/run-1";
+    const resultCommitSha = "b".repeat(40);
     const service = new GitHubGitService({
       repositoryRoot: "/trusted/repository", token: () => "token",
       fetch: (async () => new Response(JSON.stringify([{
-        id: 91, number: 12, html_url: "https://github.test/pull/12", draft: false,
+        id: 91, number: 12, html_url: "https://github.test/pull/12", state: "open", draft: false,
+        head: { ref: branchName, sha: resultCommitSha }, base: { ref: "main" },
       }]), { status: 200 })) as unknown as typeof fetch,
     });
     await expect(service.createPullRequest({
-      runId: "run-1", repository, branchName: "zintus/engineer/run-1", baseBranch: "main",
+      runId: "run-1", repository, branchName, resultCommitSha, baseBranch: "main",
       title: "Verified change", body: "trusted body", idempotencyKey: "pr:create:run-1",
     })).rejects.toThrow("existing publication pull request is not a draft");
   });
@@ -169,7 +209,7 @@ describe("Phase 4 credentialed Git publication", () => {
       }) as unknown as typeof fetch,
     });
     const pullRequest = await service.createPullRequest({
-      runId: "run-1", repository, branchName: "zintus/engineer/run-1", baseBranch: "main",
+      runId: "run-1", repository, branchName: "zintus/engineer/run-1", resultCommitSha: "b".repeat(40), baseBranch: "main",
       title: "Verified change", body: "trusted body", idempotencyKey: "pr:create:run-1",
     });
     expect(pullRequest.number).toBe(13);

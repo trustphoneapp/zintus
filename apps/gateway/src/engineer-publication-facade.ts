@@ -333,8 +333,23 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
    * result) — the publication_id is never taken from the URL segment.
    */
   const ownedCurrentPublicationId = (runId: string): string | null =>
+    // FINDING C (Sol P2-1). Deterministically pick the GENUINELY-current owned
+    // publication, not merely the most-recently-touched operation ROW. We reduce to
+    // one row per publication (its max revision = current state), then prefer an
+    // ACTIVE (non-terminal) publication over any terminal one, tie-breaking by
+    // recency. This closes the mis-hydration where a LATE operator transition of an
+    // OLDER, already-terminal publication (its new revision carries the newest
+    // created_at) would otherwise out-sort a newer, still-active publication on the
+    // same run+owner. A run is not expected to hold two concurrently-active
+    // publications; if it ever did, the active-first + recency ordering is still
+    // deterministic.
     (connection
-      .query("SELECT publication_id FROM publication_git_operations_v33 WHERE run_id=? AND requester_actor_id=? ORDER BY created_at DESC, revision DESC LIMIT 1")
+      .query(`SELECT o.publication_id AS publication_id
+        FROM publication_git_operations_v33 o
+        WHERE o.run_id=? AND o.requester_actor_id=?
+          AND o.revision=(SELECT MAX(m.revision) FROM publication_git_operations_v33 m WHERE m.publication_id=o.publication_id)
+        ORDER BY (CASE WHEN o.state IN ('RECEIPTED','FAILED') THEN 1 ELSE 0 END) ASC, o.created_at DESC, o.publication_id DESC
+        LIMIT 1`)
       .get(runId, principal.ownerId) as { publication_id: string } | null)?.publication_id ?? null;
 
   return {

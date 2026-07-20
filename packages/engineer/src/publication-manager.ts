@@ -514,6 +514,7 @@ export class EngineerPublicationManager {
           const value = await this.options.gitService.createPullRequest({
             runId, repository: authority.run.repository, branchName: branchValue.branchName,
             baseBranch: authority.run.repository.baseBranch,
+            resultCommitSha: authority.checkpoint.resultCommitSha,
             title: authority.run.requestNormalized || authority.run.requestOriginal,
             body, idempotencyKey: prIdempotencyKey,
           });

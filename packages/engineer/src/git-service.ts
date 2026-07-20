@@ -18,6 +18,14 @@ export interface CreatePullRequestInput {
   repository: RepositoryReference;
   branchName: string;
   baseBranch: string;
+  /**
+   * The verified result commit that MUST be at the head of the publication PR.
+   * The existing-PR short-circuit re-asserts head.sha against this (mirroring
+   * `reconcilePublicationOperation`), so an existing PR is only ever returned
+   * when its head/sha/base EXACTLY match this publication — never merely because
+   * it is a draft on the same head ref.
+   */
+  resultCommitSha: string;
   title: string;
   body: string;
   idempotencyKey: string;
@@ -204,12 +212,32 @@ export class GitHubGitService implements GitService {
 
   async createPullRequest(input: CreatePullRequestInput): Promise<PullRequestResult> {
     const query = new URLSearchParams({ state: "open", head: `${input.repository.owner}:${input.branchName}`, base: input.baseBranch });
-    const existing = await this.github(input.repository, `/pulls?${query.toString()}`, { method: "GET" }) as Array<{ id?: number; number?: number; html_url?: string; draft?: boolean }>;
-    const match = existing[0];
+    const existing = await this.github(input.repository, `/pulls?${query.toString()}`, { method: "GET" }) as Array<{
+      id?: number; number?: number; html_url?: string; draft?: boolean;
+      state?: string; merged_at?: string | null; head?: { sha?: string; ref?: string }; base?: { ref?: string };
+    }>;
+    // Existing-PR short-circuit. Return an existing PR ONLY when it is the EXACT
+    // open-draft PR for THIS publication: re-assert head.ref, head.sha (lowercased)
+    // and base.ref against the verified branch/commit/base — mirroring
+    // `reconcilePublicationOperation` — never merely `draft===true` on the same
+    // head. A provider that ignores the head/base filter (or a compromised
+    // listing) can therefore NEVER yield a prUrl for a non-matching PR.
+    const match = existing.find((candidate) => candidate.head?.ref === input.branchName &&
+      candidate.head?.sha?.toLowerCase() === input.resultCommitSha.toLowerCase() &&
+      candidate.base?.ref === input.baseBranch && candidate.state === "open" &&
+      candidate.draft === true && !candidate.merged_at);
     if (match?.id && match.number && match.html_url) {
-      if (match.draft !== true) throw new Error("existing publication pull request is not a draft");
       return { id: String(match.id), number: match.number, url: match.html_url };
     }
+    // An OPEN, non-draft PR already exists on this exact head/base: creating a
+    // draft would be refused by the provider, and a ready-for-review PR is NOT an
+    // admissible publication receipt. Fail closed with the same error the legacy
+    // draft check surfaced, rather than attempting a duplicate create.
+    const readyForReview = existing.find((candidate) => candidate.head?.ref === input.branchName &&
+      candidate.head?.sha?.toLowerCase() === input.resultCommitSha.toLowerCase() &&
+      candidate.base?.ref === input.baseBranch && candidate.state === "open" &&
+      candidate.draft !== true && !candidate.merged_at);
+    if (readyForReview) throw new Error("existing publication pull request is not a draft");
     const response = await this.github(input.repository, "/pulls", {
       method: "POST",
       body: JSON.stringify({ title: input.title, body: input.body, head: input.branchName, base: input.baseBranch, draft: true }),

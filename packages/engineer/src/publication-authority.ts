@@ -848,9 +848,66 @@ export class PublicationAuthorityService {
       // dispatch is committed before the remote call, so no path re-issues it.
       throw error instanceof Error ? error : new Error(String(error));
     }
-    // ACTUATOR_CREATED: the credentialed actuator just created the PR. Its returned
-    // commit is re-validated centrally against the verified candidate before persist.
+    // ACTUATOR_CREATED: the credentialed actuator just created the PR. P8 does NOT
+    // trust the actuator-returned prUrl. When a read-only discovery seam is present
+    // (always in prod), re-confirm the receipt through the SAME side-effect-free
+    // existing-PR discovery the resume/recheck/manual paths use: the prUrl must be
+    // the provider-confirmed exact OPEN DRAFT PR for THIS run's branch+commit+base,
+    // and the persisted reference is the discovered html_url — never the
+    // actuator-echoed one. A foreign / non-matching prUrl (Luna F-R7-1 / Sol P2-2)
+    // is REJECTED here (fail closed): the durable DISPATCHED row survives for
+    // resume/reconcile, and no receipt is written. Absent a discovery seam
+    // (dev/tests only; prod wires it) the actuator's exact-PR contract — now
+    // structurally enforced by git-service `createPullRequest` (head/sha/base
+    // re-assertion) — is trusted as before, and the commit binding still applies.
+    if (outcome.kind === "RECEIPT" && this.deps.receiptDiscovery) {
+      const confirmed = await this.confirmActuatorReceiptViaDiscovery(dispatched, outcome);
+      return this.settleOutcome(dispatched, confirmed, "DISCOVERED");
+    }
     return this.settleOutcome(dispatched, outcome, "ACTUATOR_CREATED");
+  }
+
+  /**
+   * FINDING A (Luna F-R7-1 / Sol P2-2). Read-only re-confirmation of an
+   * ACTUATOR_CREATED receipt's prUrl. Runs the SAME credentialed, side-effect-free
+   * existing-PR discovery the restart/resume path uses and requires that it
+   * positively matches the exact OPEN DRAFT PR for THIS publication AND that its
+   * html_url equals the actuator-returned prUrl (mirroring the manual path's
+   * `discovered.prUrl !== receipt.prUrl` rejection). Returns a RECEIPT carrying the
+   * PROVIDER-confirmed html_url + commit, so `centralReceiptBinding` persists the
+   * discovered reference — never an actuator-echoed URL. Throws
+   * `PublicationReceiptBindingError` (fail closed) when discovery cannot confirm the
+   * PR or the URLs diverge; the caller leaves the durable DISPATCHED row intact for
+   * resume/reconcile.
+   */
+  private async confirmActuatorReceiptViaDiscovery(
+    operation: OperationRow,
+    outcome: { readonly kind: "RECEIPT"; readonly prUrl: string; readonly commitSha: string },
+  ): Promise<ActuatorOutcome> {
+    const discovery = this.deps.receiptDiscovery!;
+    const expectedCommit = this.selectionResultCommit(operation);
+    let discovered: ActuatorOutcome | null = null;
+    try {
+      discovered = await discovery.discoverExistingReceipt({
+        runId: operation.run_id, publicationId: operation.publication_id, repositoryId: operation.repository_id,
+        baseCommitSha: operation.base_commit_sha, resultCommitSha: expectedCommit,
+        idempotencyKey: operation.idempotency_key,
+      });
+    } catch {
+      discovered = null; // remote unknown => cannot confirm => fail closed
+    }
+    if (!discovered || discovered.kind !== "RECEIPT") {
+      throw new PublicationReceiptBindingError(
+        "the actuator reported a created pull request but read-only discovery could not confirm the exact open-draft PR for this publication",
+      );
+    }
+    if (discovered.prUrl.trim() !== outcome.prUrl.trim()) {
+      throw new PublicationReceiptBindingError(
+        "the actuator-returned pull-request URL does not match the provider-confirmed open-draft PR for this publication",
+      );
+    }
+    // Persist the PROVIDER-confirmed (discovered) URL, never the actuator-echoed one.
+    return { kind: "RECEIPT", prUrl: discovered.prUrl, commitSha: discovered.commitSha };
   }
 
   /**

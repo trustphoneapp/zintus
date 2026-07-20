@@ -641,7 +641,9 @@ describe("R7-3 — recheckReconciliation re-runs read-only discovery on RECONCIL
   });
 
   test("recheck on a non-RECONCILING publication is an idempotent no-op that returns the current view (never re-dispatches)", async () => {
-    const h = harness({ outcome: { kind: "RECEIPT", prUrl: "https://example/pr/ok", commitSha: RESULT_COMMIT }, receiptDiscovery: confirmingDiscovery });
+    // The actuator prUrl matches the discovery's DISCOVERED_PR so the dispatch's
+    // ACTUATOR_CREATED re-confirmation (FINDING A) settles to RECEIPTED.
+    const h = harness({ outcome: { kind: "RECEIPT", prUrl: DISCOVERED_PR, commitSha: RESULT_COMMIT }, receiptDiscovery: confirmingDiscovery });
     const approval = await seedApprovedOriginal(h);
     const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
     const receipted = await h.draft.dispatch(started.publicationId);
@@ -678,6 +680,54 @@ describe("GAP #2 — automatic settleOutcome centrally binds the actuator receip
     const settled = await h.draft.dispatch(started.publicationId);
     expect(settled.state).toBe("RECEIPTED");
     expect(settled.receipt).toEqual({ prUrl: "https://example/pr/ok", commitSha: RESULT_COMMIT });
+  });
+});
+
+// FINDING A (Luna F-R7-1 / Sol P2-2): the AUTOMATIC dispatch (ACTUATOR_CREATED)
+// path centrally validates the prUrl, not just the commit. When a read-only
+// discovery seam is present (prod ALWAYS wires it), the actuator-returned prUrl
+// must be the PROVIDER-confirmed exact open-draft PR for THIS run's
+// branch+commit+base; a FOREIGN / non-matching prUrl is REJECTED and the
+// persisted reference is the DISCOVERED html_url — never the actuator-echoed one.
+// RED on the pre-fix code, which persisted `outcome.prUrl` verbatim once the
+// commit matched.
+describe("FINDING A — automatic dispatch re-confirms the actuator prUrl via read-only discovery", () => {
+  const DISCOVERED_PR = "https://github.com/acme/svc/pull/7"; // the authoritative confirmed PR
+  const FOREIGN_PR = "https://evil/pr/attacker-controlled";
+  const confirming: PublicationReceiptDiscovery = {
+    discoverExistingReceipt: async (input) => ({ kind: "RECEIPT", prUrl: DISCOVERED_PR, commitSha: input.resultCommitSha }),
+  };
+
+  test("RED: a correct commit but a FOREIGN prUrl is REJECTED (no receipt row, stays DISPATCHED)", async () => {
+    const h = harness({ outcome: { kind: "RECEIPT", prUrl: FOREIGN_PR, commitSha: RESULT_COMMIT }, receiptDiscovery: confirming });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await expect(h.draft.dispatch(started.publicationId)).rejects.toThrow(PublicationReceiptBindingError);
+    expect(h.discoveryCalls).toBe(1); // the read-only re-confirmation actually ran
+    expect(h.draft.getPublication(started.publicationId).state).toBe("DISPATCHED");
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(started.publicationId) as { c: number }).c).toBe(0);
+  });
+
+  test("RED: discovery cannot confirm the PR (non-RECEIPT) => the actuator receipt is REJECTED (fail closed, DISPATCHED)", async () => {
+    const h = harness({
+      outcome: { kind: "RECEIPT", prUrl: DISCOVERED_PR, commitSha: RESULT_COMMIT },
+      receiptDiscovery: { discoverExistingReceipt: async () => ({ kind: "AMBIGUOUS", observedRemoteState: "none", detail: "no PR" }) },
+    });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await expect(h.draft.dispatch(started.publicationId)).rejects.toThrow(PublicationReceiptBindingError);
+    expect(h.draft.getPublication(started.publicationId).state).toBe("DISPATCHED");
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(started.publicationId) as { c: number }).c).toBe(0);
+  });
+
+  test("a matching, provider-confirmed prUrl is ACCEPTED and persists the DISCOVERED html_url", async () => {
+    const h = harness({ outcome: { kind: "RECEIPT", prUrl: DISCOVERED_PR, commitSha: RESULT_COMMIT }, receiptDiscovery: confirming });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    const settled = await h.draft.dispatch(started.publicationId);
+    expect(settled.state).toBe("RECEIPTED");
+    expect(settled.receipt).toEqual({ prUrl: DISCOVERED_PR, commitSha: RESULT_COMMIT });
+    expect(h.discoveryCalls).toBe(1);
   });
 });
 

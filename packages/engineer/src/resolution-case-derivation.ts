@@ -95,6 +95,28 @@ function isAdoptableLegacyState(state: string): boolean {
   return ADOPTABLE_LEGACY_STATES.has(state);
 }
 
+/**
+ * FINDING B (Luna F-R7-2, INFO → STRUCTURAL guard). Legacy adoption of a run
+ * parked in `HUMAN_APPROVAL_PENDING` / `BASE_BRANCH_STALE` rests on the invariant
+ * that ONLY the retired `EngineerPublicationManager` ever transitioned a run INTO
+ * those states — the live P8 `git-publication-mechanics` path never does. Rather
+ * than trust that WIRING argument, we assert it against durable state: a run that
+ * carries ANY live P8 publication artifact (a `publication_candidate_selections_v33`
+ * row or a `publication_git_operations_v33` row) is NOT a stranded legacy run, so
+ * a future re-wiring that let P8 reach an adoptable state could never let case
+ * creation hijack a live-P8 publication. Read-only.
+ */
+function hasLiveP8Publication(db: Database, runId: string): boolean {
+  const selection = db
+    .query("SELECT 1 FROM publication_candidate_selections_v33 WHERE run_id=? LIMIT 1")
+    .get(runId);
+  if (selection) return true;
+  const operation = db
+    .query("SELECT 1 FROM publication_git_operations_v33 WHERE run_id=? LIMIT 1")
+    .get(runId);
+  return operation !== null;
+}
+
 export interface DeriveCaseCreationOptions {
   /**
    * The server's CURRENT pricing-policy digest (S1). The case exposes it and a
@@ -152,6 +174,18 @@ export function deriveCaseCreationInput(
     throw new ResolutionDeskError(
       "DERIVATION_RUN_NOT_TERMINAL",
       `a resolution case may only be opened for a terminal or stranded-legacy run; run ${runId} is ${run.state}`,
+      409,
+      { state: run.state },
+    );
+  }
+  // FINDING B: an adoptable legacy state is only genuinely stranded when NO live
+  // P8 publication exists for the run. A run in such a state that ALSO carries a
+  // P8 selection/operation is a live-P8 run (a re-wiring hazard, not a legacy
+  // remnant) and must NOT be adopted — its authority is not frozen by a case row.
+  if (!isTerminalState(run.state as RunState) && hasLiveP8Publication(db, runId)) {
+    throw new ResolutionDeskError(
+      "DERIVATION_RUN_NOT_TERMINAL",
+      `run ${runId} is in a legacy-adoptable state but carries a live P8 publication; it is not a stranded legacy run and cannot be adopted`,
       409,
       { state: run.state },
     );

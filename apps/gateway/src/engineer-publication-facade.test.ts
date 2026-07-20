@@ -808,4 +808,33 @@ describe("R7-2 — durable current-publication projection (refresh hydration)", 
     const strangerFacade = makeFacade(db, { principal: stranger }).facade;
     expect(strangerFacade.getCurrentPublication(stranger, RUN_ID)).toEqual({ publication: null });
   });
+
+  // FINDING C (Sol P2-1). When a run holds two owned publications, the projection
+  // must hydrate the GENUINELY-CURRENT (active / non-terminal) one — not merely the
+  // most-recently-touched operation ROW. A terminal (RECEIPTED) older publication
+  // accumulates the highest revisions; the pre-fix `ORDER BY created_at DESC,
+  // revision DESC` therefore out-sorted a newer, still-active publication and
+  // mis-hydrated the completed one. RED on the pre-fix projection.
+  test("FINDING C: with a terminal older + an active newer publication on one run, hydrates the ACTIVE one", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    // P_OLD: dispatched to RECEIPTED (terminal, revisions 0→1→2 — the highest).
+    const pOld = await seedStartedPublication(facade);
+    expect((await facade.dispatch(principal, pOld) as { state: string }).state).toBe("RECEIPTED");
+
+    // A SECOND promoted candidate on the same run → a second, still-active (PREFLIGHT)
+    // publication P_NEW (revision 0 only).
+    const CK2_ID = `sha256:${"c".repeat(64)}`;
+    const CK2_HASH = `sha256:${"d".repeat(64)}`;
+    seedCheckpoint(db, { id: CK2_ID, hash: CK2_HASH, runId: RUN_ID, owner: principal.ownerId, repositoryId: REPO_ID, resultCommit: RESULT_COMMIT, nonce: "second" });
+    await facade.selectCandidate(principal, RUN_ID, { checkpointId: CK2_ID });
+    const approval2 = facade.approve(principal, CK2_ID, { checkpointHash: CK2_HASH, decision: "APPROVE", policyVersion: POLICY }) as { approvalId: string };
+    const pNew = await facade.startPublication(principal, RUN_ID, { approvalId: approval2.approvalId }, "idem-2") as { publicationId: string; state: string };
+    expect(pNew.state).toBe("PREFLIGHT");
+
+    const projection = facade.getCurrentPublication(principal, RUN_ID) as CurrentShape;
+    // The active in-flight publication is hydrated — NOT the completed older one.
+    expect(projection.publication!.publicationId).toBe(pNew.publicationId);
+    expect(projection.publication!.state).toBe("PREFLIGHT");
+  });
 });
