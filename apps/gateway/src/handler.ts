@@ -843,6 +843,9 @@ export interface EngineerPublicationAuthorityFacade {
   approve(principal: unknown, checkpointId: string, body: unknown): unknown | Promise<unknown>;
   startPublication(principal: unknown, runId: string, body: unknown, idempotencyKey: string): unknown | Promise<unknown>;
   getPublication(principal: unknown, publicationId: string): unknown | Promise<unknown>;
+  // R7-2: owner-fenced durable projection of a run's CURRENT publication (state,
+  // approval, checkpoint, receipt) — the refresh-hydration source of authority.
+  getCurrentPublication(principal: unknown, runId: string): unknown | Promise<unknown>;
   // R3: advance PREFLIGHT → DISPATCHED (credentialed effect), idempotent restart
   // recovery, and explicit typed reconciliation resolution. All owner-scoped.
   dispatch(principal: unknown, publicationId: string): unknown | Promise<unknown>;
@@ -3041,7 +3044,7 @@ export function createGatewayHandler(
     // -> typed 400 with issues; SelfApprovalError -> 403; consumed/idempotency
     // conflicts -> 409; fail-closed attestation -> 503).
     if (url.pathname.startsWith("/v1/engineer/")
-      && (url.pathname.includes("/publication-candidates") || url.pathname.includes("/publications"))) {
+      && (url.pathname.includes("/publication-candidates") || url.pathname.includes("/publications") || url.pathname.includes("/current-publication"))) {
       if (!publicationAuthority) return json(request, { error: { message: "Engineer publication authority is not configured" } }, 503);
       const parts = url.pathname.split("/");
       const idempotencyKey = request.headers.get("Idempotency-Key") ?? "";
@@ -3058,6 +3061,16 @@ export function createGatewayHandler(
             const body = await request.json().catch(() => ({}));
             return json(request, { candidate: await publicationAuthority.selectCandidate(engineerPrincipal!, runId, body) }, 201, { "Cache-Control": "no-store" });
           }
+        }
+        // GET /v1/engineer/runs/:runId/current-publication  (R7-2 durable projection)
+        // Owner-fenced read-only hydration source: returns the run's CURRENT
+        // durable publication (state/approval/checkpoint/receipt) or
+        // { publication: null } when there is none / the run is unknown /
+        // cross-owner (same none-shape, no oracle). The web page hydrates from
+        // this on refresh so React state is never the authority.
+        if (parts[3] === "runs" && parts[5] === "current-publication" && !parts[6] && request.method === "GET") {
+          const runId = decodeURIComponent(parts[4] ?? "");
+          return json(request, await publicationAuthority.getCurrentPublication(engineerPrincipal!, runId), 200, { "Cache-Control": "no-store" });
         }
         // POST /v1/engineer/publication-candidates/:checkpointId/approvals
         if (parts[3] === "publication-candidates" && parts[4] && parts[5] === "approvals" && !parts[6] && request.method === "POST") {

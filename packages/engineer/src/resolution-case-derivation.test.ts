@@ -199,6 +199,68 @@ describe("deriveCaseCreationInput blocker classification", () => {
   });
 });
 
+describe("stranded legacy non-terminal run adoption (Finding #6)", () => {
+  // A historical run parked at HUMAN_APPROVAL_PENDING or BASE_BRANCH_STALE can
+  // no longer use the retired legacy approval lane (410) — only the RETIRED
+  // legacy publication manager ever entered these states, so any run found here
+  // is necessarily a stranded legacy run. The 410 names the Resolution Desk as
+  // the successor; the desk must therefore ADOPT these two states, deriving an
+  // honest, CORRECTABLE blocker so the operator gets a real corrected-run route
+  // out, with the source run's history readable throughout.
+  function driveCorrectedRunEndToEnd(runId: string, expectedReasonCode: string) {
+    const view = deskCase(runId);
+    expect(view.blockers).toHaveLength(1);
+    expect(view.blockers[0]).toMatchObject({ kind: "BLOCKING", reasonCode: expectedReasonCode });
+    expect(view.correctionEligible).toBe(true);
+    // never silently advisory / blocker-free
+    expect(view.blockers.some((b) => b.kind === "ADVISORY")).toBe(false);
+
+    // End-to-end: a signed corrected directive is issuable AND applyable, so the
+    // operator reaches a real replacement run — not another dead end.
+    const desk = new ResolutionDesk(fixture.db, SECRET, KEY_ID, () => new Date(NOW));
+    const issued = desk.issueDirective(
+      view.caseId,
+      {
+        type: "CREATE_CORRECTED_RUN",
+        caseVersion: view.caseVersion,
+        sourceRunVersion: 4,
+        budget: { maxCostUsd: 5, maxTokens: 100_000, maxActiveSeconds: 3_600, pricingPolicyDigest: serverPricingPolicyDigest() },
+      },
+      `idem-${runId}`,
+    );
+    const applied = desk.applyDirective(issued.directive.directiveId, `apply-${runId}`);
+    expect(applied.state).toBe("READY");
+    expect(applied.replacementRunId).toMatch(/^resolution-/);
+
+    // History stays readable throughout: the stranded source run row is intact.
+    const sourceRow = fixture.db.query("SELECT id,state FROM engineer_runs WHERE id=?").get(runId) as
+      | { id: string; state: string }
+      | null;
+    expect(sourceRow).not.toBeNull();
+    return view;
+  }
+
+  test("a stranded HUMAN_APPROVAL_PENDING legacy run adopts into a correctable case with a corrected-run route", () => {
+    insertRun("run-1", "HUMAN_APPROVAL_PENDING");
+    const view = driveCorrectedRunEndToEnd("run-1", "LEGACY_HUMAN_APPROVAL_GATE_RETIRED");
+    expect(view.state).toBe("OPEN"); // the freshly-opened case (pre-directive snapshot)
+  });
+
+  test("a stranded BASE_BRANCH_STALE legacy run adopts into a correctable case with a corrected-run route", () => {
+    insertRun("run-1", "BASE_BRANCH_STALE");
+    driveCorrectedRunEndToEnd("run-1", "LEGACY_BASE_BRANCH_STALE");
+  });
+
+  test("adoption is bounded: a genuinely live non-terminal run (not one of the two legacy gates) is still refused", () => {
+    insertRun("run-1", "IMPLEMENTING");
+    expect(() => deriveCaseCreationInput(fixture.db, "run-1")).toThrow(/not terminal|IMPLEMENTING/i);
+    insertRun("run-2", "PLANNING");
+    expect(() => deriveCaseCreationInput(fixture.db, "run-2")).toThrow(/not terminal|PLANNING/i);
+    insertRun("run-3", "HUMAN_APPROVED");
+    expect(() => deriveCaseCreationInput(fixture.db, "run-3")).toThrow(/not terminal|HUMAN_APPROVED/i);
+  });
+});
+
 describe("deriveCaseCreationInput spend + guards", () => {
   test("(e) spend + ceiling are derived from the real cost/budget records", () => {
     insertRun("run-1", "VERIFICATION_INCOMPLETE", { lifetimeCostUsd: 10 });

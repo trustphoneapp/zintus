@@ -60,6 +60,41 @@ const ADVISORY_SEVERITIES: ReadonlySet<string> = new Set(["LOW", "INFO"]);
 const MAX_DESCRIPTION = 2_000;
 const MAX_ANCESTOR_DEPTH = 256;
 
+/**
+ * Finding #6 (legacy-run migration completeness). The R5F-2 retirement made the
+ * legacy human-gate approval lane an honest `410 GONE` (see the gateway's
+ * `LegacyApprovalLaneRetiredError`), which points stranded runs at the
+ * Developer Resolution Desk. But a HISTORICAL run parked at either non-terminal
+ * legacy gate — `HUMAN_APPROVAL_PENDING` (a verified candidate waiting on a
+ * human approval that the retired lane can no longer deliver) or
+ * `BASE_BRANCH_STALE` (a candidate whose base moved) — could neither use the
+ * retired path (410) NOR open a case (the desk required a TERMINAL run), leaving
+ * it readable-but-unrecoverable.
+ *
+ * These two states are ADOPTABLE by the desk because they are exclusively
+ * legacy: only the retired `EngineerPublicationManager` ever transitioned a run
+ * INTO them (the current P8 `git-publication-mechanics` publication path never
+ * does). So any run found in one of these states is necessarily a stranded
+ * legacy run, and adopting it cannot hijack a live run. Case creation installs
+ * the source freeze (the v31 freeze triggers key off the case row's existence),
+ * which is the durable-authority freeze the terminal-only rule otherwise gave us
+ * for free — so an adopted legacy run is frozen exactly like a terminal one from
+ * the moment its case exists. Every OTHER non-terminal state stays refused.
+ *
+ * Adoption derives an honest, CORRECTABLE terminal-style blocker (see
+ * `strandedStateBackstop`), so the operator's recovery is a real corrected run
+ * that re-verifies and can publish through the current surface — never a
+ * fabricated defect on unrelated durable evidence, never a raw state mutation.
+ */
+const ADOPTABLE_LEGACY_STATES: ReadonlySet<string> = new Set([
+  "HUMAN_APPROVAL_PENDING",
+  "BASE_BRANCH_STALE",
+]);
+
+function isAdoptableLegacyState(state: string): boolean {
+  return ADOPTABLE_LEGACY_STATES.has(state);
+}
+
 export interface DeriveCaseCreationOptions {
   /**
    * The server's CURRENT pricing-policy digest (S1). The case exposes it and a
@@ -108,10 +143,15 @@ export function deriveCaseCreationInput(
     "SELECT id,user_id,repository_id,base_commit_sha,manifest_hash,state,state_version FROM engineer_runs WHERE id=?",
   ).get(runId) as RunRow | null;
   if (!run) throw new ResolutionDeskError("DERIVATION_RUN_NOT_FOUND", "resolution source run not found", 404);
-  if (!isTerminalState(run.state as RunState)) {
+  // A case may be opened for a run whose durable authority is frozen: either a
+  // TERMINAL run, or a stranded LEGACY-gate run (HUMAN_APPROVAL_PENDING /
+  // BASE_BRANCH_STALE) whose only entry path — the retired legacy publication
+  // manager — no longer exists, and whose case row installs the source freeze.
+  // Every other non-terminal state (a genuinely live run) stays refused.
+  if (!isTerminalState(run.state as RunState) && !isAdoptableLegacyState(run.state)) {
     throw new ResolutionDeskError(
       "DERIVATION_RUN_NOT_TERMINAL",
-      `a resolution case may only be opened for a terminal run; run ${runId} is ${run.state}`,
+      `a resolution case may only be opened for a terminal or stranded-legacy run; run ${runId} is ${run.state}`,
       409,
       { state: run.state },
     );
@@ -208,25 +248,29 @@ function deriveBlockers(db: Database, runId: string, state: string): CanonicalBl
     });
   }
 
-  // 4. Terminal-state backstop (fail-closed floor). If the run stopped in a
-  //    non-success terminal state yet no BLOCKING blocker was derived above, we
-  //    do NOT leave it blocker-free (which would silently read as "no defect").
-  //    We synthesize exactly one BLOCKING blocker from the terminal state.
+  // 4. Stranded-state backstop (fail-closed floor). If the run stopped in a
+  //    non-success terminal state — OR is a stranded adoptable legacy gate
+  //    (HUMAN_APPROVAL_PENDING / BASE_BRANCH_STALE) — yet no BLOCKING blocker was
+  //    derived above, we do NOT leave it blocker-free (which would silently read
+  //    as "no defect"). We synthesize exactly one BLOCKING blocker from the state.
   const hasBlocking = blockers.some((blocker) => blocker.kind === "BLOCKING");
   if (!hasBlocking && state !== "COMPLETED") {
-    blockers.push(terminalStateBackstop(runId, state));
+    blockers.push(strandedStateBackstop(runId, state));
   }
 
   return blockers;
 }
 
 /**
- * Deterministic terminal-state -> BLOCKING reasonCode floor. Only
+ * Deterministic run-state -> BLOCKING reasonCode floor. Only
  * RETRY_BUDGET_EXHAUSTED keeps its non-recoverable (reject-only) class; every
- * other terminal maps to a CORRECTABLE reasonCode so correction — never a
- * silent reverify — is the authorized path when the durable cause is unknown.
+ * other state maps to a CORRECTABLE reasonCode so correction — never a silent
+ * reverify — is the authorized path when the durable cause is unknown. The two
+ * adoptable legacy gates map to honest, distinguishable legacy reason codes so
+ * the case reads as "stranded at a retired gate, recover by correction" rather
+ * than fabricating a defect on the (possibly perfectly good) candidate.
  */
-function terminalStateBackstop(runId: string, state: string): CanonicalBlocker {
+function strandedStateBackstop(runId: string, state: string): CanonicalBlocker {
   const reasonByState: Record<string, string> = {
     FAILED: "RUN_FAILED",
     REJECTED: "RUN_REJECTED",
@@ -238,13 +282,18 @@ function terminalStateBackstop(runId: string, state: string): CanonicalBlocker {
     SECURITY_ESCALATION: "SECURITY_ESCALATION",
     VERIFICATION_INCOMPLETE: "VERIFICATION_INCOMPLETE",
     ROLLED_BACK: "RUN_ROLLED_BACK",
+    HUMAN_APPROVAL_PENDING: "LEGACY_HUMAN_APPROVAL_GATE_RETIRED",
+    BASE_BRANCH_STALE: "LEGACY_BASE_BRANCH_STALE",
   };
   const reasonCode = reasonByState[state] ?? "RUN_TERMINAL_UNCLASSIFIED";
+  const description = isAdoptableLegacyState(state)
+    ? truncate(`stranded legacy run state ${state}: the retired legacy approval lane can no longer advance it; adopted as a correctable blocker`)
+    : truncate(`terminal run state ${state} with no durable blocker record; failed closed to a blocking correction`);
   return {
     blockerId: `terminal:${runId}:${state}`,
     kind: "BLOCKING",
     reasonCode,
-    description: truncate(`terminal run state ${state} with no durable blocker record; failed closed to a blocking correction`),
+    description,
     sourceRef: `engineer_runs:${runId}`,
   };
 }

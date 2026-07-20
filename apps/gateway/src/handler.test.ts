@@ -3284,6 +3284,7 @@ describe("P8 publication-authority HTTP routes", () => {
       approve: method("approve", { approvalId: "approval-1", status: "APPROVED" }),
       startPublication: method("startPublication", { publicationId: "pub-1", state: "PREFLIGHT" }),
       getPublication: method("getPublication", { publicationId: "pub-1", state: "PREFLIGHT" }),
+      getCurrentPublication: method("getCurrentPublication", { publication: null }),
       dispatch: method("dispatch", { publicationId: "pub-1", state: "RECEIPTED", receipt: { prUrl: "https://github.com/o/r/pull/1", commitSha: "d".repeat(40) } }),
       resume: method("resume", { publicationId: "pub-1", state: "RECONCILING", reconciliation: { reason: "RESTART_UNCERTAIN_DISPATCH", observedRemoteState: "unknown" } }),
       resolveReconciliation: method("resolveReconciliation", { publicationId: "pub-1", state: "FAILED" }),
@@ -3394,6 +3395,41 @@ describe("P8 publication-authority HTTP routes", () => {
     const { handler } = makePublicationHandler();
     const response = await handler(new Request("http://x/v1/engineer/publications/pub-1/bogus", { method: "POST", headers: authorized }));
     expect(response.status).toBe(404);
+  });
+
+  // R7-2 (FINDING #3): GET /runs/:runId/current-publication forwards principal +
+  // runId to the owner-fenced durable projection and returns it verbatim, so a
+  // browser refresh restores the exact in-flight publication. RED against the
+  // pre-R7-2 handler (the route did not exist → the shared publication gate did
+  // not match `/current-publication`, so the request fell through past the
+  // authority block).
+  test("GET /runs/:runId/current-publication forwards principal + runId and returns the durable projection (200)", async () => {
+    const active = {
+      publication: {
+        publicationId: "pub-1", runId: "run-1", state: "DISPATCHED", approvalId: "approval-1", approvalStatus: "APPROVED",
+        checkpointId: CK_ID, checkpointHash: CK_HASH, lineage: "ORIGINAL", lineageVerified: true,
+      },
+    };
+    const { handler, calls } = makePublicationHandler({ getCurrentPublication: () => active });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/current-publication", { headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(active);
+    expect(calls[0]).toEqual({ method: "getCurrentPublication", args: [principal, "run-1"] });
+  });
+
+  test("GET /runs/:runId/current-publication returns the none-shape { publication: null } when there is no active publication (200)", async () => {
+    const { handler, calls } = makePublicationHandler({ getCurrentPublication: () => ({ publication: null }) });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-2/current-publication", { headers: authorized }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ publication: null });
+    expect(calls[0]).toEqual({ method: "getCurrentPublication", args: [principal, "run-2"] });
+  });
+
+  test("unconfigured publication authority makes current-publication a 503 (never a wrong classification)", async () => {
+    const engineerRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const response = await handler(new Request("http://x/v1/engineer/runs/run-1/current-publication", { headers: authorized }));
+    expect(response.status).toBe(503);
   });
 
   test("POST /publications/:id/dispatch forwards principal + publicationId and returns the settled view (200)", async () => {

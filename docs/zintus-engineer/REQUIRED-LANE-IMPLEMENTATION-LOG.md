@@ -3389,3 +3389,29 @@ audit-clean; a real ship requires the [HUMAN] tail above.
   →RECONCILING (safe); (3) manual redundant commit pre-check (defense-in-depth).
   LESSON RECORDED: verify presence AND binding; put the binding in the AUTHORITY,
   not the mechanics; "accepted-risk" was a disguised gap.
+
+### R7-2 + R7-4 — durable hydration + stranded-legacy recovery (Fable-gated, 2026-07-19)
+
+- R7-2 (finding #3): owner-scoped durable current-publication projection. Service
+  getCurrentPublicationView reconstructs from durable rows only; facade
+  ownedCurrentPublicationId filters requester_actor_id=principal.ownerId (unknown/
+  cross-owner/none all collapse to {publication:null} — no oracle); route GET
+  /v1/engineer/runs/:runId/current-publication (owner-scoped, no-store). Web page
+  hydratePublicationDesk restores selected+approval+publicationId+publication from
+  the SERVER on load/refresh (page.tsx:44 — browser state no longer the authority;
+  CONSUMED→APPROVED mapping keeps the gate closed on refresh). Fable
+  mutation-verified: dropping the owner filter reds 16 tests (cross-owner
+  isolation). RED-first (facade/route/loader all fail pre-fix). Residual: no
+  React re-mount test (no web harness) — loader behaviorally tested + page wiring
+  source-asserted; the actual browser-refresh-restores behavior is the R7-7 live gate.
+- R7-4 (finding #6): Resolution Desk now ADOPTS stranded non-terminal legacy runs.
+  deriveCaseCreationInput accepts HUMAN_APPROVAL_PENDING + BASE_BRANCH_STALE
+  (ADOPTABLE_LEGACY_STATES) in addition to terminal; every OTHER non-terminal
+  still refused (bounded-guard test). Semantically safe (Fable-noted agent proof):
+  ONLY the retired legacy manager ever writes those states, so adoption cannot
+  hijack a live run; case-creation freeze preserves the durable-authority-frozen
+  invariant. Honest reason codes LEGACY_HUMAN_APPROVAL_GATE_RETIRED /
+  LEGACY_BASE_BRANCH_STALE (CORRECTABLE → corrected-run route). RED-first: 2
+  adoption tests failed pre-fix. No raw SQL / no state-mutation — the desk's
+  ledger-honest append-only path. Combined gates engineer 863/gateway 472/web
+  576/typecheck/diff.

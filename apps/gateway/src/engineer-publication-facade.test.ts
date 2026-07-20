@@ -692,3 +692,79 @@ describe("P8 publication facade — R3 dispatch / restart / reconcile (owner-sco
     await expect(facade.resolveReconciliation(principal, "not-a-real-publication", { resolution: "FAILED" })).rejects.toThrow(CandidateNotFoundError);
   });
 });
+
+// R7-2 (FINDING #3): the durable current-publication projection the Approval &
+// publication screen hydrates from on refresh, so React state is never the
+// authority for an in-flight publication. Owner-fenced, server-derived,
+// read-only. Each assertion below fails against the pre-R7-2 facade (the method
+// did not exist — the page could only reload candidates).
+describe("R7-2 — durable current-publication projection (refresh hydration)", () => {
+  interface CurrentShape {
+    publication: null | {
+      publicationId: string; runId: string; state: string; approvalId: string; approvalStatus: string | null;
+      checkpointId: string; checkpointHash: string; lineage: string; lineageVerified: boolean;
+      receipt?: { prUrl: string; commitSha: string };
+    };
+  }
+
+  test("returns the run's CURRENT publication with state, approval id/status, checkpoint and lineage", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    await facade.selectCandidate(principal, RUN_ID, selectBody);
+    const approval = facade.approve(principal, CK_ID, { checkpointHash: CK_HASH, decision: "APPROVE", policyVersion: POLICY }) as { approvalId: string };
+    const pub = await facade.startPublication(principal, RUN_ID, { approvalId: approval.approvalId }, "hk-r72") as { publicationId: string };
+
+    const projection = facade.getCurrentPublication(principal, RUN_ID) as CurrentShape;
+    expect(projection.publication).not.toBeNull();
+    expect(projection.publication!.publicationId).toBe(pub.publicationId);
+    expect(projection.publication!.runId).toBe(RUN_ID);
+    expect(projection.publication!.state).toBe("PREFLIGHT");
+    expect(projection.publication!.approvalId).toBe(approval.approvalId);
+    // The projection faithfully reports the DURABLE approval status: creating the
+    // publication consumed the single-use approval (APPROVED → CONSUMED). The web
+    // page maps CONSUMED → APPROVED for its gate model, but the server-derived
+    // projection never lies about the durable state.
+    expect(projection.publication!.approvalStatus).toBe("CONSUMED");
+    expect(projection.publication!.checkpointId).toBe(CK_ID);
+    expect(projection.publication!.checkpointHash).toBe(CK_HASH);
+    expect(projection.publication!.lineage).toBe("ORIGINAL");
+    expect(projection.publication!.lineageVerified).toBe(true);
+  });
+
+  test("carries the durable receipt once the publication is RECEIPTED", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    const publicationId = await seedStartedPublication(facade);
+    expect((await facade.dispatch(principal, publicationId) as { state: string }).state).toBe("RECEIPTED");
+
+    const projection = facade.getCurrentPublication(principal, RUN_ID) as CurrentShape;
+    expect(projection.publication!.state).toBe("RECEIPTED");
+    expect(projection.publication!.receipt).toEqual({ prUrl: "https://x/pr/1", commitSha: RESULT_COMMIT });
+  });
+
+  test("a run with NO publication returns the none-shape { publication: null }", () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    expect(facade.getCurrentPublication(principal, RUN_ID)).toEqual({ publication: null });
+  });
+
+  test("an unknown run returns the same none-shape", () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    expect(facade.getCurrentPublication(principal, "no-such-run")).toEqual({ publication: null });
+  });
+
+  test("a cross-owner principal gets the SAME none-shape (no ownership oracle), never the owner's publication", async () => {
+    const db = scratchDb();
+    const { facade } = makeFacade(db);
+    await seedStartedPublication(facade);
+
+    const stranger = deriveEngineerPrincipal({
+      gatewayIdentitySecret: "r72-different-owner",
+      approverIdentitySecret: "r72-different-approver",
+    });
+    expect(stranger.ownerId).not.toBe(principal.ownerId);
+    const strangerFacade = makeFacade(db, { principal: stranger }).facade;
+    expect(strangerFacade.getCurrentPublication(stranger, RUN_ID)).toEqual({ publication: null });
+  });
+});

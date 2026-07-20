@@ -129,6 +129,8 @@ interface PublicationAuthorityServiceLike {
   approveWithinTx(checkpointId: string, body: unknown, context: unknown): { approvalId: string; status: string };
   startPublication(input: unknown): Promise<{ publicationId: string; state: string }>;
   getPublication(publicationId: string): { publicationId: string; state: string };
+  /** R7-2 durable current-publication projection for a run's owned publication. */
+  getCurrentPublicationView(publicationId: string): unknown;
   // R3 dispatch/reconcile/restart seams.
   dispatch(publicationId: string): Promise<{ publicationId: string; state: string }>;
   resume(publicationId: string): Promise<{ publicationId: string; state: string }>;
@@ -316,6 +318,19 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
     connection
       .query("SELECT requester_actor_id FROM publication_git_operations_v33 WHERE publication_id=? AND requester_actor_id=? ORDER BY revision DESC LIMIT 1")
       .get(publicationId, principal.ownerId) !== null;
+
+  /**
+   * R7-2: the principal-owned CURRENT publication_id for a run — the
+   * most-recently-touched operation row owned by the principal (its
+   * `requester_actor_id` is the P8 requester = the principal's ownerId). An
+   * unknown run, a run owned by a DIFFERENT principal, and a run with no
+   * publication ALL collapse to the same `null` (no ownership oracle / none
+   * result) — the publication_id is never taken from the URL segment.
+   */
+  const ownedCurrentPublicationId = (runId: string): string | null =>
+    (connection
+      .query("SELECT publication_id FROM publication_git_operations_v33 WHERE run_id=? AND requester_actor_id=? ORDER BY created_at DESC, revision DESC LIMIT 1")
+      .get(runId, principal.ownerId) as { publication_id: string } | null)?.publication_id ?? null;
 
   return {
     listCandidates(_p, runId) {
@@ -508,6 +523,20 @@ export function createEngineerPublicationAuthorityFacade(deps: PublicationFacade
 
     getPublication(_p, publicationId) {
       return service.getPublication(publicationId);
+    },
+
+    // R7-2 durable current-publication projection. Read-only. The browser names
+    // the run only by its opaque runId; the publication_id is DERIVED from the
+    // owner-fenced durable operation rows (never the URL), and the whole view is
+    // reconstructed from durable state by the service. A run with no owned
+    // publication — including an unknown or cross-owner run — returns the SAME
+    // `{ publication: null }` none-shape (no ownership oracle). This is what the
+    // Approval & publication screen hydrates from on refresh, so React state is
+    // never the authority for an in-flight publication.
+    getCurrentPublication(_p, runId) {
+      const publicationId = ownedCurrentPublicationId(runId);
+      if (!publicationId) return { publication: null };
+      return { publication: service.getCurrentPublicationView(publicationId) };
     },
 
     // --- R3 dispatch / restart / reconcile (owner-scoped) -------------------

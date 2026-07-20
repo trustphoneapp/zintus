@@ -20,11 +20,11 @@ import {
   createPublication,
   dispatchPublication,
   getPublication,
-  getPublicationCandidates,
   type EngineerPublication,
   type PublicationCandidate,
   type PublicationApprovalResult,
 } from "@/lib/engineer-resolution";
+import { hydratePublicationDesk } from "@/lib/engineer-publication-hydrate";
 import {
   ApprovalRationaleControls,
   PREFLIGHT_MISMATCH_ERROR,
@@ -57,12 +57,38 @@ function PublicationDeskInner() {
 
   const actionLockRef = useRef(new EngineerActionLock());
 
+  // FINDING #3 fix: hydrate from the SERVER on every load/refresh. The run's
+  // durable CURRENT publication projection (state + approval + selected
+  // candidate) is restored from the server — not React state — so a browser
+  // refresh mid-publication restores the EXACT in-flight publication instead of
+  // dropping back to the candidate list and losing it. When there is no active
+  // publication, `current` is null and the candidate-selection flow runs as
+  // before.
   const load = useCallback(async (id: string) => {
     setLoading(true);
     setError(null);
     try {
-      const next = await getPublicationCandidates(id);
-      setCandidates(next);
+      const { candidates: nextCandidates, current } = await hydratePublicationDesk(id);
+      setCandidates(nextCandidates);
+      if (current) {
+        setSelected({
+          checkpointId: current.checkpointId,
+          checkpointHash: current.checkpointHash,
+          lineage: current.lineage,
+          lineageVerified: current.lineageVerified,
+        });
+        // A current publication only ever exists on an APPROVED approval (later
+        // CONSUMED by the publish); REJECTED never yields one. Restore the
+        // approval so the decision gate stays closed on refresh, mapping the
+        // durable CONSUMED status back to APPROVED for the UI's gate model.
+        if (current.approvalStatus === "REJECTED") {
+          setApproval({ approvalId: current.approvalId, status: "REJECTED" });
+        } else {
+          setApproval({ approvalId: current.approvalId, status: "APPROVED" });
+        }
+        setPublicationId(current.publicationId);
+        setPublication({ state: current.state, receipt: current.receipt, reconciliation: current.reconciliation });
+      }
       await getEngineerHardeningReadiness().then((result) => setReadiness(result.state)).catch(() => setReadiness("UNKNOWN"));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The Approval and publication screen is unavailable");

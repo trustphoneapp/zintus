@@ -281,6 +281,30 @@ export interface CreatePublicationInput {
   operation: "BRANCH_PR";
 }
 
+/**
+ * R7-2 durable current-publication projection (the refresh-hydration source).
+ * WIRED to `GET /v1/engineer/runs/:runId/current-publication` in
+ * apps/gateway/src/handler.ts (the EngineerPublicationAuthorityFacade over
+ * packages/engineer/src/publication-authority.ts
+ * `getCurrentPublicationView`). Everything the Approval & publication screen
+ * must restore on a browser refresh — the active publication's state, its
+ * approval, and the selected candidate — reconstructed from durable server rows
+ * so React state is never the authority for an in-flight publication.
+ */
+export interface CurrentPublication {
+  publicationId: string;
+  runId: string;
+  state: PublicationState;
+  approvalId: string;
+  approvalStatus: "APPROVED" | "REJECTED" | (string & {}) | null;
+  checkpointId: string;
+  checkpointHash: string;
+  lineage: PublicationCandidateLineage;
+  lineageVerified: boolean;
+  receipt?: { prUrl: string; commitSha: string };
+  reconciliation?: { reason: string; observedRemoteState: string };
+}
+
 // ---------------------------------------------------------------------------
 // transport
 // ---------------------------------------------------------------------------
@@ -476,4 +500,16 @@ export async function dispatchPublication(publicationId: string): Promise<Engine
 
 export async function getPublication(publicationId: string): Promise<EngineerPublication> {
   return request<EngineerPublication>(`/v1/engineer/publications/${encodeURIComponent(publicationId)}`);
+}
+
+/**
+ * R7-2: read-only durable projection of the run's CURRENT publication. The
+ * Approval & publication screen hydrates from this on load/refresh so a
+ * mid-publication refresh restores the EXACT durable publication (state +
+ * approval + selected candidate) instead of falling back to the candidate list.
+ * Returns `null` when the run has no active publication (or is unknown /
+ * cross-owner — the server returns the same `{ publication: null }` none-shape).
+ */
+export async function getCurrentPublication(runId: string): Promise<CurrentPublication | null> {
+  return (await request<{ publication: CurrentPublication | null }>(`/v1/engineer/runs/${encodeURIComponent(runId)}/current-publication`)).publication;
 }

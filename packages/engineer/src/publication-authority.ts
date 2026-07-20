@@ -49,6 +49,24 @@ export interface PublicationView {
   readonly reconciliation?: { readonly reason: string; readonly observedRemoteState: string };
 }
 
+/**
+ * R7-2 durable current-publication projection: everything the Approval &
+ * publication screen must restore on a browser refresh (so React state is never
+ * the authority). Reconstructed entirely from durable rows — the current
+ * operation (state/checkpoint/approval), its approval status, the candidate
+ * selection's lineage, and the receipt/reconciliation carried by
+ * `PublicationView`. Never derived from client input.
+ */
+export interface CurrentPublicationView extends PublicationView {
+  readonly runId: string;
+  readonly approvalId: string;
+  readonly approvalStatus: string | null;
+  readonly checkpointId: string;
+  readonly checkpointHash: string;
+  readonly lineage: CandidateLineage;
+  readonly lineageVerified: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Seams the integrator fills. The real implementations drop in with zero
 // changes to the call sites below.
@@ -992,6 +1010,34 @@ export class PublicationAuthorityService {
       }
     }
     return view;
+  }
+
+  /**
+   * R7-2 read-only projection: the CURRENT durable publication for a run,
+   * reconstructed from durable rows so a browser refresh restores the exact
+   * publication rather than falling back to the candidate list. Owner-fencing
+   * is applied by the facade (it resolves the run's owned `publicationId`); this
+   * method derives state, approval status, checkpoint, lineage, and the
+   * receipt/reconciliation from durable state alone — never client input. The
+   * facade calls it with a publicationId it already fenced to the principal.
+   */
+  getCurrentPublicationView(publicationId: string): CurrentPublicationView {
+    const operation = this.requireCurrentOperation(publicationId);
+    const base = this.getPublication(publicationId);
+    const approval = this.currentApproval(operation.approval_id);
+    const selection = this.db.query(`SELECT lineage, lineage_verified FROM publication_candidate_selections_v33
+      WHERE run_id=? AND checkpoint_id=? AND checkpoint_hash=? ORDER BY created_at DESC, id DESC LIMIT 1`)
+      .get(operation.run_id, operation.checkpoint_id, operation.checkpoint_hash) as { lineage: CandidateLineage; lineage_verified: number } | null;
+    return {
+      ...base,
+      runId: operation.run_id,
+      approvalId: operation.approval_id,
+      approvalStatus: approval?.status ?? null,
+      checkpointId: operation.checkpoint_id,
+      checkpointHash: operation.checkpoint_hash,
+      lineage: selection?.lineage ?? "ORIGINAL",
+      lineageVerified: selection ? selection.lineage_verified === 1 : false,
+    };
   }
 
   // --- Internal state helpers ----------------------------------------------

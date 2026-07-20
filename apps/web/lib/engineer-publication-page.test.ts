@@ -6,9 +6,20 @@ const source = readFileSync(join(import.meta.dir, "..", "app", "(app)", "enginee
 
 describe("Approval/publication page wiring", () => {
   it("consumes only §3/§4-permitted routes via the typed client, plus the existing readiness projection", () => {
-    expect(source).toContain("getPublicationCandidates(id)");
+    expect(source).toContain("hydratePublicationDesk(id)");
     expect(source).toContain("getEngineerHardeningReadiness()");
     expect(source).not.toContain("fetch(");
+  });
+
+  it("R7-2 (FINDING #3): hydrates the durable current publication from the server on load/refresh, restoring publication + approval + selected candidate (React state is not the authority)", () => {
+    // The loader reads the server projection and, when a publication is active,
+    // restores the full in-flight state instead of dropping to candidates-only.
+    expect(source).toContain("hydratePublicationDesk(id)");
+    expect(source).toContain("if (current)");
+    expect(source).toContain("setPublicationId(current.publicationId)");
+    expect(source).toContain("setPublication({ state: current.state");
+    expect(source).toContain("setApproval({ approvalId: current.approvalId");
+    expect(source).toContain("setSelected({");
   });
 
   it("never sends a client-supplied checkpointHash mismatch — the selected candidate's own hash is what gets approved", () => {
