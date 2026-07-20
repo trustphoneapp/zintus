@@ -3492,3 +3492,36 @@ audit-clean; a real ship requires the [HUMAN] tail above.
   COMPLETE: both independent auditors GO (no P0/P1), converged finding + 2 notes
   closed. REMAINING = R7-7 [HUMAN] live tail: live browser refresh/restart,
   crash-after-PR against real GitHub, two-person approval ceremony.
+
+### R7 VERDICT (Fable) — code + adversarial COMPLETE; release conditional on [HUMAN] live tail (2026-07-19)
+
+All 8 findings from the fresh audit (F1-F9 span → the 7 numbered blockers + Sol
+P2-4 + the R7-7 converged F-R7-1/P2-2 + 2 defense-in-depth notes) are CLOSED and
+Fable-mutation-verified. Final stacked gates @55f97e40: engineer 876, gateway 476,
+web 586, workspace typecheck + git diff clean.
+
+PROVEN (driven / mutation-verified / two independent adversarial re-audits, both GO):
+- #1/#2 central receipt validation on EVERY write path (3 INSERT sites, all via
+  centralReceiptBinding); commit AND (R7-8) prUrl now authority-validated — Fable
+  reds the automatic foreign-commit AND foreign-prUrl attacks by mutation.
+- #3 durable owner-scoped hydration (owner-fence: 16 tests red without it).
+- #4 operable RECONCILING surfacing binding-rejection honestly (recheck routes
+  through the central validator).
+- #6 stranded-legacy adoption with a STRUCTURAL live-P8 guard.
+- #7 provenance required-by-default fail-closed; #8 legacy de-exported; Sol P2-4
+  credentials-before-DISPATCHED (phantom test red by mutation).
+- #5 OpenAPI/docs aligned (code was truth); openapi-spec contract test green.
+- R7-7: Sol GO + Luna GO (no P0/P1); the one converged finding (prUrl) fixed
+  structurally in R7-8.
+
+NOT DONE — R7-7 [HUMAN] live tail (task #37; a GATE, not a deferral): live browser
+refresh/restart (resolves R7-2 no-React-harness residual — finding #3 proven for
+real); crash-after-PR against real GitHub; two-person GitHub approval ceremony
+(real creds + separate ENGINEER_APPROVER_IDENTITY_PATH). Fable cannot complete
+these without [HUMAN] enabling the Chrome bridge / GitHub creds / second identity.
+
+VERDICT: R7 code + adversarial verification is COMPLETE and independently
+audit-clean (two auditors GO); the publication path is fail-closed, durable,
+UI-operable, and honestly documented. Unconditional production GO remains BLOCKED
+on the [HUMAN] live tail. This is the honest ceiling reachable without human
+infrastructure — NOT a GO that absorbs the undone parts.
