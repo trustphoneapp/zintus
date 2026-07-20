@@ -65,6 +65,10 @@ import {
   resolveCorsOrigin,
   type GatewayConfig,
 } from "./auth.js";
+import {
+  bearerCredential,
+  type LoopbackAuthority,
+} from "./loopback-auth.js";
 import { createMetrics, type Metrics } from "./metrics.js";
 import type { RateLimiter } from "./rate-limit.js";
 import {
@@ -796,6 +800,17 @@ export interface GatewayHandlerDeps {
    * server connects once.
    */
   mcpRegistry?: MCPRegistry;
+  /**
+   * Ephemeral, origin-bound loopback handshake authority. ONLY consulted on a
+   * tokenless gateway (config.token === ""): an allowlisted BROWSER origin must
+   * then present a valid session token minted via the /v1/handshake handshake,
+   * instead of being trusted on its Origin header alone (the old, permanent
+   * unauthenticated origin grant). No-Origin local clients (CLI, same-process)
+   * remain trusted on the loopback bind. When omitted (library embedders / unit
+   * tests) the prior origin-only trust is preserved; index.ts always injects one
+   * for a tokenless gateway so production enforces the handshake.
+   */
+  loopbackAuthority?: LoopbackAuthority;
   /** Zintus Engineer run facade. Omitted when the local execution feature is disabled. */
   engineerRuns?: EngineerRunManager;
   /**
@@ -876,6 +891,7 @@ export function createGatewayHandler(
   deps: GatewayHandlerDeps,
 ): (request: Request) => Promise<Response> {
   const { engine, config } = deps;
+  const loopbackAuthority = deps.loopbackAuthority;
   const log = deps.log ?? noopLog;
   const onError = deps.onError;
   const metrics = deps.metrics ?? createMetrics();
@@ -1005,7 +1021,108 @@ export function createGatewayHandler(
   }
 
   function isAuthorized(request: Request): boolean {
-    return bearerAuthorized(request.headers.get("authorization"), config.token);
+    // Token mode: a configured GATEWAY_TOKEN is authoritative for every request,
+    // browser or not. Unchanged.
+    if (config.token) {
+      return bearerAuthorized(
+        request.headers.get("authorization"),
+        config.token,
+      );
+    }
+    // Tokenless ("loopback") mode. A request with NO browser Origin is a local
+    // process on the loopback bind (CLI, same-process, server-to-server) and is
+    // trusted as before. A request WITH an Origin has already cleared the origin
+    // allowlist (route() 403s disallowed origins). Previously that Origin alone
+    // was sufficient — the permanent unauthenticated origin grant. Now, when a
+    // loopback authority is wired, an allowlisted browser origin must ALSO carry
+    // a valid, unexpired, origin-bound ephemeral session token from the
+    // /v1/handshake handshake. When no authority is wired (library embedders /
+    // unit tests), prior origin-only trust is preserved.
+    const origin = request.headers.get("origin");
+    if (!origin) {
+      return true;
+    }
+    if (!loopbackAuthority || !loopbackAuthority.hasBootstrapSecret()) {
+      return true;
+    }
+    return loopbackAuthority.verify(
+      bearerCredential(request.headers.get("authorization")),
+      origin,
+    );
+  }
+
+  /** True when the tokenless loopback handshake is active (authority wired). */
+  function handshakeActive(): boolean {
+    return (
+      !config.token &&
+      loopbackAuthority != null &&
+      loopbackAuthority.hasBootstrapSecret()
+    );
+  }
+
+  /**
+   * GET/POST /v1/handshake — bootstrap an ephemeral, origin-bound session token
+   * for a tokenless gateway. GET issues a single-use challenge nonce (no secret
+   * revealed); POST redeems {challenge, proof} — where proof = HMAC(bootstrap
+   * secret, challenge) — for an origin-bound session token. Reachable WITHOUT a
+   * session token (it mints them); disallowed origins were already 403'd by
+   * route(); a compromised remote origin cannot compute a valid proof, so it
+   * cannot mint a session.
+   */
+  async function handleHandshake(
+    request: Request,
+    requestId: string,
+  ): Promise<Response> {
+    const authority = loopbackAuthority;
+    if (!handshakeActive() || !authority) {
+      // Only meaningful for a tokenless gateway with an authority wired.
+      return json(request, { error: { message: "Not found" } }, 404);
+    }
+    const origin = request.headers.get("origin");
+    if (request.method === "GET") {
+      const { challenge, expiresAt } = authority.issueChallenge();
+      return json(request, { challenge, expiresAt });
+    }
+    if (request.method === "POST") {
+      if (!origin) {
+        return json(
+          request,
+          {
+            error: {
+              message: "Origin required for handshake",
+              type: "forbidden",
+            },
+          },
+          403,
+        );
+      }
+      let body: unknown = null;
+      try {
+        body = await request.json();
+      } catch {
+        body = null;
+      }
+      const record = (body ?? {}) as Record<string, unknown>;
+      const challenge =
+        typeof record.challenge === "string" ? record.challenge : "";
+      const proof = typeof record.proof === "string" ? record.proof : "";
+      const minted = authority.redeem({ challenge, proof, origin });
+      if (!minted) {
+        log("warn", "gateway.handshake_rejected", { requestId, origin });
+        return json(
+          request,
+          { error: { message: "Handshake failed", type: "forbidden" } },
+          401,
+        );
+      }
+      log("info", "gateway.handshake_ok", { requestId, origin });
+      return json(request, {
+        token: minted.token,
+        token_type: "Bearer",
+        expires_at: minted.expiresAt,
+      });
+    }
+    return json(request, { error: { message: "Method not allowed" } }, 405);
   }
 
   /**
@@ -2634,6 +2751,14 @@ export function createGatewayHandler(
         },
         draining || engineerUnavailable ? 503 : 200,
       );
+    }
+
+    // Ephemeral loopback handshake (tokenless gateways only). MUST sit before the
+    // auth gate below — it is what mints the credential that gate now requires
+    // from browser origins. Disallowed origins were already 403'd above; on a
+    // token-protected gateway it 404s (the token is the credential there).
+    if (url.pathname === "/v1/handshake") {
+      return handleHandshake(request, requestId);
     }
 
     // Everything below requires authorization (when a token is configured).

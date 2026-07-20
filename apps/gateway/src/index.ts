@@ -64,7 +64,14 @@ import {
 } from "@zintus/engineer";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+} from "node:crypto";
+import { LoopbackAuthority } from "./loopback-auth.js";
 import { EngineerRunManager } from "./engineer.js";
 import { createBoundEngineerArtifactStore } from "./engineer-artifact-store.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight } from "./engineer-preflight.js";
@@ -101,6 +108,47 @@ export interface RunningGateway {
 }
 
 const DEFAULT_DRAIN_TIMEOUT_MS = 10_000;
+
+// Out-of-band delivery channel for the loopback bootstrap secret: a 0600 file
+// only a local process (the desktop shell / a local dev) can read. A remote
+// origin has no filesystem access, so it can never obtain the secret. The
+// desktop shell may instead inject GATEWAY_HANDSHAKE_SECRET directly.
+const HANDSHAKE_SECRET_FILE = join(
+  homedir(),
+  ".zintus",
+  "gateway-session.json",
+);
+
+/**
+ * Build the loopback handshake authority for a TOKENLESS gateway. The bootstrap
+ * secret is taken from GATEWAY_HANDSHAKE_SECRET when the launcher injects one
+ * (the desktop shell), otherwise minted here and written to a 0600 session file
+ * so the legitimate local app can read it and perform the handshake. Never
+ * called when a GATEWAY_TOKEN is configured.
+ */
+function establishLoopbackAuthority(log: LogFn): LoopbackAuthority {
+  const injected = process.env.GATEWAY_HANDSHAKE_SECRET?.trim();
+  const secret = injected || randomBytes(32).toString("hex");
+  if (!injected) {
+    // Persist the minted secret out-of-band (0600) so the local app can read it.
+    // Best-effort: if this fails the gateway still runs, and a launcher that
+    // injects GATEWAY_HANDSHAKE_SECRET does not depend on the file at all.
+    try {
+      mkdirSync(join(homedir(), ".zintus"), { recursive: true });
+      writeFileSync(
+        HANDSHAKE_SECRET_FILE,
+        `${JSON.stringify({ handshakeSecret: secret, pid: process.pid })}\n`,
+        { mode: 0o600 },
+      );
+      chmodSync(HANDSHAKE_SECRET_FILE, 0o600);
+    } catch (error) {
+      log("warn", "gateway.handshake_secret_persist_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return new LoopbackAuthority({ bootstrapSecret: secret });
+}
 // Bun's default is 10 seconds, which is shorter than the Engineer's bounded
 // 120-second Responses API calls. Keep the connection alive long enough for
 // synchronous plan/freeze requests while application-level timeouts retain
@@ -750,6 +798,16 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   // errors continue to flow only to the structured JSON log).
   const onError = createErrorSink(process.env, log);
 
+  // Ephemeral, origin-bound loopback handshake. On a TOKENLESS gateway, replace
+  // the old "trust any allowlisted Origin" grant with a per-boot bootstrap
+  // secret that only a LOCAL app can read. Browser origins must complete a
+  // challenge–response handshake to mint an origin-bound session token; a
+  // compromised remote origin cannot (it lacks the secret). Absent on a
+  // token-protected gateway (the token is the credential there).
+  const loopbackAuthority = config.token
+    ? undefined
+    : establishLoopbackAuthority(log);
+
   // P7 Developer Resolution Desk. Constructed on the ledger's SINGLE live
   // connection (so case/directive/apply transactions and the executable
   // replacement-run inserts are atomic with ledger writes and see the freeze
@@ -928,6 +986,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       rateLimiter,
       activityStore,
       mcpRegistry,
+      loopbackAuthority,
       engineerRuns,
       resolutionDesk,
       publicationAuthority,
@@ -1096,9 +1155,12 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   if (!config.token) {
     log("warn", "gateway.auth_disabled", {
       hint:
-        "No GATEWAY_TOKEN: API auth is disabled and CORS is restricted to " +
-        "localhost / the desktop app / zintus.ai so other websites can't reach " +
-        "this gateway. Set GATEWAY_TOKEN to require a bearer token (and allow any origin).",
+        "No GATEWAY_TOKEN: no-Origin local clients (CLI, same-process) are " +
+        "trusted on the loopback bind. Browser origins are restricted to " +
+        "localhost / the desktop app / zintus.ai AND must complete the " +
+        "/v1/handshake ephemeral origin-bound handshake — an allowlisted Origin " +
+        "alone is no longer sufficient. Set GATEWAY_TOKEN to require a bearer " +
+        "token instead (and allow any origin).",
     });
   }
 

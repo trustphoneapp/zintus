@@ -98,6 +98,114 @@ paths:
                 $ref: "#/components/schemas/Health"
               example: { ok: false, auth: "required", status: "draining" }
 
+  /v1/handshake:
+    get:
+      tags: [Operations]
+      operationId: getHandshakeChallenge
+      summary: Loopback handshake — issue a challenge (tokenless gateways only)
+      description: |
+        Step 1 of the ephemeral, origin-bound loopback handshake. Present ONLY on
+        a TOKENLESS gateway (no `GATEWAY_TOKEN`); a token-protected gateway
+        returns 404 here (the bearer token is the credential there). Returns a
+        single-use, short-lived `challenge` nonce; no secret is revealed.
+
+        A tokenless gateway no longer trusts a request purely because its
+        `Origin` is on the allowlist. Browser origins must complete this
+        handshake — GET a challenge, then POST `proof = HMAC-SHA256(bootstrap
+        secret, challenge)` — to obtain an origin-bound session token. The
+        per-boot bootstrap secret is only readable by a LOCAL app (env-injected
+        by the desktop shell, or a 0600 session file), so a compromised remote
+        origin cannot compute a valid proof. No-Origin local clients (CLI,
+        same-process) are trusted on the loopback bind and skip the handshake.
+      security: []
+      responses:
+        "200":
+          description: A fresh single-use challenge nonce.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [challenge, expiresAt]
+                properties:
+                  challenge:
+                    type: string
+                    description: Single-use, short-lived nonce to be HMAC'd.
+                  expiresAt:
+                    type: integer
+                    description: Epoch-ms after which the challenge is invalid.
+        "404":
+          description: Handshake is not available (token-protected gateway).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StringError"
+    post:
+      tags: [Operations]
+      operationId: redeemHandshake
+      summary: Loopback handshake — redeem a challenge for a session token
+      description: |
+        Step 2 of the loopback handshake. POST the `challenge` from GET plus
+        `proof = HMAC-SHA256(bootstrapSecret, challenge)` (hex). On success the
+        gateway burns the single-use nonce and mints a session token bound to the
+        request `Origin`, returned as `token`. Present the token as
+        `Authorization: Bearer <token>` on subsequent requests; it is accepted
+        only for the exact origin it was minted for and only until `expires_at`.
+        A missing `Origin`, an unknown/replayed/expired challenge, or a wrong
+        proof all return 401.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [challenge, proof]
+              properties:
+                challenge:
+                  type: string
+                  description: The nonce returned by GET /v1/handshake.
+                proof:
+                  type: string
+                  description: HMAC-SHA256(bootstrapSecret, challenge), hex-encoded.
+      responses:
+        "200":
+          description: An origin-bound ephemeral session token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [token, token_type, expires_at]
+                properties:
+                  token:
+                    type: string
+                    description: Origin-bound session bearer token.
+                  token_type:
+                    type: string
+                    example: Bearer
+                  expires_at:
+                    type: integer
+                    description: Epoch-ms after which the session token is invalid.
+        "401":
+          description: |
+            Handshake failed — missing Origin, unknown/replayed/expired
+            challenge, or an invalid proof.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: A POST without an Origin header (origin binding is required).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Handshake is not available (token-protected gateway).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StringError"
+
   /v1/chat/completions:
     post:
       tags: [Chat]

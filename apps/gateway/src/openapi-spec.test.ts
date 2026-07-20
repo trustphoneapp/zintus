@@ -94,6 +94,7 @@ describe("docs/openapi.yaml", () => {
   // Templated paths ({id}) are matched by their startsWith() prefix.
   const pathToHandlerLiteral: Record<string, string> = {
     "/health": '"/health"',
+    "/v1/handshake": '"/v1/handshake"',
     "/metrics": '"/metrics"',
     "/v1/chat/completions": '"/v1/chat/completions"',
     "/v1/research": '"/v1/research"',

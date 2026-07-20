@@ -7,6 +7,7 @@ import type { Engine } from "@zintus/engine";
 import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
+import { LoopbackAuthority } from "./loopback-auth.js";
 import { createRateLimiter } from "./rate-limit.js";
 import {
   EngineerSupervisor,
@@ -115,6 +116,179 @@ describe("origin rejection (CSRF / denial-of-wallet guard)", () => {
       }),
     );
     expect(res.status).not.toBe(403);
+  });
+});
+
+describe("ephemeral origin-bound loopback handshake (R8-4)", () => {
+  const PRICING = "http://localhost:8788/v1/pricing";
+  const HANDSHAKE = "http://localhost:8788/v1/handshake";
+  const ALLOWED = "https://www.zintus.ai";
+
+  /** A tokenless loopback gateway with a real handshake authority wired. */
+  function loopbackHandler(now?: () => number) {
+    const authority = new LoopbackAuthority({
+      bootstrapSecret: "boot-secret",
+      sessionTtlMs: 1_000,
+      ...(now ? { now } : {}),
+    });
+    const handler = makeHandler({ corsOrigins: "loopback", token: "" }, fakeEngine(), {
+      loopbackAuthority: authority,
+    });
+    return { authority, handler };
+  }
+
+  /** Mint an origin-bound session token directly through the authority. */
+  function mint(authority: LoopbackAuthority, origin: string, now?: number) {
+    const { challenge } = authority.issueChallenge(now);
+    const proof = authority.proofFor(challenge);
+    const minted = authority.redeem({ challenge, proof, origin }, now);
+    if (!minted) throw new Error("expected a minted token");
+    return minted.token;
+  }
+
+  // Test 1 — the vulnerability: an allowlisted browser Origin with NO handshake
+  // token was accepted before. It MUST now be rejected.
+  test("Test 1: allowlisted Origin with no handshake token is rejected (401)", async () => {
+    const { handler } = loopbackHandler();
+    const res = await handler(
+      new Request(PRICING, { headers: { origin: ALLOWED } }),
+    );
+    expect(res.status).toBe(401);
+
+    // A no-Origin local client (CLI / same-process) stays trusted on the bind.
+    const noOrigin = await handler(new Request(PRICING));
+    expect(noOrigin.status).toBe(200);
+
+    // A disallowed origin is still 403 (origin allowlist unchanged).
+    const evil = await handler(
+      new Request(PRICING, { headers: { origin: "https://evil.com" } }),
+    );
+    expect(evil.status).toBe(403);
+  });
+
+  // Test 2 — a forged / never-minted bearer token is rejected.
+  test("Test 2: a forged handshake token is rejected (401)", async () => {
+    const { handler } = loopbackHandler();
+    const res = await handler(
+      new Request(PRICING, {
+        headers: {
+          origin: ALLOWED,
+          authorization: "Bearer forged-token-not-minted",
+        },
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  // Test 3 — an expired session token is rejected.
+  test("Test 3: an expired handshake token is rejected (401)", async () => {
+    let clock = 1_000;
+    const { authority, handler } = loopbackHandler(() => clock);
+    const token = mint(authority, ALLOWED, clock);
+    // Still valid inside the 1s TTL.
+    const fresh = await handler(
+      new Request(PRICING, {
+        headers: { origin: ALLOWED, authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(fresh.status).toBe(200);
+    // Advance past expiry.
+    clock = 5_000;
+    const expired = await handler(
+      new Request(PRICING, {
+        headers: { origin: ALLOWED, authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(expired.status).toBe(401);
+  });
+
+  // Test 4 — a token minted for origin A, replayed from origin B, is rejected.
+  test("Test 4: a token bound to origin A is rejected from origin B (401)", async () => {
+    const { authority, handler } = loopbackHandler();
+    const token = mint(authority, ALLOWED);
+    const replay = await handler(
+      new Request(PRICING, {
+        headers: {
+          origin: "http://localhost:3000",
+          authorization: `Bearer ${token}`,
+        },
+      }),
+    );
+    expect(replay.status).toBe(401);
+    // The same token IS accepted from its bound origin.
+    const ok = await handler(
+      new Request(PRICING, {
+        headers: { origin: ALLOWED, authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(ok.status).toBe(200);
+  });
+
+  // Test 5 — the legitimate end-to-end handshake over HTTP succeeds.
+  test("Test 5: the legitimate handshake flow (GET challenge → POST redeem → use) succeeds", async () => {
+    const { authority, handler } = loopbackHandler();
+    // Step 1: GET a challenge nonce (no secret revealed).
+    const challengeRes = await handler(
+      new Request(HANDSHAKE, { method: "GET", headers: { origin: ALLOWED } }),
+    );
+    expect(challengeRes.status).toBe(200);
+    const { challenge } = (await challengeRes.json()) as { challenge: string };
+    expect(typeof challenge).toBe("string");
+
+    // Step 2: prove knowledge of the bootstrap secret and redeem for a token.
+    const proof = authority.proofFor(challenge);
+    const redeemRes = await handler(
+      new Request(HANDSHAKE, {
+        method: "POST",
+        headers: { origin: ALLOWED, "content-type": "application/json" },
+        body: JSON.stringify({ challenge, proof }),
+      }),
+    );
+    expect(redeemRes.status).toBe(200);
+    const { token } = (await redeemRes.json()) as { token: string };
+    expect(typeof token).toBe("string");
+
+    // Step 3: the minted session token is accepted for its origin.
+    const ok = await handler(
+      new Request(PRICING, {
+        headers: { origin: ALLOWED, authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(ok.status).toBe(200);
+
+    // Replaying the same handshake POST (single-use nonce) is rejected.
+    const replay = await handler(
+      new Request(HANDSHAKE, {
+        method: "POST",
+        headers: { origin: ALLOWED, "content-type": "application/json" },
+        body: JSON.stringify({ challenge, proof }),
+      }),
+    );
+    expect(replay.status).toBe(401);
+  });
+
+  test("handshake POST with a forged proof is rejected (401)", async () => {
+    const { handler } = loopbackHandler();
+    const challengeRes = await handler(
+      new Request(HANDSHAKE, { method: "GET", headers: { origin: ALLOWED } }),
+    );
+    const { challenge } = (await challengeRes.json()) as { challenge: string };
+    const forged = await handler(
+      new Request(HANDSHAKE, {
+        method: "POST",
+        headers: { origin: ALLOWED, "content-type": "application/json" },
+        body: JSON.stringify({ challenge, proof: "deadbeef" }),
+      }),
+    );
+    expect(forged.status).toBe(401);
+  });
+
+  test("handshake endpoint is 404 on a token-protected gateway (token is the credential)", async () => {
+    const handler = makeHandler({ token: "secret" });
+    const res = await handler(
+      new Request(HANDSHAKE, { method: "GET" }),
+    );
+    expect(res.status).toBe(404);
   });
 });
 
