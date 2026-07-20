@@ -1587,38 +1587,38 @@ export class EngineerLedger {
         .all(runId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "advisory_backlog_items" || table === "hardening_quotes" || table === "hardening_quote_requests" || table === "hardening_consents" || table === "advisory_backlog_events") {
-      return this.db.query(`SELECT * FROM ${table} WHERE parent_run_id = ? ORDER BY rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT * FROM ${table} WHERE parent_run_id = ? AND org_id = ? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "hardening_quote_advisories") {
-      return this.db.query(`SELECT m.* FROM hardening_quote_advisories m JOIN hardening_quotes q ON q.id=m.quote_id WHERE q.parent_run_id=? ORDER BY m.rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT m.* FROM hardening_quote_advisories m JOIN hardening_quotes q ON q.id=m.quote_id AND q.org_id=m.org_id WHERE q.parent_run_id=? AND m.org_id=? ORDER BY m.rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "engineer_run_lineage") {
       return this.db.query(`SELECT * FROM engineer_run_lineage WHERE root_run_id=? OR parent_run_id=? OR child_run_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
         .all(runId, runId, runId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "hardening_start_operations") {
-      return this.db.query(`SELECT * FROM hardening_start_operations WHERE child_run_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT * FROM hardening_start_operations WHERE child_run_id=? AND org_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "hardening_seed_attestations") {
-      return this.db.query(`SELECT * FROM hardening_seed_attestations WHERE parent_run_id=? OR child_run_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
-        .all(runId, runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT * FROM hardening_seed_attestations WHERE (parent_run_id=? OR child_run_id=?) AND org_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "hardening_start_claims") {
-      return this.db.query(`SELECT * FROM hardening_start_claims WHERE root_run_id=? OR parent_run_id=? OR child_run_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
-        .all(runId, runId, runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT * FROM hardening_start_claims WHERE (root_run_id=? OR parent_run_id=? OR child_run_id=?) AND org_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, runId, runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "hardening_model_call_slots") {
-      return this.db.query(`SELECT * FROM hardening_model_call_slots WHERE child_run_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT * FROM hardening_model_call_slots WHERE child_run_id=? AND org_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "hardening_child_budget_authorities" || table === "hardening_child_model_reservations" ||
         table === "hardening_paid_call_finalizations" || table === "hardening_recovery_worker_fences" ||
         table === "hardening_child_tool_actions") {
-      return this.db.query(`SELECT * FROM ${table} WHERE child_run_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT * FROM ${table} WHERE child_run_id=? AND org_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "publication_candidate_selections") {
       return this.db.query(`SELECT * FROM publication_candidate_selections WHERE root_run_id=? OR candidate_run_id=? ORDER BY rowid LIMIT ? OFFSET ?`)
@@ -2448,8 +2448,8 @@ export class EngineerLedger {
     if (parsed.status !== "RUNNING") {
       throw new IdempotencyConflictError(parsed.runId, `agent-missing-running-origin:${parsed.agentExecutionId}`);
     }
-    const hardeningStart=this.db.query(`SELECT 1 FROM engineer_run_lineage l JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash
-      WHERE l.child_run_id=?`).get(parsed.runId);
+    const hardeningStart=this.db.query(`SELECT 1 FROM engineer_run_lineage l JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash AND o.org_id=?
+      WHERE l.child_run_id=?`).get(this.tenantOrgId,parsed.runId);
     if(hardeningStart){
       if((parsed.role!=="BUILDER"&&parsed.role!=="REVIEWER")||
         (parsed.role==="BUILDER"&&parsed.modelTier!=="GPT-5.6_TERRA")||
@@ -2490,10 +2490,10 @@ export class EngineerLedger {
         workerFencingToken: worker?.fencingToken ?? null, claimedAt: parsed.startedAt,
       });
       this.db.query(`INSERT INTO builder_dispatch_claims
-        (run_id, input_hash, agent_execution_id, model_tier, worker_owner_id, worker_fencing_token, claimed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+        (run_id, input_hash, agent_execution_id, model_tier, worker_owner_id, worker_fencing_token, claimed_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
         claim.runId, claim.inputHash, claim.agentExecutionId, claim.modelTier,
-        claim.workerOwnerId, claim.workerFencingToken, claim.claimedAt,
+        claim.workerOwnerId, claim.workerFencingToken, claim.claimedAt, this.tenantOrgId,
       );
       return { won: true, claim, execution: parsed };
     });
@@ -2504,7 +2504,7 @@ export class EngineerLedger {
     this.getRun(runId);
     const row = this.db.query(`SELECT run_id, input_hash, agent_execution_id, model_tier,
       worker_owner_id, worker_fencing_token, claimed_at
-      FROM builder_dispatch_claims WHERE run_id = ? AND input_hash = ?`).get(runId, inputHash) as Record<string, unknown> | null;
+      FROM builder_dispatch_claims WHERE run_id = ? AND input_hash = ? AND org_id = ?`).get(runId, inputHash, this.tenantOrgId) as Record<string, unknown> | null;
     return row ? BuilderDispatchClaimSchema.parse({
       runId: row.run_id, inputHash: row.input_hash, agentExecutionId: row.agent_execution_id,
       modelTier: row.model_tier, workerOwnerId: row.worker_owner_id,
@@ -2562,8 +2562,8 @@ export class EngineerLedger {
       if(bytes.byteLength!==artifact.sizeBytes||!matchesSha256Bytes(bytes,artifact.sha256))return false;
       const result=BuilderResultSchema.parse(JSON.parse(bytes.toString("utf8")));
       const reservationRow=this.db.query(`SELECT * FROM hardening_child_model_reservations
-        WHERE id=? AND child_run_id=? AND agent_execution_id=? AND role='BUILDER'`)
-        .get(input.reservationId,input.childRunId,input.agentExecutionId) as Record<string,unknown>|null;
+        WHERE id=? AND child_run_id=? AND agent_execution_id=? AND role='BUILDER' AND org_id=?`)
+        .get(input.reservationId,input.childRunId,input.agentExecutionId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!reservationRow)return false;
       const reservation=this.hardeningBudgetReservationFromRow(reservationRow,true,readArtifact);
       const reconciliation=this.hardeningBudgetReconciliationFromRow(reservationRow,reservation,readArtifact);
@@ -2657,8 +2657,8 @@ export class EngineerLedger {
       const run=this.getRun(input.childRunId);if(!run.manifestHash)return false;
       const reservationRow=this.db.query(`SELECT *
         FROM hardening_child_model_reservations
-        WHERE id=? AND child_run_id=? AND agent_execution_id=? AND role='REVIEWER'`)
-        .get(input.reservationId,input.childRunId,input.agentExecutionId) as Record<string,unknown>|null;
+        WHERE id=? AND child_run_id=? AND agent_execution_id=? AND role='REVIEWER' AND org_id=?`)
+        .get(input.reservationId,input.childRunId,input.agentExecutionId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!reservationRow)return false;
       const reservation=this.hardeningBudgetReservationFromRow(reservationRow,true,readArtifact);
       const reconciliation=this.hardeningBudgetReconciliationFromRow(reservationRow,reservation,readArtifact);
@@ -2802,8 +2802,8 @@ export class EngineerLedger {
           return details.status==="FAILED"&&details.reason==="HARDENING_PAID_CALL_RECOVERY_TERMINAL";
         }catch{return false;}
       });
-      const budget=this.db.query("SELECT status FROM hardening_child_budget_authorities WHERE child_run_id=?")
-        .get(input.childRunId) as {status:string}|null;
+      const budget=this.db.query("SELECT status FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?")
+        .get(input.childRunId,this.tenantOrgId) as {status:string}|null;
       // RUNNING executions produce the orphan-finalization audit. A corrupt
       // already-SUCCEEDED execution is instead proven by the failed exact
       // successor check above and the terminal run/budget authorities.
@@ -2839,13 +2839,13 @@ export class EngineerLedger {
     if (!agent || agent.run_id !== parsed.runId) {
       throw new TypeError("model call agent execution does not belong to the run");
     }
-    if(this.db.query(`SELECT 1 FROM engineer_run_lineage l JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash
-      WHERE l.child_run_id=?`).get(parsed.runId)){
+    if(this.db.query(`SELECT 1 FROM engineer_run_lineage l JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash AND o.org_id=?
+      WHERE l.child_run_id=?`).get(this.tenantOrgId,parsed.runId)){
       if((agent.role!=="BUILDER"&&agent.role!=="REVIEWER")||(agent.role==="BUILDER"&&agent.model_tier!=="GPT-5.6_TERRA")||
         (agent.role==="REVIEWER"&&agent.model_tier!=="GPT-5.6_SOL"))throw new HardeningAuthorityInvalidError();
       if(!budgetReservationId)throw new HardeningAuthorityInvalidError();
-      const reservationRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=?")
-        .get(budgetReservationId,parsed.runId) as Record<string,unknown>|null;
+      const reservationRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=? AND org_id=?")
+        .get(budgetReservationId,parsed.runId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!reservationRow||reservationRow.status!=="RESERVED")throw new HardeningAuthorityInvalidError();
       const reservation=this.hardeningBudgetReservationFromRow(reservationRow);
       const expectedPromptVersion=reservation.role==="BUILDER"?"engineer-codex-builder-v3":"engineer-isolated-reviewer-v6";
@@ -4329,8 +4329,8 @@ export class EngineerLedger {
       a.started_at, a.completed_at,
       d.worker_owner_id, d.worker_fencing_token, d.input_hash AS claim_input_hash, d.agent_execution_id AS claim_agent_id
       FROM agent_executions a LEFT JOIN builder_dispatch_claims d
-        ON d.agent_execution_id = a.id AND d.run_id = a.run_id
-      WHERE a.run_id = ? AND a.role = 'BUILDER' ORDER BY a.id`).all(input.runId) as Array<Record<string, unknown>>;
+        ON d.agent_execution_id = a.id AND d.run_id = a.run_id AND d.org_id = ?
+      WHERE a.run_id = ? AND a.role = 'BUILDER' ORDER BY a.id`).all(this.tenantOrgId, input.runId) as Array<Record<string, unknown>>;
     const builderRows = historicalCheckpoint
       ? allBuilderRows.filter((row) => historicalCheckpoint.builderDispatchSummary.claims
         .some((claim) => claim.agentExecutionId === row.id && claim.inputHash === row.input_hash))
@@ -4338,8 +4338,8 @@ export class EngineerLedger {
     if (historicalCheckpoint && builderRows.length !== historicalCheckpoint.builderDispatchSummary.claims.length) {
       throw new Error("verified candidate referenced Builder execution is missing");
     }
-    const dispatchCount = this.db.query("SELECT COUNT(*) AS count FROM builder_dispatch_claims WHERE run_id = ?")
-      .get(input.runId) as { count: number };
+    const dispatchCount = this.db.query("SELECT COUNT(*) AS count FROM builder_dispatch_claims WHERE run_id = ? AND org_id = ?")
+      .get(input.runId, this.tenantOrgId) as { count: number };
     if (builderRows.length === 0 || (!historicalCheckpoint && dispatchCount.count !== builderRows.length)) {
       throw new Error("verified candidate Builder dispatch coverage is incomplete");
     }
@@ -4581,11 +4581,11 @@ export class EngineerLedger {
   }>{
     const lineageRows=this.db.query("SELECT * FROM engineer_run_lineage WHERE child_run_id=?").all(runId) as Array<Record<string,unknown>>;
     if(lineageRows.length!==1)throw new HardeningAuthorityInvalidError();const lineage=this.hardeningLineageFromRow(lineageRows[0]!);
-    const operationRow=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=? AND lineage_id=? AND lineage_hash=?")
-      .get(runId,lineage.lineageId,lineage.lineageHash) as Record<string,unknown>|null;
+    const operationRow=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=? AND lineage_id=? AND lineage_hash=? AND org_id=?")
+      .get(runId,lineage.lineageId,lineage.lineageHash,this.tenantOrgId) as Record<string,unknown>|null;
     if(!operationRow)throw new HardeningAuthorityInvalidError();const operation=this.hardeningStartOperationFromRow(operationRow);
-    const seedRow=this.db.query("SELECT * FROM hardening_seed_attestations WHERE operation_id=? AND operation_hash=?")
-      .get(operation.operationId,operation.operationHash) as Record<string,unknown>|null;
+    const seedRow=this.db.query("SELECT * FROM hardening_seed_attestations WHERE operation_id=? AND operation_hash=? AND org_id=?")
+      .get(operation.operationId,operation.operationHash,this.tenantOrgId) as Record<string,unknown>|null;
     if(!seedRow)throw new HardeningAuthorityInvalidError();const signedSeed=this.hardeningSeedFromRow(seedRow);
     await verifySignedHardeningSeedAttestation(signedSeed,attestor);
     const parent=await this.getVerifiedCandidateCheckpoint({checkpointId:lineage.parentCheckpointId},attestor,true,readArtifact);
@@ -4645,8 +4645,8 @@ export class EngineerLedger {
         throw new StateVersionConflictError(input.runId,expectedStateVersion,run.stateVersion);
       if(run.state!=="REVIEWING")throw new InvalidTransitionError("verified hardening candidate promotion requires REVIEWING");
       const currentLineageRow=this.db.query("SELECT * FROM engineer_run_lineage WHERE child_run_id=?").get(input.runId) as Record<string,unknown>|null;
-      const currentOperationRow=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=?").get(input.runId) as Record<string,unknown>|null;
-      const currentSeedRow=this.db.query("SELECT * FROM hardening_seed_attestations WHERE child_run_id=?").get(input.runId) as Record<string,unknown>|null;
+      const currentOperationRow=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=? AND org_id=?").get(input.runId,this.tenantOrgId) as Record<string,unknown>|null;
+      const currentSeedRow=this.db.query("SELECT * FROM hardening_seed_attestations WHERE child_run_id=? AND org_id=?").get(input.runId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!currentLineageRow||!currentOperationRow||!currentSeedRow||canonicalJson(this.hardeningLineageFromRow(currentLineageRow))!==canonicalJson(authority.lineage)||
         canonicalJson(this.hardeningStartOperationFromRow(currentOperationRow))!==canonicalJson(authority.operation)||
         canonicalJson(this.hardeningSeedFromRow(currentSeedRow))!==canonicalJson(authority.signedSeed)||
@@ -4796,8 +4796,8 @@ export class EngineerLedger {
           !['SELECTED','HARDENING_STARTED','HARDENING_VERIFIED','HARDENING_STOPPED'].includes(event.eventType))throw new AdvisoryIntegrityError();
         const authority=this.db.query(`SELECT 1 FROM hardening_start_operations o JOIN engineer_run_lineage l
           ON l.id=o.lineage_id AND l.lineage_hash=o.lineage_hash WHERE o.id=? AND l.parent_run_id=? AND l.parent_checkpoint_id=?
-          AND l.parent_checkpoint_hash=? AND l.quote_id=? AND (? IS NULL OR l.child_run_id=?)`).get(event.operationId,event.parentRunId,
-            event.parentCheckpointId,event.parentCheckpointHash,event.quoteId,event.childRunId,event.childRunId);
+          AND l.parent_checkpoint_hash=? AND l.quote_id=? AND (? IS NULL OR l.child_run_id=?) AND o.org_id=?`).get(event.operationId,event.parentRunId,
+            event.parentCheckpointId,event.parentCheckpointHash,event.quoteId,event.childRunId,event.childRunId,this.tenantOrgId);
         if(!authority)throw new AdvisoryIntegrityError();
       }
       return event;}catch(error){if(error instanceof AdvisoryIntegrityError)throw error;throw new AdvisoryIntegrityError();}
@@ -4969,8 +4969,8 @@ export class EngineerLedger {
         reviewer_output_token_cap:quote.schemaVersion===2?quote.inputCaps.reviewerOutputTokens:null,
         quote_json:canonicalJson(quote),created_at:quote.createdAt,expires_at:quote.expiresAt};
       if(Object.entries(projection).some(([key,value])=>row[key]!==value))throw new HardeningAuthorityInvalidError();
-      const mappings=this.db.query("SELECT ordinal,advisory_id FROM hardening_quote_advisories WHERE quote_id=? ORDER BY ordinal")
-        .all(quote.quoteId) as Array<{ordinal:number;advisory_id:string}>;
+      const mappings=this.db.query("SELECT ordinal,advisory_id FROM hardening_quote_advisories WHERE quote_id=? AND org_id=? ORDER BY ordinal")
+        .all(quote.quoteId,this.tenantOrgId) as Array<{ordinal:number;advisory_id:string}>;
       if(mappings.length!==quote.advisoryIds.length||mappings.some((mapping,index)=>mapping.ordinal!==index||mapping.advisory_id!==quote.advisoryIds[index]))
         throw new HardeningAuthorityInvalidError();
       return quote;
@@ -5136,7 +5136,7 @@ export class EngineerLedger {
       if(existingRequest){
         this.assertQuoteRequestRow(existingRequest,ownerId,input);
         const checkpoint=this.assertSignedHardeningParent(input.runId,signed);
-        const row=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=?").get(String(existingRequest.quote_id),String(existingRequest.quote_hash)) as Record<string,unknown>|null;
+        const row=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND org_id=?").get(String(existingRequest.quote_id),String(existingRequest.quote_hash),this.tenantOrgId) as Record<string,unknown>|null;
         if(!row)throw new HardeningAuthorityInvalidError();const quote=this.hardeningQuoteFromRow(row);
         this.assertDeterministicQuoteAuthority(quote,checkpoint,false);
         this.db.exec("COMMIT");return this.hardeningQuoteView(quote);
@@ -5185,15 +5185,15 @@ export class EngineerLedger {
         .get(sizing.sizingAuthorityId,sizing.sizingAuthorityHash) as Record<string,unknown>|null;
       if(!persistedSizingRow||canonicalJson(this.hardeningQuoteSizingAuthorityFromRow(persistedSizingRow))!==canonicalJson(sizing))
         throw new HardeningAuthorityInvalidError();
-      const mapping=this.db.query("INSERT INTO hardening_quote_advisories(quote_id,ordinal,advisory_id) VALUES (?,?,?)");
-      quote.advisoryIds.forEach((id,index)=>mapping.run(quote.quoteId,index,id));
+      const mapping=this.db.query("INSERT INTO hardening_quote_advisories(quote_id,ordinal,advisory_id,org_id) VALUES (?,?,?,?)");
+      quote.advisoryIds.forEach((id,index)=>mapping.run(quote.quoteId,index,id,this.tenantOrgId));
       this.db.query(`INSERT INTO hardening_quotes(id,quote_hash,schema_version,policy_version,estimator_version,parent_run_id,requester_user_id,
         repository_id,parent_checkpoint_id,parent_checkpoint_hash,parent_state_version,selection_hash,advisory_count,routing_policy_version,
         pricing_version,max_cost_microusd,max_tokens,max_time_seconds,max_planner_calls,max_builder_calls,max_reviewer_calls,
         automatic_repair_calls,sizing_authority_id,sizing_authority_hash,local_input_counter_version,builder_prompt_version,reviewer_policy_version,
         cache_policy_version,cache_accounting_version,cache_write_input_multiplier_numerator,cache_write_input_multiplier_denominator,
-        builder_input_token_cap,builder_output_token_cap,reviewer_input_token_cap,reviewer_output_token_cap,quote_json,created_at,expires_at)
-        VALUES(?,?,2,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        builder_input_token_cap,builder_output_token_cap,reviewer_input_token_cap,reviewer_output_token_cap,quote_json,created_at,expires_at,org_id)
+        VALUES(?,?,2,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         quote.quoteId,quote.quoteHash,quote.policyVersion,quote.estimatorVersion,quote.parentRunId,quote.requesterUserId,quote.repositoryId,
         quote.parentCheckpointId,quote.parentCheckpointHash,quote.parentStateVersion,quote.selectionHash,quote.advisoryIds.length,
         quote.routingPolicyVersion,quote.pricingVersion,quote.estimate.maxCostMicrousd,quote.estimate.maxTokens,quote.estimate.maxTimeSeconds,
@@ -5201,7 +5201,7 @@ export class EngineerLedger {
         quote.sizingAuthorityId,quote.sizingAuthorityHash,quote.localInputCounterVersion,quote.builderPromptVersion,quote.reviewerPolicyVersion,
         quote.cachePolicyVersion,quote.cacheAccountingVersion,quote.cacheWriteInputMultiplier.numerator,quote.cacheWriteInputMultiplier.denominator,
         quote.inputCaps.builderInputTokens,quote.inputCaps.builderOutputTokens,quote.inputCaps.reviewerInputTokens,quote.inputCaps.reviewerOutputTokens,
-        canonicalJson(quote),quote.createdAt,quote.expiresAt);
+        canonicalJson(quote),quote.createdAt,quote.expiresAt,this.tenantOrgId);
       const request=this.quoteRequestAuthority(ownerId,input);
       this.db.query(`INSERT INTO hardening_quote_requests(id,request_hash,requester_user_id,parent_run_id,idempotency_key,quote_id,quote_hash,request_json,created_at)
         VALUES(?,?,?,?,?,?,?,?,?)`).run(request.requestId,request.requestHash,ownerId,input.runId,input.idempotencyKey,quote.quoteId,quote.quoteHash,canonicalJson(request),createdAt);
@@ -5216,7 +5216,7 @@ export class EngineerLedger {
       const run=this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(runId,this.tenantOrgId,ownerId) as Record<string,unknown>|null;
       if(!run)throw new EngineerNotFoundError("hardening quote",quoteId);
       const checkpoint=this.assertSignedHardeningParent(runId,signed);
-      const row=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND parent_run_id=? AND requester_user_id=?").get(quoteId,runId,ownerId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND parent_run_id=? AND requester_user_id=? AND org_id=?").get(quoteId,runId,ownerId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)throw new EngineerNotFoundError("hardening quote",quoteId);const quote=this.hardeningQuoteFromRow(row);
       if(checkpoint.checkpointId!==quote.parentCheckpointId||checkpoint.checkpointHash!==quote.parentCheckpointHash)throw new HardeningAuthorityInvalidError();
       this.assertDeterministicQuoteAuthority(quote,checkpoint,false);
@@ -5242,8 +5242,8 @@ export class EngineerLedger {
           canonicalJson(existing.authorizedBudget)!==canonicalJson(input.authorizedBudget)||canonicalJson(existing.acknowledgements)!==canonicalJson(input.acknowledgements))
           throw new IdempotencyConflictError(runId,input.idempotencyKey);
         const checkpoint=this.assertSignedHardeningParent(runId,signed);
-        const replayQuoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=?")
-          .get(input.quoteId,input.quoteHash,runId,ownerId) as Record<string,unknown>|null;
+        const replayQuoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=? AND org_id=?")
+          .get(input.quoteId,input.quoteHash,runId,ownerId,this.tenantOrgId) as Record<string,unknown>|null;
         if(!replayQuoteRow)throw new HardeningAuthorityInvalidError();const replayQuote=this.hardeningQuoteFromRow(replayQuoteRow);this.assertCurrentHardeningQuote(replayQuote);
         if(replayQuote.parentCheckpointId!==checkpoint.checkpointId||replayQuote.parentCheckpointHash!==checkpoint.checkpointHash)throw new HardeningAuthorityInvalidError();
         this.assertDeterministicQuoteAuthority(replayQuote,checkpoint,false);
@@ -5254,7 +5254,7 @@ export class EngineerLedger {
         this.db.exec("COMMIT");return existing;}
       if(run.state_version!==input.expectedParentStateVersion)throw new StateVersionConflictError(runId,input.expectedParentStateVersion,run.state_version);
       const checkpoint=this.assertSignedHardeningParent(runId,signed);
-      const quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=?").get(input.quoteId,input.quoteHash,runId,ownerId) as Record<string,unknown>|null;
+      const quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=? AND org_id=?").get(input.quoteId,input.quoteHash,runId,ownerId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!quoteRow)throw new EngineerNotFoundError("hardening quote",input.quoteId);const quote=this.hardeningQuoteFromRow(quoteRow);this.assertCurrentHardeningQuote(quote);
       if(quote.parentStateVersion!==input.expectedParentStateVersion||quote.parentCheckpointId!==checkpoint.checkpointId||quote.parentCheckpointHash!==checkpoint.checkpointHash)throw new HardeningAuthorityInvalidError();
       this.assertDeterministicQuoteAuthority(quote,checkpoint,true);
@@ -5369,8 +5369,8 @@ export class EngineerLedger {
       const consentRow=this.db.query("SELECT * FROM hardening_consents WHERE id=? AND consent_hash=? AND parent_run_id=? AND requester_user_id=?")
         .get(input.consentId,input.consentHash,parentRunId,ownerId) as Record<string,unknown>|null;
       if(!consentRow)throw new EngineerNotFoundError("hardening consent",input.consentId);const consent=this.hardeningConsentFromRow(consentRow);
-      const quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=?")
-        .get(consent.quoteId,consent.quoteHash,parentRunId,ownerId) as Record<string,unknown>|null;
+      const quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=? AND org_id=?")
+        .get(consent.quoteId,consent.quoteHash,parentRunId,ownerId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!quoteRow)throw new HardeningAuthorityInvalidError();const quote=this.hardeningQuoteFromRow(quoteRow);this.assertCurrentHardeningQuote(quote);
       const {consentId:_consentId,consentHash:_consentHash,...consentContent}=consent;
       if(canonicalJson(createHardeningConsent(consentContent,quote))!==canonicalJson(consent))throw new HardeningAuthorityInvalidError();
@@ -5432,8 +5432,8 @@ export class EngineerLedger {
     const consentRow=this.db.query("SELECT * FROM hardening_consents WHERE id=? AND consent_hash=? AND parent_run_id=? AND requester_user_id=?")
       .get(lineage.consentId,lineage.consentHash,parentRunId,ownerId) as Record<string,unknown>|null;
     if(!consentRow)throw new HardeningAuthorityInvalidError();const consent=this.hardeningConsentFromRow(consentRow);
-    const quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=?")
-      .get(lineage.quoteId,lineage.quoteHash,parentRunId,ownerId) as Record<string,unknown>|null;
+    const quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND parent_run_id=? AND requester_user_id=? AND org_id=?")
+      .get(lineage.quoteId,lineage.quoteHash,parentRunId,ownerId,this.tenantOrgId) as Record<string,unknown>|null;
     if(!quoteRow)throw new HardeningAuthorityInvalidError();const quote=this.hardeningQuoteFromRow(quoteRow);this.assertCurrentHardeningQuote(quote);
     const {consentId:_consentId,consentHash:_consentHash,...consentContent}=consent;
     if(canonicalJson(createHardeningConsent(consentContent,quote))!==canonicalJson(consent))throw new HardeningAuthorityInvalidError();
@@ -5493,29 +5493,29 @@ export class EngineerLedger {
     const rows=this.db.query(`SELECT o.*,l.parent_run_id FROM hardening_start_operations o
       JOIN engineer_run_lineage l ON l.id=o.lineage_id AND l.lineage_hash=o.lineage_hash
       JOIN engineer_runs c ON c.id=o.child_run_id
-      WHERE o.requester_user_id=? AND c.org_id=? AND c.user_id=? ORDER BY o.created_at,o.id`).all(ownerId,this.tenantOrgId,ownerId) as Array<Record<string,unknown>>;
+      WHERE o.requester_user_id=? AND c.org_id=? AND c.user_id=? AND o.org_id=? ORDER BY o.created_at,o.id`).all(ownerId,this.tenantOrgId,ownerId,this.tenantOrgId) as Array<Record<string,unknown>>;
     return rows.map((row)=>({parentRunId:String(row.parent_run_id),operation:this.hardeningStartOperationFromRow(row)}));
   }
 
   isOptionalHardeningChild(runId:string):boolean{
     this.getRun(runId);const lineageCount=(this.db.query(
       "SELECT COUNT(*) AS count FROM engineer_run_lineage WHERE child_run_id=?").get(runId) as {count:number}).count,
-      operationCount=(this.db.query("SELECT COUNT(*) AS count FROM hardening_start_operations WHERE child_run_id=?")
-        .get(runId) as {count:number}).count,exact=Boolean(this.db.query(`SELECT 1 FROM engineer_run_lineage l
-      JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash
-      WHERE l.child_run_id=? AND o.child_run_id=l.child_run_id`).get(runId));
+      operationCount=(this.db.query("SELECT COUNT(*) AS count FROM hardening_start_operations WHERE child_run_id=? AND org_id=?")
+        .get(runId,this.tenantOrgId) as {count:number}).count,exact=Boolean(this.db.query(`SELECT 1 FROM engineer_run_lineage l
+      JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash AND o.org_id=?
+      WHERE l.child_run_id=? AND o.child_run_id=l.child_run_id`).get(this.tenantOrgId,runId));
     if(exact&&lineageCount===1&&operationCount===1)return true;
     if(lineageCount===1&&operationCount===0){
-      const started=this.db.query(`SELECT 1 FROM hardening_seed_attestations WHERE child_run_id=?
-        UNION ALL SELECT 1 FROM hardening_child_budget_authorities WHERE child_run_id=? LIMIT 1`).get(runId,runId);
+      const started=this.db.query(`SELECT 1 FROM hardening_seed_attestations WHERE child_run_id=? AND org_id=?
+        UNION ALL SELECT 1 FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=? LIMIT 1`).get(runId,this.tenantOrgId,runId,this.tenantOrgId);
       if(!started)return true;
     }
     const marker=this.db.query(`SELECT 1 FROM engineer_run_lineage WHERE child_run_id=?
-      UNION ALL SELECT 1 FROM hardening_start_operations WHERE child_run_id=?
-      UNION ALL SELECT 1 FROM hardening_seed_attestations WHERE child_run_id=?
-      UNION ALL SELECT 1 FROM hardening_child_budget_authorities WHERE child_run_id=?
+      UNION ALL SELECT 1 FROM hardening_start_operations WHERE child_run_id=? AND org_id=?
+      UNION ALL SELECT 1 FROM hardening_seed_attestations WHERE child_run_id=? AND org_id=?
+      UNION ALL SELECT 1 FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?
       UNION ALL SELECT 1 FROM advisory_backlog_events WHERE child_run_id=? LIMIT 1`).get(
-        runId,runId,runId,runId,runId);
+        runId,runId,this.tenantOrgId,runId,this.tenantOrgId,runId,this.tenantOrgId,runId);
     if(marker)throw new HardeningAuthorityInvalidError();
     return false;
   }
@@ -5548,10 +5548,10 @@ export class EngineerLedger {
 
   private initializeHardeningChildBudgetUnderLock(preparation:OptionalHardeningStartPreparation,nowMs:number):HardeningBudgetAuthority{
     if(!Number.isSafeInteger(nowMs)||nowMs<0)throw new HardeningBudgetAuthorityInvalidError();
-    const existing=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(preparation.operation.childRunId) as Record<string,unknown>|null;
+    const existing=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(preparation.operation.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
     if(existing)return this.hardeningChildBudgetFromRow(existing);
-    const lineage=preparation.lineage,quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=?")
-      .get(lineage.quoteId,lineage.quoteHash) as Record<string,unknown>|null;if(!quoteRow)throw new HardeningBudgetAuthorityInvalidError();
+    const lineage=preparation.lineage,quoteRow=this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND quote_hash=? AND org_id=?")
+      .get(lineage.quoteId,lineage.quoteHash,this.tenantOrgId) as Record<string,unknown>|null;if(!quoteRow)throw new HardeningBudgetAuthorityInvalidError();
     const quote=this.hardeningQuoteFromRow(quoteRow);this.assertCurrentHardeningQuote(quote);
     const authority=createHardeningBudgetAuthority({schemaVersion:1,policyVersion:"engineer-hardening-child-budget-v1",
       childRunId:lineage.childRunId,lineageId:lineage.lineageId,lineageHash:lineage.lineageHash,quoteId:lineage.quoteId,quoteHash:lineage.quoteHash,
@@ -5567,17 +5567,17 @@ export class EngineerLedger {
       max_tool_calls,max_mutations,max_command_calls,max_tool_argument_bytes,max_file_bytes,max_tool_result_bytes,max_search_bytes,max_search_results,
       max_range_lines,builder_input_token_cap,builder_output_ceiling,reviewer_input_token_cap,reviewer_output_ceiling,model_timeout_ms,automatic_repair_calls,used_cost_microusd,used_tokens,
       reserved_cost_microusd,reserved_tokens,ambiguous_cost_microusd,ambiguous_tokens,used_active_ms,active_since_ms,fence_owner_id,
-      fence_token_hash,fence_generation,fence_expires_at_ms,status,stop_reason,revision,created_at_ms,updated_at_ms)
-      VALUES(${Array.from({length:48},()=>"?").join(",")})`).run(
+      fence_token_hash,fence_generation,fence_expires_at_ms,status,stop_reason,revision,created_at_ms,updated_at_ms,org_id)
+      VALUES(${Array.from({length:49},()=>"?").join(",")})`).run(
       authority.budgetAuthorityId,authority.budgetAuthorityHash,1,authority.policyVersion,authority.childRunId,authority.lineageId,authority.lineageHash,
       authority.quoteId,authority.quoteHash,authority.consentId,authority.consentHash,authority.costLimitMicrousd,authority.tokenLimit,authority.activeTimeLimitMs,
       1,1,8,8,8,131072,1048576,32768,8388608,100,400,quote.inputCaps.builderInputTokens,6000,
-      quote.inputCaps.reviewerInputTokens,12000,120000,0,0,0,0,0,0,0,0,nowMs,null,null,0,null,"ACTIVE",null,1,nowMs,nowMs);
+      quote.inputCaps.reviewerInputTokens,12000,120000,0,0,0,0,0,0,0,0,nowMs,null,null,0,null,"ACTIVE",null,1,nowMs,nowMs,this.tenantOrgId);
     return authority;
   }
 
   getHardeningChildBudgetAuthority(childRunId:string):HardeningBudgetAuthority|null{
-    const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
+    const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as Record<string,unknown>|null;
     return row?this.hardeningChildBudgetFromRow(row):null;
   }
 
@@ -5588,7 +5588,7 @@ export class EngineerLedger {
    */
   hardeningPaidCallRecoveryReady(childRunId:string,nowMs:number):boolean{
     if(!Number.isSafeInteger(nowMs)||nowMs<0)throw new TypeError("invalid hardening recovery time");
-    const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
+    const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as Record<string,unknown>|null;
     if(!row)return false;
     try{this.hardeningChildBudgetFromRow(row);}
     catch(error){
@@ -5615,13 +5615,13 @@ export class EngineerLedger {
     if(row.status!=="ACTIVE")throw new HardeningBudgetAuthorityInvalidError();
     const elapsed=this.hardeningActiveElapsedMs(row,nowMs);
     const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET status='STOPPED',stop_reason=?,used_active_ms=?,active_since_ms=NULL,
-      fence_owner_id=NULL,fence_token_hash=NULL,fence_expires_at_ms=NULL,revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND status='ACTIVE'`)
-      .run(reason,elapsed,nowMs,String(row.child_run_id),Number(row.revision));
+      fence_owner_id=NULL,fence_token_hash=NULL,fence_expires_at_ms=NULL,revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND status='ACTIVE' AND org_id=?`)
+      .run(reason,elapsed,nowMs,String(row.child_run_id),Number(row.revision),this.tenantOrgId);
     if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();
   }
 
   private verifyHardeningBudgetUnderLock(childRunId:string,nowMs:number):void{
-    const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
+    const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as Record<string,unknown>|null;
     if(!row)throw new HardeningBudgetAuthorityInvalidError();
     this.hardeningChildBudgetFromRow(row);
     if(row.status==="VERIFIED")return;
@@ -5632,7 +5632,7 @@ export class EngineerLedger {
     if(elapsed>Number(row.active_time_limit_ms))throw new HardeningBudgetAuthorityInvalidError();
     const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET status='VERIFIED',stop_reason=NULL,used_active_ms=?,active_since_ms=NULL,
       fence_owner_id=NULL,fence_token_hash=NULL,fence_expires_at_ms=NULL,revision=revision+1,updated_at_ms=?
-      WHERE child_run_id=? AND revision=? AND status='ACTIVE'`).run(elapsed,effectiveNowMs,childRunId,Number(row.revision));
+      WHERE child_run_id=? AND revision=? AND status='ACTIVE' AND org_id=?`).run(elapsed,effectiveNowMs,childRunId,Number(row.revision),this.tenantOrgId);
     if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();
   }
 
@@ -5642,7 +5642,7 @@ export class EngineerLedger {
     if(!input.ownerId||input.ownerId.length>200||!input.idempotencyKey||input.idempotencyKey.length>200||!Number.isSafeInteger(input.ttlMs)||
       input.ttlMs<1000||input.ttlMs>300000)throw new TypeError("invalid hardening execution fence request");
     const rawFenceToken=randomBytes(32).toString("base64url"),tokenHash=sha256(rawFenceToken);
-    const decision=this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
+    const decision=this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)return {error:new HardeningBudgetAuthorityInvalidError()} as const;
       this.hardeningChildBudgetFromRow(row);if(row.status!=="ACTIVE")return {error:new HardeningBudgetStoppedError(row.stop_reason as HardeningBudgetStopReason)} as const;
       const elapsed=this.hardeningActiveElapsedMs(row,input.nowMs);if(elapsed>=Number(row.active_time_limit_ms)){this.stopHardeningBudgetUnderLock(row,"ACTIVE_TIME_CAP_REACHED",input.nowMs);return {error:new HardeningBudgetStoppedError("ACTIVE_TIME_CAP_REACHED")} as const;}
@@ -5650,15 +5650,15 @@ export class EngineerLedger {
       if(currentExpiry!==null&&currentExpiry>input.nowMs)throw new HardeningExecutionFenceStaleError();
       const generation=Number(row.fence_generation)+1,expiresAtMs=Math.min(input.nowMs+input.ttlMs,input.nowMs+(Number(row.active_time_limit_ms)-elapsed));
       const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET fence_owner_id=?,fence_token_hash=?,fence_generation=?,
-        fence_expires_at_ms=?,revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND status='ACTIVE'`)
-        .run(input.ownerId,tokenHash,generation,expiresAtMs,input.nowMs,input.childRunId,Number(row.revision));
+        fence_expires_at_ms=?,revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND status='ACTIVE' AND org_id=?`)
+        .run(input.ownerId,tokenHash,generation,expiresAtMs,input.nowMs,input.childRunId,Number(row.revision),this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();return {value:{childRunId:input.childRunId,ownerId:input.ownerId,
         rawFenceToken,fenceGeneration:generation,expiresAtMs}} as const;}).immediate();
     if("error" in decision)throw decision.error;return decision.value;
   }
 
   assertHardeningExecutionFence(input:{childRunId:string;ownerId:string;fenceGeneration:number;rawFenceToken:string;nowMs:number}):HardeningBudgetAuthority{
-    const decision=this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
+    const decision=this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)return {error:new HardeningBudgetAuthorityInvalidError()} as const;const authority=this.hardeningChildBudgetFromRow(row);
       if(row.status!=="ACTIVE")return {error:new HardeningBudgetStoppedError(row.stop_reason as HardeningBudgetStopReason)} as const;
       const elapsed=this.hardeningActiveElapsedMs(row,input.nowMs);if(elapsed>=Number(row.active_time_limit_ms)){this.stopHardeningBudgetUnderLock(row,"ACTIVE_TIME_CAP_REACHED",input.nowMs);return {error:new HardeningBudgetStoppedError("ACTIVE_TIME_CAP_REACHED")} as const;}
@@ -5669,34 +5669,34 @@ export class EngineerLedger {
 
   renewHardeningExecutionFence(input:{childRunId:string;ownerId:string;fenceGeneration:number;rawFenceToken:string;ttlMs:number;nowMs:number;idempotencyKey:string}){
     if(!Number.isSafeInteger(input.ttlMs)||input.ttlMs<1000||input.ttlMs>300000)throw new TypeError("invalid hardening execution fence ttl");
-    const decision=this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
+    const decision=this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)return {error:new HardeningBudgetAuthorityInvalidError()} as const;if(row.status!=="ACTIVE")return {error:new HardeningBudgetStoppedError(row.stop_reason as HardeningBudgetStopReason)} as const;
       if(row.fence_owner_id!==input.ownerId||Number(row.fence_generation)!==input.fenceGeneration||row.fence_token_hash!==sha256(input.rawFenceToken)||row.fence_expires_at_ms===null||Number(row.fence_expires_at_ms)<=input.nowMs)throw new HardeningExecutionFenceStaleError();
       const elapsed=this.hardeningActiveElapsedMs(row,input.nowMs),expiresAtMs=Math.min(input.nowMs+input.ttlMs,input.nowMs+(Number(row.active_time_limit_ms)-elapsed));
       if(elapsed>=Number(row.active_time_limit_ms)){this.stopHardeningBudgetUnderLock(row,"ACTIVE_TIME_CAP_REACHED",input.nowMs);return {error:new HardeningBudgetStoppedError("ACTIVE_TIME_CAP_REACHED")} as const;}
       const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET fence_expires_at_ms=?,revision=revision+1,updated_at_ms=?
-        WHERE child_run_id=? AND revision=? AND fence_generation=? AND fence_token_hash=?`).run(expiresAtMs,input.nowMs,input.childRunId,Number(row.revision),input.fenceGeneration,sha256(input.rawFenceToken));
+        WHERE child_run_id=? AND revision=? AND fence_generation=? AND fence_token_hash=? AND org_id=?`).run(expiresAtMs,input.nowMs,input.childRunId,Number(row.revision),input.fenceGeneration,sha256(input.rawFenceToken),this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();return {value:{...input,expiresAtMs}} as const;}).immediate();
     if("error" in decision)throw decision.error;return decision.value;
   }
 
   releaseHardeningExecutionFence(input:{childRunId:string;ownerId:string;fenceGeneration:number;rawFenceToken:string;nowMs:number}):void{
-    this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
+    this.db.transaction(()=>{const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row||row.status!=="ACTIVE"||row.fence_owner_id!==input.ownerId||Number(row.fence_generation)!==input.fenceGeneration||
         row.fence_token_hash!==sha256(input.rawFenceToken)||row.fence_expires_at_ms===null||Number(row.fence_expires_at_ms)<=input.nowMs)throw new HardeningExecutionFenceStaleError();
       this.hardeningActiveElapsedMs(row,input.nowMs);
       const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET fence_owner_id=NULL,fence_token_hash=NULL,fence_expires_at_ms=NULL,
-        revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND fence_generation=?`).run(input.nowMs,input.childRunId,Number(row.revision),input.fenceGeneration);
+        revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND fence_generation=? AND org_id=?`).run(input.nowMs,input.childRunId,Number(row.revision),input.fenceGeneration,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();}).immediate();
   }
 
   recordOptionalHardeningStopped(runId:string,stopReason:"FAILED"|"CANCELLED"|"BUDGET_EXHAUSTED"|"TIMED_OUT"|"SECURITY_BLOCKED"|"ENVIRONMENT_BLOCKED"):void{
     const transact=this.db.transaction(()=>{
       const authority=this.db.query(`SELECT l.*,o.id AS operation_id,o.created_at AS operation_created_at
-        FROM engineer_run_lineage l JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash
-        WHERE l.child_run_id=?`).get(runId) as Record<string,unknown>|null;if(!authority)return;
+        FROM engineer_run_lineage l JOIN hardening_start_operations o ON o.lineage_id=l.id AND o.lineage_hash=l.lineage_hash AND o.org_id=?
+        WHERE l.child_run_id=?`).get(this.tenantOrgId,runId) as Record<string,unknown>|null;if(!authority)return;
       const advisories=this.db.query(`SELECT a.* FROM hardening_quote_advisories m JOIN advisory_backlog_items a ON a.id=m.advisory_id
-        WHERE m.quote_id=? ORDER BY m.ordinal`).all(String(authority.quote_id)) as Array<Record<string,unknown>>;
+        WHERE m.quote_id=? AND m.org_id=? ORDER BY m.ordinal`).all(String(authority.quote_id),this.tenantOrgId) as Array<Record<string,unknown>>;
       const createdAt=this.now().toISOString();
       for(const row of advisories){const item=AdvisoryBacklogItemSchema.parse(JSON.parse(String(row.item_json)));
         const latest=this.advisoryLifecycle(item).at(-1);if(latest?.eventType==="HARDENING_STOPPED"){
@@ -5721,7 +5721,7 @@ export class EngineerLedger {
   stopHardeningChildBudgetForRecovery(childRunId:string,
     reason:"FAILED"|"CANCELLED"|"SECURITY_BLOCKED"|"ENVIRONMENT_BLOCKED",nowMs:number):void{
     this.db.transaction(()=>{
-      const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)throw new HardeningBudgetAuthorityInvalidError();this.hardeningChildBudgetFromRow(row);
       if(row.status==="ACTIVE")this.stopHardeningBudgetUnderLock(row,reason,nowMs);
       else if(row.status!=="STOPPED"&&row.status!=="VERIFIED")throw new HardeningBudgetAuthorityInvalidError();
@@ -5749,7 +5749,7 @@ export class EngineerLedger {
     const authority=createHardeningStartClaimIntent(rawIntent);const now=this.now();const createdAt=now.toISOString();
     const expiresAt=new Date(now.getTime()+leaseMs).toISOString();
     this.db.exec("BEGIN IMMEDIATE");try{
-      const row=this.db.query("SELECT * FROM hardening_start_claims WHERE child_run_id=?").get(authority.intent.childRunId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_start_claims WHERE child_run_id=? AND org_id=?").get(authority.intent.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(row){const fence=this.hardeningStartFenceFromRow(row);
         if(row.intent_hash!==authority.intentHash||row.id!==authority.claimId)throw new IdempotencyConflictError(authority.intent.childRunId,authority.intent.idempotencyKey);
         if(fence.status==="FINALIZED"||(fence.ownerId===ownerId&&fence.leaseExpiresAt>createdAt)){this.db.exec("COMMIT");return {applied:false,stolen:false,intent:authority.intent,fence};}
@@ -5757,24 +5757,24 @@ export class EngineerLedger {
         const generation=fence.generation+1;const fenceToken=sha256({namespace:HARDENING_START_CLAIM_POLICY_VERSION,
           claimId:fence.claimId,ownerId,generation,nonce:randomUUID()});
         const changed=this.db.query(`UPDATE hardening_start_claims SET owner_id=?,fence_token=?,generation=?,lease_expires_at=?,updated_at=?
-          WHERE id=? AND status='PREPARING' AND generation=? AND lease_expires_at<=?`).run(ownerId,fenceToken,generation,expiresAt,createdAt,
-            fence.claimId,fence.generation,createdAt);
+          WHERE id=? AND status='PREPARING' AND generation=? AND lease_expires_at<=? AND org_id=?`).run(ownerId,fenceToken,generation,expiresAt,createdAt,
+            fence.claimId,fence.generation,createdAt,this.tenantOrgId);
         if(changed.changes!==1)throw new HardeningStartClaimBusyError();
-        const current=this.db.query("SELECT * FROM hardening_start_claims WHERE id=?").get(fence.claimId) as Record<string,unknown>;
+        const current=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND org_id=?").get(fence.claimId,this.tenantOrgId) as Record<string,unknown>;
         this.db.exec("COMMIT");return {applied:true,stolen:true,intent:authority.intent,fence:this.hardeningStartFenceFromRow(current)};
       }
       const fenceToken=sha256({namespace:HARDENING_START_CLAIM_POLICY_VERSION,claimId:authority.claimId,ownerId,generation:1,nonce:randomUUID()});
       this.db.query(`INSERT INTO hardening_start_claims(id,intent_hash,schema_version,policy_version,requester_user_id,root_run_id,parent_run_id,
         child_run_id,repository_id,parent_checkpoint_id,parent_checkpoint_hash,lineage_id,lineage_hash,quote_id,quote_hash,consent_id,consent_hash,
         intended_operation_id,intended_operation_hash,idempotency_key,intent_json,status,owner_id,fence_token,generation,lease_expires_at,
-        finalized_operation_id,finalized_operation_hash,seed_attestation_id,seed_attestation_hash,sandbox_id,created_at,updated_at)
-        VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PREPARING',?,?,1,?,NULL,NULL,NULL,NULL,NULL,?,?)`).run(authority.claimId,authority.intentHash,
+        finalized_operation_id,finalized_operation_hash,seed_attestation_id,seed_attestation_hash,sandbox_id,created_at,updated_at,org_id)
+        VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PREPARING',?,?,1,?,NULL,NULL,NULL,NULL,NULL,?,?,?)`).run(authority.claimId,authority.intentHash,
           HARDENING_START_CLAIM_POLICY_VERSION,authority.intent.requesterUserId,authority.intent.rootRunId,authority.intent.parentRunId,
           authority.intent.childRunId,authority.intent.repositoryId,authority.intent.parentCheckpointId,authority.intent.parentCheckpointHash,
           authority.intent.lineageId,authority.intent.lineageHash,authority.intent.quoteId,authority.intent.quoteHash,authority.intent.consentId,
           authority.intent.consentHash,authority.intent.operationId,authority.intent.operationHash,authority.intent.idempotencyKey,canonicalJson(authority.intent),
-          ownerId,fenceToken,expiresAt,createdAt,createdAt);
-      const current=this.db.query("SELECT * FROM hardening_start_claims WHERE id=?").get(authority.claimId) as Record<string,unknown>;
+          ownerId,fenceToken,expiresAt,createdAt,createdAt,this.tenantOrgId);
+      const current=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND org_id=?").get(authority.claimId,this.tenantOrgId) as Record<string,unknown>;
       this.db.exec("COMMIT");return {applied:true,stolen:false,intent:authority.intent,fence:this.hardeningStartFenceFromRow(current)};
     }catch(error){try{this.db.exec("ROLLBACK");}catch{}throw error;}
   }
@@ -5783,7 +5783,7 @@ export class EngineerLedger {
     if(!ownerId||ownerId.length>200)throw new TypeError("hardening start ownerId is invalid");
     const now=this.now().toISOString();
     const rows=this.db.query(`SELECT * FROM hardening_start_claims WHERE requester_user_id=? AND status='PREPARING'
-      AND lease_expires_at<=? ORDER BY created_at,id`).all(ownerId,now) as Array<Record<string,unknown>>;
+      AND lease_expires_at<=? AND org_id=? ORDER BY created_at,id`).all(ownerId,now,this.tenantOrgId) as Array<Record<string,unknown>>;
     return rows.map((row)=>{
       const intent=HardeningStartClaimIntentSchema.parse(JSON.parse(String(row.intent_json)));
       this.hardeningStartFenceFromRow(row);
@@ -5795,8 +5795,8 @@ export class EngineerLedger {
 
   listOptionalHardeningStartClaimsForRecovery(ownerId:string):Array<{parentRunId:string;childRunId:string;leaseExpiresAt:string;input:HardeningStartRequest}>{
     if(!ownerId||ownerId.length>200)throw new TypeError("hardening start ownerId is invalid");
-    const rows=this.db.query(`SELECT * FROM hardening_start_claims WHERE requester_user_id=? AND status='PREPARING'
-      ORDER BY lease_expires_at,created_at,id`).all(ownerId) as Array<Record<string,unknown>>;
+    const rows=this.db.query(`SELECT * FROM hardening_start_claims WHERE requester_user_id=? AND status='PREPARING' AND org_id=?
+      ORDER BY lease_expires_at,created_at,id`).all(ownerId,this.tenantOrgId) as Array<Record<string,unknown>>;
     return rows.map((row)=>{const intent=HardeningStartClaimIntentSchema.parse(JSON.parse(String(row.intent_json)));const fence=this.hardeningStartFenceFromRow(row);
       return {parentRunId:intent.parentRunId,childRunId:intent.childRunId,leaseExpiresAt:fence.leaseExpiresAt,input:HardeningStartRequestSchema.parse({
         expectedChildStateVersion:0,lineageId:intent.lineageId,lineageHash:intent.lineageHash,idempotencyKey:intent.idempotencyKey})};});
@@ -5804,7 +5804,7 @@ export class EngineerLedger {
 
   getFinalizedOptionalHardeningStartClaim(childRunId:string):HardeningStartFence|null{
     this.getRun(childRunId);
-    const rows=this.db.query("SELECT * FROM hardening_start_claims WHERE child_run_id=? ORDER BY id").all(childRunId) as Array<Record<string,unknown>>;
+    const rows=this.db.query("SELECT * FROM hardening_start_claims WHERE child_run_id=? AND org_id=? ORDER BY id").all(childRunId,this.tenantOrgId) as Array<Record<string,unknown>>;
     if(rows.length===0)return null;
     if(rows.length!==1)throw new HardeningAuthorityInvalidError();
     const fence=this.hardeningStartFenceFromRow(rows[0]!);
@@ -5813,7 +5813,7 @@ export class EngineerLedger {
 
   finalizeOptionalHardeningStartClaim(input:FinalizeOptionalHardeningStartClaimInput):HardeningStartFence{
     const now=this.now().toISOString();this.db.exec("BEGIN IMMEDIATE");try{
-      const row=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=?").get(input.claimId,input.childRunId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=? AND org_id=?").get(input.claimId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)throw new HardeningStartFenceStaleError();const fence=this.hardeningStartFenceFromRow(row);
       if(fence.status==="FINALIZED"){
         if(fence.generation!==input.generation||fence.fenceToken!==input.fenceToken||fence.finalizedOperationId!==input.operationId||
@@ -5823,11 +5823,11 @@ export class EngineerLedger {
       }
       const changed=this.db.query(`UPDATE hardening_start_claims SET status='FINALIZED',finalized_operation_id=?,finalized_operation_hash=?,
         seed_attestation_id=?,seed_attestation_hash=?,sandbox_id=?,updated_at=? WHERE id=? AND child_run_id=? AND status='PREPARING'
-        AND fence_token=? AND generation=? AND lease_expires_at>=? AND intended_operation_id=? AND intended_operation_hash=?`).run(
+        AND fence_token=? AND generation=? AND lease_expires_at>=? AND intended_operation_id=? AND intended_operation_hash=? AND org_id=?`).run(
           input.operationId,input.operationHash,input.seedAttestationId,input.seedAttestationHash,input.sandboxId,now,input.claimId,input.childRunId,
-          input.fenceToken,input.generation,now,input.operationId,input.operationHash);
+          input.fenceToken,input.generation,now,input.operationId,input.operationHash,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningStartFenceStaleError();
-      const current=this.db.query("SELECT * FROM hardening_start_claims WHERE id=?").get(input.claimId) as Record<string,unknown>;
+      const current=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND org_id=?").get(input.claimId,this.tenantOrgId) as Record<string,unknown>;
       this.db.exec("COMMIT");return this.hardeningStartFenceFromRow(current);
     }catch(error){try{this.db.exec("ROLLBACK");}catch{}throw error;}
   }
@@ -5977,9 +5977,9 @@ export class EngineerLedger {
     const builderClaimValid=reservation.role!=="BUILDER"||Boolean(builderClaim&&
       builderClaim.agentExecutionId===reservation.agentExecutionId&&builderClaim.modelTier==="GPT-5.6_TERRA"&&
       builderClaim.inputHash===agent?.input_hash&&builderClaim.claimedAt===agent?.started_at);
-    const slot=this.db.query("SELECT * FROM hardening_model_call_slots WHERE id=?").get(reservation.paidCallSlotId) as Record<string,unknown>|null;
-    const authority=this.db.query("SELECT id,authority_hash,child_run_id FROM hardening_child_budget_authorities WHERE id=? AND authority_hash=?")
-      .get(reservation.budgetAuthorityId,reservation.budgetAuthorityHash) as Record<string,unknown>|null;
+    const slot=this.db.query("SELECT * FROM hardening_model_call_slots WHERE id=? AND org_id=?").get(reservation.paidCallSlotId,this.tenantOrgId) as Record<string,unknown>|null;
+    const authority=this.db.query("SELECT id,authority_hash,child_run_id FROM hardening_child_budget_authorities WHERE id=? AND authority_hash=? AND org_id=?")
+      .get(reservation.budgetAuthorityId,reservation.budgetAuthorityHash,this.tenantOrgId) as Record<string,unknown>|null;
     const slotClaim=slot?this.hardeningModelCallSlotFromRow(slot):null;
     const slotStatusMatches=row.status==="RESERVED"?slotClaim?.status==="CLAIMED"&&slotClaim.modelCallId===null:
       row.status==="SETTLED"?slotClaim?.status==="COMPLETED"&&slotClaim.modelCallId===row.model_call_id:
@@ -6209,7 +6209,7 @@ export class EngineerLedger {
       !/^sha256:[a-f0-9]{64}$/.test(input.requestHash))
       throw new TypeError("invalid hardening paid-call reservation");
     const decision=this.db.transaction(()=>{
-      const budgetRow=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
+      const budgetRow=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!budgetRow)return {error:new HardeningBudgetAuthorityInvalidError()} as const;const authority=this.hardeningChildBudgetFromRow(budgetRow);
       if(budgetRow.status!=="ACTIVE")return {error:new HardeningBudgetStoppedError(budgetRow.stop_reason as HardeningBudgetStopReason)} as const;
       const elapsed=this.hardeningActiveElapsedMs(budgetRow,input.nowMs);
@@ -6223,8 +6223,8 @@ export class EngineerLedger {
         this.stopHardeningBudgetUnderLock(budgetRow,reason,input.nowMs);return {error:new HardeningBudgetStoppedError(reason)} as const;}
       const expectedCeiling=role==="BUILDER"?authority.transportLimits.builderOutputCeiling:authority.transportLimits.reviewerOutputCeiling;
       if(input.resolvedModel!==expectedRole.model||input.outputTokenCeiling!==expectedCeiling)throw new HardeningBudgetAuthorityInvalidError();
-      const existing=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE child_run_id=? AND role=?")
-        .get(input.childRunId,role) as Record<string,unknown>|null;
+      const existing=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE child_run_id=? AND role=? AND org_id=?")
+        .get(input.childRunId,role,this.tenantOrgId) as Record<string,unknown>|null;
       if(!this.hardeningPromptCacheSecret)throw new HardeningPromptCacheAuthorityUnavailableError();
       const ownerRow=this.db.query("SELECT user_id,state,state_version FROM engineer_runs WHERE id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as
         {user_id:string;state:string;state_version:number}|null;
@@ -6257,7 +6257,7 @@ export class EngineerLedger {
         if(canonicalJson(persistedReservation)!==canonicalJson(reservation)||existing.reservation_idempotency_key!==input.reservationIdempotencyKey||
           existing.status!=="RESERVED"||existing.fence_owner_id!==input.fenceOwnerId||existing.fence_token_hash!==sha256(input.rawFenceToken)||
           Number(existing.fence_generation)!==input.fenceGeneration)throw new HardeningReservationConflictError();
-        const slot=this.db.query("SELECT * FROM hardening_model_call_slots WHERE id=?").get(slotId) as Record<string,unknown>|null;
+        const slot=this.db.query("SELECT * FROM hardening_model_call_slots WHERE id=? AND org_id=?").get(slotId,this.tenantOrgId) as Record<string,unknown>|null;
         if(!slot)throw new HardeningReservationConflictError();return {value:{applied:false,claim:this.hardeningModelCallSlotFromRow(slot),reservation:persistedReservation}} as const;}
       const totalCost=Number(budgetRow.used_cost_microusd)+Number(budgetRow.reserved_cost_microusd)+Number(budgetRow.ambiguous_cost_microusd)+reservedCostMicrousd;
       const totalTokens=Number(budgetRow.used_tokens)+Number(budgetRow.reserved_tokens)+Number(budgetRow.ambiguous_tokens)+reservedTokens;
@@ -6265,16 +6265,16 @@ export class EngineerLedger {
       if(!Number.isSafeInteger(totalTokens)||totalTokens>authority.tokenLimit){this.stopHardeningBudgetUnderLock(budgetRow,"TOKEN_CAP_REACHED",input.nowMs);return {error:new HardeningBudgetStoppedError("TOKEN_CAP_REACHED")} as const;}
       const createdAt=new Date(input.nowMs).toISOString();
       this.db.query(`INSERT INTO hardening_model_call_slots(id,schema_version,policy_version,child_run_id,role,model_tier,status,claimant_id,
-        idempotency_key,model_call_id,created_at,updated_at) VALUES(?,1,?,?,?,?,'CLAIMED',?,?,NULL,?,?)`).run(slotId,
-        HARDENING_MODEL_CALL_SLOT_POLICY_VERSION,input.childRunId,role,tier,input.agentExecutionId,input.reservationIdempotencyKey,createdAt,createdAt);
+        idempotency_key,model_call_id,created_at,updated_at,org_id) VALUES(?,1,?,?,?,?,'CLAIMED',?,?,NULL,?,?,?)`).run(slotId,
+        HARDENING_MODEL_CALL_SLOT_POLICY_VERSION,input.childRunId,role,tier,input.agentExecutionId,input.reservationIdempotencyKey,createdAt,createdAt,this.tenantOrgId);
       this.db.query(`INSERT INTO hardening_child_model_reservations(id,reservation_hash,schema_version,policy_version,authority_id,authority_hash,child_run_id,role,
         model_tier,resolved_model,routing_decision_id,agent_execution_id,expected_run_state,expected_state_version,paid_slot_id,input_token_upper_bound,output_token_ceiling,
         cache_policy_version,cache_accounting_version,static_prefix_hash,tool_schema_hash,prompt_cache_key_hash,cache_shard,cache_ttl_seconds,
         cache_breakpoint_count,reserved_cache_write_input_tokens,reserved_cached_input_tokens,uncached_input_microusd_per_million,
         cached_input_microusd_per_million,cache_write_input_microusd_per_million,output_microusd_per_million,reserved_tokens,
         reserved_cost_microusd,pricing_version,currency,reservation_idempotency_key,request_hash,client_request_id,
-        fence_owner_id,fence_token_hash,fence_generation,status,dispatch_status,created_at_ms)
-        VALUES(${Array.from({length:44},()=>"?").join(",")})`).run(reservation.reservationId,reservation.reservationHash,1,reservation.policyVersion,
+        fence_owner_id,fence_token_hash,fence_generation,status,dispatch_status,created_at_ms,org_id)
+        VALUES(${Array.from({length:45},()=>"?").join(",")})`).run(reservation.reservationId,reservation.reservationHash,1,reservation.policyVersion,
         reservation.budgetAuthorityId,reservation.budgetAuthorityHash,reservation.childRunId,reservation.role,reservation.modelTier,reservation.resolvedModel,
         reservation.routingDecisionId,reservation.agentExecutionId,reservation.expectedRunState,reservation.expectedStateVersion,
         reservation.paidCallSlotId,reservation.inputTokenUpperBound,reservation.outputTokenCeiling,
@@ -6284,13 +6284,13 @@ export class EngineerLedger {
         reservation.cacheWriteInputMicrousdPerMillion,reservation.outputMicrousdPerMillion,
         reservation.reservedTokens,reservation.reservedCostMicrousd,reservation.pricingVersion,"USD",input.reservationIdempotencyKey,
         reservation.requestHash,reservation.clientRequestId,input.fenceOwnerId,sha256(input.rawFenceToken),input.fenceGeneration,
-        "RESERVED","RESERVED_UNSENT",input.nowMs);
+        "RESERVED","RESERVED_UNSENT",input.nowMs,this.tenantOrgId);
       const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET reserved_cost_microusd=reserved_cost_microusd+?,
-        reserved_tokens=reserved_tokens+?,revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND status='ACTIVE'`)
-        .run(reservedCostMicrousd,reservedTokens,input.nowMs,input.childRunId,Number(budgetRow.revision));
+        reserved_tokens=reserved_tokens+?,revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND status='ACTIVE' AND org_id=?`)
+        .run(reservedCostMicrousd,reservedTokens,input.nowMs,input.childRunId,Number(budgetRow.revision),this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();
-      const slot=this.db.query("SELECT * FROM hardening_model_call_slots WHERE id=?").get(slotId) as Record<string,unknown>;
-      const persistedRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=?").get(reservation.reservationId) as Record<string,unknown>;
+      const slot=this.db.query("SELECT * FROM hardening_model_call_slots WHERE id=? AND org_id=?").get(slotId,this.tenantOrgId) as Record<string,unknown>;
+      const persistedRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND org_id=?").get(reservation.reservationId,this.tenantOrgId) as Record<string,unknown>;
       const persistedReservation=this.hardeningBudgetReservationFromRow(persistedRow);
       if(canonicalJson(persistedReservation)!==canonicalJson(reservation))throw new HardeningBudgetAuthorityInvalidError();
       return {value:{applied:true,claim:this.hardeningModelCallSlotFromRow(slot),reservation:persistedReservation}} as const;
@@ -6301,9 +6301,9 @@ export class EngineerLedger {
   markHardeningPaidCallDispatching(input:{childRunId:string;reservationId:string;requestHash:string;clientRequestId:string;
     fenceOwnerId:string;fenceGeneration:number;rawFenceToken:string;nowMs:number}):void{
     const decision=this.db.transaction(()=>{
-      const budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
-      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=?")
-        .get(input.reservationId,input.childRunId) as Record<string,unknown>|null;
+      const budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=? AND org_id=?")
+        .get(input.reservationId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!budget||!row)throw new HardeningBudgetAuthorityInvalidError();const reservation=this.hardeningBudgetReservationFromRow(row);
       if(reservation.requestHash!==input.requestHash||reservation.clientRequestId!==input.clientRequestId)
         throw new HardeningReservationConflictError();
@@ -6315,8 +6315,8 @@ export class EngineerLedger {
       if(row.status==="RESERVED"&&row.dispatch_status==="DISPATCHING")return;
       if(row.status!=="RESERVED"||row.dispatch_status!=="RESERVED_UNSENT")throw new HardeningReservationConflictError();
       const changed=this.db.query(`UPDATE hardening_child_model_reservations SET dispatch_status='DISPATCHING',dispatch_started_at_ms=?
-        WHERE id=? AND status='RESERVED' AND dispatch_status='RESERVED_UNSENT' AND dispatch_started_at_ms IS NULL`)
-        .run(input.nowMs,input.reservationId);
+        WHERE id=? AND status='RESERVED' AND dispatch_status='RESERVED_UNSENT' AND dispatch_started_at_ms IS NULL AND org_id=?`)
+        .run(input.nowMs,input.reservationId,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningReservationConflictError();
     });
     decision.immediate();
@@ -6326,7 +6326,7 @@ export class EngineerLedger {
     outcome:"VOID_UNSENT"|"AMBIGUOUS"|"SETTLED"|"SETTLED_RECOVERED";
     reconciliation:HardeningBudgetReconciliation;nowMs:number}):void{
     const binding=this.db.query(`SELECT role,agent_execution_id,expected_run_state,expected_state_version,reservation_hash,paid_slot_id
-      FROM hardening_child_model_reservations WHERE id=? AND child_run_id=?`).get(input.reservationId,input.childRunId) as
+      FROM hardening_child_model_reservations WHERE id=? AND child_run_id=? AND org_id=?`).get(input.reservationId,input.childRunId,this.tenantOrgId) as
       {role:"BUILDER"|"REVIEWER";agent_execution_id:string;expected_run_state:"IMPLEMENTING"|"REVIEWING";expected_state_version:number;
         reservation_hash:string;paid_slot_id:string}|null;
     if(!binding||binding.expected_run_state!==(binding.role==="BUILDER"?"IMPLEMENTING":"REVIEWING"))throw new HardeningBudgetAuthorityInvalidError();
@@ -6341,7 +6341,7 @@ export class EngineerLedger {
       reservationHash:binding.reservation_hash,reservationId:input.reservationId,role:binding.role,schemaVersion:1,terminalIntentId};
     const payloadJson=canonicalJson(payload),payloadHash=sha256(payload);
     const id=sha256({namespace:"engineer-hardening-paid-call-finalization-v1",reservationId:input.reservationId});
-    const existing=this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE reservation_id=?").get(input.reservationId) as Record<string,unknown>|null;
+    const existing=this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE reservation_id=? AND org_id=?").get(input.reservationId,this.tenantOrgId) as Record<string,unknown>|null;
     if(existing){
       if(existing.id!==id||existing.child_run_id!==input.childRunId||existing.outcome!==input.outcome||
         existing.reservation_hash!==binding.reservation_hash||existing.paid_slot_id!==binding.paid_slot_id||existing.terminal_intent_id!==terminalIntentId||
@@ -6350,11 +6350,11 @@ export class EngineerLedger {
       return;
     }
     this.db.query(`INSERT INTO hardening_paid_call_finalizations(id,reservation_id,reservation_hash,paid_slot_id,child_run_id,role,agent_execution_id,
-      expected_run_state,expected_state_version,terminal_intent_id,outcome,reconciliation_id,reconciliation_hash,payload_hash,payload_json,status,created_at_ms,updated_at_ms)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',?,?)`).run(id,input.reservationId,binding.reservation_hash,binding.paid_slot_id,
+      expected_run_state,expected_state_version,terminal_intent_id,outcome,reconciliation_id,reconciliation_hash,payload_hash,payload_json,status,created_at_ms,updated_at_ms,org_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'PENDING',?,?,?)`).run(id,input.reservationId,binding.reservation_hash,binding.paid_slot_id,
         input.childRunId,binding.role,binding.agent_execution_id,binding.expected_run_state,Number(binding.expected_state_version),terminalIntentId,
         input.outcome,input.reconciliation.reconciliationId,input.reconciliation.reconciliationHash,payloadHash,payloadJson,
-        input.nowMs,input.nowMs);
+        input.nowMs,input.nowMs,this.tenantOrgId);
   }
 
   private hardeningPaidCallFinalizationFromRow(row:Record<string,unknown>){
@@ -6367,8 +6367,8 @@ export class EngineerLedger {
       row.id!==sha256({namespace:"engineer-hardening-paid-call-finalization-v1",reservationId:payload.reservationId})||
       !["VOID_UNSENT","AMBIGUOUS","SETTLED","SETTLED_RECOVERED"].includes(payload.outcome)||
       !["PENDING","CLAIMED","APPLIED"].includes(String(row.status)))throw new HardeningBudgetAuthorityInvalidError();
-    const reservation=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=?")
-      .get(payload.reservationId) as Record<string,unknown>|null;
+    const reservation=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND org_id=?")
+      .get(payload.reservationId,this.tenantOrgId) as Record<string,unknown>|null;
     if(!reservation)throw new HardeningBudgetAuthorityInvalidError();
     const reservationAuthority=this.hardeningBudgetReservationFromRow(reservation);
     const reconciliation=this.hardeningBudgetReconciliationFromRow(reservation,reservationAuthority);
@@ -6393,9 +6393,9 @@ export class EngineerLedger {
 
   listOpenHardeningPaidCallReservations(childRunId?:string):Array<{childRunId:string;reservationId:string;dispatchStatus:string}>{
     const rows=(childRunId?this.db.query(`SELECT child_run_id,id,dispatch_status FROM hardening_child_model_reservations
-      WHERE child_run_id=? AND status='RESERVED' ORDER BY created_at_ms,id`).all(childRunId):
+      WHERE child_run_id=? AND status='RESERVED' AND org_id=? ORDER BY created_at_ms,id`).all(childRunId,this.tenantOrgId):
       this.db.query(`SELECT child_run_id,id,dispatch_status FROM hardening_child_model_reservations
-        WHERE status='RESERVED' ORDER BY created_at_ms,id`).all()) as Array<Record<string,unknown>>;
+        WHERE status='RESERVED' AND org_id=? ORDER BY created_at_ms,id`).all(this.tenantOrgId)) as Array<Record<string,unknown>>;
     return rows.map((row)=>({childRunId:String(row.child_run_id),reservationId:String(row.id),dispatchStatus:String(row.dispatch_status)}));
   }
 
@@ -6408,14 +6408,14 @@ export class EngineerLedger {
     this.getRun(childRunId);
     const row=this.db.query(`SELECT
       EXISTS(SELECT 1 FROM hardening_child_model_reservations
-        WHERE child_run_id=? AND status='RESERVED') OR
+        WHERE child_run_id=? AND status='RESERVED' AND org_id=?) OR
       EXISTS(SELECT 1 FROM hardening_paid_call_finalizations
-        WHERE child_run_id=? AND status IN ('PENDING','CLAIMED')) OR
+        WHERE child_run_id=? AND status IN ('PENDING','CLAIMED') AND org_id=?) OR
       EXISTS(SELECT 1 FROM agent_executions AS agent
         WHERE agent.run_id=? AND agent.status='RUNNING' AND agent.role IN ('BUILDER','REVIEWER')
           AND NOT EXISTS(SELECT 1 FROM hardening_child_model_reservations AS reservation
-            WHERE reservation.child_run_id=agent.run_id AND reservation.agent_execution_id=agent.id))
-      AS outstanding`).get(childRunId,childRunId,childRunId) as {outstanding:number}|null;
+            WHERE reservation.child_run_id=agent.run_id AND reservation.agent_execution_id=agent.id AND reservation.org_id=?))
+      AS outstanding`).get(childRunId,this.tenantOrgId,childRunId,this.tenantOrgId,childRunId,this.tenantOrgId) as {outstanding:number}|null;
     return Number(row?.outstanding)===1;
   }
 
@@ -6427,8 +6427,8 @@ export class EngineerLedger {
       throw new TypeError("invalid hardening recovery worker fence");
     return this.db.transaction(()=>{
       const tokenHash=sha256(input.rawWorkerLeaseToken);
-      const row=this.db.query("SELECT * FROM hardening_recovery_worker_fences WHERE child_run_id=?")
-        .get(input.childRunId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_recovery_worker_fences WHERE child_run_id=? AND org_id=?")
+        .get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       const exact=row&&row.worker_lease_id===input.workerLeaseId&&row.worker_owner_id===input.workerOwnerId&&
         Number(row.worker_fencing_token)===input.workerFencingToken&&row.worker_lease_token_hash===tokenHash;
       if(exact)return {childRunId:input.childRunId,workerLeaseId:input.workerLeaseId,workerOwnerId:input.workerOwnerId,
@@ -6438,13 +6438,13 @@ export class EngineerLedger {
       if(row){
         const changed=this.db.query(`UPDATE hardening_recovery_worker_fences SET worker_lease_id=?,worker_owner_id=?,
           worker_fencing_token=?,worker_lease_token_hash=?,claimed_at_ms=?,updated_at_ms=?
-          WHERE child_run_id=? AND worker_fencing_token=?`).run(input.workerLeaseId,input.workerOwnerId,input.workerFencingToken,
-            tokenHash,input.nowMs,input.nowMs,input.childRunId,Number(row.worker_fencing_token));
+          WHERE child_run_id=? AND worker_fencing_token=? AND org_id=?`).run(input.workerLeaseId,input.workerOwnerId,input.workerFencingToken,
+            tokenHash,input.nowMs,input.nowMs,input.childRunId,Number(row.worker_fencing_token),this.tenantOrgId);
         if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();
       }else{
         this.db.query(`INSERT INTO hardening_recovery_worker_fences(child_run_id,worker_lease_id,worker_owner_id,
-          worker_fencing_token,worker_lease_token_hash,claimed_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?)`)
-          .run(input.childRunId,input.workerLeaseId,input.workerOwnerId,input.workerFencingToken,tokenHash,input.nowMs,input.nowMs);
+          worker_fencing_token,worker_lease_token_hash,claimed_at_ms,updated_at_ms,org_id) VALUES(?,?,?,?,?,?,?,?)`)
+          .run(input.childRunId,input.workerLeaseId,input.workerOwnerId,input.workerFencingToken,tokenHash,input.nowMs,input.nowMs,this.tenantOrgId);
       }
       return {childRunId:input.childRunId,workerLeaseId:input.workerLeaseId,workerOwnerId:input.workerOwnerId,
         workerFencingToken:input.workerFencingToken,workerLeaseTokenHash:tokenHash,claimedAtMs:input.nowMs,updatedAtMs:input.nowMs};
@@ -6452,9 +6452,9 @@ export class EngineerLedger {
   }
 
   listPendingHardeningPaidCallFinalizations(childRunId?:string){
-    const rows=(childRunId?this.db.query(`SELECT * FROM hardening_paid_call_finalizations WHERE child_run_id=? AND status!='APPLIED'
-      ORDER BY created_at_ms,id`).all(childRunId):this.db.query(`SELECT * FROM hardening_paid_call_finalizations WHERE status!='APPLIED'
-      ORDER BY created_at_ms,id`).all()) as Array<Record<string,unknown>>;
+    const rows=(childRunId?this.db.query(`SELECT * FROM hardening_paid_call_finalizations WHERE child_run_id=? AND status!='APPLIED' AND org_id=?
+      ORDER BY created_at_ms,id`).all(childRunId,this.tenantOrgId):this.db.query(`SELECT * FROM hardening_paid_call_finalizations WHERE status!='APPLIED' AND org_id=?
+      ORDER BY created_at_ms,id`).all(this.tenantOrgId)) as Array<Record<string,unknown>>;
     return rows.map((row)=>{
       try{return this.hardeningPaidCallFinalizationFromRow(row);}
       catch(error){
@@ -6470,7 +6470,7 @@ export class EngineerLedger {
       !input.idempotencyKey||input.idempotencyKey.length>200||!Number.isSafeInteger(input.nowMs)||input.nowMs<0)
       throw new TypeError("invalid hardening finalization claim");
     return this.db.transaction(()=>{
-      const row=this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=?").get(input.finalizationId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=? AND org_id=?").get(input.finalizationId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)throw new HardeningBudgetAuthorityInvalidError();const current=this.hardeningPaidCallFinalizationFromRow(row);
       const exact=row.claim_owner_id===input.ownerId&&row.claim_token_hash===sha256(input.rawToken)&&row.claim_idempotency_key===input.idempotencyKey;
       if(current.status==="APPLIED"){
@@ -6479,12 +6479,12 @@ export class EngineerLedger {
       if(current.status==="CLAIMED"&&current.claimExpiresAtMs!>input.nowMs&&!exact)throw new HardeningExecutionFenceStaleError();
       if(current.status==="CLAIMED"&&exact&&current.claimExpiresAtMs!>input.nowMs)return current;
       const changed=this.db.query(`UPDATE hardening_paid_call_finalizations SET status='CLAIMED',claim_owner_id=?,claim_token_hash=?,
-        claim_generation=claim_generation+1,claim_idempotency_key=?,claim_expires_at_ms=?,updated_at_ms=? WHERE id=? AND status=? AND claim_generation=?`)
+        claim_generation=claim_generation+1,claim_idempotency_key=?,claim_expires_at_ms=?,updated_at_ms=? WHERE id=? AND status=? AND claim_generation=? AND org_id=?`)
         .run(input.ownerId,sha256(input.rawToken),input.idempotencyKey,input.nowMs+30_000,input.nowMs,input.finalizationId,
-          current.status,current.claimGeneration);
+          current.status,current.claimGeneration,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();
-      return this.hardeningPaidCallFinalizationFromRow(this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=?")
-        .get(input.finalizationId) as Record<string,unknown>);
+      return this.hardeningPaidCallFinalizationFromRow(this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=? AND org_id=?")
+        .get(input.finalizationId,this.tenantOrgId) as Record<string,unknown>);
     }).immediate();
   }
 
@@ -6493,7 +6493,7 @@ export class EngineerLedger {
       !input.idempotencyKey||input.idempotencyKey.length>200||!Number.isSafeInteger(input.nowMs)||input.nowMs<0)
       throw new TypeError("invalid hardening finalization application");
     return this.db.transaction(()=>{
-      const row=this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=?").get(input.finalizationId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=? AND org_id=?").get(input.finalizationId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!row)throw new HardeningBudgetAuthorityInvalidError();const current=this.hardeningPaidCallFinalizationFromRow(row);
       if(current.status==="APPLIED"){
         if(row.claim_owner_id!==input.ownerId||row.claim_token_hash!==sha256(input.rawToken)||row.claim_idempotency_key!==input.idempotencyKey)
@@ -6502,10 +6502,10 @@ export class EngineerLedger {
       if(current.status!=="CLAIMED"||row.claim_owner_id!==input.ownerId||row.claim_token_hash!==sha256(input.rawToken)||
         row.claim_idempotency_key!==input.idempotencyKey||current.claimExpiresAtMs!<=input.nowMs)throw new HardeningExecutionFenceStaleError();
       const changed=this.db.query(`UPDATE hardening_paid_call_finalizations SET status='APPLIED',applied_at_ms=?,updated_at_ms=?
-        WHERE id=? AND status='CLAIMED' AND claim_generation=?`).run(input.nowMs,input.nowMs,input.finalizationId,current.claimGeneration);
+        WHERE id=? AND status='CLAIMED' AND claim_generation=? AND org_id=?`).run(input.nowMs,input.nowMs,input.finalizationId,current.claimGeneration,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningExecutionFenceStaleError();
-      return this.hardeningPaidCallFinalizationFromRow(this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=?")
-        .get(input.finalizationId) as Record<string,unknown>);
+      return this.hardeningPaidCallFinalizationFromRow(this.db.query("SELECT * FROM hardening_paid_call_finalizations WHERE id=? AND org_id=?")
+        .get(input.finalizationId,this.tenantOrgId) as Record<string,unknown>);
     }).immediate();
   }
 
@@ -6516,9 +6516,9 @@ export class EngineerLedger {
     if(!strictReader)throw new HardeningBudgetAuthorityInvalidError();
     const record=this.normalizeHardeningModelCall(input.modelCall);
     const decision=this.db.transaction(()=>{
-      const budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
-      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=?")
-        .get(input.reservationId,input.childRunId) as Record<string,unknown>|null;
+      const budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=? AND org_id=?")
+        .get(input.reservationId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!budget||!row)throw new HardeningBudgetAuthorityInvalidError();const reservation=this.hardeningBudgetReservationFromRow(row);
       if(reservation.requestHash!==input.requestHash||reservation.clientRequestId!==input.clientRequestId||record.runId!==input.childRunId||
         record.agentExecutionId!==reservation.agentExecutionId||record.logicalTier!==reservation.modelTier||record.resolvedModel!==reservation.resolvedModel||
@@ -6554,8 +6554,8 @@ export class EngineerLedger {
       }catch(error){if(error instanceof HardeningBudgetAuthorityInvalidError)throw error;throw new HardeningBudgetAuthorityInvalidError();}
       this.recordModelCall(record,input.reservationId);
       const changed=this.db.query(`UPDATE hardening_child_model_reservations SET dispatch_status='RESPONSE_RECORDED',response_recorded_at_ms=?,
-        model_call_id=?,provider_response_id=?,provider_response_artifact_id=? WHERE id=? AND status='RESERVED' AND dispatch_status='DISPATCHING'`)
-        .run(input.nowMs,record.modelCallId,input.providerResponseId,input.providerResponseArtifactId,input.reservationId);
+        model_call_id=?,provider_response_id=?,provider_response_artifact_id=? WHERE id=? AND status='RESERVED' AND dispatch_status='DISPATCHING' AND org_id=?`)
+        .run(input.nowMs,record.modelCallId,input.providerResponseId,input.providerResponseArtifactId,input.reservationId,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningReservationConflictError();
     });
     decision.immediate();
@@ -6569,8 +6569,8 @@ export class EngineerLedger {
   voidHardeningPaidCallUnsent(input:{childRunId:string;reservationId:string;requestHash:string;clientRequestId:string;
     settlementIdempotencyKey:string;fenceOwnerId:string;fenceGeneration:number;rawFenceToken:string;nowMs:number}){
     return this.db.transaction(()=>{
-      const budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
-      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=?").get(input.reservationId,input.childRunId) as Record<string,unknown>|null;
+      const budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=? AND org_id=?").get(input.reservationId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!budget||!row)throw new HardeningBudgetAuthorityInvalidError();
       try{this.hardeningChildBudgetFromRow(budget);}
       catch(error){
@@ -6592,26 +6592,26 @@ export class EngineerLedger {
         throw new HardeningExecutionFenceStaleError();
       if(row.status!=="RESERVED"||row.dispatch_status!=="RESERVED_UNSENT")throw new HardeningReservationConflictError();
       const now=new Date(input.nowMs).toISOString();
-      const slot=this.db.query("UPDATE hardening_model_call_slots SET status='FAILED',updated_at=? WHERE id=? AND status='CLAIMED' AND model_call_id IS NULL")
-        .run(now,reservation.paidCallSlotId);if(slot.changes!==1)throw new HardeningReservationConflictError();
+      const slot=this.db.query("UPDATE hardening_model_call_slots SET status='FAILED',updated_at=? WHERE id=? AND status='CLAIMED' AND model_call_id IS NULL AND org_id=?")
+        .run(now,reservation.paidCallSlotId,this.tenantOrgId);if(slot.changes!==1)throw new HardeningReservationConflictError();
       const reconciliation=createHardeningBudgetReconciliation({schemaVersion:1,policyVersion:"engineer-hardening-budget-reconciliation-v1",
         childRunId:input.childRunId,reservationId:reservation.reservationId,reservationHash:reservation.reservationHash,status:"VOID_UNSENT",
         providerResponseId:null,modelCallId:null,actualInputTokens:null,actualOutputTokens:null,actualCachedInputTokens:null,
         actualCacheWriteInputTokens:null,cacheObservation:"UNKNOWN",actualCostMicrousd:null,createdAt:now});
       const changed=this.db.query(`UPDATE hardening_child_model_reservations SET status='VOID_UNSENT',dispatch_status='VOID_UNSENT',
         settlement_idempotency_key=?,settlement_input_hash=?,reconciliation_id=?,reconciliation_hash=?,reconciliation_json=?,settled_at_ms=?
-        WHERE id=? AND status='RESERVED' AND dispatch_status='RESERVED_UNSENT'`).run(input.settlementIdempotencyKey,
+        WHERE id=? AND status='RESERVED' AND dispatch_status='RESERVED_UNSENT' AND org_id=?`).run(input.settlementIdempotencyKey,
           sha256({settlementIdempotencyKey:input.settlementIdempotencyKey,outcome:"VOID_UNSENT"}),reconciliation.reconciliationId,
-          reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId);
+          reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningReservationConflictError();
       const budgetChanged=this.db.query(`UPDATE hardening_child_budget_authorities SET reserved_cost_microusd=reserved_cost_microusd-?,
         reserved_tokens=reserved_tokens-?,revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=?
-        AND reserved_cost_microusd>=? AND reserved_tokens>=?`).run(reservation.reservedCostMicrousd,reservation.reservedTokens,input.nowMs,
-          input.childRunId,Number(budget.revision),reservation.reservedCostMicrousd,reservation.reservedTokens);
+        AND reserved_cost_microusd>=? AND reserved_tokens>=? AND org_id=?`).run(reservation.reservedCostMicrousd,reservation.reservedTokens,input.nowMs,
+          input.childRunId,Number(budget.revision),reservation.reservedCostMicrousd,reservation.reservedTokens,this.tenantOrgId);
       if(budgetChanged.changes!==1)throw new HardeningReservationConflictError();
       this.recordHardeningPaidCallFinalizationUnderLock({childRunId:input.childRunId,reservationId:input.reservationId,
         outcome:"VOID_UNSENT",reconciliation,nowMs:input.nowMs});
-      const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>;
+      const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>;
       this.stopHardeningBudgetUnderLock(current,"MODEL_DISPATCH_NOT_STARTED",input.nowMs);
       return reconciliation;
     }).immediate();
@@ -6625,9 +6625,9 @@ export class EngineerLedger {
       !input.rawRecoveryToken||input.rawRecoveryToken.length>200||!Number.isSafeInteger(input.nowMs)||input.nowMs<0)
       throw new TypeError("invalid hardening recovery authority");
     const decision=this.db.transaction(()=>{
-      let budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
-      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=?")
-        .get(input.reservationId,input.childRunId) as Record<string,unknown>|null;
+      let budget=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
+      const row=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=? AND org_id=?")
+        .get(input.reservationId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!budget||!row)throw new DatabaseIntegrityCorruptionError(input.childRunId,input.reservationId);
       try{this.hardeningChildBudgetFromRow(budget);}
       catch(error){
@@ -6695,9 +6695,9 @@ export class EngineerLedger {
         const claimed=this.db.query(`UPDATE hardening_child_model_reservations SET recovery_owner_id=?,recovery_token_hash=?,
           recovery_generation=recovery_generation+1,recovery_idempotency_key=?,recovery_claimed_at_ms=?,recovery_expires_at_ms=?
           WHERE id=? AND status='RESERVED' AND recovery_generation=? AND
-            (recovery_generation=0 OR recovery_expires_at_ms<=?)`)
+            (recovery_generation=0 OR recovery_expires_at_ms<=?) AND org_id=?`)
           .run(input.recoveryOwnerId,sha256(input.rawRecoveryToken),input.recoveryIdempotencyKey,input.nowMs,input.nowMs+30_000,
-            input.reservationId,recoveryGeneration,input.nowMs);
+            input.reservationId,recoveryGeneration,input.nowMs,this.tenantOrgId);
         if(claimed.changes!==1)throw new HardeningReservationConflictError();
       }else if(!exactRecovery)throw new HardeningExecutionFenceStaleError();
       const now=new Date(input.nowMs).toISOString(),reservedCost=reservation.reservedCostMicrousd,reservedTokens=reservation.reservedTokens;
@@ -6708,27 +6708,27 @@ export class EngineerLedger {
             ? `reserved_cost_microusd=reserved_cost_microusd-?,reserved_tokens=reserved_tokens-?,ambiguous_cost_microusd=ambiguous_cost_microusd+${reservedCost},ambiguous_tokens=ambiguous_tokens+${reservedTokens}`
             : `reserved_cost_microusd=reserved_cost_microusd-?,reserved_tokens=reserved_tokens-?,used_cost_microusd=used_cost_microusd+${actualCost},used_tokens=used_tokens+${actualTokens}`;
         const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET ${update},revision=revision+1,updated_at_ms=?
-          WHERE child_run_id=? AND reserved_cost_microusd>=? AND reserved_tokens>=?`).run(reservedCost,reservedTokens,input.nowMs,
-            input.childRunId,reservedCost,reservedTokens);
+          WHERE child_run_id=? AND reserved_cost_microusd>=? AND reserved_tokens>=? AND org_id=?`).run(reservedCost,reservedTokens,input.nowMs,
+            input.childRunId,reservedCost,reservedTokens,this.tenantOrgId);
         if(changed.changes!==1)throw new HardeningReservationConflictError();
       };
       if(row.dispatch_status==="RESERVED_UNSENT"){
-        const slot=this.db.query("UPDATE hardening_model_call_slots SET status='FAILED',updated_at=? WHERE id=? AND status='CLAIMED' AND model_call_id IS NULL")
-          .run(now,reservation.paidCallSlotId);if(slot.changes!==1)throw new HardeningReservationConflictError();
+        const slot=this.db.query("UPDATE hardening_model_call_slots SET status='FAILED',updated_at=? WHERE id=? AND status='CLAIMED' AND model_call_id IS NULL AND org_id=?")
+          .run(now,reservation.paidCallSlotId,this.tenantOrgId);if(slot.changes!==1)throw new HardeningReservationConflictError();
         const reconciliation=createHardeningBudgetReconciliation({schemaVersion:1,policyVersion:"engineer-hardening-budget-reconciliation-v1",
           childRunId:input.childRunId,reservationId:reservation.reservationId,reservationHash:reservation.reservationHash,status:"VOID_UNSENT",
           providerResponseId:null,modelCallId:null,actualInputTokens:null,actualOutputTokens:null,actualCachedInputTokens:null,
           actualCacheWriteInputTokens:null,cacheObservation:"UNKNOWN",actualCostMicrousd:null,createdAt:now});
         const changed=this.db.query(`UPDATE hardening_child_model_reservations SET status='VOID_UNSENT',dispatch_status='VOID_UNSENT',
           settlement_idempotency_key=?,settlement_input_hash=?,reconciliation_id=?,reconciliation_hash=?,reconciliation_json=?,settled_at_ms=?
-          WHERE id=? AND status='RESERVED' AND dispatch_status='RESERVED_UNSENT'`).run(input.recoveryIdempotencyKey,
+          WHERE id=? AND status='RESERVED' AND dispatch_status='RESERVED_UNSENT' AND org_id=?`).run(input.recoveryIdempotencyKey,
             sha256({recoveryIdempotencyKey:input.recoveryIdempotencyKey,outcome:"VOID_UNSENT"}),reconciliation.reconciliationId,
-            reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId);
+            reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId,this.tenantOrgId);
         if(changed.changes!==1)throw new HardeningReservationConflictError();finalizeBudget("VOID");
         this.recordHardeningPaidCallFinalizationUnderLock({childRunId:input.childRunId,reservationId:input.reservationId,
           outcome:"VOID_UNSENT",reconciliation,nowMs:input.nowMs});
         if(budget.status==="ACTIVE"){
-          const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>;
+          const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>;
           this.stopHardeningBudgetUnderLock(current,"MODEL_DISPATCH_NOT_STARTED",input.nowMs);
         }
         return {outcome:"VOID_UNSENT" as const,reconciliation};
@@ -6743,22 +6743,22 @@ export class EngineerLedger {
           cacheHit:null,latencyMs:Math.max(0,input.nowMs-Number(row.dispatch_started_at_ms)),inputTokens:null,outputTokens:null,
           retryCount:0,status:"FAILED",createdAt:now});
         this.recordModelCall(modelCall,reservation.reservationId);
-        const slot=this.db.query("UPDATE hardening_model_call_slots SET status='AMBIGUOUS',model_call_id=?,updated_at=? WHERE id=? AND status='CLAIMED'")
-          .run(modelCall.modelCallId,now,reservation.paidCallSlotId);if(slot.changes!==1)throw new HardeningReservationConflictError();
+        const slot=this.db.query("UPDATE hardening_model_call_slots SET status='AMBIGUOUS',model_call_id=?,updated_at=? WHERE id=? AND status='CLAIMED' AND org_id=?")
+          .run(modelCall.modelCallId,now,reservation.paidCallSlotId,this.tenantOrgId);if(slot.changes!==1)throw new HardeningReservationConflictError();
         const reconciliation=createHardeningBudgetReconciliation({schemaVersion:1,policyVersion:"engineer-hardening-budget-reconciliation-v1",
           childRunId:input.childRunId,reservationId:reservation.reservationId,reservationHash:reservation.reservationHash,status:"AMBIGUOUS",
           providerResponseId:null,modelCallId:modelCall.modelCallId,actualInputTokens:null,actualOutputTokens:null,actualCachedInputTokens:null,
           actualCacheWriteInputTokens:null,cacheObservation:"UNKNOWN",actualCostMicrousd:null,createdAt:now});
         const changed=this.db.query(`UPDATE hardening_child_model_reservations SET status='AMBIGUOUS',dispatch_status='AMBIGUOUS',model_call_id=?,
           cache_observation='UNKNOWN',settlement_idempotency_key=?,settlement_input_hash=?,reconciliation_id=?,reconciliation_hash=?,reconciliation_json=?,settled_at_ms=?
-          WHERE id=? AND status='RESERVED' AND dispatch_status='DISPATCHING'`).run(modelCall.modelCallId,input.recoveryIdempotencyKey,
+          WHERE id=? AND status='RESERVED' AND dispatch_status='DISPATCHING' AND org_id=?`).run(modelCall.modelCallId,input.recoveryIdempotencyKey,
             sha256({recoveryIdempotencyKey:input.recoveryIdempotencyKey,outcome:"AMBIGUOUS"}),reconciliation.reconciliationId,
-            reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId);
+            reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId,this.tenantOrgId);
         if(changed.changes!==1)throw new HardeningReservationConflictError();finalizeBudget("AMBIGUOUS");
         this.recordHardeningPaidCallFinalizationUnderLock({childRunId:input.childRunId,reservationId:input.reservationId,
           outcome:"AMBIGUOUS",reconciliation,nowMs:input.nowMs});
         if(budget.status==="ACTIVE"){
-          const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>;
+          const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>;
           this.stopHardeningBudgetUnderLock(current,"MODEL_USAGE_AMBIGUOUS",input.nowMs);
         }
         return {outcome:"AMBIGUOUS" as const,reconciliation};
@@ -6835,7 +6835,7 @@ export class EngineerLedger {
         if(beforeCallCount.count!==1||beforeReservationCallCount.count!==1)throw new HardeningBudgetAuthorityInvalidError();
         const recoveryState=this.db.query(`SELECT recovery_generation,recovery_owner_id,recovery_token_hash,
           recovery_idempotency_key,recovery_claimed_at_ms,recovery_expires_at_ms
-          FROM hardening_child_model_reservations WHERE id=?`).get(input.reservationId) as Record<string,unknown>|null;
+          FROM hardening_child_model_reservations WHERE id=? AND org_id=?`).get(input.reservationId,this.tenantOrgId) as Record<string,unknown>|null;
         if(!recoveryState||recoveryState.recovery_owner_id!==input.recoveryOwnerId||
           recoveryState.recovery_idempotency_key!==input.recoveryIdempotencyKey||
           recoveryState.recovery_token_hash!==sha256(input.rawRecoveryToken))throw new HardeningBudgetAuthorityInvalidError();
@@ -6874,22 +6874,22 @@ export class EngineerLedger {
           failureCode:receiptFailureCode,observedSha256:observedReceiptSha256,observedSizeBytes:observedReceiptSizeBytes});
         const invalidReceiptInputHash=this.recoveredInvalidReceiptInputHash({recoveryIdempotencyKey:input.recoveryIdempotencyKey,
           observation:invalidReceiptObservation});
-        const slot=this.db.query("UPDATE hardening_model_call_slots SET status='AMBIGUOUS',model_call_id=?,updated_at=? WHERE id=? AND status='CLAIMED'")
-          .run(ambiguousModel!.modelCallId,now,reservation.paidCallSlotId);if(slot.changes!==1)throw new HardeningReservationConflictError();
+        const slot=this.db.query("UPDATE hardening_model_call_slots SET status='AMBIGUOUS',model_call_id=?,updated_at=? WHERE id=? AND status='CLAIMED' AND org_id=?")
+          .run(ambiguousModel!.modelCallId,now,reservation.paidCallSlotId,this.tenantOrgId);if(slot.changes!==1)throw new HardeningReservationConflictError();
         const reconciliation=createHardeningBudgetReconciliation({schemaVersion:1,policyVersion:"engineer-hardening-budget-reconciliation-v1",
           childRunId:input.childRunId,reservationId:reservation.reservationId,reservationHash:reservation.reservationHash,status:"AMBIGUOUS",
           providerResponseId:null,modelCallId:ambiguousModel!.modelCallId,actualInputTokens:null,actualOutputTokens:null,actualCachedInputTokens:null,
           actualCacheWriteInputTokens:null,cacheObservation:"UNKNOWN",actualCostMicrousd:null,invalidReceiptObservation,createdAt:now});
         const changed=this.db.query(`UPDATE hardening_child_model_reservations SET status='AMBIGUOUS',dispatch_status='AMBIGUOUS',model_call_id=?,
           cache_observation='UNKNOWN',settlement_idempotency_key=?,settlement_input_hash=?,reconciliation_id=?,reconciliation_hash=?,reconciliation_json=?,settled_at_ms=?
-          WHERE id=? AND status='RESERVED' AND dispatch_status='RESPONSE_RECORDED'`).run(ambiguousModel!.modelCallId,input.recoveryIdempotencyKey,
+          WHERE id=? AND status='RESERVED' AND dispatch_status='RESPONSE_RECORDED' AND org_id=?`).run(ambiguousModel!.modelCallId,input.recoveryIdempotencyKey,
             invalidReceiptInputHash,reconciliation.reconciliationId,
-            reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId);
+            reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId,this.tenantOrgId);
         if(changed.changes!==1)throw new HardeningReservationConflictError();finalizeBudget("AMBIGUOUS");
         this.recordHardeningPaidCallFinalizationUnderLock({childRunId:input.childRunId,reservationId:input.reservationId,
           outcome:"AMBIGUOUS",reconciliation,nowMs:input.nowMs});
         if(budget.status==="ACTIVE"){
-          const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>;
+          const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>;
           this.stopHardeningBudgetUnderLock(current,"MODEL_USAGE_AMBIGUOUS",input.nowMs);
         }
         return {outcome:"AMBIGUOUS" as const,reconciliation};
@@ -6900,8 +6900,8 @@ export class EngineerLedger {
         uncachedInputMicrousdPerMillion:reservation.uncachedInputMicrousdPerMillion,cachedInputMicrousdPerMillion:reservation.cachedInputMicrousdPerMillion,
         cacheWriteInputMicrousdPerMillion:reservation.cacheWriteInputMicrousdPerMillion,outputMicrousdPerMillion:reservation.outputMicrousdPerMillion});
       const observation=cached>0&&write>0?"MIXED":cached>0?"HIT":write>0?"WRITE":"MISS";
-      const slot=this.db.query("UPDATE hardening_model_call_slots SET status='COMPLETED',model_call_id=?,updated_at=? WHERE id=? AND status='CLAIMED' AND model_call_id IS NULL")
-        .run(settledModel.modelCallId,now,reservation.paidCallSlotId);if(slot.changes!==1)throw new HardeningReservationConflictError();
+      const slot=this.db.query("UPDATE hardening_model_call_slots SET status='COMPLETED',model_call_id=?,updated_at=? WHERE id=? AND status='CLAIMED' AND model_call_id IS NULL AND org_id=?")
+        .run(settledModel.modelCallId,now,reservation.paidCallSlotId,this.tenantOrgId);if(slot.changes!==1)throw new HardeningReservationConflictError();
       const reconciliation=createHardeningBudgetReconciliation({schemaVersion:1,policyVersion:"engineer-hardening-budget-reconciliation-v1",
         childRunId:input.childRunId,reservationId:reservation.reservationId,reservationHash:reservation.reservationHash,status:"SETTLED",
         providerResponseId:String(row.provider_response_id),modelCallId:settledModel.modelCallId,actualInputTokens:actualInput,actualOutputTokens:actualOutput,
@@ -6909,10 +6909,10 @@ export class EngineerLedger {
       const changed=this.db.query(`UPDATE hardening_child_model_reservations SET status='SETTLED',dispatch_status='SETTLED',
         actual_input_tokens=?,actual_uncached_input_tokens=?,actual_output_tokens=?,actual_cached_input_tokens=?,actual_cache_write_input_tokens=?,
         cache_observation=?,settled_cost_microusd=?,settlement_idempotency_key=?,settlement_input_hash=?,reconciliation_id=?,reconciliation_hash=?,
-        reconciliation_json=?,settled_at_ms=? WHERE id=? AND status='RESERVED' AND dispatch_status='RESPONSE_RECORDED'`)
+        reconciliation_json=?,settled_at_ms=? WHERE id=? AND status='RESERVED' AND dispatch_status='RESPONSE_RECORDED' AND org_id=?`)
         .run(actualInput,actualInput-cached-write,actualOutput,cached,write,observation,actualCost,input.recoveryIdempotencyKey,
           sha256({recoveryIdempotencyKey:input.recoveryIdempotencyKey,outcome:"SETTLED_RECOVERED"}),reconciliation.reconciliationId,
-          reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId);
+          reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningReservationConflictError();finalizeBudget("SETTLED",actualCost,actualInput+actualOutput);
       this.recordHardeningPaidCallFinalizationUnderLock({childRunId:input.childRunId,reservationId:input.reservationId,
         outcome:"SETTLED_RECOVERED",reconciliation,nowMs:input.nowMs});
@@ -6933,9 +6933,9 @@ export class EngineerLedger {
     const settlementInputHash=sha256({modelCall:record,providerResponseId:input.providerResponseId,
       providerResponseArtifactId:input.providerResponseArtifactId,settlementIdempotencyKey:input.settlementIdempotencyKey});
     const decision=this.db.transaction(()=>{
-      const budgetRow=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>|null;
-      const reservation=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=?")
-        .get(input.reservationId,input.childRunId) as Record<string,unknown>|null;
+      const budgetRow=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
+      const reservation=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND child_run_id=? AND org_id=?")
+        .get(input.reservationId,input.childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!budgetRow||!reservation)throw new HardeningBudgetAuthorityInvalidError();this.hardeningChildBudgetFromRow(budgetRow);
       const reservationAuthority=this.hardeningBudgetReservationFromRow(reservation);
       const expectedPromptVersion=reservationAuthority.role==="BUILDER"?"engineer-codex-builder-v3":"engineer-isolated-reviewer-v6";
@@ -7020,7 +7020,7 @@ export class EngineerLedger {
       if(!responseRecorded)this.recordModelCall(persistedModelCall,input.reservationId);
       const slotStatus=ambiguous?"AMBIGUOUS":"COMPLETED";const now=new Date(input.nowMs).toISOString();
       const slotChange=this.db.query(`UPDATE hardening_model_call_slots SET status=?,model_call_id=?,updated_at=?
-        WHERE id=? AND child_run_id=? AND status='CLAIMED'`).run(slotStatus,record.modelCallId,now,String(reservation.paid_slot_id),input.childRunId);
+        WHERE id=? AND child_run_id=? AND status='CLAIMED' AND org_id=?`).run(slotStatus,record.modelCallId,now,String(reservation.paid_slot_id),input.childRunId,this.tenantOrgId);
       if(slotChange.changes!==1)throw new HardeningReservationConflictError();
       const reservedCost=Number(reservation.reserved_cost_microusd),reservedTokens=Number(reservation.reserved_tokens);
       if(ambiguous){
@@ -7031,18 +7031,18 @@ export class EngineerLedger {
           actualCacheWriteInputTokens:null,cacheObservation:"UNKNOWN",actualCostMicrousd:null,createdAt:now});
         this.db.query(`UPDATE hardening_child_model_reservations SET status='AMBIGUOUS',dispatch_status='AMBIGUOUS',model_call_id=?,provider_response_id=?,provider_response_artifact_id=?,
           cache_observation='UNKNOWN',settlement_idempotency_key=?,settlement_input_hash=?,reconciliation_id=?,reconciliation_hash=?,reconciliation_json=?,
-          settled_at_ms=? WHERE id=? AND status='RESERVED' AND dispatch_status=?`).run(record.modelCallId,input.providerResponseId,input.providerResponseArtifactId,
+          settled_at_ms=? WHERE id=? AND status='RESERVED' AND dispatch_status=? AND org_id=?`).run(record.modelCallId,input.providerResponseId,input.providerResponseArtifactId,
           input.settlementIdempotencyKey,settlementInputHash,reconciliation.reconciliationId,
           reconciliation.reconciliationHash,canonicalJson(reconciliation),input.nowMs,input.reservationId,
-          responseRecorded?"RESPONSE_RECORDED":"DISPATCHING");
+          responseRecorded?"RESPONSE_RECORDED":"DISPATCHING",this.tenantOrgId);
         const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET reserved_cost_microusd=reserved_cost_microusd-?,
           reserved_tokens=reserved_tokens-?,ambiguous_cost_microusd=ambiguous_cost_microusd+?,ambiguous_tokens=ambiguous_tokens+?,
-          revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND reserved_cost_microusd>=? AND reserved_tokens>=?`)
-          .run(reservedCost,reservedTokens,liabilityCost,liabilityTokens,input.nowMs,input.childRunId,Number(budgetRow.revision),reservedCost,reservedTokens);
+          revision=revision+1,updated_at_ms=? WHERE child_run_id=? AND revision=? AND reserved_cost_microusd>=? AND reserved_tokens>=? AND org_id=?`)
+          .run(reservedCost,reservedTokens,liabilityCost,liabilityTokens,input.nowMs,input.childRunId,Number(budgetRow.revision),reservedCost,reservedTokens,this.tenantOrgId);
         if(changed.changes!==1)throw new HardeningReservationConflictError();
-        const ambiguousRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=?").get(input.reservationId) as Record<string,unknown>;
+        const ambiguousRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND org_id=?").get(input.reservationId,this.tenantOrgId) as Record<string,unknown>;
         this.hardeningBudgetReconciliationFromRow(ambiguousRow,this.hardeningBudgetReservationFromRow(ambiguousRow));
-        const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=?").get(input.childRunId) as Record<string,unknown>;
+        const current=this.db.query("SELECT * FROM hardening_child_budget_authorities WHERE child_run_id=? AND org_id=?").get(input.childRunId,this.tenantOrgId) as Record<string,unknown>;
         const reason=boundViolation?"MODEL_USAGE_BOUND_VIOLATION":"MODEL_USAGE_AMBIGUOUS";this.stopHardeningBudgetUnderLock(current,reason,input.nowMs);
         this.recordHardeningPaidCallFinalizationUnderLock({childRunId:input.childRunId,reservationId:input.reservationId,
           outcome:"AMBIGUOUS",reconciliation,nowMs:input.nowMs});
@@ -7065,17 +7065,17 @@ export class EngineerLedger {
       const reservationChange=this.db.query(`UPDATE hardening_child_model_reservations SET status='SETTLED',dispatch_status='SETTLED',model_call_id=?,provider_response_id=?,provider_response_artifact_id=?,
         actual_input_tokens=?,actual_uncached_input_tokens=?,actual_output_tokens=?,actual_cached_input_tokens=?,actual_cache_write_input_tokens=?,cache_observation=?,
         settled_cost_microusd=?,settlement_idempotency_key=?,settlement_input_hash=?,reconciliation_id=?,reconciliation_hash=?,reconciliation_json=?,settled_at_ms=?
-        WHERE id=? AND status='RESERVED' AND dispatch_status='RESPONSE_RECORDED'`).run(record.modelCallId,input.providerResponseId,input.providerResponseArtifactId,
+        WHERE id=? AND status='RESERVED' AND dispatch_status='RESPONSE_RECORDED' AND org_id=?`).run(record.modelCallId,input.providerResponseId,input.providerResponseArtifactId,
         actualInputTokens,actualUncachedInputTokens,actualOutputTokens,actualCachedInputTokens,actualCacheWriteInputTokens,cacheObservation,actualCost,
         input.settlementIdempotencyKey,settlementInputHash,reconciliation.reconciliationId,reconciliation.reconciliationHash,canonicalJson(reconciliation),
-        input.nowMs,input.reservationId);
+        input.nowMs,input.reservationId,this.tenantOrgId);
       if(reservationChange.changes!==1)throw new HardeningReservationConflictError();
-      const settledRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=?").get(input.reservationId) as Record<string,unknown>;
+      const settledRow=this.db.query("SELECT * FROM hardening_child_model_reservations WHERE id=? AND org_id=?").get(input.reservationId,this.tenantOrgId) as Record<string,unknown>;
       this.hardeningBudgetReconciliationFromRow(settledRow,this.hardeningBudgetReservationFromRow(settledRow));
       const changed=this.db.query(`UPDATE hardening_child_budget_authorities SET reserved_cost_microusd=reserved_cost_microusd-?,
         reserved_tokens=reserved_tokens-?,used_cost_microusd=used_cost_microusd+?,used_tokens=used_tokens+?,revision=revision+1,updated_at_ms=?
-        WHERE child_run_id=? AND revision=? AND reserved_cost_microusd>=? AND reserved_tokens>=?`).run(reservedCost,reservedTokens,actualCost,
-        actualInputTokens+actualOutputTokens,input.nowMs,input.childRunId,Number(budgetRow.revision),reservedCost,reservedTokens);
+        WHERE child_run_id=? AND revision=? AND reserved_cost_microusd>=? AND reserved_tokens>=? AND org_id=?`).run(reservedCost,reservedTokens,actualCost,
+        actualInputTokens+actualOutputTokens,input.nowMs,input.childRunId,Number(budgetRow.revision),reservedCost,reservedTokens,this.tenantOrgId);
       if(changed.changes!==1)throw new HardeningReservationConflictError();
       this.recordHardeningPaidCallFinalizationUnderLock({childRunId:input.childRunId,reservationId:input.reservationId,
         outcome:"SETTLED",reconciliation,nowMs:input.nowMs});
@@ -7088,16 +7088,16 @@ export class EngineerLedger {
     attestor:CheckpointAttestor):Promise<OptionalHardeningStartPreparation>{
     const input=HardeningStartRequestSchema.parse(rawInput);if(!this.db.query("SELECT 1 FROM engineer_runs WHERE id=? AND org_id=? AND user_id=?").get(childRunId,this.tenantOrgId,ownerId))
       throw new EngineerNotFoundError("hardening child",childRunId);
-    const existingRow=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
+    const existingRow=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as Record<string,unknown>|null;
     const signedParent=await this.signedHardeningParent(parentRunId,attestor);this.db.exec("BEGIN IMMEDIATE");
     try{const checkpoint=this.assertSignedHardeningParent(parentRunId,signedParent);
-      if(existingRow){const current=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
+      if(existingRow){const current=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as Record<string,unknown>|null;
         if(!current)throw new HardeningAuthorityInvalidError();const operation=this.hardeningStartOperationFromRow(current);
         if(operation.requesterUserId!==ownerId||operation.expectedChildStateVersion!==input.expectedChildStateVersion||operation.lineageId!==input.lineageId||
           operation.lineageHash!==input.lineageHash||operation.idempotencyKey!==input.idempotencyKey)throw new IdempotencyConflictError(childRunId,input.idempotencyKey);
         const preparation=this.optionalHardeningStartPreparationUnderLock(ownerId,parentRunId,childRunId,input,checkpoint,false,operation.createdAt);
         if(canonicalJson(preparation.operation)!==canonicalJson(operation))throw new HardeningAuthorityInvalidError();
-        const seedRow=this.db.query("SELECT * FROM hardening_seed_attestations WHERE operation_id=? AND operation_hash=?").get(operation.operationId,operation.operationHash) as Record<string,unknown>|null;
+        const seedRow=this.db.query("SELECT * FROM hardening_seed_attestations WHERE operation_id=? AND operation_hash=? AND org_id=?").get(operation.operationId,operation.operationHash,this.tenantOrgId) as Record<string,unknown>|null;
         if(!seedRow)throw new HardeningAuthorityInvalidError();const signedSeed=this.hardeningSeedFromRow(seedRow);this.db.exec("COMMIT");
         await verifySignedHardeningSeedAttestation(signedSeed,attestor);return {...preparation,replay:true,signedSeed};}
       const preparation=this.optionalHardeningStartPreparationUnderLock(ownerId,parentRunId,childRunId,input,checkpoint,true,this.now().toISOString());
@@ -7114,14 +7114,14 @@ export class EngineerLedger {
     const input=HardeningStartRequestSchema.parse(rawInput),operation=HardeningStartOperationSchema.parse(expectedOperation);
     const signedSeed=await verifySignedHardeningSeedAttestation(rawSignedSeed,attestor);const signedParent=await this.signedHardeningParent(parentRunId,attestor);
     this.db.exec("BEGIN IMMEDIATE");try{const checkpoint=this.assertSignedHardeningParent(parentRunId,signedParent);
-      const existing=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=?").get(childRunId) as Record<string,unknown>|null;
-      if(existing){const existingClaim=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=?")
-          .get(fence.claimId,childRunId) as Record<string,unknown>|null;
+      const existing=this.db.query("SELECT * FROM hardening_start_operations WHERE child_run_id=? AND org_id=?").get(childRunId,this.tenantOrgId) as Record<string,unknown>|null;
+      if(existing){const existingClaim=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=? AND org_id=?")
+          .get(fence.claimId,childRunId,this.tenantOrgId) as Record<string,unknown>|null;
         if(!existingClaim||this.hardeningStartFenceFromRow(existingClaim).status!=="FINALIZED")throw new HardeningStartFenceStaleError();
         this.db.exec("COMMIT");return this.prepareOptionalHardeningStartForOwner(ownerId,parentRunId,childRunId,input,attestor);}
       const preparation=this.optionalHardeningStartPreparationUnderLock(ownerId,parentRunId,childRunId,input,checkpoint,true,operation.createdAt);
       if(canonicalJson(preparation.operation)!==canonicalJson(operation))throw new HardeningAuthorityInvalidError();const seed=signedSeed.attestation;
-      const claimRow=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=?").get(fence.claimId,childRunId) as Record<string,unknown>|null;
+      const claimRow=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=? AND org_id=?").get(fence.claimId,childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!claimRow)throw new HardeningStartFenceStaleError();const activeFence=this.hardeningStartFenceFromRow(claimRow);const fenceNow=this.now().toISOString();
       if(activeFence.status!=="PREPARING"||activeFence.fenceToken!==fence.fenceToken||activeFence.generation!==fence.generation||
         activeFence.leaseExpiresAt<fenceNow||claimRow.intended_operation_id!==operation.operationId||claimRow.intended_operation_hash!==operation.operationHash)
@@ -7133,20 +7133,20 @@ export class EngineerLedger {
         seed.baseCommitSha!==checkpoint.baseCommitSha||seed.seedResultCommitSha!==checkpoint.resultCommitSha||seed.seedDiffHash!==checkpoint.diffHash||
         seed.environmentDigest!==checkpoint.environmentDigest||seed.createdAt!==operation.createdAt)throw new HardeningAuthorityInvalidError();
       this.db.query(`INSERT INTO hardening_start_operations(id,operation_hash,schema_version,policy_version,requester_user_id,child_run_id,
-        expected_child_state_version,lineage_id,lineage_hash,idempotency_key,operation_json,created_at) VALUES(?,?,1,?,?,?,?,?,?,?,?,?)`).run(
+        expected_child_state_version,lineage_id,lineage_hash,idempotency_key,operation_json,created_at,org_id) VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?)`).run(
         operation.operationId,operation.operationHash,operation.policyVersion,operation.requesterUserId,operation.childRunId,
-        operation.expectedChildStateVersion,operation.lineageId,operation.lineageHash,operation.idempotencyKey,canonicalJson(operation),operation.createdAt);
+        operation.expectedChildStateVersion,operation.lineageId,operation.lineageHash,operation.idempotencyKey,canonicalJson(operation),operation.createdAt,this.tenantOrgId);
       this.db.query(`INSERT INTO hardening_seed_attestations(id,seed_attestation_hash,schema_version,policy_version,attestation_type,operation_id,
         operation_hash,root_run_id,parent_run_id,child_run_id,requester_user_id,repository_id,lineage_id,lineage_hash,parent_checkpoint_id,
         parent_checkpoint_hash,base_commit_sha,seed_result_commit_sha,seed_tree_hash,seed_diff_hash,image_digest,environment_digest,dependency_hash,
-        attestation_json,statement_json,statement_hash,signature_algorithm,signature_key_id,signature,created_at)
-        VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(seed.seedAttestationId,seed.seedAttestationHash,seed.policyVersion,
+        attestation_json,statement_json,statement_hash,signature_algorithm,signature_key_id,signature,created_at,org_id)
+        VALUES(?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(seed.seedAttestationId,seed.seedAttestationHash,seed.policyVersion,
         seed.attestationType,seed.operationId,seed.operationHash,seed.rootRunId,seed.parentRunId,seed.childRunId,seed.requesterUserId,seed.repositoryId,
         seed.lineageId,seed.lineageHash,seed.parentCheckpointId,seed.parentCheckpointHash,seed.baseCommitSha,seed.seedResultCommitSha,seed.seedTreeHash,
         seed.seedDiffHash,seed.imageDigest,seed.environmentDigest,seed.dependencyHash,canonicalJson(seed),signedSeed.statementJson,signedSeed.statementHash,
-        signedSeed.algorithm,signedSeed.keyId,signedSeed.signature,seed.createdAt);
-      const advisories=this.assertDeterministicQuoteAuthority(this.hardeningQuoteFromRow(this.db.query("SELECT * FROM hardening_quotes WHERE id=?")
-        .get(preparation.lineage.quoteId) as Record<string,unknown>),checkpoint,true);
+        signedSeed.algorithm,signedSeed.keyId,signedSeed.signature,seed.createdAt,this.tenantOrgId);
+      const advisories=this.assertDeterministicQuoteAuthority(this.hardeningQuoteFromRow(this.db.query("SELECT * FROM hardening_quotes WHERE id=? AND org_id=?")
+        .get(preparation.lineage.quoteId,this.tenantOrgId) as Record<string,unknown>),checkpoint,true);
       const insertAdvisoryEvent=(event:AdvisoryBacklogEvent)=>this.db.query(`INSERT INTO advisory_backlog_events(id,event_hash,schema_version,policy_version,
         advisory_id,parent_run_id,parent_checkpoint_id,parent_checkpoint_hash,event_type,revision,expected_revision,actor_type,actor_id,operation_id,
         idempotency_key,quote_id,consent_id,hardening_lineage_id,child_run_id,child_checkpoint_id,child_checkpoint_hash,stop_reason,rationale,event_json,created_at)
@@ -7172,11 +7172,11 @@ export class EngineerLedger {
       const finalizedAt=this.now().toISOString();const finalizedChange=this.db.query(`UPDATE hardening_start_claims SET status='FINALIZED',
         finalized_operation_id=?,finalized_operation_hash=?,seed_attestation_id=?,seed_attestation_hash=?,sandbox_id=?,updated_at=?
         WHERE id=? AND child_run_id=? AND status='PREPARING' AND fence_token=? AND generation=? AND lease_expires_at>=?
-        AND intended_operation_id=? AND intended_operation_hash=?`).run(operation.operationId,operation.operationHash,seed.seedAttestationId,
+        AND intended_operation_id=? AND intended_operation_hash=? AND org_id=?`).run(operation.operationId,operation.operationHash,seed.seedAttestationId,
           seed.seedAttestationHash,sandboxId,finalizedAt,fence.claimId,childRunId,fence.fenceToken,fence.generation,finalizedAt,
-          operation.operationId,operation.operationHash);
+          operation.operationId,operation.operationHash,this.tenantOrgId);
       if(finalizedChange.changes!==1)throw new HardeningStartFenceStaleError();
-      const finalizedRow=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=?").get(fence.claimId,childRunId) as Record<string,unknown>|null;
+      const finalizedRow=this.db.query("SELECT * FROM hardening_start_claims WHERE id=? AND child_run_id=? AND org_id=?").get(fence.claimId,childRunId,this.tenantOrgId) as Record<string,unknown>|null;
       if(!finalizedRow)throw new HardeningStartFenceStaleError();const finalized=this.hardeningStartFenceFromRow(finalizedRow);
       if(finalized.status!=="FINALIZED"||finalized.fenceToken!==fence.fenceToken||finalized.generation!==fence.generation||
         finalized.finalizedOperationId!==operation.operationId||finalized.finalizedOperationHash!==operation.operationHash||
