@@ -1577,14 +1577,14 @@ export class EngineerLedger {
         .all(runId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "review_findings") {
-      return this.db.query(`SELECT f.* FROM review_findings f JOIN reviewer_sessions s ON s.id = f.reviewer_session_id WHERE s.run_id = ? ORDER BY f.rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+      return this.db.query(`SELECT f.* FROM review_findings f JOIN reviewer_sessions s ON s.id = f.reviewer_session_id AND s.org_id = f.org_id WHERE s.run_id = ? AND s.org_id = ? ORDER BY f.rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "review_finding_classifications") {
       return this.db.query(`SELECT c.* FROM review_finding_classifications c
-        JOIN reviewer_sessions s ON s.id = c.reviewer_session_id
-        WHERE s.run_id = ? ORDER BY c.rowid LIMIT ? OFFSET ?`)
-        .all(runId, limit, offset) as Array<Record<string, unknown>>;
+        JOIN reviewer_sessions s ON s.id = c.reviewer_session_id AND s.org_id = c.org_id
+        WHERE s.run_id = ? AND s.org_id = ? ORDER BY c.rowid LIMIT ? OFFSET ?`)
+        .all(runId, this.tenantOrgId, limit, offset) as Array<Record<string, unknown>>;
     }
     if (table === "advisory_backlog_items" || table === "hardening_quotes" || table === "hardening_quote_requests" || table === "hardening_consents" || table === "advisory_backlog_events") {
       return this.db.query(`SELECT * FROM ${table} WHERE parent_run_id = ? AND org_id = ? ORDER BY rowid LIMIT ? OFFSET ?`)
@@ -3091,22 +3091,22 @@ export class EngineerLedger {
       this.db.query(`INSERT INTO reviewer_sessions
         (id, run_id, attempt, model_tier, resolved_model, input_hash, manifest_hash, diff_hash,
          evidence_bundle_hash, policy_version, cache_key, cache_hit, cache_observed, started_at, completed_at,
-         decision, isolation_verified)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+         decision, isolation_verified, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         parsed.reviewerSessionId, parsed.runId, parsed.attempt, parsed.modelTier, parsed.resolvedModel,
         parsed.inputHash, parsed.manifestHash, parsed.diffHash, parsed.evidenceBundleHash,
         parsed.policyVersion, parsed.cacheKey, parsed.cacheHit ? 1 : 0, parsed.cacheHit === null ? 0 : 1, parsed.startedAt,
-        parsed.completedAt, parsed.decision, parsed.isolationVerified ? 1 : 0,
+        parsed.completedAt, parsed.decision, parsed.isolationVerified ? 1 : 0, this.tenantOrgId,
       );
       const statement = this.db.query(`INSERT INTO review_findings
         (id, reviewer_session_id, fingerprint, severity, category, file, line_start, line_end,
-         description, required_change, criterion_ids_json, evidence_ids_json, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+         description, required_change, criterion_ids_json, evidence_ids_json, status, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const finding of parsedFindings) {
         statement.run(
           finding.findingId, finding.reviewerSessionId, finding.fingerprint, finding.severity,
           finding.category, finding.file, finding.lineStart, finding.lineEnd, finding.description,
-          finding.requiredChange, canonicalJson(finding.criterionIds), canonicalJson(finding.evidenceIds), finding.status,
+          finding.requiredChange, canonicalJson(finding.criterionIds), canonicalJson(finding.evidenceIds), finding.status, this.tenantOrgId,
         );
       }
       this.insertAudit(parsed.runId, "REVIEWER_SESSION_COMPLETED", "AGENT", parsed.reviewerSessionId, {
@@ -3161,8 +3161,8 @@ export class EngineerLedger {
     const transact = this.db.transaction(() => {
       const persistedReplay = this.db.query(`SELECT reviewer_session_id, batch_json, reviewer_input_json,
         normalized_output_json FROM review_classification_batches
-        WHERE reviewer_session_id = ? OR classification_hash = ?`).get(
-          parsed.reviewerSessionId, batch.classificationHash,
+        WHERE (reviewer_session_id = ? OR classification_hash = ?) AND org_id = ?`).get(
+          parsed.reviewerSessionId, batch.classificationHash, this.tenantOrgId,
         ) as {
           reviewer_session_id: string; batch_json: string; reviewer_input_json: string;
           normalized_output_json: string;
@@ -3245,8 +3245,8 @@ export class EngineerLedger {
       }
       const existingBatch = this.db.query(`SELECT reviewer_session_id, batch_json
         FROM review_classification_batches
-        WHERE reviewer_session_id = ? OR classification_hash = ?`).get(
-          parsed.reviewerSessionId, batch.classificationHash,
+        WHERE (reviewer_session_id = ? OR classification_hash = ?) AND org_id = ?`).get(
+          parsed.reviewerSessionId, batch.classificationHash, this.tenantOrgId,
         ) as { reviewer_session_id: string; batch_json: string } | null;
       if (existingBatch) {
         if (existingBatch.reviewer_session_id !== parsed.reviewerSessionId || existingBatch.batch_json !== batchJson) {
@@ -3254,51 +3254,51 @@ export class EngineerLedger {
         }
         return batch;
       }
-      const existingSession = this.db.query("SELECT id FROM reviewer_sessions WHERE id = ? OR (run_id = ? AND (attempt = ? OR input_hash = ?))")
-        .get(parsed.reviewerSessionId, parsed.runId, parsed.attempt, parsed.inputHash) as { id: string } | null;
+      const existingSession = this.db.query("SELECT id FROM reviewer_sessions WHERE (id = ? OR (run_id = ? AND (attempt = ? OR input_hash = ?))) AND org_id = ?")
+        .get(parsed.reviewerSessionId, parsed.runId, parsed.attempt, parsed.inputHash, this.tenantOrgId) as { id: string } | null;
       if (existingSession) {
         throw new IdempotencyConflictError(parsed.runId, `classified-reviewer-legacy:${parsed.reviewerSessionId}`);
       }
       this.db.query(`INSERT INTO reviewer_sessions
         (id, run_id, attempt, model_tier, resolved_model, input_hash, manifest_hash, diff_hash,
          evidence_bundle_hash, policy_version, cache_key, cache_hit, cache_observed, started_at, completed_at,
-         decision, isolation_verified)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+         decision, isolation_verified, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         parsed.reviewerSessionId, parsed.runId, parsed.attempt, parsed.modelTier, parsed.resolvedModel,
         parsed.inputHash, parsed.manifestHash, parsed.diffHash, parsed.evidenceBundleHash,
         parsed.policyVersion, parsed.cacheKey, parsed.cacheHit ? 1 : 0, parsed.cacheHit === null ? 0 : 1,
-        parsed.startedAt, parsed.completedAt, parsed.decision, parsed.isolationVerified ? 1 : 0,
+        parsed.startedAt, parsed.completedAt, parsed.decision, parsed.isolationVerified ? 1 : 0, this.tenantOrgId,
       );
       const findingStatement = this.db.query(`INSERT INTO review_findings
         (id, reviewer_session_id, fingerprint, severity, category, file, line_start, line_end,
-         description, required_change, criterion_ids_json, evidence_ids_json, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+         description, required_change, criterion_ids_json, evidence_ids_json, status, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const finding of parsedFindings) {
         findingStatement.run(
           finding.findingId, finding.reviewerSessionId, finding.fingerprint, finding.severity,
           finding.category, finding.file, finding.lineStart, finding.lineEnd, finding.description,
-          finding.requiredChange, canonicalJson(finding.criterionIds), canonicalJson(finding.evidenceIds), finding.status,
+          finding.requiredChange, canonicalJson(finding.criterionIds), canonicalJson(finding.evidenceIds), finding.status, this.tenantOrgId,
         );
       }
       const classificationStatement = this.db.query(`INSERT INTO review_finding_classifications
         (classification_hash, batch_hash, reviewer_session_id, finding_id, finding_fingerprint,
-         disposition, authority, reason_code, classification_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+         disposition, authority, reason_code, classification_json, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const item of batch.classifications) {
         classificationStatement.run(
           item.classificationHash, batch.classificationHash, batch.reviewerSessionId, item.findingId,
-          item.findingFingerprint, item.disposition, item.authority, item.reasonCode, canonicalJson(item),
+          item.findingFingerprint, item.disposition, item.authority, item.reasonCode, canonicalJson(item), this.tenantOrgId,
         );
       }
       this.db.query(`INSERT INTO review_classification_batches
         (classification_hash, reviewer_session_id, run_id, contract_hash, schema_version, policy_version,
          raw_output_artifact_id, raw_output_hash, normalized_output_hash, normalized_session_hash,
-         normalized_findings_hash, reviewer_input_json, normalized_output_json, batch_json, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+         normalized_findings_hash, reviewer_input_json, normalized_output_json, batch_json, created_at, org_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         batch.classificationHash, batch.reviewerSessionId, batch.runId, batch.contractHash,
         batch.schemaVersion, batch.policyVersion, batch.rawOutput.artifactId, batch.rawOutput.sha256,
         batch.normalizedOutputHash, batch.normalizedSessionHash, batch.normalizedFindingsHash,
-        canonicalJson(reviewerInput), canonicalJson(parsed.output), batchJson, batch.createdAt,
+        canonicalJson(reviewerInput), canonicalJson(parsed.output), batchJson, batch.createdAt, this.tenantOrgId,
       );
       this.insertAudit(parsed.runId, "REVIEW_CLASSIFICATION_RECORDED", "SYSTEM", batch.policyVersion, {
         reviewerSessionId: parsed.reviewerSessionId,
@@ -3331,8 +3331,8 @@ export class EngineerLedger {
   }
 
   getReviewClassification(reviewerSessionId: string, readArtifact?: ArtifactByteReader): ReviewClassificationBatch | null {
-    const row = this.db.query("SELECT * FROM review_classification_batches WHERE reviewer_session_id = ?")
-      .get(reviewerSessionId) as Record<string, unknown> | null;
+    const row = this.db.query("SELECT * FROM review_classification_batches WHERE reviewer_session_id = ? AND org_id = ?")
+      .get(reviewerSessionId, this.tenantOrgId) as Record<string, unknown> | null;
     if (!row) return null;
     const batch = ReviewClassificationBatchSchema.parse(JSON.parse(String(row.batch_json)));
     if (row.classification_hash !== batch.classificationHash || row.run_id !== batch.runId ||
@@ -3344,8 +3344,8 @@ export class EngineerLedger {
       throw new Error("persisted review classification batch columns do not match its hash-bound JSON");
     }
     const session = this.db.query(`SELECT run_id, attempt, input_hash, manifest_hash, diff_hash,
-      evidence_bundle_hash, policy_version FROM reviewer_sessions WHERE id = ?`)
-      .get(reviewerSessionId) as {
+      evidence_bundle_hash, policy_version FROM reviewer_sessions WHERE id = ? AND org_id = ?`)
+      .get(reviewerSessionId, this.tenantOrgId) as {
         run_id: string; attempt: number; input_hash: string; manifest_hash: string; diff_hash: string;
         evidence_bundle_hash: string; policy_version: string;
       } | null;
@@ -3356,7 +3356,7 @@ export class EngineerLedger {
       throw new Error("persisted review classification authority binding is invalid");
     }
     const children = (this.db.query(`SELECT * FROM review_finding_classifications
-      WHERE batch_hash = ?`).all(batch.classificationHash) as Array<Record<string, unknown>>)
+      WHERE batch_hash = ? AND org_id = ?`).all(batch.classificationHash, this.tenantOrgId) as Array<Record<string, unknown>>)
       .sort((left, right) => compareCodeUnits(String(left.finding_id), String(right.finding_id)));
     if (children.length !== batch.classifications.length) throw new Error("persisted review classification mapping is incomplete");
     for (const [index, item] of batch.classifications.entries()) {
@@ -3404,8 +3404,8 @@ export class EngineerLedger {
   }
 
   reviewClassificationRunId(reviewerSessionId:string):string|null{
-    const row=this.db.query("SELECT run_id FROM review_classification_batches WHERE reviewer_session_id=?")
-      .get(reviewerSessionId) as {run_id:string}|null;
+    const row=this.db.query("SELECT run_id FROM review_classification_batches WHERE reviewer_session_id=? AND org_id=?")
+      .get(reviewerSessionId, this.tenantOrgId) as {run_id:string}|null;
     return row?.run_id??null;
   }
 
@@ -3419,8 +3419,8 @@ export class EngineerLedger {
     const row = this.db.query(`SELECT b.*, s.attempt, s.model_tier, s.resolved_model, s.input_hash,
       s.manifest_hash, s.diff_hash, s.evidence_bundle_hash, s.policy_version AS session_policy_version,
       s.cache_key, s.cache_hit, s.cache_observed, s.started_at, s.completed_at, s.decision, s.isolation_verified
-      FROM review_classification_batches b JOIN reviewer_sessions s ON s.id = b.reviewer_session_id
-      WHERE b.run_id = ? ORDER BY s.attempt DESC LIMIT 1`).get(runId) as Record<string, unknown> | null;
+      FROM review_classification_batches b JOIN reviewer_sessions s ON s.id = b.reviewer_session_id AND s.org_id = b.org_id
+      WHERE b.run_id = ? AND b.org_id = ? ORDER BY s.attempt DESC LIMIT 1`).get(runId, this.tenantOrgId) as Record<string, unknown> | null;
     if (!row) return null;
     const classification = this.getReviewClassification(String(row.reviewer_session_id), readArtifact);
     if (!classification) throw new Error("classified review disappeared during rehydration");
@@ -3435,8 +3435,8 @@ export class EngineerLedger {
       startedAt: row.started_at, completedAt: row.completed_at, decision: row.decision,
       isolationVerified: row.isolation_verified === 1, output,
     });
-    const findings = (this.db.query("SELECT * FROM review_findings WHERE reviewer_session_id = ? ORDER BY id")
-      .all(session.reviewerSessionId) as Array<Record<string, unknown>>).map((finding) => ReviewFindingRecordSchema.parse({
+    const findings = (this.db.query("SELECT * FROM review_findings WHERE reviewer_session_id = ? AND org_id = ? ORDER BY id")
+      .all(session.reviewerSessionId, this.tenantOrgId) as Array<Record<string, unknown>>).map((finding) => ReviewFindingRecordSchema.parse({
         findingId: finding.id, reviewerSessionId: finding.reviewer_session_id, fingerprint: finding.fingerprint,
         severity: finding.severity, category: finding.category, file: finding.file,
         lineStart: finding.line_start, lineEnd: finding.line_end, description: finding.description,
@@ -3889,8 +3889,8 @@ export class EngineerLedger {
 
   nextReviewerAttempt(runId: string): number {
     this.getRun(runId);
-    const row = this.db.query("SELECT COALESCE(MAX(attempt), 0) AS attempt FROM reviewer_sessions WHERE run_id = ?")
-      .get(runId) as { attempt: number };
+    const row = this.db.query("SELECT COALESCE(MAX(attempt), 0) AS attempt FROM reviewer_sessions WHERE run_id = ? AND org_id = ?")
+      .get(runId, this.tenantOrgId) as { attempt: number };
     return row.attempt + 1;
   }
 
@@ -3903,12 +3903,12 @@ export class EngineerLedger {
       FROM agent_executions a
       JOIN artifacts ar ON ar.id = a.output_artifact_id
       JOIN model_calls m ON m.agent_execution_id = a.id AND m.status = 'SUCCEEDED'
-      LEFT JOIN reviewer_sessions rs ON rs.run_id = a.run_id AND rs.input_hash = a.input_hash
+      LEFT JOIN reviewer_sessions rs ON rs.run_id = a.run_id AND rs.input_hash = a.input_hash AND rs.org_id = ?
       WHERE a.run_id = ? AND a.role = 'REVIEWER' AND a.status = 'SUCCEEDED'
         AND ar.type = 'REVIEWER_OUTPUT' AND ar.producer_id = a.id AND rs.id IS NULL
       ORDER BY a.rowid DESC, m.rowid DESC
       LIMIT 1
-    `).get(runId) as {
+    `).get(this.tenantOrgId, runId) as {
       agent_execution_id: string;
       input_hash: string;
       model_tier: "GPT-5.6_SOL";
@@ -3939,14 +3939,14 @@ export class EngineerLedger {
       SELECT s.id AS reviewer_session_id, s.attempt, s.decision, s.diff_hash,
         s.evidence_bundle_hash, a.output_artifact_id
       FROM agent_executions a
-      JOIN reviewer_sessions s ON s.run_id = a.run_id AND s.input_hash = a.input_hash
+      JOIN reviewer_sessions s ON s.run_id = a.run_id AND s.input_hash = a.input_hash AND s.org_id = ?
       JOIN artifacts ar ON ar.id = a.output_artifact_id
       WHERE a.run_id = ? AND a.role = 'REVIEWER' AND a.status = 'SUCCEEDED'
         AND a.output_artifact_id = ? AND ar.type = 'REVIEWER_OUTPUT'
         AND ar.producer_id = a.id
       ORDER BY s.rowid DESC
       LIMIT 1
-    `).get(runId, outputArtifactId) as {
+    `).get(this.tenantOrgId, runId, outputArtifactId) as {
       reviewer_session_id: string;
       attempt: number;
       decision: RecordedReviewerOutput["decision"];
@@ -4007,8 +4007,8 @@ export class EngineerLedger {
   recordEvidenceBundle(record: EvidenceBundleRecord): EvidenceBundleRecord {
     const parsed = EvidenceBundleRecordSchema.parse(record);
     this.getRun(parsed.bundle.runId);
-    const existing = this.db.query(`SELECT id, bundle_hash, manifest_json FROM evidence_bundles WHERE id = ?`)
-      .get(parsed.evidenceBundleId) as Record<string, unknown> | null;
+    const existing = this.db.query(`SELECT id, bundle_hash, manifest_json FROM evidence_bundles WHERE id = ? AND org_id = ?`)
+      .get(parsed.evidenceBundleId, this.tenantOrgId) as Record<string, unknown> | null;
     if (existing) {
       const current = EvidenceBundleRecordSchema.parse({
         evidenceBundleId: existing.id,
@@ -4022,11 +4022,11 @@ export class EngineerLedger {
     }
     this.db.query(`INSERT INTO evidence_bundles
       (id, run_id, manifest_hash, bundle_hash, base_commit_sha, result_commit_sha,
-       environment_digest, manifest_json, final_decision, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+       environment_digest, manifest_json, final_decision, created_at, org_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       parsed.evidenceBundleId, parsed.bundle.runId, parsed.bundle.manifestHash, parsed.bundleHash,
       parsed.bundle.baseCommitSha, parsed.bundle.resultCommitSha, parsed.bundle.environmentDigest,
-      canonicalJson(parsed.bundle), parsed.bundle.finalDecision, parsed.bundle.createdAt,
+      canonicalJson(parsed.bundle), parsed.bundle.finalDecision, parsed.bundle.createdAt, this.tenantOrgId,
     );
     return parsed;
   }
@@ -4034,7 +4034,7 @@ export class EngineerLedger {
   listEvidenceBundles(runId: string): EvidenceBundleRecord[] {
     this.getRun(runId);
     const rows = this.db.query(`SELECT id, bundle_hash, manifest_json
-      FROM evidence_bundles WHERE run_id = ? ORDER BY created_at ASC, id ASC`).all(runId) as Array<Record<string, unknown>>;
+      FROM evidence_bundles WHERE run_id = ? AND org_id = ? ORDER BY created_at ASC, id ASC`).all(runId, this.tenantOrgId) as Array<Record<string, unknown>>;
     return rows.map((row) => EvidenceBundleRecordSchema.parse({
       evidenceBundleId: row.id,
       bundleHash: row.bundle_hash,
@@ -4102,15 +4102,16 @@ export class EngineerLedger {
       throw new Error(`verified candidate classification authority mismatch: ${classification?.result ?? "missing"}`);
     }
     const latestRows = this.db.query(`SELECT b.reviewer_session_id, s.attempt
-      FROM review_classification_batches b JOIN reviewer_sessions s ON s.id = b.reviewer_session_id
-      WHERE b.run_id = ? ORDER BY s.attempt DESC`).all(input.runId) as Array<{ reviewer_session_id: string; attempt: number }>;
+      FROM review_classification_batches b JOIN reviewer_sessions s ON s.id = b.reviewer_session_id AND s.org_id = b.org_id
+      WHERE b.run_id = ? AND b.org_id = ? ORDER BY s.attempt DESC`).all(input.runId, this.tenantOrgId) as Array<{ reviewer_session_id: string; attempt: number }>;
     if (latestRows.length === 0 || latestRows[0]!.reviewer_session_id !== input.reviewerSessionId ||
         latestRows.filter((row) => row.attempt === latestRows[0]!.attempt).length !== 1) {
       throw new Error("verified candidate requires the unique latest classified Reviewer session");
     }
     const reviewerRow = this.db.query(`SELECT s.*, b.reviewer_input_json FROM reviewer_sessions s
-      JOIN review_classification_batches b ON b.reviewer_session_id = s.id WHERE s.id = ? AND s.run_id = ?`)
-      .get(input.reviewerSessionId, input.runId) as Record<string, unknown> | null;
+      JOIN review_classification_batches b ON b.reviewer_session_id = s.id AND b.org_id = s.org_id
+      WHERE s.id = ? AND s.run_id = ? AND s.org_id = ?`)
+      .get(input.reviewerSessionId, input.runId, this.tenantOrgId) as Record<string, unknown> | null;
     if (!reviewerRow || reviewerRow.isolation_verified !== 1 || reviewerRow.decision !== "APPROVE" ||
         reviewerRow.manifest_hash !== run.manifestHash) {
       throw new Error("verified candidate Reviewer authority mismatch");
@@ -4120,8 +4121,8 @@ export class EngineerLedger {
       throw new Error("verified candidate Reviewer input binding mismatch");
     }
 
-    const bundleRow = this.db.query("SELECT * FROM evidence_bundles WHERE id = ? AND run_id = ?")
-      .get(input.evidenceBundleId, input.runId) as Record<string, unknown> | null;
+    const bundleRow = this.db.query("SELECT * FROM evidence_bundles WHERE id = ? AND run_id = ? AND org_id = ?")
+      .get(input.evidenceBundleId, input.runId, this.tenantOrgId) as Record<string, unknown> | null;
     if (!bundleRow) throw new EngineerNotFoundError("evidence bundle", input.evidenceBundleId);
     const evidenceBundle = EvidenceBundleRecordSchema.parse({
       evidenceBundleId: bundleRow.id,
@@ -4129,8 +4130,8 @@ export class EngineerLedger {
       bundle: JSON.parse(String(bundleRow.manifest_json)),
     });
     const bundle = evidenceBundle.bundle;
-    const boundBundleIds = (this.db.query("SELECT id, manifest_json FROM evidence_bundles WHERE run_id = ?")
-      .all(input.runId) as Array<{ id: string; manifest_json: string }>).flatMap((candidate) => {
+    const boundBundleIds = (this.db.query("SELECT id, manifest_json FROM evidence_bundles WHERE run_id = ? AND org_id = ?")
+      .all(input.runId, this.tenantOrgId) as Array<{ id: string; manifest_json: string }>).flatMap((candidate) => {
         try {
           const parsed = EvidenceBundleRecordSchema.shape.bundle.parse(JSON.parse(candidate.manifest_json));
           return parsed.bundleVersion === 2 && parsed.reviewerSessionId === input.reviewerSessionId &&
@@ -4713,8 +4714,8 @@ export class EngineerLedger {
     if ((classification.result === "READY" && advisoryClassifications.length !== 0) ||
         (classification.result === "READY_WITH_ADVISORIES" && advisoryClassifications.length < 1)) throw new AdvisoryIntegrityError();
     return advisoryClassifications.map((classified) => {
-      const finding = this.db.query("SELECT * FROM review_findings WHERE id=? AND reviewer_session_id=?")
-        .get(classified.findingId, checkpoint.reviewerSessionId) as Record<string, unknown> | null;
+      const finding = this.db.query("SELECT * FROM review_findings WHERE id=? AND reviewer_session_id=? AND org_id=?")
+        .get(classified.findingId, checkpoint.reviewerSessionId, this.tenantOrgId) as Record<string, unknown> | null;
       if (!finding || finding.fingerprint !== classified.findingFingerprint) throw new AdvisoryIntegrityError();
       const file = finding.file === null ? null : String(finding.file);
       return createAdvisoryBacklogItem({
@@ -7644,14 +7645,14 @@ export class EngineerLedger {
     this.assertReplacementLineageAuthority(runId);
     const reviewer = this.db.query(`SELECT id, decision, input_hash, manifest_hash, diff_hash,
       evidence_bundle_hash, isolation_verified, completed_at
-      FROM reviewer_sessions WHERE run_id = ? ORDER BY attempt DESC LIMIT 1`).get(runId) as Record<string, unknown> | null;
+      FROM reviewer_sessions WHERE run_id = ? AND org_id = ? ORDER BY attempt DESC LIMIT 1`).get(runId, this.tenantOrgId) as Record<string, unknown> | null;
     const reviewerAgent = this.db.query(`SELECT id, status, input_hash, output_artifact_id, started_at, completed_at
       FROM agent_executions WHERE run_id = ? AND role = 'REVIEWER' ORDER BY rowid DESC LIMIT 1`)
       .get(runId) as Record<string, unknown> | null;
     if (!reviewer || !reviewerAgent) throw new EngineerNotFoundError("publication evidence", runId);
     const classificationRow = this.db.query(`SELECT b.reviewer_session_id FROM review_classification_batches b
-      JOIN reviewer_sessions s ON s.id = b.reviewer_session_id
-      WHERE b.run_id = ? ORDER BY s.attempt DESC, b.rowid DESC LIMIT 1`).get(runId) as { reviewer_session_id: string } | null;
+      JOIN reviewer_sessions s ON s.id = b.reviewer_session_id AND s.org_id = b.org_id
+      WHERE b.run_id = ? AND b.org_id = ? ORDER BY s.attempt DESC, b.rowid DESC LIMIT 1`).get(runId, this.tenantOrgId) as { reviewer_session_id: string } | null;
     if (!classificationRow || classificationRow.reviewer_session_id !== reviewer.id) {
       throw new Error("publication blocked: latest Reviewer session has no classified authority");
     }
@@ -7659,8 +7660,8 @@ export class EngineerLedger {
     if (!classification || !["READY", "READY_WITH_ADVISORIES"].includes(classification.result)) {
       throw new Error("publication blocked: deterministic review classification is not ready");
     }
-    const bundleRows = this.db.query(`SELECT id, bundle_hash, manifest_json FROM evidence_bundles WHERE run_id = ?`)
-      .all(runId) as Array<Record<string, unknown>>;
+    const bundleRows = this.db.query(`SELECT id, bundle_hash, manifest_json FROM evidence_bundles WHERE run_id = ? AND org_id = ?`)
+      .all(runId, this.tenantOrgId) as Array<Record<string, unknown>>;
     const boundBundles = bundleRows.map((row) => EvidenceBundleRecordSchema.parse({
       evidenceBundleId: row.id, bundleHash: row.bundle_hash, bundle: JSON.parse(String(row.manifest_json)),
     })).filter((record) => record.bundle.bundleVersion >= 2 &&
