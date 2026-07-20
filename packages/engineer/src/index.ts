@@ -101,4 +101,4 @@ export * from "./resolution-source-candidate.js";
 // tenancy context, so the gateway (and its joint-integration tests) can drive the
 // real org-scoped `exportRunAuditChain` instead of re-implementing the read.
 export { TenantScopedLedgerDal, TenantWriteConflictError, tenantNotFound, type OrgContext, type TenantRunRow, type ListRunsOptions } from "./tenant-dal.js";
-export { defineHumanActor, defineNonHumanActor, assertDistinctApprovalActors, SelfApprovalError, roleCan, actorCan, TENANT_ROLES, TENANT_ACTIONS, type TenantRole, type TenantAction, type ActorKind, type ActorIdentity, type HumanActorIdentity, type NonHumanActorIdentity } from "./tenant-roles.js";
+export { defineHumanActor, defineNonHumanActor, assertDistinctApprovalActors, SelfApprovalError, roleCan, actorCan, assertAuthority, assertNotRevoked, AuthorizationError, TENANT_ROLES, TENANT_ACTIONS, type TenantRole, type TenantAction, type ActorKind, type ActorIdentity, type HumanActorIdentity, type NonHumanActorIdentity, type RoledActor, type RevocableAuthority } from "./tenant-roles.js";

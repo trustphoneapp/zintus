@@ -5,6 +5,20 @@ export class EngineerNotFoundError extends Error {
   }
 }
 
+/**
+ * Constructor-time org-context rejection (contract §1). Thrown when an
+ * `EngineerLedger` is bound to an org that is not a KNOWN, ACTIVE row in
+ * `orgs(id)`. The default org is seeded active by the tenancy migration, so
+ * default construction never trips this; a non-existent or SUSPENDED org does.
+ */
+export class EngineerOrgContextError extends Error {
+  readonly code = "ENGINEER_ORG_CONTEXT_INVALID";
+  constructor(readonly orgId: string) {
+    super(`org context is not a known active org: ${orgId}`);
+    this.name = "EngineerOrgContextError";
+  }
+}
+
 export class StateVersionConflictError extends Error {
   constructor(runId: string, expected: number, actual: number) {
     super(`state version conflict for ${runId}: expected ${expected}, actual ${actual}`);

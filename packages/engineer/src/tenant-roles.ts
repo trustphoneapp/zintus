@@ -162,3 +162,71 @@ export class SelfApprovalError extends Error {
 export function assertDistinctApprovalActors(requesterActorId: string, approverActorId: string): void {
   if (requesterActorId === approverActorId) throw new SelfApprovalError(approverActorId);
 }
+
+/**
+ * Authn/authz failure (contract §3/§4/§6). DELIBERATELY distinct from
+ * `EngineerNotFoundError`: a data-absence result and an authority-denied result
+ * are different outcomes. The DAL anti-oracle funnel (contract §2) never maps a
+ * cross-tenant data probe to this — cross-tenant reads collapse to the identical
+ * NotFound. This error is only for authority the principal genuinely lacks
+ * (unknown/ungranted action, absent/inactive membership, revoked authority),
+ * NOT for the existence of another org's data.
+ */
+export class AuthorizationError extends Error {
+  readonly code = "ENGINEER_AUTHORIZATION_DENIED";
+  constructor(message = "authorization denied") {
+    super(message);
+    this.name = "AuthorizationError";
+  }
+}
+
+/** O(1) membership check for the frozen action set (deny unknown actions). */
+const TENANT_ACTION_SET: ReadonlySet<string> = new Set<string>(TENANT_ACTIONS);
+
+/** Minimal shape `assertAuthority` needs: an actor carrying its ACTIVE roles. */
+export interface RoledActor {
+  readonly roles: Iterable<TenantRole>;
+}
+
+/**
+ * Deny-by-default authority gate (contract §4). Throws `AuthorizationError`
+ * when the action is unknown (not in the frozen `TENANT_ACTIONS`) OR when none
+ * of the actor's ACTIVE roles grant it. This is the callable primitive every
+ * privileged ledger/gateway method entry will wire (D2/D3/D4 + buckets); a
+ * mutation that flips a single grant in `ROLE_GRANTS` MUST red an authority
+ * test. It is intentionally NOT yet wired at call sites here.
+ */
+export function assertAuthority(action: string, actor: RoledActor): void {
+  if (!TENANT_ACTION_SET.has(action)) {
+    throw new AuthorizationError(`unknown authority action: ${action}`);
+  }
+  if (!actorCan(actor.roles, action as TenantAction)) {
+    throw new AuthorizationError(`actor is not granted ${action}`);
+  }
+}
+
+/**
+ * A durable authority record that revocation can turn off (contract §6): an
+ * org membership, an approval grant, a non-human actor, etc. `status` is the
+ * monotonic ACTIVE→REVOKED flag every such row already carries; `revokedAt` is
+ * set exactly when revoked.
+ */
+export interface RevocableAuthority {
+  readonly status: string;
+  readonly revokedAt?: string | null;
+}
+
+/**
+ * Revocation re-check skeleton (contract §6). The load-bearing property: a
+ * revoked (or missing) authority BLOCKS the action at the MOMENT OF USE, not
+ * only at grant time. Throws `AuthorizationError` when the authority is absent,
+ * not ACTIVE, or carries a `revokedAt` stamp. Callers (publish/execute paths in
+ * D4 + buckets) pass the freshly-read authority row; org-scoping of that read is
+ * the caller's tenant fence (contract §2), so this stays a pure predicate.
+ */
+export function assertNotRevoked(authority: RevocableAuthority | null | undefined, entity = "authority"): void {
+  if (!authority) throw new AuthorizationError(`${entity} is missing or has been revoked`);
+  if (authority.status !== "ACTIVE" || (authority.revokedAt ?? null) !== null) {
+    throw new AuthorizationError(`${entity} has been revoked`);
+  }
+}

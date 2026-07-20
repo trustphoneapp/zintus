@@ -103,6 +103,7 @@ import {
   DatabaseIntegrityFatalMarkerConflictError,
   DatabaseIntegrityFatalMarkerConflictAuthorityInvalidError,
   EngineerNotFoundError,
+  EngineerOrgContextError,
   HardeningAuthorityInvalidError, HardeningQuoteExpiredError, HardeningSelectionInvalidError,
   HardeningPromptCacheAuthorityUnavailableError,
   HardeningPromptCacheAuthorityMismatchError,
@@ -643,20 +644,20 @@ export class EngineerLedger {
   private readonly db: Database;
   private readonly now: () => Date;
   /**
-   * P10 tenancy: the org context these ledger queries scope to.
+   * P10 tenancy: the org context these ledger queries scope to (contract §1).
    *
-   * SINGLE-TENANT INVARIANT (P12 Finding C, Sol P1-3 / Luna-2): this ledger is
-   * DELIBERATELY single-tenant for this release. `tenantOrgId` is fixed to
-   * `ENGINEER_DEFAULT_ORG_ID` and the constructor REJECTS any attempt to bind a
-   * non-default org (`multi-tenant is not yet supported`). Real multi-tenant
-   * isolation is NOT wired: `EngineerLedger` uses ~120 bare `WHERE run_id=?`
-   * queries (not org-scoped), and `TenantScopedLedgerDal` is a separate,
-   * isolation-tested path that `EngineerLedger` does NOT route through. Do NOT
-   * treat this class as tenant-isolated — the single owner minted per install by
-   * `deriveEngineerPrincipal` is what makes the runtime safe today. See
-   * docs/zintus-engineer/KNOWN-LIMITATIONS.md.
+   * SOLE ORG SOURCE. `tenantOrgId` is fixed at construction (default
+   * `ENGINEER_DEFAULT_ORG_ID`) and VALIDATED against `orgs(id)` — the bound org
+   * MUST exist and be ACTIVE or the constructor throws `EngineerOrgContextError`.
+   * No method re-derives the org from an argument, a row, a join, or a
+   * caller-supplied value: if a query needs the org it reads THIS field. The
+   * per-site tenant conversion (contract §2) and the anti-oracle NotFound funnel
+   * (`findTenantOwnedRow` / `requireTenantOwnedRow`) both key off it. R8-5 is
+   * additive: the bulk of `this.db.*` id-keyed reads are NOT yet org-scoped — that
+   * is the buckets' mechanical work — so do NOT treat this class as fully
+   * tenant-isolated until the central cross-tenant matrix (contract §9) is green.
    */
-  private readonly tenantOrgId: string = ENGINEER_DEFAULT_ORG_ID;
+  private readonly tenantOrgId: string;
   private hardeningPromptCacheSecret?: string;
   private hardeningArtifactReader?: ArtifactByteReader;
   // P7 replacement-lineage authority. Injected at composition time via
@@ -677,13 +678,11 @@ export class EngineerLedger {
   private provenanceSigner?: ProvenanceSigner;
 
   constructor(dbPath: string, now: () => Date = () => new Date(), hardeningPromptCacheSecret?: string, orgId: string = ENGINEER_DEFAULT_ORG_ID) {
-    // SINGLE-TENANT INVARIANT (P12 Finding C): reject any non-default org context.
-    // Multi-tenant isolation is not wired in this release; constructing the ledger
-    // for a second tenant must fail loudly rather than silently share one owner's
-    // unscoped queries across tenants.
-    if (orgId !== ENGINEER_DEFAULT_ORG_ID) {
-      throw new Error("multi-tenant is not yet supported: EngineerLedger is single-tenant and only accepts the default org");
-    }
+    // Contract §1: bind the SOLE org source here. It is VALIDATED against the
+    // durable `orgs` table AFTER migrations open+seed it (see the end of this
+    // constructor), so a non-existent or SUSPENDED org fails loudly rather than
+    // scoping every query to an org that cannot own data.
+    this.tenantOrgId = orgId;
     this.now = now;
     if (hardeningPromptCacheSecret !== undefined) this.configureHardeningPromptCacheSecret(hardeningPromptCacheSecret);
     if (dbPath !== ":memory:") {
@@ -807,6 +806,48 @@ export class EngineerLedger {
       throw error;
     }
     migrateEngineerDatabase(this.db, migrationTimestamp);
+    // Contract §1: validate the bound org against the durable `orgs` table now
+    // that the tenancy migration has created + seeded it. The row MUST exist and
+    // be ACTIVE. The default org is seeded active by the migration, so default
+    // construction (all existing callers) always passes; a non-existent or
+    // SUSPENDED org throws a typed EngineerOrgContextError. No silent trust.
+    const orgRow = this.db.query("SELECT status FROM orgs WHERE id = ?")
+      .get(this.tenantOrgId) as { status: string } | null;
+    if (!orgRow || orgRow.status !== "ACTIVE") {
+      throw new EngineerOrgContextError(this.tenantOrgId);
+    }
+  }
+
+  /** The org this ledger instance is bound to — the SOLE org source (contract §1). */
+  get orgId(): string {
+    return this.tenantOrgId;
+  }
+
+  /**
+   * Anti-oracle tenant funnel (contract §2) — the reusable id-keyed read every
+   * bucket calls. Fetches a row on a TENANT-OWNED table SCOPED to
+   * `this.tenantOrgId`. A row that belongs to ANOTHER org and a row that does
+   * NOT exist are INDISTINGUISHABLE: both return `null`. `table`/`idColumn` are
+   * code literals (never caller input), so the interpolation carries no
+   * injection surface.
+   */
+  private findTenantOwnedRow<T extends Record<string, unknown>>(table: string, idColumn: string, id: string): T | null {
+    return this.db.query(`SELECT * FROM ${table} WHERE ${idColumn} = ? AND org_id = ?`)
+      .get(id, this.tenantOrgId) as T | null;
+  }
+
+  /**
+   * Throwing variant of the funnel (contract §2). A foreign-org row and an
+   * absent row both throw the IDENTICAL `EngineerNotFoundError(entity, id)` —
+   * same class, same message template, same shape — so a cross-tenant probe is
+   * byte-indistinguishable from a genuine miss. There is deliberately NO
+   * "forbidden"/"unauthorized" variant for the cross-org case; that difference
+   * would itself be an existence oracle.
+   */
+  private requireTenantOwnedRow<T extends Record<string, unknown>>(table: string, idColumn: string, id: string, entity: string): T {
+    const row = this.findTenantOwnedRow<T>(table, idColumn, id);
+    if (!row) throw new EngineerNotFoundError(entity, id);
+    return row;
   }
 
   /** Server-owned strict reader used by every optional-hardening receipt/recovery path. */
@@ -1650,9 +1691,14 @@ export class EngineerLedger {
   }
 
   recordPlanProposal(proposal: PlanProposal, expectedStateVersion: number): PlanProposal {
-    const artifact = this.db.query("SELECT run_id, type, sha256, storage_reference, size_bytes FROM artifacts WHERE id = ?")
-      .get(proposal.artifactId) as { run_id: string; type: string; sha256: string; storage_reference: string; size_bytes: number } | null;
-    if (!artifact || artifact.run_id !== proposal.runId) throw new EngineerNotFoundError("plan artifact", proposal.artifactId);
+    // Contract §2/§8: scope the artifact row by org BEFORE the byte read below.
+    // A foreign-org artifact id and an absent id both funnel to the IDENTICAL
+    // "plan artifact" not-found, so `readFileSync(storage_reference)` can never
+    // reach another org's FILE BYTES.
+    const artifact = this.requireTenantOwnedRow<{ run_id: string; type: string; sha256: string; storage_reference: string; size_bytes: number }>(
+      "artifacts", "id", proposal.artifactId, "plan artifact",
+    );
+    if (artifact.run_id !== proposal.runId) throw new EngineerNotFoundError("plan artifact", proposal.artifactId);
     if (artifact.type !== "PLAN_PROPOSAL") throw new TypeError("plan proposal must reference a PLAN_PROPOSAL artifact");
     const artifactBytes = readFileSync(artifact.storage_reference);
     if (artifactBytes.byteLength !== artifact.size_bytes || !matchesSha256Bytes(artifactBytes, artifact.sha256)) {
@@ -7215,8 +7261,11 @@ export class EngineerLedger {
       checkpointId = event.evidenceIds[0]!;
       promotedRunId = reference.runId;
     }
-    const row = this.db.query("SELECT * FROM verified_candidate_checkpoints WHERE id = ?")
-      .get(checkpointId) as Record<string, unknown> | null;
+    // Contract §2/§8: the id-only checkpoint lookup is org-scoped through the
+    // anti-oracle funnel. A checkpoint owned by ANOTHER org is indistinguishable
+    // from an absent one (both yield null → the same null-return / integrity path
+    // below), so a foreign checkpointId can never surface another org's checkpoint.
+    const row = this.findTenantOwnedRow<Record<string, unknown>>("verified_candidate_checkpoints", "id", checkpointId as string);
     if (!row) {
       if (promotedRunId) throw new VerifiedCandidateIntegrityError(promotedRunId);
       return null;
