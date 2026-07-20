@@ -30,6 +30,7 @@ import {
   ENGINEER_DATABASE_MIGRATION_35_SQL,
   ENGINEER_DATABASE_MIGRATION_37_SQL,
   ENGINEER_DATABASE_MIGRATION_38_SQL,
+  ENGINEER_DATABASE_MIGRATION_39_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
   ENGINEER_DEFAULT_ORG_ID,
   AUTHORITY_ACTOR_TABLES,
@@ -75,6 +76,7 @@ const MIGRATIONS: readonly Migration[] = [
   // may claim it, so the chain skips straight to v37.
   { version: 37, sql: ENGINEER_DATABASE_MIGRATION_37_SQL },
   { version: 38, sql: ENGINEER_DATABASE_MIGRATION_38_SQL },
+  { version: 39, sql: ENGINEER_DATABASE_MIGRATION_39_SQL },
 ];
 
 function assertHardeningBudgetShape(db: Database): void {
@@ -1287,6 +1289,14 @@ export function migrateEngineerDatabase(
   // additive column lands on top of every prior, immutable object.
   if (appliedVersions.has(38) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37].every((version) => appliedVersions.has(version)))) {
     throw new Error("Engineer schema v38 is missing required migration ancestry");
+  }
+  // v39 is the tenancy ENFORCEMENT migration: it adds the durable requester-identity
+  // column to approval_requests (contract §5). The approval_requests table exists from
+  // the v14 base, but the column must land on top of every prior immutable object
+  // (checkpoint-binding triggers, v34 org_id/authority columns), so v39 requires the
+  // full v14..v38 chain (v36 reserved, never applied).
+  if (appliedVersions.has(39) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38].every((version) => appliedVersions.has(version)))) {
+    throw new Error("Engineer schema v39 is missing required migration ancestry");
   }
 
   for (const migration of MIGRATIONS) {

@@ -205,9 +205,17 @@ function restoreLegacyCheckpointTable(db: Database): void {
  */
 function removeV34Schema(db: Database): void {
   db.exec("PRAGMA foreign_keys=OFF");
-  // The live chain now installs v38 (the reviewer-input/normalized-output columns
-  // on review_classification_batches) at the very head, above v37, so a
-  // build-to-head fixture must shed the v38 slice first. Idempotent (guarded).
+  // The live chain now installs v39 (the durable requester_actor_id column on
+  // approval_requests) at the very head, above v38, so a build-to-head fixture must
+  // shed the v39 slice first. Idempotent (guarded).
+  db.exec("DELETE FROM schema_migrations WHERE version=39;");
+  {
+    const columns = new Set((db.query("PRAGMA table_info(approval_requests)").all() as Array<{ name: string }>)
+      .map((c) => c.name));
+    if (columns.has("requester_actor_id")) db.exec("ALTER TABLE approval_requests DROP COLUMN requester_actor_id");
+  }
+  // v38 (the reviewer-input/normalized-output columns on review_classification_batches)
+  // sits above v37, so shed it next. Idempotent (guarded).
   db.exec("DELETE FROM schema_migrations WHERE version=38;");
   for (const column of ["reviewer_input_json", "normalized_output_json"]) {
     const columns = new Set((db.query("PRAGMA table_info(review_classification_batches)").all() as Array<{ name: string }>)
@@ -461,7 +469,7 @@ describe("Engineer database schema", () => {
     const sandboxIndexes = db.query("PRAGMA index_list(sandboxes)").all() as Array<{ name: string; unique: number }>;
     expect(sandboxIndexes.find((index) => index.name === "idx_sandboxes_run")?.unique).toBe(0);
     expect(ENGINEER_DATABASE_BASE_SCHEMA_VERSION).toBe(14);
-    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(38);
+    expect(ENGINEER_DATABASE_SCHEMA_VERSION).toBe(39);
     expect(tables.has("required_lane_contracts")).toBe(false);
     db.close();
   });
@@ -485,7 +493,7 @@ describe("Engineer database schema", () => {
     const partialIndexes = db.query("SELECT name FROM pragma_index_list('publication_candidate_selections') WHERE partial=1").all();
     expect(partialIndexes).toEqual([]);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
-    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 38 });
+    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 39 });
     db.close();
   });
 
@@ -516,7 +524,7 @@ describe("Engineer database schema", () => {
         [20,ENGINEER_DATABASE_MIGRATION_20_SQL],[21,ENGINEER_DATABASE_MIGRATION_21_SQL],[22,ENGINEER_DATABASE_MIGRATION_22_SQL],
         [23,ENGINEER_DATABASE_MIGRATION_23_SQL],[24,ENGINEER_DATABASE_MIGRATION_24_SQL]] as const){db.exec(sql);db.query("INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)").run(version,at);}};
     const db=new Database(":memory:");initialize(db);
-    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({version:38});
+    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({version:39});
     expect(()=>db.query(`INSERT INTO run_budgets(run_id,cost_limit_usd,token_limit,time_limit_seconds,lifetime_cost_limit_usd,lifetime_token_limit,
       lifetime_time_limit_seconds,status,revision,created_at,updated_at) VALUES('missing',1,1,1,1,1,1,'ACTIVE',-1,?,?)`).run(at,at)).toThrow();
     const gap=new Database(":memory:");initialize(gap);gap.query("DELETE FROM schema_migrations WHERE version=24").run();
@@ -773,7 +781,7 @@ describe("Engineer database schema", () => {
 
   test("installs exact v28 start fences and paid-call slots and rejects counterfeit recovery authority", () => {
     const root=mkdtempSync(join(tmpdir(),"zintus-engineer-v28-fencing-"));const dbPath=join(root,"engineer.sqlite");
-    new EngineerLedger(dbPath).close();const db=new Database(dbPath);expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({version:38});
+    new EngineerLedger(dbPath).close();const db=new Database(dbPath);expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({version:39});
     for(const name of ["hardening_start_claims","hardening_model_call_slots","require_hardening_start_claim_binding_v28",
       "fence_hardening_start_claim_update_v28","require_hardening_model_call_slot_child_v28","fence_hardening_model_call_slot_update_v28"]){
       expect(db.query("SELECT name FROM sqlite_master WHERE name=?").get(name)).toEqual({name});}
@@ -825,7 +833,7 @@ describe("Engineer database schema", () => {
     `);
     expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({version:29});
     migrateEngineerDatabase(db,timestamp);
-    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({version:38});
+    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({version:39});
     for(const name of ["hardening_paid_call_finalizations","idx_hardening_paid_call_finalization_status_v29",
       "require_hardening_paid_call_finalization_binding_v29","fence_hardening_paid_call_finalization_update_v29",
       "prevent_hardening_paid_call_finalization_delete_v29","hardening_recovery_worker_fences",
@@ -846,7 +854,7 @@ describe("Engineer database schema", () => {
     db.exec(ENGINEER_DATABASE_SCHEMA_SQL);
     db.query("INSERT INTO schema_migrations(version,applied_at) VALUES(14,?)").run(timestamp);
     migrateEngineerDatabase(db, timestamp);
-    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 38 });
+    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 39 });
     // Populate pre-existing (v14) and v32 (underlying_cause) rows.
     db.query("INSERT INTO users(id,created_at,updated_at) VALUES('u1',?,?)").run(timestamp, timestamp);
     db.query("INSERT INTO repository_connections(id,user_id,provider,owner,name,created_at,updated_at) VALUES('r1','u1','local','o','n',?,?)").run(timestamp, timestamp);
@@ -868,7 +876,7 @@ describe("Engineer database schema", () => {
     expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 32 });
 
     migrateEngineerDatabase(db, timestamp);
-    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 38 });
+    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 39 });
     for (const name of [
       "publication_candidate_selections_v33", "publication_approvals_v33", "publication_git_operations_v33",
       "publication_remote_receipts_v33", "publication_reconciliations_v33", "uq_pub_git_operation_approval_v33",
@@ -1319,7 +1327,7 @@ describe("Engineer database schema", () => {
 
     const migrated = new Database(dbPath);
     expect(migrated.query("SELECT MAX(version) AS version FROM schema_migrations").get())
-      .toEqual({ version: 38 });
+      .toEqual({ version: 39 });
     const approvalColumns = new Set((migrated.query("PRAGMA table_info(approval_requests)").all() as Array<{ name: string }>)
       .map((column) => column.name));
     expect(approvalColumns.has("reviewer_session_id")).toBe(true);
@@ -1807,7 +1815,7 @@ describe("Engineer database schema", () => {
     expect(fixture.db.query(`SELECT verified_checkpoint_id, verified_checkpoint_hash
       FROM git_operations WHERE id = 'v21-git'`).get())
       .toEqual({ verified_checkpoint_id: null, verified_checkpoint_hash: null });
-    expect(fixture.db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 38 });
+    expect(fixture.db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 39 });
     expect(fixture.db.query("SELECT COUNT(*) AS count FROM publication_candidate_selections").get()).toEqual({ count: 0 });
     fixture.db.close();
   });
@@ -1981,7 +1989,7 @@ describe("Engineer database schema", () => {
     expect(db.query("SELECT COUNT(*) AS count FROM agent_executions WHERE run_id = ? AND input_hash = ?").get("run-v20", inputHash))
       .toEqual({ count: 2 });
     expect(db.query("SELECT COUNT(*) AS count FROM builder_dispatch_claims").get()).toEqual({ count: 0 });
-    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 38 });
+    expect(db.query("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 39 });
     db.close();
     rmSync(root, { recursive: true, force: true });
   });
@@ -2090,7 +2098,7 @@ describe("Engineer database schema", () => {
     expect(db.query("PRAGMA table_info(required_lane_contracts)").all())
       .toContainEqual(expect.objectContaining({ name: "contract_hash", notnull: 1, pk: 1 }));
     expect((db.query("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>)
-      .map((row) => row.version)).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38]);
+      .map((row) => row.version)).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38, 39]);
     expect(db.query("PRAGMA foreign_key_check").all()).toEqual([]);
     db.close();
 
@@ -2143,7 +2151,7 @@ describe("Engineer database schema", () => {
 
     const migrated = new Database(dbPath);
     expect((migrated.query("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>)
-      .map((row) => row.version)).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38]);
+      .map((row) => row.version)).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38, 39]);
     expect(migrated.query("PRAGMA table_info(required_lane_contracts)").all())
       .toContainEqual(expect.objectContaining({ name: "contract_hash", notnull: 1, pk: 1 }));
     migrated.close();
@@ -2182,7 +2190,7 @@ describe("Engineer database schema", () => {
     const runColumns = migrated.query("PRAGMA table_info(engineer_runs)").all() as Array<{ name: string }>;
     expect(runColumns.filter((column) => column.name === "last_error")).toHaveLength(1);
     expect((migrated.query("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>)
-      .map((row) => row.version)).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38]);
+      .map((row) => row.version)).toEqual([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38, 39]);
     migrated.close();
     rmSync(root, { recursive: true, force: true });
   });
@@ -2271,7 +2279,7 @@ describe("Engineer database schema", () => {
     ledger.close();
     const migrated = new Database(dbPath);
     const versions = migrated.query("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: number }>;
-    expect(versions.map((row) => row.version)).toEqual([13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38]);
+    expect(versions.map((row) => row.version)).toEqual([13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37, 38, 39]);
     migrated.close();
     rmSync(root, { recursive: true, force: true });
   });

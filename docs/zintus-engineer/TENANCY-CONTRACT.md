@@ -68,6 +68,21 @@ any NOT-NULL/FK tightening on org_id not already present, plus the durable reque
 if absent. Append-only; immutable; MUST ship its own hardcoded-historical fixture proving an at-rest
 v38 DB upgrades clean (R8-1 discipline — frozen literal, not the mutable constant).
 
+**v39 SHIPPED (R8-5 D5):** the single additive change is
+`ALTER TABLE approval_requests ADD COLUMN requester_actor_id TEXT NOT NULL DEFAULT ''` — the durable
+§5 requester-identity column for the LEGACY approval lane (the v33 publication lane already carried a
+durable `requester_actor_id` on `publication_approvals_v33`; only `approval_requests` lacked it). `''`
+is the documented pre-v39 sentinel for historical rows that predate durable requester capture; the
+two-person path (D4) writes the real actor id for new approval requests.
+
+**v39 DEFERRED (defense-in-depth follow-up — NOT done):** a database-level FK `org_id -> orgs(id)` on
+the 69 tenant tables was intentionally deferred. All 69 already carry NOT NULL org_id + org indexes
+(v34); adding a real FK requires a full SQLite table rebuild PER TABLE (recreate every trigger, index
+and inbound/outbound FK, rewrite rows) — high risk for marginal gain, because the ENFORCED isolation
+is the runtime layer (§1 per-org ledger + §2 DAL predicate + §0 NotFound funnel), not a passive DB
+constraint. Track the FK tightening as a future hardening item; do NOT attempt the 69-table rebuild
+inside an enforcement migration.
+
 ## 8. KNOWN DANGEROUS ID-KEYED SITES (call-outs — these are where the breach hides)
 - `getVerifiedCandidateCheckpoint(checkpointId)` (ledger.ts:7201) — id-only, NO org filter.
 - ARTIFACT BYTE READS (ledger.ts 1652 / 1706 / 2267 / 2496) — `readFileSync(storage_reference)` by

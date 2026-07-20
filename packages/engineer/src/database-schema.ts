@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 38;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 39;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -3377,4 +3377,45 @@ export const ENGINEER_DATABASE_MIGRATION_37_SQL = `
 export const ENGINEER_DATABASE_MIGRATION_38_SQL = `
   ALTER TABLE review_classification_batches ADD COLUMN reviewer_input_json TEXT NOT NULL DEFAULT '';
   ALTER TABLE review_classification_batches ADD COLUMN normalized_output_json TEXT NOT NULL DEFAULT '';
+`;
+
+/**
+ * Tenancy ENFORCEMENT migration (contract §5, §7) — the DURABLE requester-identity
+ * column for the legacy approval lane. Contract §5 requires the structural two-person
+ * check to read the requester from a durable column WRITTEN AT REQUEST TIME, never
+ * reconstructed and never provisioning-dependent. The v33 publication lane already
+ * carries a durable `requester_actor_id` on `publication_approvals_v33`; the legacy
+ * `approval_requests` lane (decideApproval) did NOT — its requester was only ever
+ * reconstructed. This migration closes that gap on the legacy table so BOTH approval
+ * paths read the requester from a durable at-rest column.
+ *
+ * ADD COLUMN (not a table rebuild) is the correct tool: approval_requests carries a
+ * dense set of v21/v22/v23 checkpoint-binding + immutability + selection triggers, an
+ * inbound foreign key from approval_decisions/git_operations, and several indexes. A
+ * rebuild would have to drop and faithfully recreate every one of them and rewrite
+ * existing rows, multiplying risk for a purely additive change. ADD COLUMN preserves
+ * every prior byte, trigger, index and FK, and does not fire the BEFORE UPDATE
+ * immutability triggers (DDL is not a row update).
+ *
+ * The column is NOT NULL; SQLite requires a constant default to add a NOT NULL column
+ * to a table that may already hold rows. '' is the DOCUMENTED pre-v39 sentinel for
+ * historical rows that predate durable requester capture — approval requests for which
+ * a durable requester identity genuinely never existed. This is the same honest-data
+ * reality as R8-1's v38: rows written AFTER this migration always carry the real actor
+ * id (the two-person path — D4 — writes it explicitly at request time); the '' sentinel
+ * only ever lands on rows that predate the column. Those historical rows are therefore
+ * not two-person-attributable, which is the honest state, not a regression introduced
+ * here.
+ *
+ * DEFERRED (contract §7 defense-in-depth follow-up — intentionally NOT done here):
+ * a database-level FK org_id -> orgs(id) on the 69 tenant-owned tables. All 69 already
+ * carry a NOT NULL org_id + org indexes (v34); adding a real FK requires a full SQLite
+ * table rebuild PER TABLE (recreate every trigger, index and inbound/outbound FK, and
+ * rewrite rows) — high risk for marginal gain, because the enforced isolation is the
+ * RUNTIME layer (the §2 DAL predicate + §0 NotFound funnel + per-org ledger of §1), not
+ * a passive DB constraint. The FK tightening is recorded as a deferred hardening item in
+ * docs/zintus-engineer/TENANCY-CONTRACT.md §7 rather than attempted in this migration.
+ */
+export const ENGINEER_DATABASE_MIGRATION_39_SQL = `
+  ALTER TABLE approval_requests ADD COLUMN requester_actor_id TEXT NOT NULL DEFAULT '';
 `;
