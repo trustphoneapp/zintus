@@ -244,3 +244,8 @@ redaction-before-hash + org-scoping invariants.
    attestation remains formally deferred unless `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED`
    is set AND a signer is configured (then it fails closed). Real git-tree sourcing
    is downstream work.
+   > **SUPERSEDED (R7-5, 2026-07-19):** this frozen R2 note no longer describes the
+   > runtime. `resultTreeHash` is now SOURCED (`GitService.resolveResultTreeHash`,
+   > wired via `resultTreeHashFor`) and attestation is REQUIRED BY DEFAULT — the
+   > `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` flag is honored only as a loud `=0`
+   > opt-out. See KNOWN-LIMITATIONS.md / ARCHITECTURE.md for the current posture.

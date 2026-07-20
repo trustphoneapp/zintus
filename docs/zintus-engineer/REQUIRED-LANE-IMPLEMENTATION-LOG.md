@@ -3447,3 +3447,21 @@ audit-clean; a real ship requires the [HUMAN] tail above.
   credential-ordering survive). Combined gates engineer 869/gateway 475/web 586/
   workspace-typecheck/diff clean. REMAINING: R7-6 (OpenAPI/docs align) → R7-7
   (live gate: refresh/restart/crash-after-PR/2-person ceremony).
+
+### R7-6 — OpenAPI/docs aligned to runtime (Fable-gated, 2026-07-19)
+
+- Finding #5 + accumulated drift closed doc-side; the CODE was already truth
+  (R7-1/2/3/5 built the runtime correctly, only docs lagged — no code change).
+  openapi.yaml: reconcile body oneOf (RECEIPTED {resolution,prUrl,commitSha} +
+  documented 409 PUBLICATION_RECEIPT_BINDING; FAILED {resolution,detail?}); NEW
+  GET /runs/:runId/current-publication (R7-2, {publication|null} none-shape) + POST
+  /publications/:id/reconcile-discovery (R7-3 read-only recheck); resume
+  description corrected always-park→discover-then-settle-or-park (F2). openapi-spec
+  contract test extended to the 2 new paths and PASSES (docs↔handler gate green).
+  ARCHITECTURE.md + KNOWN-LIMITATIONS.md: provenance required-by-default +
+  tree-hash-wired + restart-discover-first. R2-FROZEN-CONTRACT.md: appended a dated
+  SUPERSEDED(R7-5) note rather than rewriting the frozen record; append-only
+  journal left as history. Fable-verified: openapi-spec test 0 fail, gateway/
+  typecheck/diff clean. Residual (intentional): no zod for the reconcile body
+  (server validates manually + client TS types match). 6 of 7 findings + Sol P2-4
+  now closed; NEXT R7-7 live gate.

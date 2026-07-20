@@ -101,28 +101,30 @@
   scoped to the same organization. Resolution Desk routes contain owner checks,
   but the broader publication facade does not. Do not claim tenant isolation or a
   production-safe single-tenant authority boundary until R2/R4 close these gaps.
-- **Provenance attestation formally deferred (P12 Finding A — Sol P1-1 / Luna-1).**
-  The v35 provenance attestation binds a result git *tree* hash for the verified
-  candidate. That tree hash is not durably recorded for an ORIGINAL verified
-  candidate (only `result_commit_sha` is) and deriving it needs a real
-  `git rev-parse <sha>^{tree}` object read that is not wired to the v33 selection
-  at publication time. Posture: attestation is gated behind the explicit env flag
-  `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` (default **unset = not required =
-  deferred**). At the isolated service/facade boundary, leaving it unset permits an
-  approval without an attestation. This is a documented deferral, not evidence that
-  the browser publication flow is usable; publication remains disabled for the
-  independent R2/R3 blockers above. When set true,
-  attestation is required and, because the tree hash cannot be sourced today,
-  approval **fails closed (503) with no P8 approval written** — absence of a
-  required attestation denies publication, never allows an unattested publish. If
-  the flag is true but no signer authority is configured, the gateway withholds
-  the publication authority entirely. When attestation is required and feasible,
-  the P8 approval and its v35 attestation are made atomic by compensation: if the
-  attestation emission throws after the P8 approval commits, the facade
-  invalidates the just-created P8 approval before rethrowing, so no live approval
-  can exist without its required attestation. To make attestation functional and
-  flip the default to required: durably record/derive the result tree hash at
-  promotion and thread it through `resultTreeHashFor`.
+- **Provenance attestation is REQUIRED BY DEFAULT (R7-5); one [HUMAN] live-git
+  caveat remains.** The v35 provenance attestation binds a result git *tree* hash
+  for the verified candidate. The gateway now SOURCES that tree hash from real,
+  trusted git — it reads the candidate result commit's full tree from the local
+  object store (`GitService.resolveResultTreeHash`, wired through
+  `resultTreeHashFor`) and derives a `sha256:<64hex>` commitment; it is never
+  taken from browser input. Posture (code is truth, see `apps/gateway/src/index.ts`):
+  attestation is required by DEFAULT. The `ENGINEER_PROVENANCE_ATTESTATION_REQUIRED`
+  flag is honored ONLY as an explicit opt-out — `0`/`false`/`no`/`off` disables it
+  and is logged loudly at boot as an audited deferral; ANY other value, INCLUDING
+  UNSET, keeps attestation required. A deployment lacking the authority to attest
+  fails CLOSED, never fail-open: with attestation required but no provenance signer
+  configured the gateway WITHHOLDS the publication authority entirely (routes
+  report the not-configured 503); with a signer but a tree hash that cannot be
+  sourced (the result commit object is not in the gateway's local object store),
+  APPROVE **fails closed (503) with no P8 approval written**. The P8 approval and
+  its v35 attestation are made atomic over the shared ledger connection — a crash
+  or throw before commit rolls both back together — so no consumable approval ever
+  exists without its bound attestation. Approval additionally requires an
+  independently provisioned approver identity (a single install cannot
+  self-approve). [HUMAN] live git: the happy path requires the builder's verified
+  result commit object to be present in the gateway's Engineer repository root at
+  approval time; absent that object the tree hash stays unsourceable and approval
+  fails closed until the credentialed checkout is wired.
 - **Reverify replacement lane is intentionally disabled in R1.** The case model
   can classify a typed transient failure as otherwise eligible, but the system
   does not yet carry cryptographic authority for the retained pre-verification

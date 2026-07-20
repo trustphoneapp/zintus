@@ -160,6 +160,10 @@ describe("docs/openapi.yaml", () => {
     "/v1/engineer/publications/{publicationId}/dispatch": '"/publications"',
     "/v1/engineer/publications/{publicationId}/resume": '"/publications"',
     "/v1/engineer/publications/{publicationId}/reconcile": '"/publications"',
+    "/v1/engineer/publications/{publicationId}/reconcile-discovery": '"/publications"',
+    // R7-2 durable current-publication projection (handler.ts publication block:
+    // `.includes("/current-publication")`).
+    "/v1/engineer/runs/{runId}/current-publication": '"/current-publication"',
     // P7 Developer Resolution Desk (handler.ts resolution block: `.includes("/resolution-cases")`
     // + `startsWith("/v1/engineer/resolution-directives/")`).
     "/v1/engineer/runs/{runId}/resolution-cases": '"/resolution-cases"',

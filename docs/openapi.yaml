@@ -1044,16 +1044,20 @@ paths:
       operationId: resumeEngineerPublication
       summary: Resume a durable publication after a restart (idempotent recovery)
       description: |
-        Boot-recovery seam: a DISPATCHED publication whose remote effect was
-        interrupted parks RECONCILING on resume without ever re-issuing the remote
-        effect (exactly one PR path).
+        Boot-recovery seam (F2 read-only discover-then-settle-or-park). A
+        DISPATCHED publication whose remote effect was interrupted FIRST runs the
+        read-only existing-PR discovery: if the exact open-draft PR is found it
+        settles RECEIPTED with that receipt (routed through the one central
+        receipt validator). Only when no PR is found, the remote is unknown, or
+        discovery is unavailable does it park RECONCILING. The credentialed
+        actuator is NEVER re-invoked — exactly one PR path.
       parameters:
         - name: publicationId
           in: path
           required: true
           schema: { type: string }
       responses:
-        "200": { description: Publication resumed / parked RECONCILING. }
+        "200": { description: Publication resumed (RECEIPTED on discovery) or parked RECONCILING. }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: No such publication for this principal. }
         "503": { description: Publication authority is not configured. }
@@ -1063,6 +1067,19 @@ paths:
       tags: [Engineer]
       operationId: reconcileEngineerPublication
       summary: Resolve a RECONCILING publication with an explicit operator decision
+      description: |
+        A RECEIPTED resolution requires a PROVIDER-CONFIRMED receipt: the body
+        carries `{ resolution: RECEIPTED, prUrl, commitSha }` and the server
+        (R7-1 central receipt binding) REJECTS it with `409
+        PUBLICATION_RECEIPT_BINDING` unless BOTH hold — `commitSha` equals the
+        verified candidate's result commit (server-derived, not trusted from the
+        body) AND read-only provider discovery positively confirms the exact
+        open-draft PR for this publication (and the claimed `prUrl` equals the
+        discovered PR). The PERSISTED reference is always the discovered
+        `html_url`, never the operator's URL. On rejection the publication stays
+        RECONCILING (no transition). A FAILED resolution carries `{ resolution:
+        FAILED, detail }` and transitions RECONCILING -> FAILED durably. `detail`
+        defaults server-side when omitted.
       parameters:
         - name: publicationId
           in: path
@@ -1073,14 +1090,93 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [resolution]
-              properties:
-                resolution: { type: string, enum: [RECEIPTED, FAILED] }
-                detail: { type: string }
+              oneOf:
+                - title: RECEIPTED
+                  type: object
+                  required: [resolution, prUrl, commitSha]
+                  properties:
+                    resolution: { type: string, enum: [RECEIPTED] }
+                    prUrl:
+                      type: string
+                      description: |
+                        The operator's claimed pull-request URL. Must equal the
+                        provider-discovered open-draft PR or the server rejects
+                        with 409 PUBLICATION_RECEIPT_BINDING.
+                    commitSha:
+                      type: string
+                      description: |
+                        40- or 64-hex. Must equal the publication's verified
+                        candidate result commit (server-derived) or the server
+                        rejects with 409 PUBLICATION_RECEIPT_BINDING.
+                    detail: { type: string }
+                - title: FAILED
+                  type: object
+                  required: [resolution]
+                  properties:
+                    resolution: { type: string, enum: [FAILED] }
+                    detail: { type: string, description: Terminal-failure reason; defaults server-side when omitted. }
       responses:
-        "200": { description: Publication driven to a terminal state. }
+        "200": { description: Publication driven to a terminal state (RECEIPTED or FAILED). }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: No such publication for this principal. }
+        "409":
+          description: |
+            PUBLICATION_RECEIPT_BINDING — a RECEIPTED receipt did not BIND to
+            this publication: its `commitSha` is not the verified candidate's
+            result commit, OR provider discovery could not confirm the exact
+            open-draft PR (no discovery seam, remote access threw, no matching
+            open-draft PR, or the claimed `prUrl` did not match the discovered
+            PR). No state change; the publication stays RECONCILING.
+        "503": { description: Publication authority is not configured. }
+
+  /v1/engineer/runs/{runId}/current-publication:
+    get:
+      tags: [Engineer]
+      operationId: getEngineerCurrentPublication
+      summary: Get the run's current durable publication projection (owner-scoped)
+      description: |
+        R7-2 durable, read-only projection. Returns the run's CURRENT durable
+        publication reconstructed from server rows — state, approval status,
+        selected checkpoint, candidate lineage, and any receipt/reconciliation —
+        so a browser refresh restores the exact in-flight publication rather than
+        trusting React state. A run with no owned publication (including an
+        unknown or cross-owner run) returns the SAME `{ publication: null }`
+        none-shape (no ownership oracle).
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: '{ publication: <current publication view> } or { publication: null }.' }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { description: Publication authority is not configured. }
+
+  /v1/engineer/publications/{publicationId}/reconcile-discovery:
+    post:
+      tags: [Engineer]
+      operationId: recheckEngineerPublicationReconciliation
+      summary: Re-run read-only remote discovery for a RECONCILING publication
+      description: |
+        R7-3 REMOTE RECHECK. A read-only, NO-BODY re-discovery of a RECONCILING
+        publication's remote outcome. Re-runs the same side-effect-free
+        existing-PR discovery the restart path uses and — ONLY when the provider
+        positively confirms the exact open-draft PR for this publication (routed
+        through the one central receipt validator: commit binding + provider
+        confirmation) — auto-resolves RECONCILING -> RECEIPTED. When the provider
+        cannot confirm (no discovery seam, remote access throws, or no matching
+        open-draft PR) this is NOT an error: the publication stays RECONCILING and
+        the current view is returned. It NEVER re-dispatches and NEVER trusts an
+        operator-supplied URL. On a non-RECONCILING publication it is an
+        idempotent no-op returning the current view.
+      parameters:
+        - name: publicationId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200": { description: Current publication view (RECEIPTED on auto-confirm, else still RECONCILING). }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { description: No such publication for this principal. }
         "503": { description: Publication authority is not configured. }

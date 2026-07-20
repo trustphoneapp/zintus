@@ -121,13 +121,20 @@ back together, so no consumable approval ever exists without its bound
 attestation. The result-tree-hash the attestation binds is sourced from real,
 trusted git: the gateway reads the candidate result commit's full tree from the
 local object store (`GitService.resolveResultTreeHash`) and derives a
-`sha256:<64hex>` commitment. Attestation remains gated behind the explicit
-`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` flag (default off); with the flag on
-and the tree hash sourced, a durable APPROVE emits and persists the v35
-attestation. If the tree hash genuinely cannot be sourced (the result commit is
-not in the gateway's local object store), APPROVE fails closed rather than fail
-open. [HUMAN] live git: the happy path requires the builder's verified commit
-object to be present in the gateway's Engineer repository root at approval time.
+`sha256:<64hex>` commitment. Attestation is REQUIRED BY DEFAULT (R7-5): the
+`ENGINEER_PROVENANCE_ATTESTATION_REQUIRED` flag is honored only as a loud,
+explicit opt-out (`=0`/`false`/`no`/`off`), logged at boot as an audited
+deferral; any other value (including unset) keeps attestation required. With
+attestation required and the tree hash sourced, a durable APPROVE emits and
+persists the v35 attestation atomically. A deployment that lacks the authority to
+attest fails CLOSED: with attestation required but no provenance signer
+configured the gateway WITHHOLDS the publication authority entirely (routes
+report the not-configured 503), and with a signer but an unsourceable tree hash
+(the result commit is not in the gateway's local object store) APPROVE fails
+closed with no P8 approval written — never fail open. [HUMAN] live git: the happy
+path requires the builder's verified commit object to be present in the gateway's
+Engineer repository root at approval time; an approver identity must also be
+independently provisioned (a single install cannot self-approve).
 
 The credentialed Git mechanics are the authority-free `GitPublicationMechanics`
 that P8 drives after it has decided: protected-base preflight, base-SHA recheck,
@@ -141,9 +148,11 @@ and immutable protected history; a stale base cannot publish. Whether a GitHub
 token exists at all is enforced upstream in the gateway facade — a missing
 credential withholds dispatch with a 503 and leaves the publication in PREFLIGHT
 (re-driveable), never committing a remote effect that cannot land. Restart
-recovery replays durable publication states and parks a DISPATCHED-but-unconfirmed
-publication in RECONCILING without ever re-issuing the remote effect (exactly one
-PR path). The read side exposes an owner-scoped, org-scoped audit export (events,
+recovery (F2) replays durable publication states and, for a
+DISPATCHED-but-unconfirmed publication, FIRST runs the read-only existing-PR
+discovery: an exact open-draft PR match settles it RECEIPTED with that receipt,
+and only a no-match / unknown-remote / no-discovery outcome parks it RECONCILING.
+The credentialed actuator is never re-invoked (exactly one PR path). The read side exposes an owner-scoped, org-scoped audit export (events,
 evidence, and v35 attestations, redacted) through the authenticated gateway.
 
 The legacy `EngineerPublicationManager` is retired to historical-read-only: it is
