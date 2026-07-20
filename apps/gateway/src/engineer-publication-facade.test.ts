@@ -623,10 +623,15 @@ describe("P8 publication facade — R3 dispatch / restart / reconcile (owner-sco
   // publication can never exist without its durable receipt (prUrl + commit_sha).
   test("F5: RECEIPTED reconciliation without a real receipt is rejected (400); with one it persists and getPublication returns it", async () => {
     const db = scratchDb();
+    const CONFIRMED_PR = "https://github.test/pull/42";
     const ambiguousService = new PublicationAuthorityService(db, {
       actuator: { async createBranchPr(): Promise<ActuatorOutcome> { return { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "receipt lost" }; } },
       preflight: { probe: (input) => ({ repositoryId: input.repositoryId, baseCommitSha: input.baseCommitSha }) },
       credentialProvider: { getPublicationCredentials: () => ({ token: "ghp_x" }) },
+      // A manual RECEIPTED now REQUIRES provider confirmation of the exact open-draft
+      // PR — wire the read-only discovery that positively confirms it (as production
+      // does via gitPublicationMechanics.createReceiptDiscovery).
+      receiptDiscovery: { discoverExistingReceipt: async (input) => ({ kind: "RECEIPT", prUrl: CONFIRMED_PR, commitSha: input.resultCommitSha }) },
       now: () => new Date(AT), idFactory: () => `f5-${(counter += 1)}`,
     });
     const { facade } = makeFacade(db, { service: ambiguousService });
@@ -642,14 +647,15 @@ describe("P8 publication facade — R3 dispatch / restart / reconcile (owner-sco
     expect((facade.getPublication(principal, publicationId) as { state: string }).state).toBe("RECONCILING");
     expect((db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
 
-    // A real receipt persists atomically with the RECEIPTED transition. F-L1: the
-    // commitSha MUST bind to the run's verified result commit (RESULT_COMMIT); this
-    // service has no discovery seam, so the prUrl stays operator-trusted.
+    // A provider-confirmed receipt persists atomically with the RECEIPTED transition.
+    // F-L1 / GAP #1: commitSha MUST bind to the run's verified result commit
+    // (RESULT_COMMIT) AND the exact open-draft PR must be provider-confirmed — the
+    // persisted reference is the authoritative discovered html_url.
     const resolved = await facade.resolveReconciliation(principal, publicationId, {
-      resolution: "RECEIPTED", detail: "operator confirmed PR", prUrl: "https://github.test/pull/42", commitSha: RESULT_COMMIT,
+      resolution: "RECEIPTED", detail: "operator confirmed PR", prUrl: CONFIRMED_PR, commitSha: RESULT_COMMIT,
     }) as { state: string; receipt?: { prUrl: string; commitSha: string } };
     expect(resolved.state).toBe("RECEIPTED");
-    expect(resolved.receipt?.prUrl).toBe("https://github.test/pull/42");
+    expect(resolved.receipt?.prUrl).toBe(CONFIRMED_PR);
     expect((db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(1);
   });
 

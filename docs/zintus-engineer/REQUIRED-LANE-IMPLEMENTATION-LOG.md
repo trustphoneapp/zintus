@@ -3360,3 +3360,32 @@ VERDICT: the automated + architecture + adversarial verification is COMPLETE and
 PASSES; the human-in-the-loop live verification tail is NOT done and gates a
 production GO. R5/R5F publication consolidation is code-complete and independently
 audit-clean; a real ship requires the [HUMAN] tail above.
+
+### R7-1 — central provider-verified receipt validation (Fable-gated, 2026-07-19)
+
+- The fresh audit's principle implemented: P8 CENTRALLY validates every receipt
+  path; it never trusts the Git mechanics' returned values. New
+  centralReceiptBinding(operation, confirmation) — a typed union with ONLY
+  ACTUATOR_CREATED | DISCOVERED provenance (no operator-trusted variant) — binds
+  commitSha to the SERVER-DERIVED selectionResultCommit (rejects a mismatch with
+  PublicationReceiptBindingError) and PERSISTS the server-derived commit, never
+  the caller-echoed one. All three paths route through it: settleOutcome
+  (automatic, ACTUATOR_CREATED), resume/restart discovery (DISCOVERED),
+  resolveReconciliation (manual — now mandates read-only discovery confirmation,
+  operator prUrl must equal the discovered html_url, discovered ref persists).
+- GAP #2 (Fable-confirmed pre-fix): settleOutcome:794 persisted the actuator's
+  commit/URL verbatim with no candidate binding. GAP #1: manual operator-prUrl
+  fallback stored an unverified URL (the attacker/other-repo test). BOTH closed:
+  the operator-prUrl fallback is REMOVED — no provider confirmation → NOT
+  RECEIPTED, stays RECONCILING, no unverified URL stored ever.
+- Fable mutation-verified GAP #2 myself (the miss I owned): neutering the central
+  commit binding (trust caller commit + persist it) reds the automatic
+  foreign-commit test, restore clean. RED-first: the ex-fallback test at :522 now
+  asserts no-discovery ⇒ RECEIPTED impossible, 0 receipt rows.
+- Gates engineer 860/gateway 464/web 571/typecheck/diff. Honest residuals: (1)
+  settleOutcome trusts the actuator's prUrl STRING by-creation (commit still
+  bound; actuator is trusted code that just made the PR, ≠ untrusted operator
+  input); (2) automatic rejection leaves DISPATCHED → resume→discovery→AMBIGUOUS
+  →RECONCILING (safe); (3) manual redundant commit pre-check (defense-in-depth).
+  LESSON RECORDED: verify presence AND binding; put the binding in the AUTHORITY,
+  not the mechanics; "accepted-risk" was a disguised gap.

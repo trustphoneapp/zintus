@@ -635,53 +635,62 @@ export class PublicationAuthorityService {
     if (!receipt || !receipt.prUrl.trim() || !receipt.commitSha.trim()) {
       throw new PublicationReceiptRequiredError();
     }
-    // F-L1 (Luna): the manual RECEIPTED path validated the receipt for SHAPE only,
-    // so an operator could reconcile to RECEIPTED with a FOREIGN prUrl + a foreign
-    // commitSha and it persisted verbatim (unlike the tight AUTO-discovery path).
-    // BIND the manual receipt to THIS publication server-side:
+    // GAP #1 (manual): the operator-prUrl fallback is REMOVED. A manual RECEIPTED
+    // no longer trusts an operator's URL when the provider cannot confirm it. Every
+    // receipt — automatic, restart, AND manual — must bind to THIS publication's
+    // verified candidate AND be provider-confirmed, routed through the ONE central
+    // validator (`centralReceiptBinding`). P8 never relies on the operator (or the
+    // Git mechanics) to have supplied a correct value.
     //
-    // (1) commitSha MUST equal the publication's OWN verified result commit, derived
-    //     server-side from the durable operation → selection → run (never trusted
-    //     from the operator). A foreign/wrong commit is rejected before any state
-    //     change — it can never be re-labelled this verified change's receipt.
+    // (1) COMMIT BINDING: commitSha MUST equal the publication's OWN verified result
+    //     commit, derived server-side from the durable operation → selection → run.
+    //     A foreign/wrong commit is rejected before any state change.
     const expectedCommitSha = this.selectionResultCommit(current);
     if (receipt.commitSha.trim().toLowerCase() !== expectedCommitSha.trim().toLowerCase()) {
       throw new PublicationReceiptBindingError(
         "manual RECEIPTED receipt commitSha does not match the publication's verified result commit",
       );
     }
-    // (2) STRONGLY PREFERRED: re-run the READ-ONLY exact-PR discovery (the same
-    //     side-effect-free credentialed lookup the restart path uses). When it
-    //     CONFIRMS an exact OPEN DRAFT PR for this publication, its html_url is
-    //     authoritative: the operator-supplied prUrl MUST equal it (else reject),
-    //     and the discovered reference is what we persist. When discovery cannot
-    //     positively confirm (no discovery seam, no remote access → throw, or no
-    //     matching PR found), we fall back to the commitSha binding alone; in that
-    //     documented case the prUrl remains OPERATOR-TRUSTED (the commit binding is
-    //     the non-bypassable minimum). Discovery is side-effect-free — it never
-    //     creates/updates/deletes a remote ref or PR.
-    let boundPrUrl = receipt.prUrl.trim();
+    // (2) PROVIDER CONFIRMATION is MANDATORY: run the READ-ONLY exact-PR discovery
+    //     (the same side-effect-free credentialed lookup the restart path uses). Only
+    //     a POSITIVE confirmation of the exact OPEN DRAFT PR for this publication can
+    //     drive RECEIPTED, and the persisted reference is the AUTHORITATIVE discovered
+    //     html_url. When the provider cannot confirm — no discovery seam, remote
+    //     access throws, or no matching open-draft PR — the path does NOT become
+    //     RECEIPTED and stores NO operator URL: it stays RECONCILING (a typed
+    //     fail-closed error; no transition is applied). Discovery is side-effect-free.
     const discovery = this.deps.receiptDiscovery;
-    if (discovery) {
-      let discovered: ActuatorOutcome | null = null;
-      try {
-        discovered = await discovery.discoverExistingReceipt({
-          runId: current.run_id, publicationId, repositoryId: current.repository_id,
-          baseCommitSha: current.base_commit_sha, resultCommitSha: expectedCommitSha,
-          idempotencyKey: current.idempotency_key,
-        });
-      } catch {
-        discovered = null; // remote unknown => cannot confirm => commitSha binding only
-      }
-      if (discovered && discovered.kind === "RECEIPT") {
-        if (discovered.prUrl.trim() !== boundPrUrl) {
-          throw new PublicationReceiptBindingError(
-            "manual RECEIPTED prUrl does not match the discovered open-draft pull request for this publication",
-          );
-        }
-        boundPrUrl = discovered.prUrl.trim(); // persist the authoritative discovered reference
-      }
+    if (!discovery) {
+      throw new PublicationReceiptBindingError(
+        "manual RECEIPTED requires provider confirmation of the open-draft PR; none is available, so the publication stays RECONCILING",
+      );
     }
+    let discovered: ActuatorOutcome | null = null;
+    try {
+      discovered = await discovery.discoverExistingReceipt({
+        runId: current.run_id, publicationId, repositoryId: current.repository_id,
+        baseCommitSha: current.base_commit_sha, resultCommitSha: expectedCommitSha,
+        idempotencyKey: current.idempotency_key,
+      });
+    } catch {
+      discovered = null; // remote unknown => cannot confirm => stay RECONCILING (fail closed)
+    }
+    if (!discovered || discovered.kind !== "RECEIPT") {
+      throw new PublicationReceiptBindingError(
+        "the provider could not confirm an open-draft pull request for this publication; it stays RECONCILING (no operator URL is trusted)",
+      );
+    }
+    // The operator's claimed prUrl must match the provider-confirmed PR (defense);
+    // the PERSISTED reference is always the authoritative discovered html_url.
+    if (discovered.prUrl.trim() !== receipt.prUrl.trim()) {
+      throw new PublicationReceiptBindingError(
+        "manual RECEIPTED prUrl does not match the discovered open-draft pull request for this publication",
+      );
+    }
+    // Route through the SAME central validator every receipt path uses.
+    const bound = this.centralReceiptBinding(current, {
+      via: "DISCOVERED", prUrl: discovered.prUrl, commitSha: discovered.commitSha,
+    });
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const receipted = this.appendTransitionLocked(current, "RECEIPTED", "RECONCILING", detail, "RESOLVED_RECEIPTED");
@@ -689,7 +698,7 @@ export class PublicationAuthorityService {
         (id, publication_id, publication_revision, idempotency_key, pr_url, commit_sha, observed_at, created_at)
         VALUES (?,?,?,?,?,?,?,?)`).run(
           this.id(), current.publication_id, receipted.revision, current.idempotency_key,
-          boundPrUrl, expectedCommitSha, this.now(), this.now());
+          bound.prUrl, bound.commitSha, this.now(), this.now());
       this.db.exec("COMMIT");
     } catch (error) {
       try { this.db.exec("ROLLBACK"); } catch { /* preserve resolution failure */ }
@@ -745,7 +754,9 @@ export class PublicationAuthorityService {
       // dispatch is committed before the remote call, so no path re-issues it.
       throw error instanceof Error ? error : new Error(String(error));
     }
-    return this.settleOutcome(dispatched, outcome);
+    // ACTUATOR_CREATED: the credentialed actuator just created the PR. Its returned
+    // commit is re-validated centrally against the verified candidate before persist.
+    return this.settleOutcome(dispatched, outcome, "ACTUATOR_CREATED");
   }
 
   /**
@@ -781,7 +792,9 @@ export class PublicationAuthorityService {
         // Re-read under the current row: only settle if it is still DISPATCHED
         // (a concurrent settle already resolved it => return that view).
         const live = this.requireCurrentOperation(publicationId);
-        if (live.state === "DISPATCHED") return this.settleOutcome(live, outcome);
+        // DISCOVERED: read-only discovery positively matched the exact open-draft PR.
+        // It routes through the SAME central validator (commit binding re-asserted).
+        if (live.state === "DISPATCHED") return this.settleOutcome(live, outcome, "DISCOVERED");
         return this.getPublication(publicationId);
       }
     }
@@ -791,8 +804,72 @@ export class PublicationAuthorityService {
     return this.getPublication(publicationId);
   }
 
-  private settleOutcome(operation: OperationRow, outcome: ActuatorOutcome): PublicationView {
+  /**
+   * P8 CENTRAL receipt validator. EVERY path that persists a
+   * publication_remote_receipts_v33 row routes through here BEFORE writing the row:
+   * settleOutcome (automatic dispatch), the restart/resume discovery path (via
+   * settleOutcome), and resolveReconciliation (manual override). P8 validates
+   * CENTRALLY rather than trusting the Git mechanics to have returned correct
+   * values:
+   *
+   *   (1) COMMIT BINDING (all paths): `commitSha` MUST equal
+   *       `selectionResultCommit(operation)` — the server-derived result commit of
+   *       THIS publication's verified candidate. A commit that is not the verified
+   *       candidate's is rejected here; it can NEVER become receipt evidence.
+   *   (2) PROVIDER CONFIRMATION (all paths): the receipt MUST originate from a
+   *       provider-confirmed exact OPEN DRAFT PR for this publication (repo + head
+   *       branch + base + commitSha — the invariants git-service
+   *       `reconcilePublicationOperation` / `lookupExistingPr` enforce). The ONLY
+   *       admissible provenances are:
+   *         - `ACTUATOR_CREATED`: the credentialed actuator just created & returned
+   *           the exact PR in THIS dispatch (creation ⇒ the confirmed PR exists).
+   *         - `DISCOVERED`: read-only existing-PR discovery positively matched the
+   *           exact open-draft PR for this publication.
+   *       There is NO operator-trusted provenance: an unconfirmed operator URL never
+   *       reaches this validator, so RECEIPTED is IMPOSSIBLE without confirmation.
+   *
+   * Returns the bound receipt to persist — the provider-confirmed prUrl + the
+   * SERVER-DERIVED commit (never a caller-echoed commit). Throws
+   * `PublicationReceiptBindingError` (fail closed) on any mismatch.
+   */
+  private centralReceiptBinding(
+    operation: OperationRow,
+    confirmation:
+      | { readonly via: "ACTUATOR_CREATED"; readonly prUrl: string; readonly commitSha: string }
+      | { readonly via: "DISCOVERED"; readonly prUrl: string; readonly commitSha: string },
+  ): { prUrl: string; commitSha: string } {
+    const expected = this.selectionResultCommit(operation);
+    const commit = confirmation.commitSha.trim().toLowerCase();
+    if (!commit || commit !== expected.trim().toLowerCase()) {
+      throw new PublicationReceiptBindingError(
+        "receipt commitSha does not match the publication's verified candidate result commit",
+      );
+    }
+    const prUrl = confirmation.prUrl.trim();
+    if (!prUrl) {
+      throw new PublicationReceiptBindingError(
+        "a provider-confirmed receipt must carry the confirmed pull-request URL",
+      );
+    }
+    // Persist the SERVER-DERIVED commit, never the caller-echoed one.
+    return { prUrl, commitSha: expected };
+  }
+
+  /**
+   * Persists a RECEIPT outcome. `confirmedVia` records the provider-confirmation
+   * provenance: `ACTUATOR_CREATED` for the direct dispatch (the actuator just
+   * created the PR) and `DISCOVERED` for the restart/resume path (read-only
+   * existing-PR discovery matched it). Both route through `centralReceiptBinding`,
+   * so the commit is re-validated against the verified candidate BEFORE any row is
+   * written — the actuator's returned commit is NEVER trusted verbatim.
+   */
+  private settleOutcome(operation: OperationRow, outcome: ActuatorOutcome, confirmedVia: "ACTUATOR_CREATED" | "DISCOVERED"): PublicationView {
     if (outcome.kind === "RECEIPT") {
+      // CENTRAL validation before any state change: reject a receipt whose commit
+      // is not this publication's verified-candidate result commit (fail closed).
+      const bound = this.centralReceiptBinding(operation, {
+        via: confirmedVia, prUrl: outcome.prUrl, commitSha: outcome.commitSha,
+      });
       this.db.exec("BEGIN IMMEDIATE");
       try {
         const receipted = this.appendTransitionLocked(operation, "RECEIPTED", "DISPATCHED", null);
@@ -800,7 +877,7 @@ export class PublicationAuthorityService {
           (id, publication_id, publication_revision, idempotency_key, pr_url, commit_sha, observed_at, created_at)
           VALUES (?,?,?,?,?,?,?,?)`).run(
             this.id(), operation.publication_id, receipted.revision, operation.idempotency_key,
-            outcome.prUrl, outcome.commitSha, this.now(), this.now());
+            bound.prUrl, bound.commitSha, this.now(), this.now());
         this.db.exec("COMMIT");
       } catch (error) {
         try { this.db.exec("ROLLBACK"); } catch { /* preserve settlement failure */ }

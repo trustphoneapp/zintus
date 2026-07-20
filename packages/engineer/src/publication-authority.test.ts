@@ -446,17 +446,23 @@ describe("F5 — manual RECEIPTED resolution must persist a real receipt", () =>
     expect(receipts.c).toBe(0);
   });
 
-  test("resolveReconciliation to RECEIPTED WITH a receipt persists it; getPublication returns it", async () => {
-    const h = harness({ outcome: { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" } });
+  test("resolveReconciliation to RECEIPTED WITH a provider-confirmed receipt persists it; getPublication returns it", async () => {
+    const RECOVERED_PR = "https://example/pr/recovered";
+    const h = harness({
+      outcome: { kind: "AMBIGUOUS", observedRemoteState: "PR_MAYBE", detail: "lost" },
+      // A RECEIPTED resolution is now IMPOSSIBLE without provider confirmation of the
+      // exact open-draft PR; wire the read-only discovery that positively confirms it.
+      receiptDiscovery: { discoverExistingReceipt: async (input) => ({ kind: "RECEIPT", prUrl: RECOVERED_PR, commitSha: input.resultCommitSha }) },
+    });
     const publicationId = await seedReconciling(h);
     const resolved = await h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed PR", {
-      prUrl: "https://example/pr/recovered", commitSha: RESULT_COMMIT,
+      prUrl: RECOVERED_PR, commitSha: RESULT_COMMIT,
     });
     expect(resolved.state).toBe("RECEIPTED");
-    expect(resolved.receipt).toEqual({ prUrl: "https://example/pr/recovered", commitSha: RESULT_COMMIT });
+    expect(resolved.receipt).toEqual({ prUrl: RECOVERED_PR, commitSha: RESULT_COMMIT });
     const view = h.draft.getPublication(publicationId);
     expect(view.state).toBe("RECEIPTED");
-    expect(view.receipt?.prUrl).toBe("https://example/pr/recovered");
+    expect(view.receipt?.prUrl).toBe(RECOVERED_PR);
     const receipts = h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number };
     expect(receipts.c).toBe(1);
   });
@@ -519,16 +525,48 @@ describe("F-L1 — manual RECEIPTED receipt must BIND to the publication (proven
     expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(1);
   });
 
-  test("no discovery seam: the commitSha binding alone still rejects a foreign commit and accepts the bound one (prUrl operator-trusted, documented)", async () => {
+  test("no discovery seam: a manual RECEIPTED is IMPOSSIBLE — the provider cannot confirm, so it stays RECONCILING and stores NO operator URL", async () => {
     const h = harness({ outcome: AMBIGUOUS }); // no receiptDiscovery wired
     const publicationId = await seedReconciling(h);
+    // A foreign commit is rejected on the central commit binding.
     await expect(h.draft.resolveReconciliation(publicationId, "RECEIPTED", "x", { prUrl: FOREIGN_PR, commitSha: FOREIGN_COMMIT }))
       .rejects.toThrow(PublicationReceiptBindingError);
-    const resolved = await h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed", { prUrl: FOREIGN_PR, commitSha: RESULT_COMMIT });
-    expect(resolved.state).toBe("RECEIPTED");
-    // With no remote to confirm the PR, the commit is server-bound but the prUrl remains operator-trusted.
-    expect(resolved.receipt).toEqual({ prUrl: FOREIGN_PR, commitSha: RESULT_COMMIT });
+    // Even the CORRECT verified commit is rejected: with no provider confirmation
+    // there is no provenance for the URL — the removed fallback no longer trusts it.
+    await expect(h.draft.resolveReconciliation(publicationId, "RECEIPTED", "operator confirmed", { prUrl: FOREIGN_PR, commitSha: RESULT_COMMIT }))
+      .rejects.toThrow(PublicationReceiptBindingError);
+    // Fail closed: still RECONCILING, no receipt row, no operator URL persisted.
+    expect(h.draft.getPublication(publicationId).state).toBe("RECONCILING");
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(publicationId) as { c: number }).c).toBe(0);
     expect(h.discoveryCalls).toBe(0);
+  });
+});
+
+// GAP #2 (automatic): settleOutcome must route the actuator's returned receipt
+// through the SAME central validator every path uses — binding commitSha to THIS
+// publication's server-derived verified-candidate result commit BEFORE persisting.
+// The shape-only code persisted outcome.commitSha verbatim, so a compromised/buggy
+// actuator returning a foreign commit became immutable receipt evidence. These are
+// RED on the shape-only code.
+describe("GAP #2 — automatic settleOutcome centrally binds the actuator receipt to the verified candidate", () => {
+  test("RED: an actuator RECEIPT whose commit != the verified candidate is REJECTED; no receipt row, not RECEIPTED", async () => {
+    const FOREIGN_COMMIT = "9".repeat(40);
+    const h = harness({ outcome: { kind: "RECEIPT", prUrl: "https://github.com/attacker/other-repo/pull/999", commitSha: FOREIGN_COMMIT } });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    await expect(h.draft.dispatch(started.publicationId)).rejects.toThrow(PublicationReceiptBindingError);
+    // No receipt row; not RECEIPTED. The durable DISPATCHED row is safe — resume/reconcile handle it.
+    expect((h.db.query("SELECT COUNT(*) c FROM publication_remote_receipts_v33 WHERE publication_id=?").get(started.publicationId) as { c: number }).c).toBe(0);
+    expect(h.draft.getPublication(started.publicationId).state).toBe("DISPATCHED");
+  });
+
+  test("an actuator RECEIPT carrying the verified candidate's commit is ACCEPTED and persists the server-derived commit", async () => {
+    const h = harness({ outcome: { kind: "RECEIPT", prUrl: "https://example/pr/ok", commitSha: RESULT_COMMIT } });
+    const approval = await seedApprovedOriginal(h);
+    const started = await h.draft.startPublication({ runId: RUN_ID, approvalId: approval.approvalId, operation: "BRANCH_PR", idempotencyKey: "k" });
+    const settled = await h.draft.dispatch(started.publicationId);
+    expect(settled.state).toBe("RECEIPTED");
+    expect(settled.receipt).toEqual({ prUrl: "https://example/pr/ok", commitSha: RESULT_COMMIT });
   });
 });
 
