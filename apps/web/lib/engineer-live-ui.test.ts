@@ -57,12 +57,15 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).not.toContain('<span className="engineer-kicker">Review approved</span>');
   });
 
-  it("scopes stale approval conflicts to one run and clears them only on full snapshot paths", () => {
-    expect(source).toContain("candidateConflictAppliesToRun(candidateStaleRunId, run?.runId ?? null)");
-    expect(source).toContain("setCandidateStaleRunId(run.runId)");
-    expect(source.match(/setCandidateStaleRunId\(null\)/g)?.length).toBeGreaterThanOrEqual(3);
-    const liveSummary = source.slice(source.indexOf("const refreshLiveSummary"), source.indexOf("useEffect(() => () =>", source.indexOf("const refreshLiveSummary")));
-    expect(liveSummary).not.toContain("setCandidateStaleRunId");
+  it("no longer carries the legacy approval candidate-stale conflict machinery (R8-3 P1 #3)", () => {
+    // R8-3 removed the legacy human-gate approval WRITE controls from the UI. The
+    // candidate-stale conflict scoping existed only to disable / refresh those
+    // approval buttons on a candidate change, so it is gone with them — recovery
+    // for a stranded run runs exclusively through the Resolution Desk.
+    expect(source).not.toContain("candidateStaleRunId");
+    expect(source).not.toContain("setCandidateStaleRunId");
+    expect(source).not.toContain("candidateConflictAppliesToRun");
+    expect(source).not.toContain("ApprovalDecisionControls");
   });
 
   it("separates active reservations from ambiguous provider outcomes", () => {

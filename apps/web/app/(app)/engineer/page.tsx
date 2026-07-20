@@ -5,7 +5,6 @@ import {
   createEngineerRun,
   engineerDecision,
   resolveHumanEngineerReview,
-  extendEngineerApproval,
   freezeEngineerPlan,
   getEngineerEvidenceStream,
   getEngineerDiff,
@@ -23,7 +22,6 @@ import {
   getEngineerSnapshot,
   listEngineerRunsPage,
   planEngineerRun,
-  recoverEngineerStaleBase,
   retryEngineerProviderTimeout,
   resumeEngineerBudget,
   resolveEngineerDecision,
@@ -42,7 +40,7 @@ import {
 } from "@/lib/engineer";
 import type { EngineerDecisionItem } from "@/lib/engineer-decisions";
 import { DecisionPresentation, DeferredHumanTaskSummary } from "./DecisionPresentation";
-import { ApprovalDecisionControls, PublicationEntryNotice, VerifiedCandidateCard } from "./EngineerVerificationControls";
+import { PublicationEntryNotice, VerifiedCandidateCard } from "./EngineerVerificationControls";
 import { HardeningReadinessBanner } from "./EngineerHardeningReadiness";
 import { clearEphemeralGatewayToken, fetchGatewayConnection, setEphemeralGatewayToken } from "@/lib/gateway";
 import { estimateEngineerCost, formatUsd } from "@/lib/engineer-cost";
@@ -51,7 +49,6 @@ import { deriveDiffProvenance, deriveSecurityStatus, DIFF_PROVENANCE_PRESENTATIO
 import { frozenPlanCapabilities } from "@/lib/engineer-capabilities";
 import { EngineerActionLock } from "@/lib/engineer-action-lock";
 import { engineerCorrectionRecovery } from "@/lib/engineer-correction";
-import { candidateConflictAppliesToRun, candidateMatchesApproval as matchesApproval } from "@/lib/engineer-candidate";
 import {
   ENGINEER_BUDGET_CHIPS,
   ENGINEER_BUDGET_PRESETS,
@@ -231,7 +228,6 @@ export default function EngineerPage() {
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [managerError, setManagerError] = useState<string | null>(null);
-  const [candidateStaleRunId, setCandidateStaleRunId] = useState<string | null>(null);
   const [activity, setActivity] = useState<EngineerRunStatus["activity"] | null>(null);
   const [displayedDiffHash, setDisplayedDiffHash] = useState<string | null>(null);
   const [gatewayToken, setGatewayToken] = useState("");
@@ -302,7 +298,6 @@ export default function EngineerPage() {
     setManagerError(status.lastError);
     setActivity(status.activity);
     setData(nextData);
-    setCandidateStaleRunId(null);
     setBudget(nextBudget);
     setEvents(snapshot.events);
   }, []);
@@ -515,7 +510,6 @@ export default function EngineerPage() {
       getEngineerSnapshot(runId), getEngineerPlan(runId).catch(() => null),
     ]);
     if (activeRunIdRef.current !== runId) return;
-    setCandidateStaleRunId(null);
     setRun(snapshot.status.run); setPlan(storedPlan); setData(snapshot.data); setBudget(snapshot.status.budget); setEvents(snapshot.events); setManagerError(snapshot.status.lastError); setActivity(snapshot.status.activity);
     window.localStorage.setItem(RUN_STORAGE_KEY, runId);
     if (snapshot.status.run.state !== "PAUSED_BUDGET" && !TERMINAL.has(snapshot.status.run.state)) watch(runId, snapshot.latestEventSequence);
@@ -526,7 +520,6 @@ export default function EngineerPage() {
     activeRunIdRef.current = null;
     if (refreshTimerRef.current) { clearTimeout(refreshTimerRef.current); refreshTimerRef.current = null; }
     window.localStorage.removeItem(RUN_STORAGE_KEY);
-    setCandidateStaleRunId(null);
     setRun(null); setPlan(null); setData(null); setBudget(null); setEvents([]); setManagerError(null); setActivity(null); setError(null);
     void loadDashboard();
   }, [loadDashboard]);
@@ -634,19 +627,19 @@ export default function EngineerPage() {
     });
   };
 
-  const recoverStaleBase = async () => {
-    if (!run) return;
-    await withRunMutation("recover-stale-base", async () => {
-      setError(null);
-      try {
-        const replacement = await recoverEngineerStaleBase(run.runId);
-        await openRun(replacement.runId);
-      } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to recover the stale base"); }
-    });
-  };
-
   const openResolutionDesk = () => {
     if (!run || correctionRecovery !== "corrected-run") return;
+    window.location.assign(`/engineer/resolution?run=${encodeURIComponent(run.runId)}`);
+  };
+
+  // R8-3 P1 #2 + P1 #3: the two stranded legacy-gate states (BASE_BRANCH_STALE and
+  // HUMAN_APPROVAL_PENDING) are recovered EXCLUSIVELY through the Resolution Desk —
+  // the single correction authority. The retired stale-base bypass and the legacy
+  // approve/reject/extend controls are gone; both states now open a durable case
+  // (the R7-4 adoption path accepts these stranded states) where a bounded
+  // corrected run is authorized against the current base.
+  const openStrandedRunInResolutionDesk = () => {
+    if (!run) return;
     window.location.assign(`/engineer/resolution?run=${encodeURIComponent(run.runId)}`);
   };
 
@@ -660,51 +653,29 @@ export default function EngineerPage() {
   };
 
   const approval = data?.approval as EngineerApproval | null | undefined;
-  const approvalAuthority = data?.approvalAuthority ?? null;
   const verifiedCandidate = data?.verifiedCandidate ?? null;
-  const candidateStale = candidateConflictAppliesToRun(candidateStaleRunId, run?.runId ?? null);
-  const candidateMatchesApproval = matchesApproval(verifiedCandidate, approvalAuthority);
-  const approvalControlsDisabled = busy || candidateStale || !candidateMatchesApproval;
 
-  const decide = async (action: "approve" | "request-changes" | "reject" | "cancel") => {
+  // R8-3 P1 #3: the legacy approval WRITE decisions (approve / request-changes /
+  // reject) and approval extension are removed from the UI — recovery for a
+  // stranded run runs exclusively through the Resolution Desk. Only cancel (the
+  // run's stop authority) remains here.
+  const decide = async (action: "cancel") => {
     if (!run) return;
     await withRunMutation(`approval:${action}`, async () => {
-      if (action === "cancel") {
-        cancellationRequestedRef.current = true;
-        planningRequestRef.current?.abort();
-        setCancelling(true);
-      }
+      cancellationRequestedRef.current = true;
+      planningRequestRef.current?.abort();
+      setCancelling(true);
       setError(null);
       try {
-        if (action !== "cancel" && !approvalAuthority) throw new Error("The candidate changed or its approval is unavailable. Refresh before deciding.");
-        await engineerDecision(run.runId, action, reason.trim() || `${action} from Zintus Engineer`, approvalAuthority ?? undefined);
+        await engineerDecision(run.runId, action, reason.trim() || `${action} from Zintus Engineer`, undefined);
         setReason("");
         await refresh(run.runId);
       }
       catch (cause) {
         const message = cause instanceof Error ? cause.message : "Decision failed";
-        if (/candidate changed/i.test(message)) setCandidateStaleRunId(run.runId);
         setError(message);
       }
       finally { setCancelling(false); }
-    });
-  };
-
-  const extendApproval = async () => {
-    if (!run) return;
-    await withRunMutation("approval:extend", async () => {
-      setError(null);
-      try {
-        if (!approvalAuthority) throw new Error("The candidate changed or its approval is unavailable. Refresh before extending.");
-        await extendEngineerApproval(run.runId, reason.trim() || "More time required for human review.", approvalAuthority);
-        setReason("");
-        await refresh(run.runId);
-      }
-      catch (cause) {
-        const message = cause instanceof Error ? cause.message : "Unable to extend approval";
-        if (/candidate changed/i.test(message)) setCandidateStaleRunId(run.runId);
-        setError(message);
-      }
     });
   };
 
@@ -932,7 +903,7 @@ export default function EngineerPage() {
       {!reachedImplementation ? <p className="engineer-stage-availability"><strong>Nothing is missing.</strong> Diff appears after implementation changes a file. Evidence appears after tests and independent verification. No implementation change has been recorded for this run yet.</p> : !reachedVerification ? <p className="engineer-stage-availability">Evidence appears after tests and independent verification begin.</p> : null}
       {!activity?.active && ["PLANNING", "REPLANNING"].includes(latestState) && !plan ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Planning interrupted</span><h2>Retry the evidence plan</h2><p>The exact failure is recorded below. The durable run and prior human answers remain intact.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void retryPlanning()}>{pendingAction === "retry-planning" ? "Retrying…" : "Retry planning"}</button></section> : null}
       {latestState === "PLAN_FROZEN" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Frozen contract</span><h2>Resume execution</h2><p>The plan is already immutable. Starting again will enqueue this exact manifest without re-freezing it.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void startFrozen()}>{pendingAction === "start-frozen" ? "Starting…" : "Start frozen plan"}</button></section> : null}
-      {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recreate and verify on the current base</h2><p>The reviewed candidate will not be published. A new immutable run will plan, execute, test, and obtain fresh review and approval.</p></div><button className="engineer-primary" disabled={busy} onClick={() => void recoverStaleBase()}>{pendingAction === "recover-stale-base" ? "Recovering…" : "Start controlled recovery"}</button></section> : null}
+      {latestState === "BASE_BRANCH_STALE" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Base branch changed</span><h2>Recover this run in the Resolution Desk</h2><p>The reviewed candidate will not be published because the base branch advanced. Open the Resolution Desk to adopt this run as a durable case and authorize a bounded corrected run that re-plans, executes, tests, and re-reviews on the current base — the single correction authority, with an explicit budget before any model call.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={openStrandedRunInResolutionDesk}>Open in Resolution Desk</button></div></section> : null}
       <DecisionPresentation decisions={decisions} onResolve={resolveDecision} disabled={busy} stage={stage} />
       {verifiedCandidate ? <VerifiedCandidateCard candidate={verifiedCandidate} /> : null}
       {tab === "timeline" ? <section className="engineer-run-grid">
@@ -941,7 +912,7 @@ export default function EngineerPage() {
       </section> : null}
       {tab === "diff" ? <section className="engineer-card"><div className="engineer-card-heading"><div><h2>{diffPresentation.title}</h2><p>{diffPresentation.description}</p></div><span className={diffPresentation.verified ? "engineer-chip" : "engineer-unverified"}>{diffProvenance}</span></div><DiffViewer diff={data?.diff ?? ""} /></section> : null}
       {tab === "evidence" ? <><ArtifactViewer key={run.runId} runId={run.runId} artifacts={artifacts} /><section className="engineer-evidence-grid"><div className="engineer-card"><div className="engineer-card-heading"><h2>Acceptance evidence</h2><button disabled={busy} onClick={() => void downloadEvidence()}>Export checksummed stream</button></div>{claims.length ? claims.map((claim) => <article className="engineer-claim" key={claim.claimId}><span className={`engineer-status engineer-status--${(claim.status ?? "").toLowerCase()}`}>{claim.status}</span><strong>{claim.claim}</strong><p>{claim.notes}</p></article>) : <p className="engineer-muted">Claims are synthesized only after independent review.</p>}<p className="engineer-muted">Bundles: {(data?.evidenceBundles ?? []).length}</p></div><div className="engineer-card"><h2>Security findings</h2>{findings.length ? findings.map((finding) => <article className="engineer-finding" key={finding.securityFindingId}><span>{finding.severity}</span><strong>{finding.category}</strong><p>{finding.description}</p></article>) : <p className="engineer-muted">{securityStatus.status === "NO_FINDINGS" ? "No findings." : securityStatus.status === "UNAVAILABLE" ? "Security results are unavailable. Retry loading the evidence before making a decision." : "Security review is pending."}</p>}</div><PublicationOperations operations={gitOperations} /></section></> : null}
-      {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human approval</span><h2>Approve the exact machine-verified result</h2><p>Risk: {approval?.riskTier ?? run.riskTier} · Deadline: {approval?.deadlineAt ? new Date(approval.deadlineAt).toLocaleString() : "policy controlled"}</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><ApprovalDecisionControls disabled={approvalControlsDisabled} candidateChanged={!candidateMatchesApproval || candidateStale} pendingAction={pendingAction} onApprove={() => void decide("approve")} onRequestChanges={() => void decide("request-changes")} onExtend={() => void extendApproval()} onReject={() => void decide("reject")} /></section> : null}
+      {latestState === "HUMAN_APPROVAL_PENDING" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Legacy approval retired</span><h2>Recover this stranded run in the Resolution Desk</h2><p>The legacy human-approval lane is retired, so this machine-verified candidate can no longer be approved here. Open the Resolution Desk to adopt this run as a durable case and authorize a bounded corrected run that re-verifies and publishes through the current surface. This immutable audit record is preserved.</p><code>Manifest {approval?.manifestHash}</code><code>Diff {approval?.diffHash}</code><code>Evidence {approval?.evidenceBundleHash}</code></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={openStrandedRunInResolutionDesk}>Open in Resolution Desk</button></div></section> : null}
       {latestState === "HUMAN_REVIEW_REQUIRED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Human review</span><h2>Reviewer evidence needs recovery</h2><p>This run has not produced an authorized verified candidate. Retry only an already-recorded failed verification or Reviewer attempt, or reject the run. Human review cannot bypass machine verification.</p></div><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Decision rationale" rows={3} /><div className="engineer-actions">{humanReviewCanRetry ? <button className="engineer-primary" disabled={busy} onClick={() => void resolveHumanReview("retry")}>{pendingAction === "human-review:retry" ? "Retrying review…" : "Retry reviewer from checkpoint"}</button> : null}<button className="danger" disabled={busy} onClick={() => void resolveHumanReview("reject")}>{pendingAction === "human-review:reject" ? "Rejecting…" : "Reject candidate"}</button></div></section> : null}
       {latestState === "REVIEW_APPROVED" && !approval ? <PublicationEntryNotice runId={run.runId} /> : null}
       {correctionRecovery === "corrected-run" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Correctable terminal result</span><h2>Resolve this run</h2><p>Open the Resolution Desk to inspect canonical blockers, choose a bounded correction budget, and preserve this immutable audit record.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={busy} onClick={openResolutionDesk}>Open Resolution Desk</button></div></section> : null}
