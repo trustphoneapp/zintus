@@ -338,29 +338,13 @@ export class EngineerPublicationManager {
     try{unlinkSync(storageReference);}catch{/* Missing candidate is already safe. */}
   }
 
-  authorizeStaleReverification(runId: string): void {
-    const run = this.options.supervisor.getRun(runId);
-    if (run.state !== "BASE_BRANCH_STALE") throw new Error("stale-base re-verification requires BASE_BRANCH_STALE");
-    this.transition(runId, "REVERIFYING", "STALE_BASE_REVERIFICATION_REQUIRED");
-  }
-
-  /** Discovers and locally synchronizes a new base for a clean replacement run. */
-  async replacementRepositoryForStale(runId: string): Promise<EngineerRun["repository"]> {
-    const authority = await this.publicationAuthority(runId);
-    const run = authority.run;
-    if (run.state !== "BASE_BRANCH_STALE") throw new Error("stale-base recovery requires BASE_BRANCH_STALE");
-    const status = await this.options.gitService.inspectBaseBranch({
-      repository: run.repository,
-      expectedBaseCommitSha: run.repository.baseCommitSha,
-    });
-    if (status.matchesExpected) throw new Error("stale-base recovery is unnecessary because the base matches again");
-    if (!this.options.gitService.synchronizeBaseBranch) {
-      throw new Error("Git service cannot synchronize the inspected replacement base");
-    }
-    await this.revalidatePublicationAuthority(authority, ["BASE_BRANCH_STALE"]);
-    await this.options.gitService.synchronizeBaseBranch({ repository: run.repository, expectedCommitSha: status.currentCommitSha });
-    return { ...run.repository, baseCommitSha: status.currentCommitSha };
-  }
+  // R8-3 FINDING 2: the stale-lane authority methods `authorizeStaleReverification`
+  // and `replacementRepositoryForStale` are removed. They were orphaned once the
+  // `recoverStaleBase` gateway bypass was deleted, and each could begin a
+  // stale-base recovery outside the Resolution Desk. Recovery for a stranded
+  // BASE_BRANCH_STALE run now runs exclusively through the desk, which pins the
+  // corrected run to the durably-observed advanced branch HEAD (see
+  // resolution-case-derivation `adoptionBaseCommitSha`).
 
   private async publish(runId: string): Promise<PublicationStartResult> {
     this.assertOrdinaryPublicationLane(runId);

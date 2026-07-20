@@ -197,6 +197,7 @@ export function deriveCaseCreationInput(
   const spend = deriveSpend(db, run);
   const requiredLaneContractHash = latestRequiredLaneContractHash(db, run);
   const pricingPolicyDigest = options.pricingPolicyDigest ?? serverPricingPolicyDigest();
+  const baseCommitSha = adoptionBaseCommitSha(db, run);
 
   return {
     sourceRunId: run.id,
@@ -204,7 +205,7 @@ export function deriveCaseCreationInput(
     repositoryId: run.repository_id,
     sourceState: run.state,
     sourceStateVersion: run.state_version,
-    baseCommitSha: run.base_commit_sha,
+    baseCommitSha,
     manifestHash: run.manifest_hash ?? sha256({ noManifest: run.id }),
     requiredLaneContractHash,
     blockers,
@@ -216,6 +217,39 @@ export function deriveCaseCreationInput(
     pricingPolicyDigest,
     sourceClassExcluded,
   };
+}
+
+// --- Adoption base commit (R8-3 FINDING 1) ---------------------------------
+
+const COMMIT_SHA = /^[0-9a-f]{40,64}$/i;
+
+/**
+ * The base commit the ADOPTED corrected run must plan against.
+ *
+ * For every state except BASE_BRANCH_STALE the recorded `base_commit_sha` is
+ * correct. For a BASE_BRANCH_STALE run it is stale BY DEFINITION — the branch
+ * advanced past it — so adopting a corrected run onto it would re-strand at
+ * publish (the deleted stale-base bypass re-synced to the advanced HEAD; the
+ * desk path must give the same equivalence). The staleness-detecting
+ * INSPECT_BASE git operation durably recorded the observed current branch HEAD
+ * in its `remote_reference` (see EngineerPublicationManager's base inspection),
+ * so we adopt the corrected run onto THAT advanced HEAD.
+ *
+ * Pure over the durable git_operations table (never a live git call), consistent
+ * with the rest of this module. Falls back to the recorded base only when no
+ * such durable HEAD observation exists — which is exactly the case that cannot
+ * have a guaranteed-stale base to fix (the branch was never re-observed as
+ * advanced), so the fallback never re-introduces the regression.
+ */
+function adoptionBaseCommitSha(db: Database, run: RunRow): string {
+  if (run.state !== "BASE_BRANCH_STALE") return run.base_commit_sha;
+  const inspected = db.query(
+    `SELECT remote_reference FROM git_operations
+     WHERE run_id=? AND operation_type='INSPECT_BASE' AND remote_reference IS NOT NULL
+     ORDER BY started_at DESC, rowid DESC LIMIT 1`,
+  ).get(run.id) as { remote_reference: string } | null;
+  const head = inspected?.remote_reference;
+  return head && COMMIT_SHA.test(head) ? head : run.base_commit_sha;
 }
 
 // --- Blocker classification (the safety-critical mapping) ------------------

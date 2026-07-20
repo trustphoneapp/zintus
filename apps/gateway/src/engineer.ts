@@ -17,9 +17,6 @@ import {
   type EngineerBudgetSelection,
   type EngineerBudgetSnapshot,
   engineerObservabilitySnapshot,
-  createCorrectedRunDirective,
-  manifestPatternMatchesPath,
-  type SafeCorrectionCode,
   isCancellationAllowed,
   hasUnreconciledRemotePublication,
   sha256,
@@ -112,15 +109,6 @@ const unavailableCheckpointAttestor: CheckpointAttestor = {
   sign: () => { throw new Error("Engineer verified-candidate attestor is not configured"); },
   verify: () => { throw new Error("Engineer verified-candidate attestor is not configured"); },
 };
-
-export function correctedRunRepository(source: RepositoryReference, current: RepositoryReference): RepositoryReference {
-  const { baseCommitSha: _sourceBase, ...sourceIdentity } = source;
-  const { baseCommitSha: _currentBase, ...currentIdentity } = current;
-  if (sha256(sourceIdentity) !== sha256(currentIdentity)) {
-    throw new Error("corrected-run recovery cannot change repository identity, origin, or base branch");
-  }
-  return RepositoryReferenceSchema.parse(current);
-}
 
 function redactAdvisoryText<T extends { description: string; recommendedChange: string }>(item: T): T {
   return { ...item, description: redactSecrets(item.description), recommendedChange: redactSecrets(item.recommendedChange) };
@@ -1048,158 +1036,12 @@ export class EngineerRunManager {
   // Resolution Desk: open a case for the stale run, then authorize a bounded
   // corrected run there. The gateway route returns 410 GONE (successor:
   // resolution-cases); the stale run stays fully readable through its GET reads.
-
-  /**
-   * Creates a distinct run with the exact original request and acceptance
-   * criteria. Only bounded, policy-defined corrections derived from durable
-   * findings/failures cross into the replacement run.
-   */
-  async createCorrectedRun(principal: EngineerPrincipal, runId: string): Promise<{
-    sourceRun: EngineerRun;
-    replacementRun: EngineerRun;
-    plan: Awaited<ReturnType<EngineerPlanningManager["plan"]>>;
-  }> {
-    this.assertPrincipal(principal);
-    this.assertOwner(runId, principal);
-    this.assertRequiredLaneAction(runId);
-    if (!this.options.planning || !this.options.context || !this.options.artifactStore) {
-      throw new Error("corrected-run recovery is not configured on this gateway");
-    }
-    const sourceRun = this.options.supervisor.getRun(runId);
-    if (!["SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "REJECTED", "REVIEW_REJECTED", "FAILED"].includes(sourceRun.state)) {
-      throw new Error(`corrected-run recovery is not available from ${sourceRun.state}`);
-    }
-    const sourceManifest = this.options.supervisor.getManifest(runId);
-    if (!sourceManifest) throw new Error("corrected-run recovery requires the original frozen manifest");
-    const replacementRepository = correctedRunRepository(sourceRun.repository, this.options.preflight.repository());
-    await this.options.preflight.assertRunAdmission(replacementRepository);
-
-    const actions = this.deriveSafeCorrections(runId, sourceManifest.allowedPaths);
-    if (actions.length === 0) {
-      throw new Error("no structured safe correction is available for this run; inspect the evidence and create a bounded new request");
-    }
-    const replacementRunId = `corrected-${sha256({
-      sourceRunId: runId,
-      sourceManifestHash: sourceManifest.manifestHash,
-      baseCommitSha: replacementRepository.baseCommitSha,
-      actions,
-    }).slice("sha256:".length, "sha256:".length + 32)}`;
-    let replacement = this.options.supervisor.listRuns().find((candidate) => candidate.runId === replacementRunId);
-    if (!replacement) {
-      const sourceBudget = this.options.supervisor.getBudget(runId);
-      if (sourceBudget.remaining.costUsd <= 0 || sourceBudget.remaining.tokens <= 0 || sourceBudget.remaining.timeSeconds <= 0) {
-        throw new Error("corrected-run recovery requires remaining budget; explicitly authorize a new bounded run instead");
-      }
-      replacement = this.options.supervisor.receiveRequest({
-        runId: replacementRunId,
-        userId: principal.ownerId,
-        repository: replacementRepository,
-        request: sourceRun.requestOriginal,
-        // A correction is a continuation of the original attempt, never an
-        // opportunity to reset or silently enlarge the user's hard cap.
-        budget: {
-          costBudgetUsd: sourceBudget.remaining.costUsd,
-          tokenBudget: sourceBudget.remaining.tokens,
-          timeBudgetSeconds: sourceBudget.remaining.timeSeconds,
-          lifetimeCostBudgetUsd: sourceBudget.remaining.costUsd,
-          lifetimeTokenBudget: sourceBudget.remaining.tokens,
-          lifetimeTimeBudgetSeconds: sourceBudget.remaining.timeSeconds,
-        },
-      });
-    }
-    if (replacement.requestOriginal !== sourceRun.requestOriginal || sha256(replacement.repository) !== sha256(replacementRepository)) {
-      throw new Error("existing corrected run does not match its immutable source identity");
-    }
-
-    const existingDirective = this.options.supervisor.listArtifacts(replacementRunId)
-      .find((artifact) => artifact.type === "CORRECTED_RUN_DIRECTIVE");
-    if (!existingDirective) {
-      const createdAt = new Date().toISOString();
-      const directive = createCorrectedRunDirective({
-        policyVersion: "engineer-corrected-run-v1",
-        sourceRunId: runId,
-        replacementRunId,
-        sourceManifestHash: sourceManifest.manifestHash,
-        requestOriginalHash: sha256(sourceRun.requestOriginal),
-        requestNormalized: sourceManifest.request.normalized,
-        acceptanceCriteria: sourceManifest.acceptanceCriteria,
-        acceptanceCriteriaHash: sha256(sourceManifest.acceptanceCriteria),
-        testPlan: sourceManifest.testPlan,
-        allowedPaths: sourceManifest.allowedPaths,
-        deniedPaths: sourceManifest.deniedPaths,
-        allowedCommands: sourceManifest.allowedCommands,
-        actions,
-        createdAt,
-      });
-      this.options.supervisor.recordArtifact(this.options.artifactStore.put({
-        runId: replacementRunId,
-        type: "CORRECTED_RUN_DIRECTIVE",
-        bytes: JSON.stringify(directive),
-        producerType: "SYSTEM",
-        producerId: "engineer-correction-policy",
-        trusted: true,
-      }));
-    }
-
-    if (replacement.state === "REQUEST_RECEIVED") await this.options.context.build(replacementRunId);
-    let plan = this.options.supervisor.latestPlanProposal(replacementRunId);
-    if (["REQUEST_RECEIVED", "PLANNING", "REPLANNING"].includes(replacement.state)) {
-      plan = await this.options.planning.plan(replacementRunId);
-    }
-    if (!plan) throw new Error(`corrected run ${replacement.state} has no durable plan proposal`);
-    replacement = this.options.supervisor.getRun(replacementRunId);
-    return { sourceRun, replacementRun: replacement, plan };
-  }
-
-  private deriveSafeCorrections(runId: string, allowedPaths: string[]): Array<{
-    code: SafeCorrectionCode;
-    sourceRecordIds: string[];
-    file: string | null;
-    lineStart: number | null;
-    lineEnd: number | null;
-  }> {
-    const actions: Array<{
-      code: SafeCorrectionCode;
-      sourceRecordIds: string[];
-      file: string | null;
-      lineStart: number | null;
-      lineEnd: number | null;
-    }> = [];
-    for (const finding of this.options.supervisor.listSecurityFindings(runId).filter((item) => item.status === "OPEN")) {
-      const signal = `${finding.category} ${finding.description}`.toLowerCase();
-      const boundedFile = finding.file && !finding.file.startsWith("/") && !finding.file.includes("\\") &&
-          !finding.file.split("/").some((segment) => !segment || segment === "." || segment === "..") &&
-          allowedPaths.some((pattern) => manifestPatternMatchesPath(pattern, finding.file!))
-        ? finding.file
-        : null;
-      const code: SafeCorrectionCode = /possible.secret|credential.like|hard.?coded (?:secret|credential)|test secret/.test(signal)
-        ? "GENERATE_NON_SECRET_TEST_FIXTURES"
-        : /unauthori[sz]ed|outside (?:the )?(?:allowlist|allowed paths)|scope violation/.test(signal)
-          ? "REMOVE_UNAUTHORIZED_PATH_CHANGES"
-          : /test (?:integrity|baseline)|baseline test/.test(signal)
-            ? "RESTORE_TEST_BASELINE_INTEGRITY"
-            : "ADDRESS_RECORDED_SECURITY_FINDING";
-      actions.push({
-        code,
-        sourceRecordIds: [finding.securityFindingId],
-        file: boundedFile,
-        lineStart: boundedFile ? finding.lineStart : null,
-        lineEnd: boundedFile ? finding.lineEnd : null,
-      });
-    }
-    for (const failure of this.options.supervisor.listFailures(runId)) {
-      if (failure.failureClass !== "TEST_FAILURE" && !/TEST|VERIFICATION/.test(failure.reasonCode)) continue;
-      actions.push({
-        code: "REPAIR_FAILED_VERIFICATION",
-        sourceRecordIds: [failure.failureId],
-        file: null,
-        lineStart: null,
-        lineEnd: null,
-      });
-    }
-    const unique = new Map(actions.map((action) => [sha256(action), action]));
-    return [...unique.values()];
-  }
+  //
+  // R8-3 FINDING 2: the old `createCorrectedRun` bypass (and its
+  // `deriveSafeCorrections` helper) is removed too. It minted an executable
+  // corrected run + planner directive outside the Resolution Desk — a latent
+  // second correction authority. The desk's signed CREATE_CORRECTED_RUN directive
+  // (issueDirective -> applyDirective) is the sole path to a corrected run.
 
   /** Prevents new detached work, aborts execution, and waits for verification/publication cleanup. */
   async drain(): Promise<void> {

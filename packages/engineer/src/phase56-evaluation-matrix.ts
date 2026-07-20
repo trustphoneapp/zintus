@@ -7,7 +7,7 @@ const ScenarioSchema = z.object({
   scenarioId: z.string().regex(/^[a-z0-9_]+$/),
   category: z.enum(["PLANNING", "BUDGET", "CACHE", "OBSERVABILITY", "RECOVERY", "STORAGE", "ISOLATION", "HUMAN_FLOW"]),
   expectedOutcome: z.string().min(1).max(500),
-  testFile: z.enum(["planning.test.ts", "budget.test.ts", "runtime-budget.test.ts", "supervisor.test.ts", "hardening.test.ts", "execution.test.ts", "verification.test.ts", "publication.test.ts", "engineer.test.ts", "handler.test.ts"]),
+  testFile: z.enum(["planning.test.ts", "budget.test.ts", "runtime-budget.test.ts", "supervisor.test.ts", "hardening.test.ts", "execution.test.ts", "verification.test.ts", "publication.test.ts", "resolution-case-derivation.test.ts", "engineer.test.ts", "handler.test.ts"]),
   testName: z.string().min(1).max(500),
 }).strict();
 
@@ -40,7 +40,7 @@ const scenarios = [
   { scenarioId: "warm_pool_quarantine", category: "STORAGE", expectedOutcome: "Expired, corrupt, and excess warm entries are quarantined and never reused.", testFile: "hardening.test.ts", testName: "warm-pool health sweep quarantines expired, corrupt, and excess entries" },
   { scenarioId: "warm_claim_once", category: "ISOLATION", expectedOutcome: "A warm workspace is atomically claimed once and never returned to the pool.", testFile: "execution.test.ts", testName: "atomically claims a validated warm workspace once and never returns it to the pool" },
   { scenarioId: "reviewer_workspace_stale", category: "ISOLATION", expectedOutcome: "Workspace mutation invalidates the isolated Reviewer decision.", testFile: "verification.test.ts", testName: "rejects a Reviewer decision when the workspace changes during review" },
-  { scenarioId: "stale_base_synchronized", category: "RECOVERY", expectedOutcome: "Credentialed stale recovery synchronizes the inspected base without remote mutation.", testFile: "publication.test.ts", testName: "credentialed stale recovery synchronizes the inspected base without remote mutation" },
+  { scenarioId: "stale_base_adopts_advanced_head", category: "RECOVERY", expectedOutcome: "A stranded stale-base run is adopted by the Resolution Desk onto the durably-observed advanced branch HEAD, never the stale recorded base, so recovery cannot immediately re-strand (R8-3: the direct stale-base synchronize/recover bypass is removed).", testFile: "resolution-case-derivation.test.ts", testName: "R8-3 FINDING 1: an adopted BASE_BRANCH_STALE run targets the advanced branch HEAD, not the stale recorded base" },
   { scenarioId: "canonical_base_cas", category: "RECOVERY", expectedOutcome: "Only the base SHA may advance and concurrent or identity-changing recovery is rejected.", testFile: "engineer.test.ts", testName: "advances only the canonical base after a credentialed stale-base recovery" },
   { scenarioId: "durable_operations_snapshot", category: "OBSERVABILITY", expectedOutcome: "Authenticated run reads expose durable run health and operation counters without invented values.", testFile: "handler.test.ts", testName: "Engineer run intake and reads use the gateway bearer boundary" },
 ] as const;

@@ -71,8 +71,6 @@ export interface GitService {
   inspectBaseBranch(input: InspectBaseBranchInput): Promise<BaseBranchStatus>;
   /** Read-only, credentialed recovery check. It must never create, update, or delete a remote ref or PR. */
   reconcilePublicationOperation?(input: ReconcilePublicationOperationInput): Promise<PublicationOperationReconciliation>;
-  /** Fetches the inspected base commit into the local object store without changing a working tree. */
-  synchronizeBaseBranch?(input: { repository: RepositoryReference; expectedCommitSha: string }): Promise<void>;
   /**
    * Read-only: derives a deterministic `sha256:<64hex>` commitment to the result
    * commit's FULL tree from the local object store, for the v35 provenance
@@ -179,13 +177,9 @@ export class GitHubGitService implements GitService {
     return { currentCommitSha, matchesExpected: currentCommitSha.toLowerCase() === input.expectedBaseCommitSha.toLowerCase(), protectionEnforced, protection };
   }
 
-  async synchronizeBaseBranch(input: { repository: RepositoryReference; expectedCommitSha: string }): Promise<void> {
-    await this.authenticatedGitCurrent(input.repository, ["fetch", "--no-tags", "--force", this.remoteUrl(input.repository), `refs/heads/${input.repository.baseBranch}`]);
-    const fetched = this.git(["rev-parse", "--verify", "FETCH_HEAD^{commit}"]).trim();
-    if (fetched.toLowerCase() !== input.expectedCommitSha.toLowerCase()) {
-      throw new Error("fetched base commit does not match the credentialed remote inspection");
-    }
-  }
+  // R8-3 FINDING 2: `synchronizeBaseBranch` is removed. Its only caller was the
+  // deleted `EngineerPublicationManager.replacementRepositoryForStale` stale-lane
+  // recovery; no live path fetches a replacement base outside the Resolution Desk.
 
   /**
    * Result-tree-hash source for the v35 provenance attestation. Reads the result

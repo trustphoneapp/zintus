@@ -269,6 +269,42 @@ describe("stranded legacy non-terminal run adoption (Finding #6)", () => {
     driveCorrectedRunEndToEnd("run-1", "LEGACY_BASE_BRANCH_STALE");
   });
 
+  // R8-3 FINDING 1 (functional regression). For a BASE_BRANCH_STALE run the
+  // recorded base_commit_sha is stale BY DEFINITION — the branch advanced past it.
+  // Adopting the corrected run onto that stale base would re-strand at publish
+  // (the deleted bypass re-synced to the advanced HEAD; the desk path must give
+  // the same equivalence). The staleness-detecting INSPECT_BASE git operation
+  // durably recorded the observed current branch HEAD in remote_reference, so the
+  // adopted corrected run must plan against THAT advanced HEAD, not the stale sha.
+  function insertInspectBaseOperation(runId: string, currentHeadSha: string, expectedBase = "a".repeat(40)): void {
+    fixture.db.query(`INSERT INTO git_operations(id,run_id,operation_type,requested_by,idempotency_key,expected_base_commit_sha,result_commit_sha,approval_id,evidence_bundle_hash,status,remote_reference,started_at,completed_at,error_code)
+      VALUES (?,?, 'INSPECT_BASE','engineer-supervisor',?,?,NULL,NULL,NULL,'SUCCEEDED',?,?,?,NULL)`)
+      .run(sha256({ inspect: runId, head: currentHeadSha }), runId, `inspect-${runId}-${currentHeadSha}`, expectedBase, currentHeadSha, NOW, NOW);
+  }
+
+  test("R8-3 FINDING 1: an adopted BASE_BRANCH_STALE run targets the advanced branch HEAD, not the stale recorded base", () => {
+    const OLD_BASE = "a".repeat(40); // insertRun records this as the (now stale) base
+    const NEW_HEAD = "f".repeat(40); // the branch advanced to here; INSPECT_BASE observed it
+    insertRun("run-1", "BASE_BRANCH_STALE");
+    insertInspectBaseOperation("run-1", NEW_HEAD, OLD_BASE);
+
+    // (1) the derived case must pin the advanced HEAD, never the stale base.
+    const input = deriveCaseCreationInput(fixture.db, "run-1");
+    expect(input.baseCommitSha).toBe(NEW_HEAD);
+    expect(input.baseCommitSha).not.toBe(OLD_BASE);
+
+    // (2) end-to-end: the durable case persists the advanced HEAD, and applyDirective
+    //     reads exactly that (planRow.base_commit_sha) to mint the corrected run — so
+    //     the replacement builds on the advanced HEAD and will not immediately
+    //     re-strand at publish.
+    const view = driveCorrectedRunEndToEnd("run-1", "LEGACY_BASE_BRANCH_STALE");
+    const caseRow = fixture.db
+      .query("SELECT base_commit_sha FROM resolution_cases WHERE id=?")
+      .get(view.caseId) as { base_commit_sha: string } | null;
+    expect(caseRow?.base_commit_sha).toBe(NEW_HEAD);
+    expect(view.state).toBe("OPEN");
+  });
+
   // FINDING B (Luna F-R7-2 → structural). Adoption of an adoptable legacy state
   // must be REFUSED when the run carries a live P8 publication — proving the
   // adoption invariant is enforced against durable state, not merely argued from

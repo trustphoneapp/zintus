@@ -9,7 +9,7 @@ import {
   VerifiedCandidateIntegrityError, createVerifiedCandidateCheckpoint, createVerifiedHardeningCandidateCheckpoint, sha256,
   type CheckpointAttestor, type EngineerRun, type WorkerLeaseGrant,
 } from "@zintus/engineer";
-import { correctedRunRepository, EngineerRunManager } from "./engineer.js";
+import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
 
@@ -88,12 +88,9 @@ function preflight(customProbe = probe(), publicationEnabled = false): EngineerC
 }
 
 describe("Engineer trusted identity and admission", () => {
-  test("creates corrected work on the current admitted base without changing repository identity", () => {
-    const current = { ...repository, baseCommitSha: "2".repeat(40) };
-    expect(correctedRunRepository(repository, current)).toEqual(current);
-    expect(() => correctedRunRepository(repository, { ...current, name: "another-repository" }))
-      .toThrow("cannot change repository identity");
-  });
+  // R8-3 FINDING 2: the orphaned `createCorrectedRun` bypass and its
+  // `correctedRunRepository` helper are removed — the Resolution Desk's signed
+  // CREATE_CORRECTED_RUN directive is the sole corrected-run authority.
 
   test("legacy human-review approval cannot bypass verified-candidate promotion", async () => {
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });

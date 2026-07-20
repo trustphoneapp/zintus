@@ -491,21 +491,20 @@ describe("Phase 4 approval deadlines", () => {
           return decisions;
         },
       });
-      const calls = { inspect: 0, reconcile: 0, synchronize: 0, branch: 0, push: 0, pr: 0 };
+      const calls = { inspect: 0, reconcile: 0, branch: 0, push: 0, pr: 0 };
       const manager = new EngineerPublicationManager({
         supervisor, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => diff,
         commandSigningSecret: "phase4-complete-authority-secret-at-least-32-bytes", checkpointAttestor,
         gitService: {
           async inspectBaseBranch() { calls.inspect += 1; throw new Error("must not inspect"); },
           async reconcilePublicationOperation() { calls.reconcile += 1; throw new Error("must not reconcile"); },
-          async synchronizeBaseBranch() { calls.synchronize += 1; throw new Error("must not synchronize"); },
           async createRunBranch() { calls.branch += 1; throw new Error("must not create branch"); },
           async pushVerifiedCommit() { calls.push += 1; throw new Error("must not push"); },
           async createPullRequest() { calls.pr += 1; throw new Error("must not create PR"); },
         },
       });
       await expect(manager.resume(runId)).rejects.toThrow();
-      expect(calls).toEqual({ inspect: 0, reconcile: 0, synchronize: 0, branch: 0, push: 0, pr: 0 });
+      expect(calls).toEqual({ inspect: 0, reconcile: 0, branch: 0, push: 0, pr: 0 });
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -1145,55 +1144,6 @@ describe("Phase 4 approval deadlines", () => {
       .rejects.toThrow("publication operation replay does not match current classified authority");
     expect(harness.calls).toEqual({ reconcile: 0, createBranch: 0, push: 0, createPr: 0 });
     expect(harness.operations.get(harness.branchKey)?.status).toBe("STARTED");
-    rmSync(root, { recursive: true, force: true });
-  });
-
-  test("credentialed stale recovery synchronizes the inspected base without remote mutation", async () => {
-    const root = mkdtempSync(join(tmpdir(), "zintus-phase4-stale-recovery-"));
-    let synchronized = "";
-    const run = {
-      runId: "run-stale", userId: "user-1",
-      repository: { repositoryId: "repo-1", provider: "github" as const, owner: "o", name: "r", baseBranch: "main", baseCommitSha: "d".repeat(40) },
-      requestOriginal: "change", requestNormalized: "change", state: "BASE_BRANCH_STALE" as const, stateVersion: 10,
-      manifestHash: `sha256:${"a".repeat(64)}`, riskTier: "HIGH" as const, humanGateRequired: true,
-      createdAt: "2026-07-14T09:00:00.000Z", updatedAt: "2026-07-14T10:00:00.000Z", terminalAt: null,
-    };
-    const evidence = {
-      runId: run.runId, reviewerSessionId: "reviewer-1", reviewerDecision: "APPROVE" as const,
-      classificationHash: sha256("classification-stale"), classificationResult: "READY" as const,
-      reviewerDiffHash: sha256(""), reviewerEvidenceBundleHash: sha256("bundle-stale"), reviewerIsolationVerified: true as const,
-      evidenceBundleId: "bundle-stale", evidenceBundleHash: sha256("bundle-stale"), resultCommitSha: "b".repeat(40),
-      allRequiredChecksPassed: true, openCriticalSecurityFindings: 0,
-    };
-    const approval: ApprovalRequestRecord = {
-      approvalRequestId: "approval-stale", runId: run.runId, riskTier: run.riskTier, assignedReviewerId: "reviewer-1",
-      requestedAt: run.createdAt, deadlineAt: "2026-07-20T10:00:00.000Z", reminderSchedule: [],
-      timeoutAction: "HUMAN_REVIEW_REQUIRED", manifestHash: run.manifestHash, diffHash: evidence.reviewerDiffHash,
-      evidenceBundleHash: evidence.evidenceBundleHash, reviewerSessionId: evidence.reviewerSessionId,
-      classificationHash: evidence.classificationHash, classificationResult: evidence.classificationResult,
-      status: "APPROVED", approvalRevision: 1, verifiedCheckpointId: sha256(`checkpoint-id:${run.runId}`),
-      verifiedCheckpointHash: sha256(`checkpoint-hash:${run.runId}`),
-    };
-    const supervisor = {
-      getRun: () => run,
-      getPublicationEvidence: () => evidence,
-      latestApprovalRequest: () => approval,
-    } as unknown as EngineerSupervisor;
-    const manager = new EngineerPublicationManager({
-      supervisor: checkpointBoundSupervisor(supervisor, run.runId),
-      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }), diffForRun: () => "",
-      commandSigningSecret: "phase4-stale-signing-secret-at-least-32-bytes",
-      checkpointAttestor,
-      gitService: {
-        async inspectBaseBranch() { return { currentCommitSha: "e".repeat(40), matchesExpected: false, protectionEnforced: true }; },
-        async synchronizeBaseBranch(input) { synchronized = input.expectedCommitSha; },
-        async createRunBranch() { throw new Error("must not mutate remote"); },
-        async pushVerifiedCommit() { throw new Error("must not mutate remote"); },
-        async createPullRequest() { throw new Error("must not mutate remote"); },
-      },
-    });
-    expect(await manager.replacementRepositoryForStale(run.runId)).toEqual({ ...run.repository, baseCommitSha: "e".repeat(40) });
-    expect(synchronized).toBe("e".repeat(40));
     rmSync(root, { recursive: true, force: true });
   });
 
