@@ -110,6 +110,7 @@ import {
   IdempotencyConflictError,
   InvalidTransitionError,
   ReplacementLineageUnverifiedError,
+  ReviewCaptureUnavailableError,
   StateVersionConflictError,
   VerifiedCandidateIntegrityError,
 } from "./errors.js";
@@ -3253,6 +3254,22 @@ export class EngineerLedger {
     return transact.immediate();
   }
 
+  /**
+   * Parse a persisted reviewer-input / normalized-output JSON column, guarding the
+   * v38 forward-migration sentinel. Rows that predate schema v38 carry '' (never a
+   * real value — canonical JSON is never empty), so an empty column is an exact,
+   * corruption-distinguishable signal that this run was never captured for replay.
+   * Fail loud but controlled: a typed ReviewCaptureUnavailableError, never a raw
+   * JSON.parse SyntaxError and never fabricated empty JSON.
+   */
+  private parseCapturedReviewerJson<T>(
+    raw: unknown, schema: { parse: (value: unknown) => T }, reviewerSessionId: string,
+  ): T {
+    const text = String(raw);
+    if (text.length === 0) throw new ReviewCaptureUnavailableError(reviewerSessionId);
+    return schema.parse(JSON.parse(text));
+  }
+
   getReviewClassification(reviewerSessionId: string, readArtifact?: ArtifactByteReader): ReviewClassificationBatch | null {
     const row = this.db.query("SELECT * FROM review_classification_batches WHERE reviewer_session_id = ?")
       .get(reviewerSessionId) as Record<string, unknown> | null;
@@ -3304,8 +3321,8 @@ export class EngineerLedger {
     if (bytes.byteLength !== artifact.sizeBytes || !matchesSha256Bytes(bytes, artifact.sha256)) {
       throw new Error("persisted review raw output artifact bytes are invalid");
     }
-    const reviewerInput = ReviewerInputSchema.parse(JSON.parse(String(row.reviewer_input_json)));
-    const normalizedOutput = ReviewerOutputSchema.parse(JSON.parse(String(row.normalized_output_json)));
+    const reviewerInput = this.parseCapturedReviewerJson(row.reviewer_input_json, ReviewerInputSchema, reviewerSessionId);
+    const normalizedOutput = this.parseCapturedReviewerJson(row.normalized_output_json, ReviewerOutputSchema, reviewerSessionId);
     let rawOutput;
     try { rawOutput = ReviewerOutputSchema.parse(JSON.parse(bytes.toString("utf8"))); } catch {
       throw new Error("persisted review raw output is invalid JSON");
@@ -3347,8 +3364,8 @@ export class EngineerLedger {
     if (!row) return null;
     const classification = this.getReviewClassification(String(row.reviewer_session_id), readArtifact);
     if (!classification) throw new Error("classified review disappeared during rehydration");
-    const reviewerInput = ReviewerInputSchema.parse(JSON.parse(String(row.reviewer_input_json)));
-    const output = ReviewerOutputSchema.parse(JSON.parse(String(row.normalized_output_json)));
+    const reviewerInput = this.parseCapturedReviewerJson(row.reviewer_input_json, ReviewerInputSchema, String(row.reviewer_session_id));
+    const output = this.parseCapturedReviewerJson(row.normalized_output_json, ReviewerOutputSchema, String(row.reviewer_session_id));
     const session = ReviewerSessionRecordSchema.parse({
       reviewerSessionId: row.reviewer_session_id, runId, attempt: row.attempt,
       modelTier: row.model_tier, resolvedModel: row.resolved_model, inputHash: row.input_hash,
@@ -4038,7 +4055,7 @@ export class EngineerLedger {
         reviewerRow.manifest_hash !== run.manifestHash) {
       throw new Error("verified candidate Reviewer authority mismatch");
     }
-    const reviewerInput = ReviewerInputSchema.parse(JSON.parse(String(reviewerRow.reviewer_input_json)));
+    const reviewerInput = this.parseCapturedReviewerJson(reviewerRow.reviewer_input_json, ReviewerInputSchema, input.reviewerSessionId);
     if (reviewerInput.diffHash !== reviewerRow.diff_hash) {
       throw new Error("verified candidate Reviewer input binding mismatch");
     }

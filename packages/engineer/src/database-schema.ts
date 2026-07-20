@@ -1,5 +1,5 @@
 export const ENGINEER_DATABASE_BASE_SCHEMA_VERSION = 14;
-export const ENGINEER_DATABASE_SCHEMA_VERSION = 37;
+export const ENGINEER_DATABASE_SCHEMA_VERSION = 38;
 
 /**
  * Phase-1 creates the complete record namespace required by the specification.
@@ -680,8 +680,6 @@ export const ENGINEER_DATABASE_MIGRATION_18_SQL = `
     normalized_output_hash TEXT NOT NULL,
     normalized_session_hash TEXT NOT NULL,
     normalized_findings_hash TEXT NOT NULL,
-    reviewer_input_json TEXT NOT NULL,
-    normalized_output_json TEXT NOT NULL,
     batch_json TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
@@ -3348,4 +3346,35 @@ export const ENGINEER_DATABASE_MIGRATION_37_SQL = `
   CREATE TRIGGER freeze_source_pub_git_operation_v37 BEFORE INSERT ON publication_git_operations_v33
     WHEN EXISTS(SELECT 1 FROM resolution_cases c WHERE c.source_run_id=NEW.run_id)
     BEGIN SELECT RAISE(ABORT,'source run publication is frozen by a resolution case'); END;
+`;
+
+/**
+ * Forward-migrate review_classification_batches to carry the exact reviewer
+ * input and normalized output alongside the batch. These two columns were, in an
+ * earlier defect, retroactively spliced into the immutable migration-18 CREATE
+ * TABLE; that broke every genuinely-shipped v18 database (which never had them)
+ * because the shape validator then demanded columns the shipped schema lacked.
+ * Migration 18 is restored to its shipped bytes and the columns are re-introduced
+ * here as an ADDITIVE forward migration so both an at-rest original-v18 database
+ * and a fully-migrated one converge on the same shape.
+ *
+ * ALTER TABLE ADD COLUMN (not a table rebuild) is the correct tool: the table
+ * carries eight immutability/completeness triggers, an inbound foreign key from
+ * review_finding_classifications, a unique reviewer-session binding and a run
+ * index — a rebuild would have to drop and faithfully recreate every one of them
+ * and rewrite existing rows, multiplying risk for a purely additive change. ADD
+ * COLUMN preserves every prior byte, every trigger, every index and every FK, and
+ * does not fire the BEFORE UPDATE immutability trigger (DDL is not a row update).
+ *
+ * The columns are NOT NULL; SQLite requires a constant default to add a NOT NULL
+ * column to a table that may hold rows. Rows written after this migration always
+ * carry the real canonical JSON (the ledger writes both columns explicitly), so
+ * the '' sentinel only ever lands on rows that predate the columns — rows for
+ * which this reviewer input / normalized output genuinely never existed at v18.
+ * Those historical rows are therefore not replayable, which is the honest state,
+ * not a regression introduced here.
+ */
+export const ENGINEER_DATABASE_MIGRATION_38_SQL = `
+  ALTER TABLE review_classification_batches ADD COLUMN reviewer_input_json TEXT NOT NULL DEFAULT '';
+  ALTER TABLE review_classification_batches ADD COLUMN normalized_output_json TEXT NOT NULL DEFAULT '';
 `;

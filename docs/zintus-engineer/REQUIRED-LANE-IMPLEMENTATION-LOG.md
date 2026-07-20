@@ -3525,3 +3525,83 @@ audit-clean (two auditors GO); the publication path is fail-closed, durable,
 UI-operable, and honestly documented. Unconditional production GO remains BLOCKED
 on the [HUMAN] live tail. This is the honest ceiling reachable without human
 infrastructure — NOT a GO that absorbs the undone parts.
+
+### R8 — Upgrade-Safe Enterprise Activation (fresh audit @77dea80b, 2026-07-19)
+
+- Fresh audit (real historical DB + running localhost) verdict: BLOCKED for
+  enterprise release. Fable verified: P0 REAL + owned (migration 18 retroactively
+  edited in 965476e5 to add reviewer_input_json/normalized_output_json →
+  genuinely-shipped v18 DB rejected; tests were STRUCTURALLY blind — they rebuild
+  "old" DBs from CURRENT mutable constants, so they can never catch a retroactive
+  migration change). P1s confirmed: correction-authority split (recoverStaleBase
+  engineer.ts:1060 bypasses Resolution Desk), legacy approval buttons visible
+  (page.tsx:944 vs 410 routes), loopback origin allowlist (auth.ts:46 permanent
+  unauthenticated), enterprise multitenancy/RBAC incomplete (was DEFERRED-PER-PLAN
+  — enterprise pulls it BACK into scope). Doc-path nit: audit cited docs/engineer/
+  (nonexistent); real file docs/zintus-engineer/.
+- R8 plan (tasks #38-44): R8-1 P0 upgrade-safe migration (revert v18 immutable +
+  new forward migration + REAL hardcoded historical-v18 fixture, NOT reconstructed)
+  → R8-2 doctor full migration/startup dry-run + split readiness + precise preflight
+  → R8-3 single correction authority + remove dead legacy controls → R8-4 ephemeral
+  origin-bound loopback handshake → R8-5 enterprise identity/tenancy/RBAC/revocation/
+  nonhuman-identity/2-person (THE BIG ONE, ~120 sites, was single-tenant) → R8-6
+  config/UI/docs → R8-7 ceremony [HUMAN].
+- 12h-parallel strategy (user asked): R8-1 solo first (boot foundation); R8-3/R8-4
+  parallel worktrees NOW (R8-1-independent); after R8-1 → Fable freezes tenancy
+  contract (one author) → R8-5 massive fan-out (per-bucket storage-site converters
+  + dedicated RBAC/approver/revocation/nonhuman/2-person agents + ONE central
+  adversarial cross-tenant-negative-test agent) → serialized integration + gates at
+  each merge → Sol/Luna. HARD LIMITS: [HUMAN] ceremony (real GitHub/2nd identity/
+  real ledger) outside loop time; audit variance (4 wrong GOs — budget ~3-4h fix
+  cycles). R8-5 is the swing risk (isolation = security property, a missed query =
+  a hole). Single-tenant-enterprise fallback = ~4-5h if full multi-tenant deferred.
+- IN FLIGHT: R8-1 (P0, main tree), R8-3 (worktree), R8-4 (worktree).
+
+#### R8-1 DONE — dual-Fable agreement (2026-07-20)
+
+- P0 (migration-18 immutability) FIXED: migration-18 constant reverted to the
+  original 13-column shape (byte-frozen, 0 json columns in its CREATE); new
+  forward migration 38 does `ALTER … ADD COLUMN reviewer_input_json /
+  normalized_output_json TEXT NOT NULL DEFAULT ''`; SCHEMA_VERSION 37→38;
+  `assertReviewClassificationShape(db,"ABSENT"|"PRESENT")` version-keyed so an
+  at-rest genuinely-shipped v18..v37 DB is accepted (ABSENT) and v38+ demands
+  both columns (PRESENT). New test review-classification-immutability.test.ts
+  builds the historical DB from a FROZEN literal (ORIGINAL_SHIPPED_MIGRATION_18_SQL)
+  that does NOT reference the mutable constant — kills the structural blindness.
+- Finding D (Independent Fable) FIXED: pre-v38 rows carry '' → JSON.parse('')
+  threw an UNCAUGHT SyntaxError on replay. New typed ReviewCaptureUnavailableError
+  + private parseCapturedReviewerJson helper (detects the exact length-0 sentinel
+  BEFORE parse) routes all 5 parse calls (ledger.ts 3324/3325/3367/3368/4058);
+  RED-first test asserts the typed error, not SyntaxError.
+- L3113 idempotency-replay '' comparison: Independent Fable ruled ACCEPTABLE
+  controlled failure (prod path throws the clean typed error first via the
+  supervisor guard; the '' comparison is the deciding mismatch only on the
+  deterministic hardening path in a crash-recovery-across-migration edge, fails
+  closed as typed IdempotencyConflictError before any write). Message-consistency
+  polish folded into R8-5 (rewrites this file). NOT a blocker.
+- Verification: Main Fable PASS (drove tests, confirmed all parse sites routed,
+  confirmed the one CI fail was a load-timeout FLAKE — suite passes 84/0 isolated)
+  + Independent Fable PASS core + delta (3 mutations caught core, 2 caught delta,
+  '' discriminant proven exact, completeness scan found no other retroactive-splice).
+- Gates: engineer 878 tests (green isolated), gateway 476/0, typecheck exit 0.
+- KNOWN follow-up (non-blocking): review-classification-ledger.test.ts rides ~5s
+  against a 5s ceiling → latent CI flake; harden test perf later.
+
+#### R8-5 SCOPE CORRECTION + USER DECISION (2026-07-20)
+
+- Read-only tenancy recon corrected the audit's "~120 sites": ledger.ts is 8037
+  lines, ~611 this.db.* calls, ~503 without an org_id predicate, ~218 pure
+  id-keyed/global/JOIN (the dangerous ones). RBAC matrix (tenant-roles.ts) is 100%
+  DEAD (zero live call sites); revocation is data-only/unenforced; two-person is
+  structural on the v33 publication lane but provisioning-dependent on legacy
+  decideApproval. GOOD: all 69 tenant tables already have org_id (v34) — R8-5 is a
+  QUERY-SCOPING job, not a schema job.
+- USER DECISION: attempt FULL multi-tenant in the 12h window (not the single-tenant
+  fallback). Guardrails held: B0 primitives freeze BEFORE any bucket dispatches;
+  ONE central adversarial cross-tenant negative-test agent; per-bucket dual-Fable;
+  HONEST final verdict naming any unverified bucket (no "done" on green alone).
+- Tenancy contract PINNED: ledger-instance-per-org (extend existing tenantOrgId
+  seam, not thread org through ~500 signatures); cross-org id returns byte-identical
+  NotFound as absent id (no existence oracle); assertAuthority(action) revives the
+  dead RBAC matrix; assertDistinctApprovalActors structural on BOTH approval paths;
+  tenancy migration = v39 (R8-1 took v38; v36 still reserved).

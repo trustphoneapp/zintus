@@ -164,3 +164,11 @@ export class DatabaseIntegrityFatalMarkerConflictAuthorityInvalidError extends E
     this.name = "DatabaseIntegrityFatalMarkerConflictAuthorityInvalidError";
   }
 }
+export class ReviewCaptureUnavailableError extends Error {
+  readonly code = "ENGINEER_REVIEW_CAPTURE_PREDATES_V38";
+  readonly retryable = false;
+  constructor(readonly reviewerSessionId: string) {
+    super("This review predates reviewer-input/normalized-output capture (schema v38) and cannot be replayed. Its sealed classification remains immutable, but no replay authority was ever recorded for it.");
+    this.name = "ReviewCaptureUnavailableError";
+  }
+}

@@ -29,6 +29,7 @@ import {
   ENGINEER_DATABASE_MIGRATION_34_SQL,
   ENGINEER_DATABASE_MIGRATION_35_SQL,
   ENGINEER_DATABASE_MIGRATION_37_SQL,
+  ENGINEER_DATABASE_MIGRATION_38_SQL,
   ENGINEER_DATABASE_SCHEMA_VERSION,
   ENGINEER_DEFAULT_ORG_ID,
   AUTHORITY_ACTOR_TABLES,
@@ -73,6 +74,7 @@ const MIGRATIONS: readonly Migration[] = [
   // v36 is RESERVED by contract §1 (standalone checkpoint-v3, deferred); no lane
   // may claim it, so the chain skips straight to v37.
   { version: 37, sql: ENGINEER_DATABASE_MIGRATION_37_SQL },
+  { version: 38, sql: ENGINEER_DATABASE_MIGRATION_38_SQL },
 ];
 
 function assertHardeningBudgetShape(db: Database): void {
@@ -544,14 +546,21 @@ function assertForeignKeys(db: Database): void {
   if (violations.length > 0) throw new Error("Engineer database migration produced foreign-key violations");
 }
 
-function assertReviewClassificationShape(db: Database): void {
+// The reviewer-input / normalized-output columns are NOT part of the immutable
+// migration-18 shape. A genuinely-shipped v18 database lacks them ("ABSENT"); the
+// v38 forward migration adds them ("PRESENT"). The validator must accept exactly
+// the shape implied by the database's applied version, and never demand the extra
+// columns from an at-rest original-v18 database.
+const REVIEW_CLASSIFICATION_JSON_COLUMNS = ["reviewer_input_json", "normalized_output_json"] as const;
+
+function assertReviewClassificationShape(db: Database, jsonColumns: "ABSENT" | "PRESENT"): void {
   const table = db.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'review_classification_batches'")
     .get() as { sql: string } | null;
   if (!table?.sql) throw new Error("Engineer schema v18 is missing review_classification_batches");
   const columns = new Map((db.query("PRAGMA table_info(review_classification_batches)").all() as Array<{
     name: string; type: string; notnull: number; pk: number;
   }>).filter((column) => !V34_COLUMN_NAME_SET.has(column.name)).map((column) => [column.name, column]));
-  const expected = {
+  const expected: Record<string, { type: string; notnull: number; pk: number }> = {
     classification_hash: { type: "TEXT", notnull: 1, pk: 1 },
     reviewer_session_id: { type: "TEXT", notnull: 1, pk: 0 },
     run_id: { type: "TEXT", notnull: 1, pk: 0 },
@@ -563,11 +572,16 @@ function assertReviewClassificationShape(db: Database): void {
     normalized_output_hash: { type: "TEXT", notnull: 1, pk: 0 },
     normalized_session_hash: { type: "TEXT", notnull: 1, pk: 0 },
     normalized_findings_hash: { type: "TEXT", notnull: 1, pk: 0 },
-    reviewer_input_json: { type: "TEXT", notnull: 1, pk: 0 },
-    normalized_output_json: { type: "TEXT", notnull: 1, pk: 0 },
     batch_json: { type: "TEXT", notnull: 1, pk: 0 },
     created_at: { type: "TEXT", notnull: 1, pk: 0 },
-  } as const;
+  };
+  if (jsonColumns === "PRESENT") {
+    for (const name of REVIEW_CLASSIFICATION_JSON_COLUMNS) expected[name] = { type: "TEXT", notnull: 1, pk: 0 };
+  } else {
+    for (const name of REVIEW_CLASSIFICATION_JSON_COLUMNS) {
+      if (columns.has(name)) throw new Error("Engineer schema v18 has unexpected review classification columns");
+    }
+  }
   if (columns.size !== Object.keys(expected).length) throw new Error("Engineer schema v18 has unexpected review classification columns");
   for (const [name, definition] of Object.entries(expected)) {
     const column = columns.get(name);
@@ -1267,6 +1281,13 @@ export function migrateEngineerDatabase(
   if (appliedVersions.has(37) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35].every((version) => appliedVersions.has(version)))) {
     throw new Error("Engineer schema v37 is missing required migration ancestry");
   }
+  // v38 re-introduces the review_classification_batches reviewer-input/normalized-
+  // output columns that were wrongly spliced into immutable v18. It only needs the
+  // v18 table to exist; it requires the full v14..v37 chain (v36 reserved) so the
+  // additive column lands on top of every prior, immutable object.
+  if (appliedVersions.has(38) && (![14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 37].every((version) => appliedVersions.has(version)))) {
+    throw new Error("Engineer schema v38 is missing required migration ancestry");
+  }
 
   for (const migration of MIGRATIONS) {
     if (migration.version > targetVersion) break;
@@ -1282,7 +1303,7 @@ export function migrateEngineerDatabase(
       if (migration.version === 16) assertRequiredLaneContractShape(db, 0, "V1_ONLY");
       if (migration.version === 17) assertRequiredLaneContractShape(db, 1, "V1_ONLY");
       if (migration.version === 18) assertRequiredLaneContractShape(db, 1, "V1_AND_V2");
-      if (migration.version === 19) assertReviewClassificationShape(db);
+      if (migration.version === 19) assertReviewClassificationShape(db, "ABSENT");
       if (migration.version === 20) assertApprovalClassificationShape(db);
       if (migration.version === 21) assertBuilderDispatchClaimShape(db);
       if (migration.version === 22) assertVerifiedCandidateCheckpointShape(db);
@@ -1291,9 +1312,11 @@ export function migrateEngineerDatabase(
         assertVerifiedCandidateCheckpointShape(db);
         assertHardeningStartShape(db);
       }
+      // The forward migration must land on the original (columns-absent) v18 shape.
+      if (migration.version === 38) assertReviewClassificationShape(db, "ABSENT");
       db.exec(migration.sql);
       assertForeignKeys(db);
-      if (migration.version === 18) assertReviewClassificationShape(db);
+      if (migration.version === 18) assertReviewClassificationShape(db, "ABSENT");
       if (migration.version === 19) assertApprovalClassificationShape(db);
       if (migration.version === 20) assertBuilderDispatchClaimShape(db);
       if (migration.version === 21) assertVerifiedCandidateCheckpointShape(db);
@@ -1315,6 +1338,7 @@ export function migrateEngineerDatabase(
       if (migration.version === 34) assertTenancyShape(db);
       if (migration.version === 35) assertAttestationStorageShape(db);
       if (migration.version === 37) assertPublicationFreezeShape(db);
+      if (migration.version === 38) assertReviewClassificationShape(db, "PRESENT");
       db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(migration.version, now);
       db.exec("COMMIT");
@@ -1330,7 +1354,9 @@ export function migrateEngineerDatabase(
   if (finalVersion === 17) assertRequiredLaneContractShape(db, 1, "V1_AND_V2");
   if (finalVersion >= 18) {
     assertRequiredLaneContractShape(db, 1, "V1_AND_V2");
-    assertReviewClassificationShape(db);
+    // The reviewer-input/normalized-output columns exist only once the v38 forward
+    // migration has run; an at-rest original-v18..v37 database must NOT have them.
+    assertReviewClassificationShape(db, finalVersion >= 38 ? "PRESENT" : "ABSENT");
   }
   if (finalVersion >= 19) assertApprovalClassificationShape(db);
   if (finalVersion >= 20) assertBuilderDispatchClaimShape(db);
