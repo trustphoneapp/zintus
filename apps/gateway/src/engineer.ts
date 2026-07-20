@@ -31,7 +31,6 @@ import {
   FailureRecordSchema,
   type EngineerWorkerLeaseManager,
   type WorkerLeaseGrant,
-  type ApprovalAuthorityExpectation,
   type CheckpointAttestor,
   verifiedCandidateSummary,
   VerifiedCandidateRequiredError,
@@ -63,31 +62,15 @@ class CancellationStillPendingError extends Error {
   constructor(message:string){super(message);this.name="CancellationStillPendingError";}
 }
 
-/**
- * F1 (R5F-2): the legacy human-gate approval lane (approve / request-changes /
- * reject / extend-approval / expire-approval) is RETIRED. R5A removed the legacy
- * publication authority from every run path, so these routes can no longer
- * perform an approval for ANY run — including a historical run still parked at
- * HUMAN_APPROVAL_PENDING or BASE_BRANCH_STALE. Rather than throw a raw, confusing
- * "publication is not configured" (which the docs implied was a transient
- * misconfiguration), they now fail with an HONEST, typed 410 GONE that names the
- * retirement and points at the successor surfaces. The run's history stays fully
- * readable through every GET (approvalView / evidence / gitOperations / artifacts).
- */
-export class LegacyApprovalLaneRetiredError extends Error {
-  readonly httpStatus = 410;
-  readonly code = "LEGACY_APPROVAL_RETIRED";
-  readonly action = "START_FRESH_RUN_OR_USE_RESOLUTION_DESK";
-  constructor() {
-    super(
-      "The legacy human-gate approval lane is retired. New runs publish only through the P8 " +
-      "publication surface (select a candidate, then approve the candidate). A historical run " +
-      "parked at the legacy gate can no longer be approved here — start a fresh run or use the " +
-      "Developer Resolution Desk; its evidence remains readable via the run's GET endpoints.",
-    );
-    this.name = "LegacyApprovalLaneRetiredError";
-  }
-}
+// R8-3 P1 #3: the legacy human-gate approval WRITE lane (approve / request-changes
+// / reject / extend-approval / expire-approval) is REMOVED from the run manager.
+// R5A had already retired the legacy publication authority from every run path,
+// so these methods could only ever fail closed (a dead 410 surface). Recovery for
+// a stranded HUMAN_APPROVAL_PENDING / BASE_BRANCH_STALE run now runs EXCLUSIVELY
+// through the Resolution Desk (durable case + directive + budget authorization),
+// the single correction authority. Historical evidence stays readable through the
+// supervisor ledger reads (approvalView / evidenceBundles / gitOperations /
+// artifacts), and the run's stop authority (`cancel`) is preserved.
 
 interface DurableCancellationSupervisor {
   requestRunCancellation(input:{runId:string;actorId:string;artifact:ArtifactRecord}):{run:EngineerRun;applied:boolean};
@@ -1056,64 +1039,15 @@ export class EngineerRunManager {
     void job.finally(() => this.background.delete(job));
   }
 
-  /** Recreates stale work as a new immutable run on the credentialed current base. */
-  async recoverStaleBase(principal: EngineerPrincipal, runId: string): Promise<{ supersededRun: EngineerRun; replacementRun: EngineerRun }> {
-    this.assertPrincipal(principal);
-    this.assertOwner(runId, principal);
-    this.assertRequiredLaneAction(runId);
-    if (!this.options.publication || !this.options.planning || !this.options.context || !this.options.execution || !this.options.artifactStore) {
-      throw new Error("stale-base recovery is not configured on this gateway");
-    }
-    const staleRun = this.options.supervisor.getRun(runId);
-    const repository = await this.options.publication.replacementRepositoryForStale(runId);
-    this.options.preflight.acceptAdvancedBase(staleRun.repository.baseCommitSha, repository);
-    const replacementRunId = `recovery-${sha256({ runId, baseCommitSha: repository.baseCommitSha }).slice(0, 32)}`;
-    let replacement = this.options.supervisor.listRuns().find((item) => item.runId === replacementRunId);
-    if (!replacement) {
-      replacement = this.options.supervisor.receiveRequest({
-        runId: replacementRunId,
-        userId: principal.ownerId,
-        repository,
-        request: staleRun.requestOriginal,
-      });
-    }
-    if (replacement.state === "REQUEST_RECEIVED" || replacement.state === "PLANNING" || replacement.state === "REPLANNING") {
-      const proposal = await this.plan(principal, replacement.runId);
-      replacement = this.options.supervisor.getRun(replacement.runId);
-      if (replacement.state === "PLAN_READY") {
-        replacement = this.options.supervisor.freezePlan({
-          runId: replacement.runId,
-          expectedStateVersion: replacement.stateVersion,
-          manifest: proposal.manifest,
-          actorId: "engineer-supervisor",
-          idempotencyKey: `stale-recovery:freeze:${replacement.runId}:${proposal.manifest.manifestVersion}`,
-        }).run;
-      }
-    }
-    if (replacement.state === "PLAN_FROZEN") replacement = await this.start(principal, replacement.runId);
-
-    const relation = this.options.supervisor.recordArtifact(this.options.artifactStore.put({
-      runId,
-      type: "STALE_BASE_REPLACEMENT",
-      bytes: JSON.stringify({ replacementRunId: replacement.runId, previousBaseCommitSha: staleRun.repository.baseCommitSha, currentBaseCommitSha: repository.baseCommitSha }),
-      producerType: "SYSTEM",
-      producerId: "engineer-supervisor",
-      trusted: true,
-    }));
-    const currentStale = this.options.supervisor.getRun(runId);
-    const supersededRun = currentStale.state === "BASE_BRANCH_STALE"
-      ? this.options.supervisor.transition({
-          runId,
-          expectedStateVersion: currentStale.stateVersion,
-          nextState: "HUMAN_REVIEW_REQUIRED",
-          reasonCode: "STALE_BASE_SUPERSEDED_BY_REPLACEMENT_RUN",
-          evidenceIds: [relation.artifactId],
-          manifestHash: currentStale.manifestHash,
-          idempotencyKey: `stale-recovery:supersede:${replacement.runId}`,
-        }).run
-      : currentStale;
-    return { supersededRun, replacementRun: replacement };
-  }
+  // R8-3 P1 #2: stale-base recovery is REMOVED from the run manager. It used to
+  // directly create / plan / freeze / execute a replacement run on the advanced
+  // base — a bypass of the Resolution Desk's single correction authority (durable
+  // case + directive + budget authorization + compare-and-swap) that could begin
+  // model spending WITHOUT an explicit correction decision. A BASE_BRANCH_STALE
+  // run is an adoptable legacy state, so recovery now runs EXCLUSIVELY through the
+  // Resolution Desk: open a case for the stale run, then authorize a bounded
+  // corrected run there. The gateway route returns 410 GONE (successor:
+  // resolution-cases); the stale run stays fully readable through its GET reads.
 
   /**
    * Creates a distinct run with the exact original request and acceptance
@@ -1619,34 +1553,9 @@ export class EngineerRunManager {
     return this.options.supervisor.latestApprovalRequest(runId);
   }
 
-  async approve(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation): Promise<PublicationStartResult> {
-    this.assertPrincipal(principal);
-    this.assertOwner(runId, principal);
-    this.assertRequiredLaneAction(runId);
-    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
-    this.options.publication.assertApprovalAuthority(runId, expected);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
-    return this.options.publication.approve(runId, principal.reviewerId, reason, expected);
-  }
-
-  async requestChanges(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation): Promise<void> {
-    this.assertPrincipal(principal);
-    this.assertOwner(runId, principal);
-    this.assertRequiredLaneAction(runId);
-    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
-    this.options.publication.assertApprovalAuthority(runId, expected);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
-    await this.options.publication.requestChanges(runId, principal.reviewerId, reason, expected);
-  }
-
-  async reject(principal: EngineerPrincipal, runId: string, reason: string, expected: ApprovalAuthorityExpectation): Promise<void> {
-    this.assertPrincipal(principal);
-    this.assertOwner(runId, principal);
-    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
-    this.options.publication.assertApprovalAuthority(runId, expected);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
-    await this.options.publication.reject(runId, principal.reviewerId, reason, expected);
-  }
+  // R8-3 P1 #3: approve / requestChanges / reject were the legacy human-gate
+  // approval WRITE lane, retired from every run path by R5A and removed here.
+  // Recovery for a stranded run now runs exclusively through the Resolution Desk.
 
   async resolveHumanReview(principal: EngineerPrincipal, runId: string, decision: "reject" | "retry", reason: string) {
     this.assertPrincipal(principal);
@@ -1713,23 +1622,9 @@ export class EngineerRunManager {
     throw new Error("Reviewer retry requires a recorded failed Reviewer attempt");
   }
 
-  async extendApproval(principal: EngineerPrincipal, runId: string, reason: string, extensionSeconds: number, expected: ApprovalAuthorityExpectation) {
-    this.assertPrincipal(principal);
-    this.assertOwner(runId, principal);
-    this.assertRequiredLaneAction(runId);
-    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
-    this.options.publication.assertApprovalAuthority(runId, expected);
-    await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
-    return this.options.publication.extend(runId, principal.reviewerId, reason, extensionSeconds, expected);
-  }
-
-  async expireApproval(principal: EngineerPrincipal, runId: string, expected: ApprovalAuthorityExpectation): Promise<void> {
-    this.assertPrincipal(principal);
-    this.assertOwner(runId, principal);
-    if (!this.options.publication) throw new LegacyApprovalLaneRetiredError();
-    this.options.publication.assertApprovalAuthority(runId, expected);
-    await this.options.publication.expire(runId, expected);
-  }
+  // R8-3 P1 #3: extendApproval / expireApproval were part of the retired legacy
+  // human-gate approval WRITE lane and are removed. Only cancel + the historical
+  // GET reads remain; recovery runs exclusively through the Resolution Desk.
 
   async cancel(principal: EngineerPrincipal, runId: string, reason: string): Promise<void> {
     this.assertPrincipal(principal);

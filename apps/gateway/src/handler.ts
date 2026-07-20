@@ -53,7 +53,6 @@ import {
   type CreateAgentTaskBody,
 } from "./agents.js";
 import type { EngineerRunManager } from "./engineer.js";
-import { LegacyApprovalLaneRetiredError } from "./engineer.js";
 import {
   mcpToolsToDefinitions,
   mcpToolName,
@@ -3255,7 +3254,18 @@ export function createGatewayHandler(
           return json(request, { run: await engineerRuns.retryProviderTimeout(engineerPrincipal!, runId), accepted: true }, 202);
         }
         if (action === "recover-stale-base" && request.method === "POST") {
-          return json(request, await engineerRuns.recoverStaleBase(engineerPrincipal!, runId), 202);
+          // R8-3 P1 #2: stale-base recovery no longer directly creates / plans /
+          // freezes / executes a replacement run. That was a bypass of the
+          // Resolution Desk's SINGLE correction authority (durable case +
+          // directive + budget authorization + CAS) and could begin model
+          // spending without an explicit correction decision. A BASE_BRANCH_STALE
+          // run is an adoptable legacy state: open a Resolution Desk case for it
+          // (POST /v1/engineer/runs/:runId/resolution-cases) and authorize a
+          // bounded corrected run there. The stale run stays fully readable.
+          return json(request, {
+            error: { code: "GONE", message: "stale-base recovery is superseded by resolution cases" },
+            successor: "resolution-cases",
+          }, 410);
         }
         if (action === "corrected-run" && request.method === "POST") {
           // Superseded by the P7 Developer Resolution Desk. The legacy
@@ -3448,43 +3458,18 @@ export function createGatewayHandler(
           }
           return json(request, await engineerRuns.resolveHumanReview(engineerPrincipal!, runId, body.decision, body.reason));
         }
-        if (["approve", "request-changes", "reject", "extend-approval", "expire-approval", "cancel"].includes(action ?? "") && request.method === "POST") {
-          const body = await request.json() as {
-            actorId?: string; reason?: string; extensionSeconds?: number;
-            expectedVerifiedCheckpointId?: string; expectedVerifiedCheckpointHash?: string;
-            expectedApprovalRevision?: number;
-          };
+        // R8-3 P1 #3: the legacy human-gate approval WRITE lane (approve /
+        // request-changes / reject / extend-approval / expire-approval) is REMOVED.
+        // R5A retired the legacy publication authority from every run path, so these
+        // routes could only ever fail closed — they were a dead 410 surface AND the
+        // last legacy correction/publication authority outside the Resolution Desk.
+        // Recovery for a stranded HUMAN_APPROVAL_PENDING run now runs exclusively
+        // through the Resolution Desk (open a case, authorize a bounded corrected
+        // run). Only `cancel` (the run's stop authority) and the historical GET
+        // reads (approval / evidence / git-operations / artifacts) remain.
+        if (action === "cancel" && request.method === "POST") {
+          const body = await request.json() as { reason?: string };
           if (typeof body.reason !== "string") throw new Error("reason is required");
-          const expected = {
-            expectedVerifiedCheckpointId: body.expectedVerifiedCheckpointId,
-            expectedVerifiedCheckpointHash: body.expectedVerifiedCheckpointHash,
-            expectedApprovalRevision: body.expectedApprovalRevision,
-          };
-          if (action !== "cancel" && (typeof expected.expectedVerifiedCheckpointId !== "string" ||
-              typeof expected.expectedVerifiedCheckpointHash !== "string" ||
-              typeof expected.expectedApprovalRevision !== "number")) {
-            throw new Error("expectedVerifiedCheckpointId, expectedVerifiedCheckpointHash, and expectedApprovalRevision are required");
-          }
-          const strictExpected = expected as {
-            expectedVerifiedCheckpointId: string; expectedVerifiedCheckpointHash: string; expectedApprovalRevision: number;
-          };
-          if (action === "approve") return json(request, { result: await engineerRuns.approve(engineerPrincipal!, runId, body.reason, strictExpected) });
-          if (action === "request-changes") {
-            await engineerRuns.requestChanges(engineerPrincipal!, runId, body.reason, strictExpected);
-            return json(request, { run: engineerRuns.get(runId).run });
-          }
-          if (action === "reject") {
-            await engineerRuns.reject(engineerPrincipal!, runId, body.reason, strictExpected);
-            return json(request, { run: engineerRuns.get(runId).run });
-          }
-          if (action === "extend-approval") {
-            if (typeof body.extensionSeconds !== "number") throw new Error("extensionSeconds is required");
-            return json(request, { approval: await engineerRuns.extendApproval(engineerPrincipal!, runId, body.reason, body.extensionSeconds, strictExpected) });
-          }
-          if (action === "expire-approval") {
-            await engineerRuns.expireApproval(engineerPrincipal!, runId, strictExpected);
-            return json(request, { run: engineerRuns.get(runId).run });
-          }
           await engineerRuns.cancel(engineerPrincipal!, runId, body.reason);
           return json(request, { run: engineerRuns.get(runId).run });
         }
@@ -3608,15 +3593,6 @@ export function createGatewayHandler(
           return json(request, {
             error: { code: error.code, message: error.message, action: error.action },
           }, 409);
-        }
-        if (error instanceof LegacyApprovalLaneRetiredError) {
-          // F1: the retired legacy human-gate lane reports an honest 410 GONE
-          // (successor: P8 publication / Resolution Desk), never a raw
-          // "not configured" 409. Historical runs stay readable via GET.
-          return json(request, {
-            error: { code: error.code, message: error.message, action: error.action },
-            successor: "p8-publication-or-resolution-desk",
-          }, 410, { "Cache-Control": "no-store" });
         }
         if(error instanceof HardeningGenericOperationForbiddenError||error instanceof HardeningBudgetExtensionRequiresNewRunError){
           return json(request,{error:{code:error.code,message:error.message}},409,{"Cache-Control":"no-store"});

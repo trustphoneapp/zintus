@@ -1182,15 +1182,9 @@ describe("Engineer trusted identity and admission", () => {
     await expect(manager.plan(forged, "owned")).rejects.toThrow("untrusted");
     await expect(manager.start(forged, "owned")).rejects.toThrow("untrusted");
     await expect(manager.freeze(forged, "owned", { expectedStateVersion: 0, manifest: {} as never, idempotencyKey: "forged-freeze" })).rejects.toThrow("untrusted");
-    const forgedAuthority = {
-      expectedVerifiedCheckpointId: `sha256:${"a".repeat(64)}`,
-      expectedVerifiedCheckpointHash: `sha256:${"b".repeat(64)}`,
-      expectedApprovalRevision: 0,
-    };
-    await expect(manager.approve(forged, "owned", "forged", forgedAuthority)).rejects.toThrow("untrusted");
-    await expect(manager.requestChanges(forged, "owned", "forged", forgedAuthority)).rejects.toThrow("untrusted");
-    await expect(manager.reject(forged, "owned", "forged", forgedAuthority)).rejects.toThrow("untrusted");
-    await expect(manager.extendApproval(forged, "owned", "forged", 60, forgedAuthority)).rejects.toThrow("untrusted");
+    // R8-3 P1 #3: the legacy approval WRITE methods (approve/requestChanges/
+    // reject/extendApproval/expireApproval) are removed; cancel remains and still
+    // proves the owner-forgery guard rejects a non-owning principal.
     await expect(manager.cancel(forged, "owned", "forged")).rejects.toThrow("untrusted");
     expect(supervisor.getRun("owned").state).toBe("REQUEST_RECEIVED");
     supervisor.close();

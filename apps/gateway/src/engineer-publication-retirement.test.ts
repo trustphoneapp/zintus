@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EngineerRun } from "@zintus/engineer";
-import { EngineerRunManager, LegacyApprovalLaneRetiredError } from "./engineer.js";
+import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal } from "./engineer-identity.js";
 
 // R5A: the legacy EngineerPublicationManager is RETIRED from every new-run
@@ -70,31 +70,24 @@ describe("R5A publication authority retirement", () => {
     expect(manager.reviewApprovedEndsStream()).toBe(true);
   });
 
-  test("the legacy approval WRITE path is refused on the P8-only run manager", async () => {
+  test("the legacy approval WRITE surface is removed from the run manager (R8-3 P1 #3)", () => {
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
-    const now = "2026-07-16T12:00:00.000Z";
-    const run: EngineerRun = {
-      runId: "p8-only-approve", userId: principal.ownerId, repository,
-      requestOriginal: "change", requestNormalized: "change",
-      state: "REVIEW_APPROVED", stateVersion: 8, manifestHash: `sha256:${"a".repeat(64)}`,
-      riskTier: "MEDIUM", humanGateRequired: true, createdAt: now, updatedAt: now, terminalAt: null,
-    };
     const manager = new EngineerRunManager({
-      supervisor: { getRun: () => run, isOptionalHardeningChild: () => false } as never,
+      supervisor: { isOptionalHardeningChild: () => false } as never,
       principal,
       preflight,
     });
-    const expected = {
-      expectedVerifiedCheckpointId: "checkpoint-1",
-      expectedVerifiedCheckpointHash: `sha256:${"c".repeat(64)}`,
-      expectedApprovalRevision: 0,
-    };
-    // F1 (R5F-2): the retired legacy lane now fails with an HONEST typed 410
-    // retirement error, not a raw "not configured" throw.
-    await expect(manager.approve(principal, run.runId, "approve", expected))
-      .rejects.toBeInstanceOf(LegacyApprovalLaneRetiredError);
-    await expect(manager.reject(principal, run.runId, "reject", expected))
-      .rejects.toBeInstanceOf(LegacyApprovalLaneRetiredError);
+    // R8-3 P1 #3: R5F-2 retired the legacy lane to an honest 410; R8-3 REMOVES the
+    // WRITE surface entirely. The run manager exposes no approve / request-changes
+    // / reject / extend-approval / expire-approval method at all — the single
+    // correction authority is the Resolution Desk. Only cancel + reads remain.
+    const surface = manager as unknown as Record<string, unknown>;
+    for (const method of ["approve", "requestChanges", "reject", "extendApproval", "expireApproval"]) {
+      expect(surface[method]).toBeUndefined();
+    }
+    // The preserved stop authority + historical read surface still exist.
+    expect(typeof surface.cancel).toBe("function");
+    expect(typeof surface.approvalView).toBe("function");
   });
 
   test("historical legacy-lane runs still read back approval/evidence/publication history (compatibility)", () => {
@@ -144,13 +137,12 @@ describe("R5A publication authority retirement", () => {
     expect((artifacts[0] as Record<string, unknown>).artifactId).toBe("art-legacy");
   });
 
-  // F1 (R5F-2): a GENUINELY-PENDING historical run — one that was parked at the
-  // legacy HUMAN_APPROVAL_PENDING / BASE_BRANCH_STALE gate BEFORE the R5A cutover
-  // (never COMPLETED). Existing tests only proved COMPLETED legacy runs read back;
-  // none exercised a still-pending one. On the post-cutover (publication-less)
-  // manager, EVERY legacy write action must be handled DETERMINISTICALLY with an
-  // HONEST typed 410 retirement error (not a raw "not configured" throw), and the
-  // run's durable history must stay fully readable.
+  // R8-3 P1 #3 (was F1/R5F-2): a GENUINELY-PENDING historical run — one parked at
+  // the legacy HUMAN_APPROVAL_PENDING / BASE_BRANCH_STALE gate BEFORE the R5A
+  // cutover (never COMPLETED). R5F-2 made every legacy write action fail closed
+  // with an honest typed 410; R8-3 REMOVES the write surface entirely so no legacy
+  // approval authority exists outside the Resolution Desk. The run's durable
+  // history must still stay fully readable.
   for (const parkedState of ["HUMAN_APPROVAL_PENDING", "BASE_BRANCH_STALE"] as const) {
     test(`a historical run parked at ${parkedState} deterministically reports the legacy-lane retirement AND stays readable`, async () => {
       const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
@@ -180,34 +172,18 @@ describe("R5A publication authority retirement", () => {
         principal,
         preflight,
       });
-      const expected = {
-        expectedVerifiedCheckpointId: "checkpoint-pending",
-        expectedVerifiedCheckpointHash: `sha256:${"c".repeat(64)}`,
-        expectedApprovalRevision: 1,
-      };
-
-      // EVERY legacy write action fails closed with the typed 410 retirement error
-      // (deterministic, honest — never the raw "not configured" message, and never
-      // a silent success that fabricates an approval).
-      const assertRetired = async (op: Promise<unknown>) => {
-        await expect(op).rejects.toBeInstanceOf(LegacyApprovalLaneRetiredError);
-        await op.catch((error: unknown) => {
-          expect(error).toBeInstanceOf(LegacyApprovalLaneRetiredError);
-          const typed = error as LegacyApprovalLaneRetiredError;
-          expect(typed.httpStatus).toBe(410);
-          expect(typed.code).toBe("LEGACY_APPROVAL_RETIRED");
-          expect(typed.message).not.toMatch(/not configured/i);
-          expect(typed.message).toMatch(/retired/i);
-        });
-      };
-      await assertRetired(manager.approve(principal, pendingRun.runId, "approve", expected));
-      await assertRetired(manager.requestChanges(principal, pendingRun.runId, "changes", expected));
-      await assertRetired(manager.reject(principal, pendingRun.runId, "reject", expected));
-      await assertRetired(manager.extendApproval(principal, pendingRun.runId, "extend", 3600, expected));
-      await assertRetired(manager.expireApproval(principal, pendingRun.runId, expected));
+      // R8-3 P1 #3: the legacy write SURFACE is gone — there is no approve /
+      // request-changes / reject / extend-approval / expire-approval method to call
+      // on a stranded run at all. Recovery for such a run runs EXCLUSIVELY through
+      // the Resolution Desk (BASE_BRANCH_STALE / HUMAN_APPROVAL_PENDING are
+      // adoptable legacy states), never a fabricated legacy approval.
+      const surface = manager as unknown as Record<string, unknown>;
+      for (const method of ["approve", "requestChanges", "reject", "extendApproval", "expireApproval"]) {
+        expect(surface[method]).toBeUndefined();
+      }
 
       // Its durable history stays fully readable through the supervisor ledger —
-      // the retirement closes the WRITE path only.
+      // the removal closes the WRITE path only.
       const view = manager.approvalView("legacy-pending");
       expect(view.approval?.approvalRequestId).toBe("appr-pending-1");
       expect(view.approval?.status).toBe("PENDING");

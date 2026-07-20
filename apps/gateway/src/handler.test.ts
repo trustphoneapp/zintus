@@ -8,18 +8,8 @@ import { ActivityStore } from "./activity-store.js";
 import type { GatewayConfig } from "./auth.js";
 import { createGatewayHandler, type GatewayHandlerDeps } from "./handler.js";
 import { createRateLimiter } from "./rate-limit.js";
-// The retired legacy authority is no longer a public-API value export (Sol P2-2);
-// this historical test imports the concrete class from its explicit legacy subpath.
-// Sol P2-2/#8: the retired legacy publication authority is no longer a public
-// value subpath export (removed from @zintus/engineer package.json exports). This
-// historical/retirement test reaches the concrete class via a direct relative
-// import into the engineer package source — never through a public import path —
-// so external consumers still cannot `new` the retired authority.
-import { EngineerPublicationManager } from "../../../packages/engineer/src/publication-manager.js";
 import {
-  ApprovalAuthorityConflictError,
   EngineerSupervisor,
-  IdempotencyConflictError,
   LocalArtifactStore,
   ResolutionDesk,
   ResolutionReplacementRunFactory,
@@ -28,10 +18,8 @@ import {
   deriveCaseCreationInput,
   serverPricingPolicyDigest,
   sha256,
-  type ApprovalRequestRecord,
-  type EngineerRun,
 } from "@zintus/engineer";
-import { EngineerRunManager, LegacyApprovalLaneRetiredError } from "./engineer.js";
+import { EngineerRunManager } from "./engineer.js";
 import { deriveEngineerPrincipal } from "./engineer-identity.js";
 import { EngineerCapabilityPreflight } from "./engineer-preflight.js";
 
@@ -197,204 +185,6 @@ describe("gateway handler", () => {
       code: "ENGINEER_VERIFIED_CANDIDATE_CORRUPT",
       message: "Verified candidate promotion references missing or corrupt durable checkpoint authority.",
     } });
-  });
-
-  test("two browser approval decisions race to one success and one actionable candidate-changed 409", async () => {
-    const authority = {
-      expectedVerifiedCheckpointId: `sha256:${"a".repeat(64)}`,
-      expectedVerifiedCheckpointHash: `sha256:${"b".repeat(64)}`,
-      expectedApprovalRevision: 3,
-    };
-    const approval = {
-      approvalRequestId: "approval-race", status: "PENDING", riskTier: "HIGH",
-      verifiedCheckpointId: authority.expectedVerifiedCheckpointId,
-      verifiedCheckpointHash: authority.expectedVerifiedCheckpointHash,
-      approvalRevision: authority.expectedApprovalRevision,
-    };
-    const principal = { ownerId: "owner-race", reviewerId: "reviewer-race" };
-    const received: unknown[] = [];
-    let winner = false;
-    const engineerRuns = {
-      readiness: () => ({ state: "READY", error: null }),
-      principal: () => principal,
-      approval: () => approval,
-      approvalAuthority: () => authority,
-      approvalView: () => ({ approval, approvalAuthority: authority }),
-      get: () => ({ run: { state: winner ? "HUMAN_APPROVED" : "HUMAN_APPROVAL_PENDING" } }),
-      async approve(_principal: unknown, runId: string, _reason: string, expected: unknown) {
-        received.push(expected);
-        await Promise.resolve();
-        if (winner) throw new ApprovalAuthorityConflictError(runId);
-        winner = true;
-        return { status: "PUBLISHED" };
-      },
-    } as unknown as EngineerRunManager;
-    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
-    const missingAuthority = await handler(new Request("http://x/v1/engineer/runs/run-race/approve", {
-      method: "POST",
-      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: "Approve without displayed authority" }),
-    }));
-    expect(missingAuthority.status).toBe(400);
-    expect(received).toEqual([]);
-    const request = () => new Request("http://x/v1/engineer/runs/run-race/approve", {
-      method: "POST",
-      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: "Approve exact candidate", ...authority }),
-    });
-    const responses = await Promise.all([handler(request()), handler(request())]);
-    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
-    expect(received).toEqual([authority, authority]);
-    const conflict = responses.find((response) => response.status === 409)!;
-    expect(await conflict.json()).toEqual({
-      error: {
-        code: "ENGINEER_CANDIDATE_CHANGED",
-        message: "Candidate changed since this approval was displayed. Refresh the approval and review the current checkpoint before deciding.",
-        action: "REFRESH_APPROVAL",
-      },
-    });
-    const read = await handler(new Request("http://x/v1/engineer/runs/run-race/approval", {
-      headers: { Authorization: "Bearer secret" },
-    }));
-    expect(await read.json()).toEqual({ approval, approvalAuthority: authority });
-  });
-
-  test("every approval-control endpoint forwards the exact displayed authority", async () => {
-    const authority = {
-      expectedVerifiedCheckpointId: `sha256:${"c".repeat(64)}`,
-      expectedVerifiedCheckpointHash: `sha256:${"d".repeat(64)}`,
-      expectedApprovalRevision: 8,
-    };
-    const received: Array<{ action: string; expected: unknown }> = [];
-    const engineerRuns = {
-      readiness: () => ({ state: "READY", error: null }),
-      principal: () => ({ ownerId: "owner-controls", reviewerId: "reviewer-controls" }),
-      get: () => ({ run: { state: "HUMAN_APPROVAL_PENDING" } }),
-      approve: async (_principal: unknown, _runId: string, _reason: string, expected: unknown) => {
-        received.push({ action: "approve", expected }); return { status: "PUBLISHED" };
-      },
-      requestChanges: async (_principal: unknown, _runId: string, _reason: string, expected: unknown) => {
-        received.push({ action: "request-changes", expected });
-      },
-      reject: async (_principal: unknown, _runId: string, _reason: string, expected: unknown) => {
-        received.push({ action: "reject", expected });
-      },
-      extendApproval: async (_principal: unknown, _runId: string, _reason: string, _seconds: number, expected: unknown) => {
-        received.push({ action: "extend-approval", expected }); return { status: "PENDING" };
-      },
-      expireApproval: async (_principal: unknown, _runId: string, expected: unknown) => {
-        received.push({ action: "expire-approval", expected });
-      },
-    } as unknown as EngineerRunManager;
-    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
-    for (const action of ["approve", "request-changes", "reject", "extend-approval", "expire-approval"]) {
-      const response = await handler(new Request(`http://x/v1/engineer/runs/run-controls/${action}`, {
-        method: "POST",
-        headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: "Exact displayed candidate", extensionSeconds: 60, ...authority }),
-      }));
-      expect(response.status).toBe(200);
-    }
-    expect(received).toEqual([
-      { action: "approve", expected: authority },
-      { action: "request-changes", expected: authority },
-      { action: "reject", expected: authority },
-      { action: "extend-approval", expected: authority },
-      { action: "expire-approval", expected: authority },
-    ]);
-  });
-
-  test("the real gateway and publication stack maps an approval CAS loser to 409", async () => {
-    const root = mkdtempSync(join(tmpdir(), "zintus-gateway-approval-cas-"));
-    const hash = (value: string) => `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
-    const authority = {
-      expectedVerifiedCheckpointId: hash("gateway-cas-checkpoint-id"),
-      expectedVerifiedCheckpointHash: hash("gateway-cas-checkpoint-hash"),
-      expectedApprovalRevision: 0,
-    };
-    let approvalStatus: ApprovalRequestRecord["status"] = "PENDING";
-    let approvalRevision = 0;
-    let arrivals = 0;
-    let release!: () => void;
-    const bothArrived = new Promise<void>((resolve) => { release = resolve; });
-    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "gateway-real-cas-identity-secret" });
-    const approval = (): ApprovalRequestRecord => ({
-      approvalRequestId: "approval-real-cas", runId: "run-real-cas", riskTier: "HIGH",
-      assignedReviewerId: principal.reviewerId, requestedAt: "2026-07-17T09:00:00.000Z",
-      deadlineAt: "2026-07-19T09:00:00.000Z", reminderSchedule: [], timeoutAction: "HUMAN_REVIEW_REQUIRED",
-      manifestHash: hash("gateway-cas-manifest"), diffHash: hash("gateway-cas-diff"),
-      evidenceBundleHash: hash("gateway-cas-bundle"), reviewerSessionId: "reviewer-real-cas",
-      classificationHash: hash("gateway-cas-classification"), classificationResult: "READY",
-      status: approvalStatus, approvalRevision, verifiedCheckpointId: authority.expectedVerifiedCheckpointId,
-      verifiedCheckpointHash: authority.expectedVerifiedCheckpointHash,
-    });
-    const run = (): EngineerRun => ({
-      runId: "run-real-cas", userId: principal.ownerId,
-      repository: { repositoryId: "repo-real-cas", provider: "github", owner: "o", name: "r", baseBranch: "main", baseCommitSha: "d".repeat(40) },
-      requestOriginal: "change", requestNormalized: "change", state: "HUMAN_APPROVAL_PENDING", stateVersion: 9,
-      manifestHash: approval().manifestHash, riskTier: "HIGH", humanGateRequired: true,
-      createdAt: "2026-07-17T09:00:00.000Z", updatedAt: "2026-07-17T09:00:00.000Z", terminalAt: null,
-    });
-    const evidence = () => ({
-      runId: run().runId, reviewerSessionId: "reviewer-real-cas", reviewerDecision: "APPROVE" as const,
-      classificationHash: approval().classificationHash!, classificationResult: "READY" as const,
-      reviewerDiffHash: approval().diffHash, reviewerEvidenceBundleHash: approval().evidenceBundleHash,
-      reviewerIsolationVerified: true as const, evidenceBundleId: "bundle-real-cas",
-      evidenceBundleHash: approval().evidenceBundleHash, resultCommitSha: "b".repeat(40),
-      allRequiredChecksPassed: true, openCriticalSecurityFindings: 0,
-    });
-    const supervisor = {
-      getRun: () => run(), latestApprovalRequest: () => approval(), getPublicationEvidence: () => evidence(),
-      async getVerifiedCandidateCheckpoint() {
-        arrivals += 1;
-        if (arrivals === 2) release();
-        await bothArrived;
-        return { checkpoint: {
-          checkpointId: authority.expectedVerifiedCheckpointId, checkpointHash: authority.expectedVerifiedCheckpointHash,
-          runId: run().runId, manifestHash: approval().manifestHash, diffHash: approval().diffHash,
-          evidenceBundleHash: approval().evidenceBundleHash, reviewerSessionId: approval().reviewerSessionId,
-          classificationHash: approval().classificationHash, classificationResult: approval().classificationResult,
-        }, attestation: {} };
-      },
-      extendApproval: (decision: { expectedApprovalRevision: number }, deadlineAt: string, reminders: string[]) => {
-        if (approvalStatus !== "PENDING" || approvalRevision !== decision.expectedApprovalRevision) {
-          throw new IdempotencyConflictError(run().runId, "approval-extension:approval-real-cas");
-        }
-        approvalRevision += 1;
-        return { ...approval(), deadlineAt, reminderSchedule: reminders };
-      },
-    } as unknown as EngineerSupervisor;
-    const publication = new EngineerPublicationManager({
-      supervisor, artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
-      diffForRun: () => "gateway-cas-diff", commandSigningSecret: "gateway-real-cas-signing-secret-at-least-32-bytes",
-      checkpointAttestor: { algorithm: "test", keyId: "test", sign: () => "test", verify: () => true },
-      gitService: {
-        async inspectBaseBranch() { throw new Error("unused"); }, async createRunBranch() { throw new Error("unused"); },
-        async pushVerifiedCommit() { throw new Error("unused"); }, async createPullRequest() { throw new Error("unused"); },
-      },
-    });
-    const engineerRuns = new EngineerRunManager({
-      supervisor, publication, principal,
-      preflight: {
-        readiness: () => ({ state: "READY", error: null }),
-        assertRunAdmission: async () => {},
-      } as unknown as EngineerCapabilityPreflight,
-    });
-    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
-    const request = () => new Request("http://x/v1/engineer/runs/run-real-cas/extend-approval", {
-      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-      body: JSON.stringify({ reason: "Need exact review time", extensionSeconds: 60, ...authority }),
-    });
-    const responses = await Promise.all([handler(request()), handler(request())]);
-    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
-    expect(await responses.find((response) => response.status === 409)!.json()).toEqual({
-      error: {
-        code: "ENGINEER_CANDIDATE_CHANGED",
-        message: "Candidate changed since this approval was displayed. Refresh the approval and review the current checkpoint before deciding.",
-        action: "REFRESH_APPROVAL",
-      },
-    });
-    rmSync(root, { recursive: true, force: true });
   });
 
   test("Engineer run intake and reads use the gateway bearer boundary", async () => {
@@ -3103,39 +2893,36 @@ describe("P7 Developer Resolution Desk HTTP routes", () => {
     });
   });
 
-  // F1 (R5F-2): the retired legacy human-gate routes report an HONEST typed 410
-  // GONE (LEGACY_APPROVAL_RETIRED), NOT a raw "not configured" 409, so a caller
-  // hitting a historical PENDING run gets an actionable answer.
-  test("the retired legacy approval routes map LegacyApprovalLaneRetiredError to 410 GONE", async () => {
-    const authority = {
-      expectedVerifiedCheckpointId: `sha256:${"c".repeat(64)}`,
-      expectedVerifiedCheckpointHash: `sha256:${"d".repeat(64)}`,
-      expectedApprovalRevision: 3,
-    };
+  // R8-3 P1 #3 (was F1/R5F-2): the legacy human-gate approval WRITE routes are
+  // REMOVED. R5F-2 had them fail closed with an honest 410; R8-3 deletes the dead
+  // surface entirely so no legacy approval authority exists outside the Resolution
+  // Desk. A caller now gets a plain 404 (no such route), and the run manager is
+  // never asked to perform any legacy approval action.
+  test("the legacy approval WRITE routes are removed (404, never routed to any approval authority)", async () => {
+    const called: string[] = [];
     const engineerRuns = {
       readiness: () => ({ state: "READY", error: null }),
       principal: () => ({ ownerId: "owner-retired", reviewerId: "reviewer-retired" }),
       get: () => ({ run: { state: "HUMAN_APPROVAL_PENDING" } }),
-      approve: async () => { throw new LegacyApprovalLaneRetiredError(); },
-      requestChanges: async () => { throw new LegacyApprovalLaneRetiredError(); },
-      reject: async () => { throw new LegacyApprovalLaneRetiredError(); },
-      extendApproval: async () => { throw new LegacyApprovalLaneRetiredError(); },
-      expireApproval: async () => { throw new LegacyApprovalLaneRetiredError(); },
+      approve: async () => { called.push("approve"); return { status: "PUBLISHED" }; },
+      requestChanges: async () => { called.push("requestChanges"); },
+      reject: async () => { called.push("reject"); },
+      extendApproval: async () => { called.push("extendApproval"); return { status: "PENDING" }; },
+      expireApproval: async () => { called.push("expireApproval"); },
     } as unknown as EngineerRunManager;
     const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
     for (const action of ["approve", "request-changes", "reject", "extend-approval", "expire-approval"]) {
       const response = await handler(new Request(`http://x/v1/engineer/runs/run-retired/${action}`, {
         method: "POST",
         headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: "attempt legacy action", extensionSeconds: 60, ...authority }),
+        body: JSON.stringify({
+          reason: "attempt legacy action", extensionSeconds: 60,
+          expectedVerifiedCheckpointId: "c", expectedVerifiedCheckpointHash: "h", expectedApprovalRevision: 0,
+        }),
       }));
-      expect(response.status).toBe(410);
-      const body = await response.json() as { error: { code: string; action: string; message: string }; successor: string };
-      expect(body.error.code).toBe("LEGACY_APPROVAL_RETIRED");
-      expect(body.error.action).toBe("START_FRESH_RUN_OR_USE_RESOLUTION_DESK");
-      expect(body.error.message).not.toMatch(/not configured/i);
-      expect(body.successor).toBe("p8-publication-or-resolution-desk");
+      expect(response.status).toBe(404);
     }
+    expect(called).toEqual([]);
   });
 });
 
