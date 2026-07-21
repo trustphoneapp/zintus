@@ -1,5 +1,5 @@
-import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 import {
@@ -7,9 +7,11 @@ import {
   OfflineDependencyBundle,
   gitCommitLockfileHash,
   runProcessAsync,
+  sha256,
   type AsyncProcessResult,
 } from "../packages/engineer/src/index.js";
 import { inspectEngineerPromptCacheAuthority } from "../apps/gateway/src/engineer-prompt-cache-authority.js";
+import { EngineerLedger } from "../packages/engineer/src/ledger.js";
 
 export type EngineerDoctorCheck = { name: string; ok: boolean; detail: string };
 export type EngineerDoctorResult = { ok: boolean; checks: EngineerDoctorCheck[] };
@@ -20,6 +22,65 @@ const required = [
   "ZINTUS_ENGINEER_REPOSITORY_OWNER", "ZINTUS_ENGINEER_REPOSITORY_NAME", "ZINTUS_ENGINEER_REPOSITORY_ORIGIN_URL",
   "ZINTUS_ENGINEER_BASE_BRANCH", "ZINTUS_ENGINEER_BASE_COMMIT_SHA", "ZINTUS_ENGINEER_IMAGE", "ZINTUS_ENGINEER_IMAGE_DIGEST",
 ] as const;
+
+const PRESERVED_AUTHORITY_TABLES = new Set([
+  "engineer_runs", "task_manifest_versions", "required_lane_contracts", "reviewer_sessions",
+  "review_findings", "review_classification_batches", "artifacts", "audit_events",
+]);
+
+type DatabasePreservationSnapshot = Map<string, { count: number; columns: string[]; hash?: string }>;
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function preservationSnapshot(db: Database): DatabasePreservationSnapshot {
+  const snapshot: DatabasePreservationSnapshot = new Map();
+  const tables = (db.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+    .all() as Array<{ name: string }>).map((row) => row.name).filter((name) => name !== "schema_migrations");
+  for (const table of tables) {
+    const columns = (db.query(`PRAGMA table_info(${JSON.stringify(table)})`).all() as Array<{ name: string }>).map((row) => row.name);
+    const count = (db.query(`SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)}`).get() as { count: number }).count;
+    let hash: string | undefined;
+    if (PRESERVED_AUTHORITY_TABLES.has(table)) {
+      const projection = columns.map(quoteIdentifier).join(", ");
+      const rows = db.query(`SELECT ${projection} FROM ${quoteIdentifier(table)}`).all() as Array<Record<string, unknown>>;
+      const encoded = rows.map((row) => JSON.stringify(columns.map((column) => row[column]), (_key, value) => {
+        if (typeof value === "bigint") return { bigint: value.toString() };
+        if (value instanceof Uint8Array) return { bytes: Buffer.from(value).toString("base64") };
+        return value;
+      })).sort();
+      hash = sha256(encoded.join("\n"));
+    }
+    snapshot.set(table, { count, columns, hash });
+  }
+  return snapshot;
+}
+
+function assertPreservedSnapshot(before: DatabasePreservationSnapshot, afterDb: Database): number {
+  const after = preservationSnapshot(afterDb);
+  let hashedTables = 0;
+  for (const [table, expected] of before) {
+    const actual = after.get(table);
+    if (!actual || actual.count !== expected.count) {
+      throw new Error(`row-count preservation failed for ${table}`);
+    }
+    if (expected.hash !== undefined) {
+      hashedTables += 1;
+      const originalProjection = expected.columns.map(quoteIdentifier).join(", ");
+      const rows = afterDb.query(`SELECT ${originalProjection} FROM ${quoteIdentifier(table)}`).all() as Array<Record<string, unknown>>;
+      const encoded = rows.map((row) => JSON.stringify(expected.columns.map((column) => row[column]), (_key, value) => {
+        if (typeof value === "bigint") return { bigint: value.toString() };
+        if (value instanceof Uint8Array) return { bytes: Buffer.from(value).toString("base64") };
+        return value;
+      })).sort();
+      if (sha256(encoded.join("\n")) !== expected.hash) {
+        throw new Error(`authority-row hash preservation failed for ${table}`);
+      }
+    }
+  }
+  return hashedTables;
+}
 
 export async function runEngineerDoctor(options: { env?: NodeJS.ProcessEnv; runner?: Runner; engineerDbPath?:string;
   promptCacheSecretPath?:string } = {}): Promise<EngineerDoctorResult> {
@@ -113,6 +174,46 @@ export async function runEngineerDoctor(options: { env?: NodeJS.ProcessEnv; runn
     }catch(error){
       add("Engineer database integrity",false,`DATABASE_INTEGRITY_CORRUPTION: read-only database inspection failed: ${error instanceof Error?error.message:String(error)}. Restore the Engineer database and artifact store from the same backup before retrying.`);
     }finally{try{db?.close();}catch{/* retain the original integrity result */}}
+  }
+
+  // Doctor must exercise the same ledger-construction/migration path the
+  // gateway uses, but never against the installed database. Database.serialize
+  // produces a consistent image (including committed WAL content); all schema
+  // repair, migration, and org-authority checks then run on the disposable file.
+  let disposableRoot: string | null = null;
+  let sourceDb: Database | null = null;
+  let migratedDb: Database | null = null;
+  let sourceSnapshot: DatabasePreservationSnapshot | null = null;
+  try {
+    disposableRoot = mkdtempSync(join(tmpdir(), "zintus-engineer-doctor-db-"));
+    const disposableDbPath = join(disposableRoot, "engineer.db");
+    if (existsSync(engineerDbPath)) {
+      sourceDb = new Database(engineerDbPath, { readonly: true });
+      sourceSnapshot = preservationSnapshot(sourceDb);
+      writeFileSync(disposableDbPath, sourceDb.serialize(), { mode: 0o600 });
+      sourceDb.close();
+      sourceDb = null;
+    }
+    const ledger = new EngineerLedger(disposableDbPath);
+    ledger.close();
+    migratedDb = new Database(disposableDbPath, { readonly: true });
+    const version = migratedDb.query("SELECT MAX(version) AS version FROM schema_migrations").get() as { version: number | null };
+    const quick = migratedDb.query("PRAGMA quick_check").all() as Array<Record<string, unknown>>;
+    const quickOk = quick.length === 1 && Object.values(quick[0] ?? {})[0] === "ok";
+    const foreignKeyViolations = migratedDb.query("PRAGMA foreign_key_check").all();
+    if (!quickOk || foreignKeyViolations.length > 0 || version.version === null) {
+      throw new Error(`post-migration integrity failed at schema ${version.version ?? "unknown"}`);
+    }
+    const hashedTables = sourceSnapshot ? assertPreservedSnapshot(sourceSnapshot, migratedDb) : 0;
+    add("Engineer database gateway construction", true,
+      `disposable copy opened through gateway ledger path at schema ${version.version}; all source table counts and ${hashedTables} authority-table hashes preserved; source opened read-only`);
+  } catch (error) {
+    add("Engineer database gateway construction", false,
+      `DATABASE_MIGRATION_NOT_READY: disposable gateway construction failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    try { sourceDb?.close(); } catch { /* preserve the construction result */ }
+    try { migratedDb?.close(); } catch { /* preserve the construction result */ }
+    if (disposableRoot) rmSync(disposableRoot, { recursive: true, force: true });
   }
   const promptCacheSecretPath=options.promptCacheSecretPath??env.ZINTUS_ENGINEER_PROMPT_CACHE_SECRET_PATH??
     join(dirname(engineerDbPath),"prompt-cache.secret");

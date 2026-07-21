@@ -36,12 +36,12 @@ const SECTIONS: Array<{
     label: "Workspace",
     items: [
       { href: "/chat", icon: "chat", label: "Chat" },
+      { href: "/engineer", icon: "zap", label: "Engineer" },
       { href: "/models", icon: "grid", label: "Models" },
       { href: "/compare", icon: "compare", label: "Compare" },
       { href: "/projects", icon: "layers", label: "Projects" },
       { href: "/research", icon: "globe", label: "Research" },
       { href: "/agent", icon: "bot", label: "Agent" },
-      { href: "/engineer", icon: "zap", label: "Engineer" },
       { href: "/terminal", icon: "terminal", label: "Terminal" },
     ],
   },
@@ -494,10 +494,14 @@ function AccountBlock({
   const savedUsd = gatewaySavings?.estimatedUsdSaved ?? 0;
   const gatewayAuthenticationRequired =
     gatewayConnectionState === "authentication-required";
+  const gatewayHandshakeUnavailable =
+    gatewayConnectionState === "local-handshake-unavailable";
   const gatewayLabel = gatewayConnected
     ? "Gateway connected"
     : gatewayAuthenticationRequired
       ? "Gateway authentication required"
+      : gatewayHandshakeUnavailable
+        ? "Local authorization unavailable"
       : "Gateway offline";
   const isDark = !mounted || theme !== "light";
   // Google OAuth round-trip: land the user back where they were (or /chat)

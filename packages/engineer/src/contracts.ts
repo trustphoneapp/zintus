@@ -504,6 +504,18 @@ export const RepairContextSchema = z.object({
   currentCommitSha: ShaSchema,
   allowedPaths: z.array(z.string().min(1).max(2_000)),
   remainingReviewFixAttempts: z.number().int().nonnegative(),
+  /**
+   * Bounded, redacted executor diagnostics for a deterministic repair. These
+   * are deliberately separate from the immutable evidence references: the
+   * Builder needs an actionable explanation, but must never receive an
+   * unbounded command transcript or a filesystem/storage reference.
+   */
+  repairDiagnostics: z.array(z.object({
+    testId: IdentifierSchema,
+    command: z.string().min(1).max(10_000),
+    summary: z.string().min(1).max(8_000),
+    evidenceIds: z.array(IdentifierSchema).min(1).max(10),
+  }).strict()).max(20).optional(),
 }).strict().superRefine((input, context) => {
   if (input.manifest.runId !== input.runId || input.manifest.manifestHash !== input.manifestHash) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "repair manifest binding mismatch", path: ["manifest"] });

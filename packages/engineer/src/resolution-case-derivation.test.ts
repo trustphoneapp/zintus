@@ -269,6 +269,12 @@ describe("stranded legacy non-terminal run adoption (Finding #6)", () => {
     driveCorrectedRunEndToEnd("run-1", "LEGACY_BASE_BRANCH_STALE");
   });
 
+  test("a paused HUMAN_REVIEW_REQUIRED run adopts into a bounded evidence-recovery case", () => {
+    insertRun("run-1", "HUMAN_REVIEW_REQUIRED");
+    const view = driveCorrectedRunEndToEnd("run-1", "HUMAN_REVIEW_EVIDENCE_RECOVERY");
+    expect(view.state).toBe("OPEN");
+  });
+
   // R8-3 FINDING 1 (functional regression). For a BASE_BRANCH_STALE run the
   // recorded base_commit_sha is stale BY DEFINITION — the branch advanced past it.
   // Adopting the corrected run onto that stale base would re-strand at publish

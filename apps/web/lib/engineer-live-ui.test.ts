@@ -14,6 +14,7 @@ describe("Engineer live UI lifecycle guards", () => {
   it("does not reopen event streams for paused or terminal runs", () => {
     expect(source).toContain('snapshot.status.run.state !== "PAUSED_BUDGET" && !TERMINAL.has(snapshot.status.run.state)');
     expect(source).toContain("watch(resumed.runId, latestSequence)");
+    expect(source).toContain("HUMAN_DECISION_STATES.has(run.state)");
   });
 
   it("invalidates artifact preview state and remounts the viewer when run identity changes", () => {
@@ -23,15 +24,15 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("<ArtifactViewer key={run.runId}");
   });
 
-  it("locks a budget top-up synchronously and exposes an applying state", () => {
-    expect(source).toContain('if (!run || !budget || run.state !== "PAUSED_BUDGET" || topUpPendingRef.current) return');
+  it("renders budget mutations only from the gateway capability projection", () => {
+    expect(source).toContain('if (!run || !budget || topUpBudgetCapability?.availability !== "AVAILABLE" || topUpPendingRef.current) return');
     expect(source).toContain("topUpPendingRef.current = true");
     expect(source).toContain('"Applying one top-up…"');
-    expect(source).toContain("Allowance added once. New ceiling:");
-    expect(source).toContain("No action needed · active top-ups are locked");
-    expect(source).toContain("Allowance was added exactly once, but resume did not complete");
-    expect(source).toContain('topUpNotice ? "Allowance already added"');
-    expect(source).toContain("canRetryLegacyReservation || Boolean(budget?.topUpPendingResume)");
+    expect(source).toContain('const topUpBudgetCapability = actionCapability("TOP_UP_BUDGET")');
+    expect(source).toContain('const canTopUpPausedBudget = topUpBudgetCapability?.availability === "AVAILABLE"');
+    expect(source).toContain('{canTopUpPausedBudget ? <BudgetTopUp');
+    expect(source).toContain('topUpBudgetCapability?.message ?? "This run\'s budget cannot be increased."');
+    expect(source).not.toContain('canRetryLegacyReservation');
   });
 
   it("locks run mutations before awaiting and exposes action-specific progress", () => {
@@ -40,10 +41,23 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain('withRunMutation(`decision:${decisionId}`');
     expect(source).toContain('pendingAction === "freeze-start" ? "Starting…"');
     expect(source).toContain('pendingAction === "human-review:retry" ? "Retrying review…"');
+    expect(source).toContain('capability.action === "RETRY_REVIEWER"');
+    expect(source).toContain('const humanReviewCanRetry = reviewerRetryCapability?.availability === "AVAILABLE"');
     expect(source).not.toContain('resolveHumanReview("approve")');
     expect(source).not.toContain("Continue to approval");
     expect(source).toContain('"Retry reviewer from checkpoint"');
     expect(source).toContain('resolveEngineerDecision(run, decisionId, optionId, "Selected through the Zintus decision inbox.")');
+    expect(source).toContain('watch(run.runId, events.at(-1)?.sequence ?? 0);');
+    expect(source).toContain('const decisionApplyInFlight = pendingAction?.startsWith("decision:") ?? false;');
+    expect(source).toContain("Applying your choice");
+    expect(source).toContain("!decisionApplyInFlight && !activity?.active");
+  });
+
+  it("keeps emergency cancellation outside planning's action lock and visible while paused", () => {
+    expect(source).toContain("Cancellation is an emergency stop authority");
+    expect(source).toContain('setPendingAction("cancel")');
+    expect(source).not.toContain('latestState !== "PAUSED_BUDGET" && !NON_CANCELLABLE_PUBLICATION_STATES');
+    expect(source).not.toContain('latestState !== "HUMAN_APPROVAL_PENDING" && !NON_CANCELLABLE_PUBLICATION_STATES');
   });
 
   it("refreshes the authoritative snapshot on promotion and approval SSE events", () => {
@@ -51,8 +65,21 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("void refresh(runId)");
   });
 
+  it("shows durable verification failure reasons at the human gate instead of a generic recovery story", () => {
+    expect(source).toContain("const humanReviewFailureReasons = failures");
+    expect(source).toContain('aria-label="Verification blockers"');
+    expect(source).toContain("Verification needs your decision");
+  });
+
+  it("explains when a run is a signed bounded correction instead of presenting it as unrelated", () => {
+    expect(source).toContain("const isResolutionReplacement = runCapabilities?.budget.isResolutionReplacement ?? false;");
+    expect(source).toContain("This run continues a prior verified record");
+    expect(source).toContain("signed Resolution Desk directive");
+  });
+
   it("hands a machine-only REVIEW_APPROVED run off to the authoritative P8 publication screen (no invented human approval)", () => {
-    expect(source).toContain('latestState === "REVIEW_APPROVED" && !approval ? <PublicationEntryNotice runId={run.runId} /> : null');
+    expect(source).toContain("getEngineerPublicationReadiness()");
+    expect(source).toContain('latestState === "REVIEW_APPROVED" && !approval ? <PublicationEntryNotice runId={run.runId} readiness={publicationReadiness} /> : null');
     expect(source).not.toContain("The candidate passed human review");
     expect(source).not.toContain('<span className="engineer-kicker">Review approved</span>');
   });
@@ -84,8 +111,9 @@ describe("Engineer live UI lifecycle guards", () => {
   });
 
   it("renders compact controls from real connector and workflow state", () => {
-    expect(source).toContain("listGithubConnectorRepositories()");
-    expect(source).toContain("getGithubBranchCommit(owner, name, candidate.defaultBranch)");
+    expect(source).toContain("listEngineerRepositories()");
+    expect(source).toContain("Engineer-admitted repositories");
+    expect(source).toContain("Connector access alone never authorizes code execution.");
     expect(source).toContain("<BudgetSlider index={budgetPresetIndex}");
     expect(source).toContain("const targetIndex = chip.label === \"Recommended\" ? recommendedIndex : chip.presetIndex");
     expect(source).toContain("stage={stage}");
@@ -98,5 +126,26 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("window.setInterval(reconnect, 3_000)");
     expect(source).toContain('window.addEventListener("focus", reconnect)');
     expect(source).toContain('window.removeEventListener("focus", reconnect)');
+  });
+
+  it("retains the durable active-run pointer if a transient reopen fails", () => {
+    expect(source).toContain("A gateway restart or transient handshake failure must never orphan a");
+    expect(source).toContain("Unable to reopen this run yet:");
+    expect(source).not.toContain("window.localStorage.removeItem(RUN_STORAGE_KEY);\n      void loadDashboard();");
+  });
+
+  it("clears the create idempotency identity before pre-filling a fresh bounded request", () => {
+    expect(source).toContain("A caller-generated ID is an idempotency identity");
+    expect(source).toContain("createRunIdRef.current = null;\n    returnToRuns();");
+  });
+
+  it("keeps diff review copying and patch download entirely in the browser", () => {
+    expect(source).toContain('navigator.clipboard?.writeText');
+    expect(source).toContain("Copy all changes");
+    expect(source).toContain("Copy diff");
+    expect(source).toContain("Copy file content");
+    expect(source).toContain('downloadBlob("zintus-engineer.patch.diff"');
+    expect(source).toContain("No code changes yet");
+    expect(source).toContain('no gateway request or model cost');
   });
 });

@@ -124,12 +124,12 @@ describe("deterministic Reviewer classification", () => {
     })).toThrow("requiredTestGates");
   });
 
-  test("never lets model severity or a MUST claim create blocking authority", () => {
+  test("turns a concrete in-scope Reviewer finding into a bounded repair candidate, never publication-blocking authority", () => {
     const value = fixture();
     const batch = classifyReviewerOutput({ ...value, findings: [value.finding], trustedEvidence: [] });
-    expect(batch.result).toBe("HUMAN_REVIEW_REQUIRED");
+    expect(batch.result).toBe("REPAIR_REQUIRED");
     expect(batch.classifications).toEqual([expect.objectContaining({
-      disposition: "HUMAN_REQUIRED", authority: "NONE", reasonCode: "UNSUBSTANTIATED_REQUIRED_CRITERION_CLAIM",
+      disposition: "ADVISORY", authority: "NONE", reasonCode: "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE",
     })]);
     expect(batch.rawOutput.sha256).not.toBe(batch.normalizedOutputHash);
     expect(ReviewClassificationBatchSchema.parse(batch)).toEqual(batch);
@@ -165,7 +165,7 @@ describe("deterministic Reviewer classification", () => {
       });
       const finding = { ...value.finding, evidenceIds: [evidence.evidenceId] };
       expect(classifyReviewerOutput({ ...value, session: sessionWithFinding(value.session, finding), findings: [finding], trustedEvidence: [evidence] }).result)
-        .toBe("HUMAN_REVIEW_REQUIRED");
+        .toBe("REPAIR_REQUIRED");
     }
   });
 
@@ -218,6 +218,29 @@ describe("deterministic Reviewer classification", () => {
       findings: [{ ...value.finding, evidenceIds: [scope.evidenceId] }], trustedEvidence: [scope],
     });
     expect(scopeBatch.classifications[0]?.authority).toBe("DETERMINISTIC_SCOPE_FAILURE");
+  });
+
+  test("handles project-level Reviewer findings without treating an empty label as a filesystem path", () => {
+    const value = fixture();
+    const projectFinding = ReviewFindingRecordSchema.parse({
+      ...value.finding,
+      file: "",
+      fingerprint: sha256({
+        severity: value.finding.severity,
+        category: value.finding.category.toLowerCase(),
+        file: "",
+        description: value.finding.description.toLowerCase(),
+        requiredChange: value.finding.requiredChange.toLowerCase(),
+      }),
+    });
+    const batch = classifyReviewerOutput({
+      ...value,
+      session: sessionWithFinding(value.session, projectFinding),
+      findings: [projectFinding],
+      trustedEvidence: [],
+    });
+    expect(batch.result).toBe("HUMAN_REVIEW_REQUIRED");
+    expect(batch.classifications[0]?.reasonCode).toBe("UNSUBSTANTIATED_REQUIRED_CRITERION_CLAIM");
   });
 
   test("is deterministic across finding/evidence order and rejects legacy contracts", () => {

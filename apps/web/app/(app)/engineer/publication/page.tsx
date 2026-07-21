@@ -11,8 +11,9 @@
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { getEngineerBudget, getEngineerHardeningReadiness, type EngineerBudgetSnapshot } from "@/lib/engineer";
+import { getEngineerBudget, getEngineerHardeningReadiness, getEngineerPublicationReadiness, type EngineerBudgetSnapshot } from "@/lib/engineer";
 import { EngineerActionLock } from "@/lib/engineer-action-lock";
+import { fetchGatewayConnection } from "@/lib/gateway";
 import { HardeningReadinessBanner, type EngineerHardeningReadinessState } from "../EngineerHardeningReadiness";
 import {
   ResolutionApiError,
@@ -23,6 +24,7 @@ import {
   markPublicationFailed,
   recheckPublicationReconciliation,
   reconcilePublicationReceipt,
+  selectPublicationCandidate,
   type EngineerPublication,
   type PublicationCandidate,
   type PublicationApprovalResult,
@@ -75,6 +77,19 @@ function PublicationDeskInner() {
     setLoading(true);
     setError(null);
     try {
+      // Publication links may be opened directly, before AppShell has renewed
+      // the memory-only loopback session. Establish it before protected reads
+      // so a healthy local gateway never renders a misleading raw 401.
+      const connection = await fetchGatewayConnection();
+      if (connection.state !== "connected") {
+        throw new Error(connection.state === "offline"
+          ? "Your local Engineer gateway is not running. Start it, then try again."
+          : "Connecting to your local Engineer gateway was not completed. Check the local connection and try again.");
+      }
+      const publicationReadiness = await getEngineerPublicationReadiness();
+      if (publicationReadiness.state !== "READY") {
+        throw new Error(publicationReadiness.message);
+      }
       const { candidates: nextCandidates, current } = await hydratePublicationDesk(id);
       setCandidates(nextCandidates);
       if (current) {
@@ -149,6 +164,20 @@ function PublicationDeskInner() {
       setApproval(result);
     });
   }, [selected, rationale, withMutation]);
+
+  const selectCandidate = useCallback(async (candidate: PublicationCandidate) => {
+    if (!runId) return;
+    await withMutation("candidate:select", async () => {
+      // Do not let React's selected styling impersonate a durable authority.
+      // Approval only becomes available after the server has derived and
+      // persisted this exact candidate selection from its checkpoint.
+      const persisted = await selectPublicationCandidate(runId, candidate.checkpointId);
+      setSelected(persisted);
+      setApproval(null);
+      setSelfApprovalError(false);
+      setPreflightMismatch(false);
+    });
+  }, [runId, withMutation]);
 
   const publish = useCallback(async () => {
     if (!runId || !approval || approval.status !== "APPROVED") return;
@@ -230,7 +259,7 @@ function PublicationDeskInner() {
       {!loading && candidates && candidates.length > 0 ? <>
         <section className="engineer-card" aria-labelledby="publication-candidates-heading">
           <h2 id="publication-candidates-heading">Publication candidates</h2>
-          <PublicationCandidateList candidates={candidates} selectedCheckpointId={selected?.checkpointId ?? null} onSelect={(candidate) => { setSelected(candidate); setApproval(null); setSelfApprovalError(false); setPreflightMismatch(false); }} />
+          <PublicationCandidateList candidates={candidates} selectedCheckpointId={selected?.checkpointId ?? null} onSelect={(candidate) => void selectCandidate(candidate)} />
         </section>
 
         {selected && !approval ? (

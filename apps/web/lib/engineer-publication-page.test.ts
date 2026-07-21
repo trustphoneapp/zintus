@@ -6,7 +6,12 @@ const source = readFileSync(join(import.meta.dir, "..", "app", "(app)", "enginee
 
 describe("Approval/publication page wiring", () => {
   it("consumes only §3/§4-permitted routes via the typed client, plus the existing readiness projection", () => {
+    expect(source).toContain('import { fetchGatewayConnection } from "@/lib/gateway"');
+    expect(source).toContain("const connection = await fetchGatewayConnection();");
+    expect(source).toContain('connection.state !== "connected"');
     expect(source).toContain("hydratePublicationDesk(id)");
+    expect(source).toContain("getEngineerPublicationReadiness()");
+    expect(source).toContain('publicationReadiness.state !== "READY"');
     expect(source).toContain("getEngineerHardeningReadiness()");
     expect(source).not.toContain("fetch(");
   });
@@ -24,6 +29,12 @@ describe("Approval/publication page wiring", () => {
 
   it("never sends a client-supplied checkpointHash mismatch — the selected candidate's own hash is what gets approved", () => {
     expect(source).toContain("checkpointHash: selected.checkpointHash");
+  });
+
+  it("persists candidate selection before exposing an approval decision", () => {
+    expect(source).toContain("selectPublicationCandidate(runId, candidate.checkpointId)");
+    expect(source).toContain('withMutation("candidate:select"');
+    expect(source).toContain("setSelected(persisted)");
   });
 
   it("distinguishes SELF_APPROVAL and PREFLIGHT_MISMATCH by their server-returned code, not a guessed error string", () => {

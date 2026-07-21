@@ -12,7 +12,11 @@ export function DecisionPresentation({ decisions, onResolve, disabled = false, s
   disabled?: boolean;
   stage?: { index: number; total: number; label: string; complete?: boolean };
 }) {
-  if (!decisions.length) return null;
+  // Resolved planning choices remain in the durable audit trail, but they are
+  // not an inbox item. Rendering them as "Needs your answer now" after the
+  // run has advanced makes users repeat decisions they already made.
+  const openDecisions = decisions.filter((decision) => decision.status === "OPEN");
+  if (!openDecisions.length) return null;
 
   return (
     <section className="engineer-card engineer-decisions" aria-labelledby="engineer-decisions-heading">
@@ -22,10 +26,10 @@ export function DecisionPresentation({ decisions, onResolve, disabled = false, s
           <span className="engineer-kicker">Decision inbox</span>
           <h2 id="engineer-decisions-heading">Clear choices, bounded impact</h2>
         </div>
-        <span className="engineer-chip">{decisions.length} {decisions.length === 1 ? "decision" : "decisions"}</span>
+        <span className="engineer-chip">{openDecisions.length} {openDecisions.length === 1 ? "decision" : "decisions"}</span>
       </div>
       <div className="engineer-decision-list">
-        {decisions.map((decision) => <DecisionCard key={decision.decisionId} decision={decision} onResolve={onResolve} disabled={disabled} />)}
+        {openDecisions.map((decision) => <DecisionCard key={decision.decisionId} decision={decision} onResolve={onResolve} disabled={disabled} />)}
       </div>
     </section>
   );

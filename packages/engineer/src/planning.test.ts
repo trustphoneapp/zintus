@@ -9,6 +9,7 @@ import { LocalArtifactStore } from "./artifact-store.js";
 import { ContextManifestContentSchema, contextSourceId } from "./context-contracts.js";
 import { sha256 } from "./hash.js";
 import type { EngineerRun } from "./contracts.js";
+import { FailureRecordSchema } from "./control-contracts.js";
 import { createCorrectedRunDirective } from "./corrected-run.js";
 import { ContextEngine } from "./context-engine.js";
 
@@ -231,6 +232,99 @@ describe("Phase 5 structured planning", () => {
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
+  test("binds a resolved scoped-verification choice to the generated task test instead of a root suite", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-scoped-plan-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    let run = supervisor.receiveRequest({
+      runId: "scoped-plan", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Create src/utils/slugify.ts and test/slugify.test.ts. Do not edit existing files. Run the repository-wide suite.",
+    });
+    seedContext(supervisor, artifactStore, run);
+    run = supervisor.normalizeRequest({ runId: run.runId, expectedStateVersion: run.stateVersion, normalizedRequest: run.requestOriginal, idempotencyKey: "scoped:normalize" }).run;
+    const decision = supervisor.createDecision({
+      runId: run.runId, expectedStateVersion: run.stateVersion,
+      question: "Which verification contract should apply?",
+      factors: { affectsMustCriterion: true, changesScope: false, affectsAuthentication: false, affectsAuthorization: false, handlesSecrets: false, requiresMigration: false, changesPublicApi: false, destructiveAction: false, externalSideEffect: false, changesBudget: false, noSafeDefault: true, safeDocumentedDefault: false, reversible: true, withinFrozenScope: false, raisesRisk: false, riskFloorRequiresHuman: false },
+      options: [
+        { optionId: "scoped-task-test", label: "Verify only the generated task test", impact: "Scoped", reversibility: "REVERSIBLE", riskTier: "MEDIUM", sourceEvidenceIds: ["request"] , recommended: true },
+        { optionId: "preserve-root-suite", label: "Require root suite", impact: "Broad", reversibility: "REVERSIBLE", riskTier: "MEDIUM", sourceEvidenceIds: ["request"], recommended: false },
+      ],
+      recommendedOptionId: "scoped-task-test",
+      sourceEvidence: [{ evidenceId: "request", runId: run.runId, sourceType: "USER_REQUEST", trust: "TRUSTED_SYSTEM", summary: "Scope conflict." }],
+      idempotencyKey: "scoped:decision",
+    });
+    const paused = supervisor.getRun(run.runId);
+    supervisor.resolveDecision({
+      runId: run.runId, decisionId: decision.decisionId, expectedStateVersion: paused.stateVersion,
+      selectedOptionId: "scoped-task-test", actorId: "user-1", rationale: "Keep the requested scope.",
+      sourceEvidence: [{ evidenceId: "human", runId: run.runId, sourceType: "HUMAN_RESPONSE", trust: "TRUSTED_HUMAN", summary: "Scoped test selected." }],
+      idempotencyKey: "scoped:resolve",
+    });
+    const output = plannerOutput(["bun test"]);
+    output.allowedPaths = ["src/utils/slugify.ts", "test/slugify.test.ts"];
+    output.touchedFileEstimates = [
+      { path: "src/utils/slugify.ts", expectedChange: "Implement slugification.", confidence: 0.9 },
+      { path: "test/slugify.test.ts", expectedChange: "Add task tests.", confidence: 0.9 },
+    ];
+    output.acceptanceCriteria.push({ criterionId: "root-suite", statement: "The repository-wide root test suite passes.", verificationMethod: "Run the repository root test script.", priority: "MUST" });
+    output.testPlan = [
+      { testId: "slugify-test", criterionIds: ["auth-1"], type: "UNIT", description: "Run the task test.", command: "bun test" },
+      { testId: "root-suite", criterionIds: ["root-suite"], type: "REGRESSION", description: "Run the root suite.", command: "bun test" },
+    ];
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "scoped-response", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ type: "function_call", name: "submit_plan", call_id: "scoped-call", arguments: JSON.stringify(output) }] };
+      } }),
+    });
+    const proposal = await manager.plan(run.runId);
+    expect(proposal.manifest.testPlan.map((item) => item.command)).toEqual(["bun test test/slugify.test.ts"]);
+    expect(proposal.manifest.testPlan[0]?.type).toBe("SECURITY");
+    expect(proposal.manifest.allowedCommands).toEqual(["bun test test/slugify.test.ts"]);
+    expect(proposal.manifest.acceptanceCriteria.map((criterion) => criterion.criterionId)).toEqual(["auth-1"]);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("promotes a literal requested TypeScript API into the required lane before Builder admission", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-explicit-api-plan-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const request = `Create src/scheduler.ts and test/scheduler.test.ts.
+export class DagScheduler {
+  addTask<T>(): Promise<T>;
+  setPriority(id: string, priority: number): void;
+  cancelTask(id: string): void;
+}
+Export DuplicateTaskError, MissingDependencyError, CyclicDependencyError, TaskCancelledError, TimeoutError, and DependencyFailedError.`;
+    const run = supervisor.receiveRequest({
+      runId: "explicit-api-plan", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request,
+    });
+    seedContext(supervisor, artifactStore, run);
+    const output = plannerOutput(["bun test test/scheduler.test.ts"]);
+    output.allowedPaths = ["src/scheduler.ts", "test/scheduler.test.ts"];
+    output.touchedFileEstimates = [
+      { path: "src/scheduler.ts", expectedChange: "Implement scheduler.", confidence: 0.9 },
+      { path: "test/scheduler.test.ts", expectedChange: "Add scheduler tests.", confidence: 0.9 },
+    ];
+    output.testPlan = [{ testId: "scheduler-test", criterionIds: ["auth-1"], type: "SECURITY", description: "Run scheduler tests.", command: "bun test test/scheduler.test.ts" }];
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "explicit-api-response", usage: { input_tokens: 10, output_tokens: 10 }, output: [{ type: "function_call", name: "submit_plan", call_id: "explicit-api-call", arguments: JSON.stringify(output) }] };
+      } }),
+    });
+    const proposal = await manager.plan(run.runId);
+    const apiCriterion = proposal.manifest.acceptanceCriteria.find((criterion) => criterion.criterionId === "explicit-api-contract");
+    expect(apiCriterion?.statement).toContain("method addTask");
+    expect(apiCriterion?.statement).toContain("error DependencyFailedError");
+    expect(proposal.manifest.testPlan[0]?.criterionIds).toContain("explicit-api-contract");
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("passes only secret-filtered and credential-redacted exact-base excerpts to the planner", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-secret-plan-"));
     const repositoryRoot = join(root, "repository");
@@ -343,6 +437,37 @@ describe("Phase 5 structured planning", () => {
     expect(proposal.manifest.testPlan[0]?.command).toBe("bun test test/scheduler.test.ts");
     expect(supervisor.listFailures(run.runId)).toEqual([]);
     expect(supervisor.exportRunRecords(run.runId).model_calls).toHaveLength(1);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("replaces an accidental source-directory suite with the one allowed task test", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-directory-test-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const run = supervisor.receiveRequest({
+      runId: "directory-test-run", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Create src/scheduler.ts and test/scheduler.test.ts.",
+    });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    seedContext(supervisor, artifactStore, run);
+    const output = plannerOutput(["bun test packages/engineer/src"]);
+    output.allowedPaths = ["src/scheduler.ts", "test/scheduler.test.ts"];
+    output.touchedFileEstimates = [
+      { path: "src/scheduler.ts", expectedChange: "Implement scheduler.", confidence: 0.9 },
+      { path: "test/scheduler.test.ts", expectedChange: "Add scheduler tests.", confidence: 0.9 },
+    ];
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "directory-test-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{
+          type: "function_call", name: "submit_plan", call_id: "directory-test-call", arguments: JSON.stringify(output),
+        }] };
+      } }),
+    });
+
+    const proposal = await manager.plan(run.runId);
+    expect(proposal.manifest.allowedCommands).toEqual(["bun test test/scheduler.test.ts"]);
+    expect(proposal.manifest.testPlan[0]?.command).toBe("bun test test/scheduler.test.ts");
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
@@ -559,6 +684,41 @@ describe("Phase 5 structured planning", () => {
     reopened.close(); rmSync(root, { recursive: true, force: true });
   });
 
+  test("replans explicit API-contract drift without consuming a Planner retry allowance", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-explicit-contract-plan-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const repository = { repositoryId: "repo-1", provider: "local" as const, owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) };
+    const run = supervisor.receiveRequest({ runId: "explicit-contract-plan", userId: "user-1", repository, request: "Export class DagScheduler." });
+    seedContext(supervisor, artifactStore, run);
+    let calls = 0;
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        calls += 1;
+        return { id: `plan-${calls}`, usage: { input_tokens: 100, output_tokens: 10 }, output: [{ type: "function_call", name: "submit_plan", call_id: `call-${calls}`, arguments: JSON.stringify(plannerOutput()) }] };
+      } }),
+    });
+    await manager.plan(run.runId);
+    const ready = supervisor.getRun(run.runId);
+    supervisor.transition({
+      runId: run.runId, expectedStateVersion: ready.stateVersion, nextState: "REPLANNING",
+      reasonCode: "EXPLICIT_CONTRACT_REPLAN_REQUESTED", idempotencyKey: "explicit-contract-replan",
+    });
+    supervisor.recordFailure(FailureRecordSchema.parse({
+      failureId: "explicit-contract-drift", runId: run.runId, failureClass: "REQUEST_FAILURE",
+      reasonCode: "EXPLICIT_CONTRACT_PLAN_DRIFT", fingerprint: sha256("explicit-contract-drift"),
+      evidenceIds: [], retryable: true, createdAt: "2026-07-20T18:00:00.000Z",
+    }));
+
+    await manager.plan(run.runId);
+
+    expect(calls).toBe(2);
+    expect(supervisor.getRun(run.runId).state).toBe("PLAN_READY");
+    expect(supervisor.exportRunRecords(run.runId).retry_attempts ?? []).toHaveLength(0);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
   test("blocks planning before any mutation when exact-base context is missing", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-no-context-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
@@ -622,6 +782,36 @@ describe("Phase 5 structured planning", () => {
     expect(supervisor.listFailures(run.runId)).toEqual([]);
     expect(supervisor.exportRunRecords(run.runId).model_calls).toEqual([]);
     expect(supervisor.getBudget(run.runId).reserved).toEqual({ costUsd: 0, tokens: 0 });
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  // Regression (V1): the planning guard must accept REQUEST_NORMALIZED, not only
+  // REQUEST_RECEIVED/PLANNING/REPLANNING. A run that was normalized before
+  // planning previously tripped "planning requires ..." and dead-ended.
+  test("plans a run that was normalized before planning", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-plan-normalized-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const artifactStore = new LocalArtifactStore({ root: join(root, "artifacts") });
+    const run = supervisor.receiveRequest({
+      runId: "normalized-plan", userId: "user-1",
+      repository: { repositoryId: "repo-1", provider: "local", owner: "local", name: "fixture", baseBranch: "main", baseCommitSha: "a".repeat(40) },
+      request: "Require authentication on the export endpoint.",
+    });
+    seedContext(supervisor, artifactStore, run);
+    supervisor.normalizeRequest({
+      runId: run.runId, expectedStateVersion: run.stateVersion,
+      normalizedRequest: "Require authentication on the export endpoint.",
+      idempotencyKey: "normalize-1",
+    });
+    expect(supervisor.getRun(run.runId).state).toBe("REQUEST_NORMALIZED");
+    const manager = new EngineerPlanningManager({
+      supervisor, artifactStore,
+      transportForRun: () => ({ async create() {
+        return { id: "normalized-response", usage: { input_tokens: 100, output_tokens: 100 }, output: [{ type: "function_call", name: "submit_plan", call_id: "normalized-call", arguments: JSON.stringify(plannerOutput()) }] };
+      } }),
+    });
+    await manager.plan(run.runId);
+    expect(supervisor.getRun(run.runId).state).toBe("PLAN_READY");
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 });

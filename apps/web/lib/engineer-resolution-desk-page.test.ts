@@ -16,6 +16,8 @@ describe("Resolution Desk page wiring", () => {
   it("chains directive-create then apply for every decision instead of leaving the case in DIRECTIVE_ISSUED unresolved", () => {
     expect(source).toContain("createResolutionDirective(resolutionCase.caseId");
     expect(source).toContain("applyResolutionDirective(directive.directiveId)");
+    expect(source).toContain("getResolutionCaseDetail(resolutionCase.caseId)");
+    expect(source).toContain('withMutation("resolution:resume-issued"');
   });
 
   it("passes caseVersion and sourceRunVersion straight from server-derived state, never a client-invented value", () => {
@@ -49,6 +51,13 @@ describe("Resolution Desk page wiring", () => {
     expect(source).toContain("<ResolutionErrorState");
     expect(source).toContain("<ResolutionTerminalSummary");
     expect(source).toContain("TERMINAL_CASE_STATES.has(resolutionCase.state)");
+  });
+
+  it("establishes the memory-only local gateway session before requesting protected Resolution Desk data", () => {
+    expect(source).toContain("fetchGatewayConnection, type GatewayConnectionState");
+    expect(source).toContain("const connection = await fetchGatewayConnection();");
+    expect(source).toContain('if (connection.state !== "connected")');
+    expect(source).toContain("Connecting to your local Engineer gateway…");
   });
 
   it("re-fetches the case after every applied directive so the desk never displays a stale version", () => {

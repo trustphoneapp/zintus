@@ -124,6 +124,94 @@ describe("Required Lane contract", () => {
     })).toThrow("must-b");
   });
 
+  test("uses the deterministic final scope attestation for a scope-only MUST without inventing a test command", () => {
+    const frozen = manifest();
+    const content: TaskManifestContent = {
+      ...frozen,
+      acceptanceCriteria: [
+        ...frozen.acceptanceCriteria,
+        {
+          criterionId: "must-scope",
+          statement: "Only approved files may change.",
+          verificationMethod: "Review the final changed-file list against the authorized paths.",
+          priority: "MUST",
+        },
+      ],
+    };
+    delete (content as Partial<typeof frozen>).manifestHash;
+    const scoped = TaskManifestSchema.parse({ ...content, manifestHash: sha256(content) });
+    const contract = createRequiredLaneContract({
+      manifest: scoped, contextManifestHash: null, planProposalHash: null, policyBindings: bindings,
+    });
+    expect(contract.requiredCriterionIds).toContain("must-scope");
+    expect(contract.requiredTestIds).not.toContain("must-scope");
+  });
+
+  test("accepts a final changed-path check that names permitted paths", () => {
+    const frozen = manifest();
+    const content: TaskManifestContent = {
+      ...frozen,
+      acceptanceCriteria: [
+        ...frozen.acceptanceCriteria,
+        {
+          criterionId: "must-permitted-scope",
+          statement: "Only two files may change.",
+          verificationMethod: "Review the final changed-path list against the two permitted paths.",
+          priority: "MUST",
+        },
+      ],
+    };
+    delete (content as Partial<typeof frozen>).manifestHash;
+    const candidate = TaskManifestSchema.parse({ ...content, manifestHash: sha256(content) });
+    expect(createRequiredLaneContract({
+      manifest: candidate, contextManifestHash: null, planProposalHash: null, policyBindings: bindings,
+    }).requiredCriterionIds).toContain("must-permitted-scope");
+  });
+
+  test("uses the deterministic scope attestation for an exact final change-set requirement", () => {
+    const frozen = manifest();
+    const content: TaskManifestContent = {
+      ...frozen,
+      acceptanceCriteria: [
+        ...frozen.acceptanceCriteria,
+        {
+          criterionId: "must-exact-change-set",
+          statement: "The change set adds exactly src/new.ts and test/new.test.ts; no other repository file is modified.",
+          verificationMethod: "Review the final change set and confirm only the two requested newly added paths are present.",
+          priority: "MUST",
+        },
+      ],
+    };
+    delete (content as Partial<typeof frozen>).manifestHash;
+    const scoped = TaskManifestSchema.parse({ ...content, manifestHash: sha256(content) });
+    const contract = createRequiredLaneContract({
+      manifest: scoped, contextManifestHash: null, planProposalHash: null, policyBindings: bindings,
+    });
+    expect(contract.requiredCriterionIds).toContain("must-exact-change-set");
+    expect(contract.requiredTestIds).not.toContain("must-exact-change-set");
+  });
+
+  test("does not let a loosely worded scope requirement bypass executable coverage", () => {
+    const frozen = manifest();
+    const content: TaskManifestContent = {
+      ...frozen,
+      acceptanceCriteria: [
+        ...frozen.acceptanceCriteria,
+        {
+          criterionId: "must-not-final-scope",
+          statement: "The scheduler preserves the requested scope.",
+          verificationMethod: "Exercise scheduling behavior with a unit test.",
+          priority: "MUST",
+        },
+      ],
+    };
+    delete (content as Partial<typeof frozen>).manifestHash;
+    const candidate = TaskManifestSchema.parse({ ...content, manifestHash: sha256(content) });
+    expect(() => createRequiredLaneContract({
+      manifest: candidate, contextManifestHash: null, planProposalHash: null, policyBindings: bindings,
+    })).toThrow("must-not-final-scope");
+  });
+
   test("refuses missing or unapproved commands for required tests", () => {
     const frozen = manifest();
     for (const testPlan of [

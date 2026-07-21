@@ -119,6 +119,41 @@ describe("origin rejection (CSRF / denial-of-wallet guard)", () => {
   });
 });
 
+describe("Engineer intake error contract", () => {
+  test("returns a typed planner-minimum response before a caller can spend on an impossible plan", async () => {
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), {
+      engineerRuns: {
+        principal: () => deriveEngineerPrincipal({ gatewayIdentitySecret: "planner-minimum-contract-secret" }),
+        readiness: () => ({ state: "READY" }),
+        create: async () => {
+          const error = new Error("This run needs at least 8,000 tokens for the Planner reservation.") as Error & { code: string };
+          error.code = "PLANNER_BUDGET_MINIMUM";
+          throw error;
+        },
+      } as never,
+    });
+
+    const response = await handler(new Request("http://x/v1/engineer/runs", {
+      method: "POST",
+      headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runId: "planner-minimum-contract",
+        repository: { repositoryId: "repo-1" },
+        request: "Add a bounded feature",
+        budget: { tokenBudget: 7_999, lifetimeTokenBudget: 7_999 },
+      }),
+    }));
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        code: "PLANNER_BUDGET_MINIMUM",
+        message: "This run needs at least 8,000 tokens for the Planner reservation.",
+      },
+    });
+  });
+});
+
 describe("ephemeral origin-bound loopback handshake (R8-4)", () => {
   const PRICING = "http://localhost:8788/v1/pricing";
   const HANDSHAKE = "http://localhost:8788/v1/handshake";
@@ -418,6 +453,15 @@ describe("gateway handler", () => {
     const readBody = (await read.json()) as { run: { state: string }; budget: { limits: { tokens: number } } };
     expect(readBody.run.state).toBe("PAUSED_BUDGET");
     expect(readBody.budget.limits.tokens).toBe(0);
+    const capabilities = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/capabilities", {
+      headers: { Authorization: "Bearer secret" },
+    }));
+    expect(capabilities.status).toBe(200);
+    expect(capabilities.headers.get("Cache-Control")).toBe("no-store");
+    const topUpCapability = ((await capabilities.json()) as { capabilities: { actions: Array<{ action: string; availability: string; reasonCode: string; expectedBudgetRevision?: number }> } }).capabilities.actions
+      .find((item) => item.action === "TOP_UP_BUDGET");
+    expect(topUpCapability).toMatchObject({ availability: "AVAILABLE", reasonCode: "READY" });
+    expect(typeof topUpCapability?.expectedBudgetRevision).toBe("number");
     const snapshot = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/snapshot", { headers: { Authorization: "Bearer secret" } }));
     expect(snapshot.status).toBe(200);
     const snapshotBody = (await snapshot.json()) as { status: { run: { runId: string } }; data: { artifacts: unknown[]; errors: unknown[] } };
@@ -438,6 +482,14 @@ describe("gateway handler", () => {
     }));
     expect(resume.status).toBe(200);
     expect(((await resume.json()) as { run: { state: string } }).run.state).toBe("REQUEST_RECEIVED");
+    const stalePlan = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/plan", {
+      method: "POST", headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedStateVersion: 0, idempotencyKey: "stale-browser-plan" }),
+    }));
+    expect(stalePlan.status).toBe(409);
+    expect(await stalePlan.json()).toEqual({ error: {
+      code: "STALE_CLIENT_STATE", message: "This run changed in another action. Refresh the run before trying again.",
+    } });
     const plan = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/plan", {
       headers: { Authorization: "Bearer secret" },
     }));
@@ -520,7 +572,7 @@ describe("gateway handler", () => {
     const gitOperations = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/git-operations", { headers: { Authorization: "Bearer secret" } }));
     expect((await gitOperations.json()) as unknown).toEqual({ gitOperations: [] });
     const diff = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/diff", { headers: { Authorization: "Bearer secret" } }));
-    expect((await diff.json()) as unknown).toEqual({ diff: "diff --git a/a b/a" });
+    expect((await diff.json()) as unknown).toEqual({ diff: "diff --git a/a b/a", available: true });
     const approval = await handler(new Request("http://x/v1/engineer/runs/gateway-run-1/approval", { headers: { Authorization: "Bearer secret" } }));
     expect((await approval.json()) as unknown).toEqual({ approval: null, approvalAuthority: null });
     const observability = await handler(new Request("http://x/v1/engineer/observability", { headers: { Authorization: "Bearer secret" } }));
@@ -586,6 +638,12 @@ describe("gateway handler", () => {
     expect((await handler(new Request("http://x/health"))).status).toBe(503);
     const failed = await handler(new Request("http://x/v1/engineer/readiness/retry", { method: "POST", headers: { Authorization: "Bearer secret" } }));
     expect(failed.status).toBe(503);
+    const blockedRead = await handler(new Request("http://x/v1/engineer/repository", { headers: { Authorization: "Bearer secret" } }));
+    expect(blockedRead.status).toBe(503);
+    expect(await blockedRead.json()).toEqual({
+      error: { message: "Engineer preflight failed: exact-model lacks required Responses/structured-output capabilities" },
+      readiness: { state: "FAILED", error: "Engineer preflight failed: exact-model lacks required Responses/structured-output capabilities" },
+    });
     expect(supervisor.listRuns()).toEqual([]);
     ready = true;
     repositoryReady = true;
@@ -636,6 +694,16 @@ describe("gateway handler", () => {
     const body = (await res.json()) as { ok: boolean; status?: string };
     expect(body.ok).toBe(false);
     expect(body.status).toBe("draining");
+  });
+
+  test("GET /health reports 503 when configured Engineer readiness has failed", async () => {
+    const engineerRuns = {
+      readiness: () => ({ state: "FAILED", error: "Engineer preflight failed: offline dependency bundle and toolchain hash are unavailable" }),
+    } as unknown as EngineerRunManager;
+    const handler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns });
+    const res = await handler(new Request("http://x/health"));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ ok: false, auth: "required", engineer: "FAILED" });
   });
 
   test("GET /health no longer leaks provider topology", async () => {
@@ -1647,6 +1715,7 @@ describe("gateway handler", () => {
     );
     expect(res.status).toBe(204);
     expect(res.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+    expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Idempotency-Key");
   });
 
   // --- Tokzen compression-savings headers (X-Zintus-*) ---------------------
@@ -3009,6 +3078,16 @@ describe("P7 Developer Resolution Desk HTTP routes", () => {
     expect(calls[0]).toEqual({ method: "issueDirective", args: [principal, "case-1", body, "idem-abc"] });
   });
 
+  test("decodes hash-shaped resolution case IDs before the owner and directive gates", async () => {
+    const { handler, calls } = makeResolutionHandler({ issueDirective: () => ({ directive: { directiveId: "d-1" }, case: { state: "DIRECTIVE_ISSUED" } }) });
+    const response = await handler(new Request("http://x/v1/engineer/resolution-cases/sha256%3Aabc/directives", {
+      method: "POST", headers: { ...authorized, "Idempotency-Key": "idem-encoded" },
+      body: JSON.stringify({ type: "CREATE_REVERIFY_RUN", caseVersion: 0, sourceRunVersion: 4 }),
+    }));
+    expect(response.status).toBe(201);
+    expect(calls[0]!.args[1]).toBe("sha256:abc");
+  });
+
   test("applies a directive and returns { replacementRunId, state }", async () => {
     const { handler, calls } = makeResolutionHandler({ applyDirective: () => ({ replacementRunId: "resolution-x", state: "READY" }) });
     const response = await handler(new Request("http://x/v1/engineer/resolution-directives/d-1/apply", {
@@ -3266,6 +3345,26 @@ describe("P8 publication-authority HTTP routes", () => {
     const response = await handler(new Request("http://x/v1/engineer/runs/run-1/publication-candidates", { headers: authorized }));
     expect(response.status).toBe(503);
     expect((await response.json() as { error: { message: string } }).error.message).toMatch(/not configured/i);
+  });
+
+  test("projects publication readiness without making a candidate or publication request", async () => {
+    const unconfiguredRuns = { principal: () => principal } as unknown as GatewayHandlerDeps["engineerRuns"];
+    const unavailableHandler = makeHandler({ token: "secret" }, fakeEngine(), { engineerRuns: unconfiguredRuns });
+    const unavailable = await unavailableHandler(new Request("http://x/v1/engineer/publication-readiness", { headers: authorized }));
+    expect(unavailable.status).toBe(200);
+    expect(await unavailable.json()).toEqual({ publication: {
+      state: "UNAVAILABLE",
+      message: "Verified locally. Approval and publication are unavailable because this gateway has no publication authority configured.",
+    } });
+
+    const { handler, calls } = makePublicationHandler();
+    const ready = await handler(new Request("http://x/v1/engineer/publication-readiness", { headers: authorized }));
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toEqual({ publication: {
+      state: "READY",
+      message: "Approval and publication are available for verified candidates.",
+    } });
+    expect(calls).toEqual([]);
   });
 
   test("lists publication candidates owner-scoped as 200 { candidates }", async () => {

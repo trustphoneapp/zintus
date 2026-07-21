@@ -34,6 +34,35 @@ export function reviewerFindingFingerprint(
   });
 }
 
+/**
+ * Reviewer finding paths are display/provenance labels, never Builder tool
+ * inputs. Some diff-aware providers nevertheless emit the conventional Git
+ * `a/` and `b/` prefixes. Normalize only that unambiguous presentation detail
+ * before the finding enters scope classification; keep the Builder's path
+ * validator strict for all filesystem access.
+ */
+export function normalizeReviewerFindingPath(path: string): string {
+  if (path === "") return path;
+  const slashNormalized = path.replace(/\\/g, "/");
+  const normalized = slashNormalized.replace(/^[ab]\//, "");
+  if (
+    !normalized ||
+    normalized.includes("\0") ||
+    normalized.startsWith("/") ||
+    /^[A-Za-z]:\//.test(normalized)
+  ) {
+    throw new Error("Reviewer finding path must be repository-relative");
+  }
+  const parts = normalized.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error("Reviewer finding path contains unsafe segments");
+  }
+  if (parts[0] === ".git") {
+    throw new Error("Reviewer finding path must not reference .git");
+  }
+  return normalized;
+}
+
 /** Provider finding labels (often F-1) are local to one response, not global IDs. */
 export function reviewerFindingRecordId(input: {
   reviewerSessionId: string;
@@ -224,6 +253,7 @@ export function bindReviewerEvidence(input: ReviewerInput, rawOutput: ReviewerOu
   });
   const findings = rawOutput.findings.map((finding) => ({
     ...finding,
+    file: normalizeReviewerFindingPath(finding.file),
     evidenceIds: uniqueTrusted(finding.evidenceIds),
   }));
   for (const { gap, evidenceId } of blockingAdversarialGapsFromEvidence(input.trustedEvidence)) {

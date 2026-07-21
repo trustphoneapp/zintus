@@ -33,6 +33,33 @@ export function scopeCriterionIds(manifest: TaskManifest): string[] {
     .map((criterion) => criterion.criterionId);
 }
 
+/**
+ * Scope criteria that the final change-scope attestation can prove on its own.
+ *
+ * `scopeCriterionIds` deliberately remains broad because an attestation should
+ * record every acceptance criterion it may help inform. Coverage is stricter:
+ * a requirement replaces an executable test only when its verification method
+ * explicitly inspects the final diff or changed-file list. This prevents a
+ * functional requirement that merely mentions "scope" from bypassing tests.
+ */
+export function deterministicScopeCriterionIds(manifest: TaskManifest): string[] {
+  return manifest.acceptanceCriteria
+    .filter((criterion) => {
+      const verificationMethod = criterion.verificationMethod.toLowerCase();
+      const checksFinalArtifact = /\bfinal\b/.test(verificationMethod)
+        && /\b(?:diff|change set|changed[- ]file(?:s)?|changed paths?|file list|path list)\b/.test(verificationMethod);
+      // Authority wording may be in the criterion statement ("Only X may
+      // change") while the verification method names the final artifact to
+      // inspect. Require the latter, then accept equivalent frozen-scope terms
+      // from either field. In particular, planners commonly say "permitted
+      // paths" rather than "approved paths".
+      const authorityText = `${criterion.statement}\n${verificationMethod}`;
+      const checksAuthority = /\b(?:only|exactly|allowed|authorized|approved|permitted|scope)\b/.test(authorityText);
+      return checksFinalArtifact && checksAuthority;
+    })
+    .map((criterion) => criterion.criterionId);
+}
+
 export function buildFinalChangeScopeAttestation(input: {
   manifest: TaskManifest;
   diff: string;

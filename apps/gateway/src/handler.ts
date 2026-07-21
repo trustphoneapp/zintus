@@ -52,7 +52,7 @@ import {
   type AgentEngine,
   type CreateAgentTaskBody,
 } from "./agents.js";
-import type { EngineerRunManager } from "./engineer.js";
+import { EngineerVerificationScopeDecisionRequiredError, type EngineerRunManager } from "./engineer.js";
 import {
   mcpToolsToDefinitions,
   mcpToolName,
@@ -288,6 +288,18 @@ function classifyEngineerHardeningError(error: unknown): { code: EngineerHardeni
     ENGINEER_HARDENING_INTERNAL_ERROR: "Hardening request could not be completed",
   };
   return { code, status, message: messages[code] };
+}
+
+/**
+ * Redact secrets/UUIDs from an error message while preserving the one run id the
+ * client already supplied on the request path/body. Every other UUID in the
+ * message still gets redacted; only the caller's own run id survives so 404 and
+ * conflict messages remain intelligible.
+ */
+function redactPreservingRunId(message: string, runId: string): string {
+  if (!runId) return redactSecrets(message);
+  const t = " RUN ";
+  return redactSecrets(message.split(runId).join(t)).split(t).join(runId);
 }
 
 /**
@@ -975,7 +987,11 @@ export function createGatewayHandler(
     );
     const headers: Record<string, string> = {
       "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID",
+      // Resolution, publication, and other mutation routes use a deterministic
+      // idempotency key. It is a non-simple browser header, so omitting it
+      // makes the browser reject the preflight before the request reaches the
+      // gateway (reported by the UI only as "Failed to fetch").
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, Last-Event-ID, Idempotency-Key",
       "Access-Control-Expose-Headers":
         "X-Provider-Used, X-Cache-Hit, X-Failover-Count, X-Compile-Tokens, X-Zintus-Route-Reason, " +
         "X-Zintus-Original-Tokens, X-Zintus-Compressed-Tokens, " +
@@ -3139,20 +3155,20 @@ export function createGatewayHandler(
         }
         // GET /v1/engineer/resolution-cases/:caseId  (case + events)
         if (parts[3] === "resolution-cases" && parts[4] && !parts[5] && request.method === "GET") {
-          return json(request, await resolutionDesk.getCase(engineerPrincipal!, parts[4]));
+          return json(request, await resolutionDesk.getCase(engineerPrincipal!, decodeURIComponent(parts[4])));
         }
         // POST /v1/engineer/resolution-cases/:caseId/directives
         if (parts[3] === "resolution-cases" && parts[4] && parts[5] === "directives" && !parts[6] && request.method === "POST") {
           const limited = enforceRateLimit(request, requestId, url.pathname);
           if (limited) return limited;
           const body = await request.json().catch(() => ({}));
-          return json(request, await resolutionDesk.issueDirective(engineerPrincipal!, parts[4], body, idempotencyKey), 201);
+          return json(request, await resolutionDesk.issueDirective(engineerPrincipal!, decodeURIComponent(parts[4]), body, idempotencyKey), 201);
         }
         // POST /v1/engineer/resolution-directives/:directiveId/apply
         if (parts[3] === "resolution-directives" && parts[4] && parts[5] === "apply" && !parts[6] && request.method === "POST") {
           const limited = enforceRateLimit(request, requestId, url.pathname);
           if (limited) return limited;
-          return json(request, await resolutionDesk.applyDirective(engineerPrincipal!, parts[4], idempotencyKey), 200);
+          return json(request, await resolutionDesk.applyDirective(engineerPrincipal!, decodeURIComponent(parts[4]), idempotencyKey), 200);
         }
         return json(request, { error: { message: "Resolution resource not found" } }, 404);
       } catch (error) {
@@ -3171,7 +3187,18 @@ export function createGatewayHandler(
     // -> typed 400 with issues; SelfApprovalError -> 403; consumed/idempotency
     // conflicts -> 409; fail-closed attestation -> 503).
     if (url.pathname.startsWith("/v1/engineer/")
-      && (url.pathname.includes("/publication-candidates") || url.pathname.includes("/publications") || url.pathname.includes("/current-publication"))) {
+      && (url.pathname === "/v1/engineer/publication-readiness" || url.pathname.includes("/publication-candidates") || url.pathname.includes("/publications") || url.pathname.includes("/current-publication"))) {
+      // This is deliberately a read-only server projection. The browser must
+      // not infer whether the P8 publication lane exists from a review state:
+      // a REVIEW_APPROVED candidate remains locally verified even when the
+      // operator has withheld Git/attestation authority from this gateway.
+      if (url.pathname === "/v1/engineer/publication-readiness" && request.method === "GET") {
+        return json(request, {
+          publication: publicationAuthority
+            ? { state: "READY", message: "Approval and publication are available for verified candidates." }
+            : { state: "UNAVAILABLE", message: "Verified locally. Approval and publication are unavailable because this gateway has no publication authority configured." },
+        }, 200, { "Cache-Control": "no-store" });
+      }
       if (!publicationAuthority) return json(request, { error: { message: "Engineer publication authority is not configured" } }, 503);
       const parts = url.pathname.split("/");
       const idempotencyKey = request.headers.get("Idempotency-Key") ?? "";
@@ -3252,7 +3279,11 @@ export function createGatewayHandler(
     }
 
     if (url.pathname.startsWith("/v1/engineer/") && engineerRuns?.readiness().state !== "READY") {
-      return json(request, { error: { message: "Engineer capability preflight is not ready" }, readiness: engineerRuns?.readiness() }, 503);
+      const readiness = engineerRuns?.readiness();
+      const message = readiness?.state === "FAILED"
+        ? redactSecrets(readiness.error)
+        : "Engineer capability preflight is not ready";
+      return json(request, { error: { message }, readiness }, 503);
     }
 
     if (url.pathname === "/v1/engineer/repository" && request.method === "GET") {
@@ -3274,10 +3305,12 @@ export function createGatewayHandler(
       if (!engineerRuns) return json(request, { error: { message: "Engineer is not configured" } }, 503);
       const limited = enforceRateLimit(request, requestId, url.pathname);
       if (limited) return limited;
+      let createRunId = "";
       try {
         const body = await request.json() as {
           runId?: string; userId?: string; actorId?: string; userEmail?: string; repository?: unknown; request?: string; budget?: unknown;
         };
+        createRunId = body.runId ?? "";
         if (!body.repository || !body.request) throw new Error("repository and request are required");
         const run = await engineerRuns.create(engineerPrincipal!, {
           ...(body.runId ? { runId: body.runId } : {}),
@@ -3287,8 +3320,18 @@ export function createGatewayHandler(
         });
         return json(request, { run }, 201);
       } catch (error) {
+        const candidate = error as { name?: string; issues?: unknown } | null;
+        if (error instanceof Error && candidate?.name === "ZodError" && Array.isArray(candidate.issues)) {
+          return json(request, { error: { message: "Invalid request body", issues: formatIssues(error as unknown as Parameters<typeof formatIssues>[0]) } }, 400);
+        }
         const message = error instanceof Error ? error.message : String(error);
-        return json(request, { error: { message: redactSecrets(message) } }, /preflight/i.test(message) ? 503 : 400);
+        if ((error as { code?: unknown } | null)?.code === "IDEMPOTENCY_CONFLICT") {
+          return json(request, { error: { code: "IDEMPOTENCY_CONFLICT", message: redactPreservingRunId(message, createRunId) } }, 409);
+        }
+        if ((error as { code?: unknown } | null)?.code === "PLANNER_BUDGET_MINIMUM") {
+          return json(request, { error: { code: "PLANNER_BUDGET_MINIMUM", message: redactPreservingRunId(message, createRunId) } }, 400);
+        }
+        return json(request, { error: { message: redactPreservingRunId(message, createRunId) } }, /preflight/i.test(message) ? 503 : 400);
       }
     }
 
@@ -3331,6 +3374,9 @@ export function createGatewayHandler(
           if (limited) return limited;
         }
         if (!action && request.method === "GET") return json(request, engineerRuns.get(runId));
+        if (action === "capabilities" && request.method === "GET") {
+          return json(request, { capabilities: engineerRuns.capabilities(engineerPrincipal!, runId) }, 200, { "Cache-Control": "no-store" });
+        }
         if (action === "budget" && request.method === "GET") {
           return json(request, { budget: engineerRuns.budget(engineerPrincipal!, runId) });
         }
@@ -3354,10 +3400,17 @@ export function createGatewayHandler(
           return json(request, { run, budget: engineerRuns.budget(engineerPrincipal!, runId) });
         }
         if (action === "plan" && request.method === "POST") {
-          return json(request, { plan: await engineerRuns.plan(engineerPrincipal!, runId) });
+          const body = await request.json() as { expectedStateVersion?: number; idempotencyKey?: string };
+          if (typeof body.expectedStateVersion !== "number" || !body.idempotencyKey) throw new Error("expectedStateVersion and idempotencyKey are required");
+          return json(request, { plan: await engineerRuns.plan(engineerPrincipal!, runId, body as Required<typeof body>) });
         }
         if (action === "plan" && request.method === "GET") {
           return json(request, { plan: engineerRuns.planProposal(runId) });
+        }
+        if (action === "replan-explicit-contract" && request.method === "POST") {
+          const body = await request.json() as { expectedStateVersion?: number; idempotencyKey?: string };
+          if (typeof body.expectedStateVersion !== "number" || !body.idempotencyKey) throw new Error("expectedStateVersion and idempotencyKey are required");
+          return json(request, { plan: await engineerRuns.replanExplicitContract(engineerPrincipal!, runId, body as Required<typeof body>) }, 202);
         }
         if (action === "freeze-plan" && request.method === "POST") {
           const body = await request.json() as {
@@ -3373,10 +3426,14 @@ export function createGatewayHandler(
           }) });
         }
         if (action === "start" && request.method === "POST") {
-          return json(request, { run: await engineerRuns.start(engineerPrincipal!, runId), accepted: true }, 202);
+          const body = await request.json() as { expectedStateVersion?: number; idempotencyKey?: string };
+          if (typeof body.expectedStateVersion !== "number" || !body.idempotencyKey) throw new Error("expectedStateVersion and idempotencyKey are required");
+          return json(request, { run: await engineerRuns.start(engineerPrincipal!, runId, body as Required<typeof body>), accepted: true }, 202);
         }
         if (action === "retry-provider-timeout" && request.method === "POST") {
-          return json(request, { run: await engineerRuns.retryProviderTimeout(engineerPrincipal!, runId), accepted: true }, 202);
+          const body = await request.json() as { expectedStateVersion?: number; idempotencyKey?: string };
+          if (typeof body.expectedStateVersion !== "number" || !body.idempotencyKey) throw new Error("expectedStateVersion and idempotencyKey are required");
+          return json(request, { run: await engineerRuns.retryProviderTimeout(engineerPrincipal!, runId, body as Required<typeof body>), accepted: true }, 202);
         }
         if (action === "recover-stale-base" && request.method === "POST") {
           // R8-3 P1 #2: stale-base recovery no longer directly creates / plans /
@@ -3575,13 +3632,14 @@ export function createGatewayHandler(
           return json(request,{start:started},202,{"Cache-Control":"no-store"});
         }
         if (action === "human-review" && request.method === "POST") {
-          const body = await request.json() as { decision?: string; reason?: string };
+          const body = await request.json() as { decision?: string; reason?: string; expectedStateVersion?: number; idempotencyKey?: string };
           if (body.decision === "approve") throw new VerifiedCandidateRequiredError();
           if (typeof body.reason !== "string" || !body.reason.trim()) throw new Error("reason is required");
           if (body.decision !== "reject" && body.decision !== "retry") {
             throw new Error("decision must be reject or retry");
           }
-          return json(request, await engineerRuns.resolveHumanReview(engineerPrincipal!, runId, body.decision, body.reason));
+          if (typeof body.expectedStateVersion !== "number" || !body.idempotencyKey) throw new Error("expectedStateVersion and idempotencyKey are required");
+          return json(request, await engineerRuns.resolveHumanReview(engineerPrincipal!, runId, body.decision, body.reason, { expectedStateVersion: body.expectedStateVersion, idempotencyKey: body.idempotencyKey }));
         }
         // R8-3 P1 #3: the legacy human-gate approval WRITE lane (approve /
         // request-changes / reject / extend-approval / expire-approval) is REMOVED.
@@ -3681,7 +3739,15 @@ export function createGatewayHandler(
           }));
         }
         if (action === "diff" && request.method === "GET") {
-          return json(request, { diff: engineerRuns.diff(runId) });
+          try {
+            return json(request, { diff: engineerRuns.diff(runId), available: true });
+          } catch (diffError) {
+            const diffMessage = diffError instanceof Error ? diffError.message : String(diffError);
+            if (/diff is unavailable/i.test(diffMessage)) {
+              return json(request, { diff: "", available: false });
+            }
+            throw diffError;
+          }
         }
       } catch (error) {
         if (hardeningRoute) {
@@ -3719,12 +3785,25 @@ export function createGatewayHandler(
             error: { code: error.code, message: error.message, action: error.action },
           }, 409);
         }
+        if (error instanceof EngineerVerificationScopeDecisionRequiredError) {
+          return json(request, { error: { code: error.code, message: error.message } }, error.httpStatus, { "Cache-Control": "no-store" });
+        }
+        if ((error as { code?: unknown } | null)?.code === "STALE_CLIENT_STATE") {
+          return json(request, { error: { code: "STALE_CLIENT_STATE", message: redactPreservingRunId(error instanceof Error ? error.message : String(error), runId) } }, 409, { "Cache-Control": "no-store" });
+        }
+        if ((error as { code?: unknown } | null)?.code === "IDEMPOTENCY_CONFLICT") {
+          return json(request, { error: { code: "IDEMPOTENCY_CONFLICT", message: redactPreservingRunId(error instanceof Error ? error.message : String(error), runId) } }, 409, { "Cache-Control": "no-store" });
+        }
         if(error instanceof HardeningGenericOperationForbiddenError||error instanceof HardeningBudgetExtensionRequiresNewRunError){
           return json(request,{error:{code:error.code,message:error.message}},409,{"Cache-Control":"no-store"});
         }
+        const zodCandidate = error as { name?: string; issues?: unknown } | null;
+        if (error instanceof Error && zodCandidate?.name === "ZodError" && Array.isArray(zodCandidate.issues)) {
+          return json(request, { error: { message: "Invalid request body", issues: formatIssues(error as unknown as Parameters<typeof formatIssues>[0]) } }, 400);
+        }
         const message = error instanceof Error ? error.message : String(error);
         const status = /not found/i.test(message) ? 404 : /preflight/i.test(message) ? 503 : /not configured|PLAN_FROZEN|planning requires/i.test(message) ? 409 : 400;
-        return json(request, { error: { message: redactSecrets(message) } }, status);
+        return json(request, { error: { message: redactPreservingRunId(message, runId) } }, status);
       }
     }
 

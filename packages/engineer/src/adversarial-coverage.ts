@@ -39,7 +39,10 @@ export type AdversarialCoverageReport = z.infer<typeof AdversarialCoverageReport
 /**
  * Converts untrusted model advice into a bounded, manifest-grounded risk report.
  * The report proves only that a coverage risk was raised; it never certifies
- * behavior. MUST-linked gaps conservatively raise the verification floor.
+ * behavior. A Tester-model suggestion is advisory even when it mentions a MUST
+ * criterion: frozen requirements and deterministic test/scope/security evidence
+ * are the only blocking authorities. Otherwise an unproven suggestion could
+ * force a paid repair loop or make Reviewer output formatting a late failure.
  */
 export function buildAdversarialCoverageReport(
   manifest: TaskManifest,
@@ -74,7 +77,7 @@ export function buildAdversarialCoverageReport(
     return [AdversarialCoverageGapSchema.parse({
       ...gap,
       criterionPriorities,
-      blocking: criterionPriorities.includes("MUST"),
+      blocking: false,
     })];
   });
 
@@ -89,7 +92,7 @@ export function buildAdversarialCoverageReport(
         counterexample: "The current trusted executor evidence does not distinguish this acceptance criterion from an incomplete implementation.",
         expectedObservation: criterion.verificationMethod,
         recommendedTest: "Add a focused regression test that fails when this criterion is not fully implemented, then repair the implementation without weakening existing checks.",
-        blocking: criterion.priority === "MUST",
+        blocking: false,
       }));
     }
   }

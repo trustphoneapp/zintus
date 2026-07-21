@@ -36,7 +36,7 @@ describe("Engineer resumable SSE", () => {
         });
       }
       return Response.json({ run: { state: "COMPLETED" }, lastError: null });
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
     const accepted: number[] = [];
     await streamEngineerEvents("run-1", (item) => accepted.push(item.sequence), new AbortController().signal, {
       maxReconnects: 2,
@@ -54,6 +54,20 @@ describe("Engineer resumable SSE", () => {
       maxReconnects: 1,
       reconnectDelayMs: 1,
     })).rejects.toThrow("reconnect budget exhausted");
+  });
+
+  test("keeps reconnecting by default across a temporary local gateway outage", async () => {
+    const controller = new AbortController();
+    let attempts = 0;
+    globalThis.fetch = (async (_input: string | URL | Request) => {
+      attempts += 1;
+      if (attempts === 3) controller.abort();
+      throw new Error("gateway restarting");
+    }) as unknown as typeof fetch;
+    await expect(streamEngineerEvents("run-restart", () => undefined, controller.signal, {
+      reconnectDelayMs: 1,
+    })).resolves.toBeUndefined();
+    expect(attempts).toBe(3);
   });
 
   test("treats REVIEW_APPROVED as a stream boundary only when the gateway says publication is disabled", async () => {

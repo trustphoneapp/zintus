@@ -34,6 +34,12 @@ export const GATEWAY_URL =
  * static secret) here — it would leak to anyone viewing the page source.
  */
 let ephemeralGatewayToken = "";
+let loopbackHandshakePromise: Promise<boolean> | null = null;
+export const GATEWAY_CREDENTIAL_CHANGED_EVENT = "zintus:gateway-credential-changed";
+
+function announceGatewayCredentialChange(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(GATEWAY_CREDENTIAL_CHANGED_EVENT));
+}
 
 /**
  * Sets a memory-only operator token for direct loopback access. It is never
@@ -41,10 +47,12 @@ let ephemeralGatewayToken = "";
  */
 export function setEphemeralGatewayToken(token: string): void {
   ephemeralGatewayToken = token.trim();
+  announceGatewayCredentialChange();
 }
 
 export function clearEphemeralGatewayToken(): void {
   ephemeralGatewayToken = "";
+  announceGatewayCredentialChange();
 }
 
 export function gatewayAuthHeaders(): Record<string, string> {
@@ -126,11 +134,60 @@ export interface GatewayHealth {
 export type GatewayConnectionState =
   | "connected"
   | "authentication-required"
+  | "local-handshake-unavailable"
   | "offline";
 
 export interface GatewayConnectionCheck {
   state: GatewayConnectionState;
   health?: GatewayHealth;
+}
+
+async function performLoopbackHandshake(): Promise<boolean> {
+  if (!isLoopbackGateway()) return false;
+  try {
+    const challengeResponse = await fetch(`${GATEWAY_URL}/v1/handshake`, { cache: "no-store" });
+    if (!challengeResponse.ok) return false;
+    const challengeBody = await challengeResponse.json() as { challenge?: unknown; expiresAt?: unknown };
+    const challenge = typeof challengeBody.challenge === "string" ? challengeBody.challenge : "";
+    if (!/^[a-f0-9]{64}$/.test(challenge) ||
+        typeof challengeBody.expiresAt !== "number" || challengeBody.expiresAt <= Date.now()) return false;
+
+    const proofResponse = await fetch("/api/local-gateway/handshake-proof", {
+      method: "POST",
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge }),
+    });
+    if (!proofResponse.ok) return false;
+    const proofBody = await proofResponse.json() as { proof?: unknown };
+    const proof = typeof proofBody.proof === "string" ? proofBody.proof : "";
+    if (!/^[a-f0-9]{64}$/.test(proof)) return false;
+
+    const redeemResponse = await fetch(`${GATEWAY_URL}/v1/handshake`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge, proof }),
+    });
+    if (!redeemResponse.ok) return false;
+    const redeemed = await redeemResponse.json() as { token?: unknown; expires_at?: unknown };
+    const token = typeof redeemed.token === "string" ? redeemed.token : "";
+    if (!/^[a-f0-9]{64}$/.test(token) || typeof redeemed.expires_at !== "number" || redeemed.expires_at <= Date.now()) {
+      return false;
+    }
+    setEphemeralGatewayToken(token);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureLoopbackSession(): Promise<boolean> {
+  if (!loopbackHandshakePromise) {
+    loopbackHandshakePromise = performLoopbackHandshake().finally(() => { loopbackHandshakePromise = null; });
+  }
+  return loopbackHandshakePromise;
 }
 
 export function getGatewayUrl(): string {
@@ -167,7 +224,7 @@ export async function fetchGatewayHealth(): Promise<GatewayHealth | null> {
  */
 export async function fetchGatewayConnection(): Promise<GatewayConnectionCheck> {
   try {
-    const response = await fetch(`${GATEWAY_URL}/v1/status`, {
+    let response = await fetch(`${GATEWAY_URL}/v1/status`, {
       cache: "no-store",
       headers: { ...gatewayAuthHeaders() },
     });
@@ -176,6 +233,19 @@ export async function fetchGatewayConnection(): Promise<GatewayConnectionCheck> 
         state: "connected",
         health: (await response.json()) as GatewayHealth,
       };
+    }
+
+    if (response.status === 401 && await ensureLoopbackSession()) {
+      response = await fetch(`${GATEWAY_URL}/v1/status`, {
+        cache: "no-store",
+        headers: { ...gatewayAuthHeaders() },
+      });
+      if (response.ok) {
+        return {
+          state: "connected",
+          health: (await response.json()) as GatewayHealth,
+        };
+      }
     }
 
     if (response.status !== 401 && response.status !== 403) {
@@ -188,10 +258,11 @@ export async function fetchGatewayConnection(): Promise<GatewayConnectionCheck> 
     if (!publicHealth.ok) {
       return { state: "offline" };
     }
-    const body = (await publicHealth.json()) as { ok?: boolean };
-    return body.ok
-      ? { state: "authentication-required" }
-      : { state: "offline" };
+    const body = (await publicHealth.json()) as { ok?: boolean; auth?: "required" | "disabled" };
+    if (!body.ok) return { state: "offline" };
+    return body.auth === "disabled"
+      ? { state: "local-handshake-unavailable" }
+      : { state: "authentication-required" };
   } catch {
     return { state: "offline" };
   }

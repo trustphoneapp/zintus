@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TaskManifestSchema, type TaskManifest } from "./contracts.js";
+import { deterministicScopeCriterionIds } from "./final-change-scope.js";
 import { sha256 } from "./hash.js";
 import { parseTrustedCommand, TRUSTED_COMMAND_POLICY_VERSION } from "./trusted-executor.js";
 
@@ -140,9 +141,19 @@ export function createRequiredLaneContract(input: CreateRequiredLaneContractInpu
     .map((criterion) => criterion.criterionId));
   if (requiredCriterionIds.length === 0) throw new TypeError("Required Lane contracts require at least one MUST criterion");
   const requiredCriterionSet = new Set(requiredCriterionIds);
+  // Scope-only requirements are not executable commands. They are instead
+  // proven by the final, fail-closed change-scope attestation, which binds the
+  // exact diff to the frozen allow/deny path authority. Requiring a synthetic
+  // unit test here made valid plans impossible to freeze while adding no
+  // security: the final attestation is the actual proof for this invariant.
+  const deterministicallyScopeCovered = new Set(deterministicScopeCriterionIds(manifest)
+    .filter((criterionId) => requiredCriterionSet.has(criterionId)));
   const coveredRequiredCriteria = new Set(manifest.testPlan
     .flatMap((test) => test.criterionIds)
     .filter((criterionId) => requiredCriterionSet.has(criterionId)));
+  for (const criterionId of deterministicallyScopeCovered) {
+    coveredRequiredCriteria.add(criterionId);
+  }
   const uncoveredRequiredCriteria = requiredCriterionIds.filter((criterionId) => !coveredRequiredCriteria.has(criterionId));
   if (uncoveredRequiredCriteria.length > 0) {
     throw new TypeError(`Required Lane contracts require tests for every MUST criterion: ${uncoveredRequiredCriteria.join(", ")}`);

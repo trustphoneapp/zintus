@@ -1660,6 +1660,7 @@ export class EngineerLedger {
     return { applied: false, event, run: this.getRun(input.runId) };
   }
 
+
   getManifest(runId: string, version?: number): TaskManifest | null {
     const row = version === undefined
       ? this.db.query("SELECT manifest_json FROM task_manifest_versions WHERE run_id = ? AND org_id = ? ORDER BY version DESC LIMIT 1").get(runId, this.tenantOrgId)
@@ -4171,10 +4172,17 @@ export class EngineerLedger {
     }
 
     const allClaims = this.listClaimEvidence(input.runId);
-    const claims = (historicalCheckpoint
-      ? allClaims.filter((claim) => historicalCheckpoint.claimSummary.claimIds.includes(claim.claimId))
-      : allClaims).sort((left, right) => compareCodeUnits(left.claimId, right.claimId));
-    if (historicalCheckpoint && claims.length !== historicalCheckpoint.claimSummary.claimIds.length) {
+    // A reviewer repair creates a new, independently reviewed evidence bundle.
+    // Earlier reviewer attempts remain immutable audit history, but they are not
+    // part of the candidate being promoted. Bind promotion to the exact claim
+    // identifiers sealed into this bundle; otherwise a successful repaired run
+    // can never promote merely because historical claims still exist.
+    const expectedClaimIds = historicalCheckpoint
+      ? historicalCheckpoint.claimSummary.claimIds
+      : bundle.claims.map((claim) => claim.claimId);
+    const claims = allClaims.filter((claim) => expectedClaimIds.includes(claim.claimId))
+      .sort((left, right) => compareCodeUnits(left.claimId, right.claimId));
+    if (claims.length !== expectedClaimIds.length || new Set(expectedClaimIds).size !== expectedClaimIds.length) {
       throw new Error("verified candidate referenced durable claim is missing");
     }
     const projectedClaims = claims.map(({ claimId, claim, status, evidenceIds, notes }) =>

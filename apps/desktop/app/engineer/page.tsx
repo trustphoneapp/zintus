@@ -98,7 +98,7 @@ export default function EngineerPage() {
     try {
       const created = await createEngineerRun({ repository, request: request.trim() });
       setRun(created); window.localStorage.setItem(RUN_STORAGE_KEY, created.runId);
-      const proposal = await planEngineerRun(created.runId);
+      const proposal = await planEngineerRun(created.runId, created.stateVersion);
       setPlan(proposal);
       const status = await getEngineerRunStatus(created.runId); setRun(status.run); setManagerError(status.lastError);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to create Engineer run"); }
@@ -108,7 +108,7 @@ export default function EngineerPage() {
   const retryPlanning = async () => {
     if (!run) return;
     setBusy(true); setError(null); setManagerError(null);
-    try { const proposal = await planEngineerRun(run.runId); setPlan(proposal); const status = await getEngineerRunStatus(run.runId); setRun(status.run); setManagerError(status.lastError); }
+    try { const proposal = await planEngineerRun(run.runId, run.stateVersion); setPlan(proposal); const status = await getEngineerRunStatus(run.runId); setRun(status.run); setManagerError(status.lastError); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to plan Engineer run"); }
     finally { setBusy(false); }
   };
@@ -119,7 +119,7 @@ export default function EngineerPage() {
     try {
       const frozen = await freezeEngineerPlan(run, plan.manifest);
       setRun(frozen);
-      const queued = await startEngineerRun(frozen.runId);
+      const queued = await startEngineerRun(frozen.runId, frozen.stateVersion);
       setRun(queued); setEvents([]); watch(queued.runId);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
     finally { setBusy(false); }
@@ -128,7 +128,7 @@ export default function EngineerPage() {
   const startFrozen = async () => {
     if (!run || run.state !== "PLAN_FROZEN") return;
     setBusy(true); setError(null);
-    try { const queued = await startEngineerRun(run.runId); setRun(queued); setEvents([]); watch(queued.runId); }
+    try { const queued = await startEngineerRun(run.runId, run.stateVersion); setRun(queued); setEvents([]); watch(queued.runId); }
     catch (cause) { const status = await getEngineerRunStatus(run.runId).catch(() => null); if (status) { setRun(status.run); setManagerError(status.lastError); } setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
     finally { setBusy(false); }
   };

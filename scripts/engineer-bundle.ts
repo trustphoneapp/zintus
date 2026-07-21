@@ -88,6 +88,11 @@ async function main(): Promise<void> {
     cpSync(sourceNodeModules, nodeModulesRoot, { recursive: true });
     const workspacePackageCount = overlayWorkspacePackages(nodeModulesRoot);
     if (workspacePackageCount === 0) throw new Error("no workspace packages were overlaid into the dependency bundle");
+    // Vitest/Vite materializes its config bundle beneath node_modules. The
+    // dependency tree is mounted read-only during execution, so create the
+    // exact mountpoint here; Docker later overlays it with an empty tmpfs.
+    // Nothing written by a run can persist into the verified bundle.
+    mkdirSync(join(nodeModulesRoot, ".vite-temp"), { recursive: true, mode: 0o755 });
     const contentHash = await hashDependencyTree(nodeModulesRoot);
     writeFileSync(join(temporaryRoot, OFFLINE_DEPENDENCY_MANIFEST), `${JSON.stringify({
       schemaVersion: 2,

@@ -81,7 +81,7 @@ describe("Engineer verified-candidate rendered UI", () => {
   });
 
   it("hands a REVIEW_APPROVED run off to the P8 Approval and publication screen scoped to the run, without inventing that approval/publication already happened", () => {
-    const markup = renderToStaticMarkup(<PublicationEntryNotice runId="run-42" />);
+    const markup = renderToStaticMarkup(<PublicationEntryNotice runId="run-42" readiness={{ state: "READY", message: "ready" }} />);
 
     expect(markup).toContain("Machine verified");
     // A real entry point into the authoritative P8 lane, scoped to this run.
@@ -90,6 +90,15 @@ describe("Engineer verified-candidate rendered UI", () => {
     // Still honest: it invites approval, it does not claim approval already occurred.
     expect(markup).not.toContain("passed human review");
     expect(markup).not.toContain("has been published");
+  });
+
+  it("keeps a verified candidate local when the server withholds publication authority", () => {
+    const markup = renderToStaticMarkup(<PublicationEntryNotice runId="run-42" readiness={{ state: "UNAVAILABLE", message: "Git credentials are not configured." }} />);
+
+    expect(markup).toContain("Verified candidate retained locally");
+    expect(markup).toContain("Git credentials are not configured.");
+    expect(markup).toContain("No publication authority");
+    expect(markup).not.toContain('href="/engineer/publication?run=run-42"');
   });
 });
 

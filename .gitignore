@@ -41,3 +41,5 @@ apps/desktop/src-tauri/gen/schemas/
 apps/desktop/src-tauri/target/
 .gstack/
 docs/design/redesign-shots/
+.vercel
+.env*

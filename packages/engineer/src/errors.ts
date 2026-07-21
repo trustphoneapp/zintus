@@ -20,6 +20,7 @@ export class EngineerOrgContextError extends Error {
 }
 
 export class StateVersionConflictError extends Error {
+  readonly code = "STALE_CLIENT_STATE" as const;
   constructor(runId: string, expected: number, actual: number) {
     super(`state version conflict for ${runId}: expected ${expected}, actual ${actual}`);
     this.name = "StateVersionConflictError";
@@ -34,6 +35,7 @@ export class InvalidTransitionError extends Error {
 }
 
 export class IdempotencyConflictError extends Error {
+  readonly code = "IDEMPOTENCY_CONFLICT" as const;
   constructor(runId: string, key: string) {
     super(`idempotency key ${key} was already used with different transition data for ${runId}`);
     this.name = "IdempotencyConflictError";

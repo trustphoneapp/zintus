@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { EvidenceBundleSchema, ReviewerOutputSchema, type TaskManifest, type TrustedEvidence } from "./contracts.js";
+import { deterministicScopeCriterionIds } from "./final-change-scope.js";
 import { sha256 } from "./hash.js";
 
 const IdentifierSchema = z.string().min(1).max(200);
@@ -13,6 +14,8 @@ export const CriterionVerificationCoverageSchema = z.object({
   priority: z.enum(["MUST", "SHOULD", "MAY"]),
   testIds: z.array(IdentifierSchema),
   executableTestIds: z.array(IdentifierSchema),
+  /** Present only when the final change-scope attestation is this row's proof. */
+  deterministicScopeAttestation: z.literal(true).optional(),
   status: z.enum(["COVERED", "UNCOVERED"]),
 }).strict();
 
@@ -36,7 +39,8 @@ export const VerificationCoverageMatrixSchema = z.object({
   }
   const expected = matrix.criteria
     .filter((criterion) => criterion.priority === "MUST")
-    .every((criterion) => criterion.status === "COVERED" && criterion.executableTestIds.length > 0);
+    .every((criterion) => criterion.status === "COVERED" &&
+      (criterion.executableTestIds.length > 0 || criterion.deterministicScopeAttestation === true));
   if (matrix.allMustCriteriaCovered !== expected) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "MUST coverage summary does not match matrix rows", path: ["allMustCriteriaCovered"] });
   }
@@ -49,15 +53,18 @@ export const VerificationCoverageMatrixSchema = z.object({
 });
 
 export function buildVerificationCoverageMatrix(manifest: TaskManifest, options: { deterministicSecurityGateCovered?: boolean } = {}) {
+  const deterministicScopeCriteria = new Set(deterministicScopeCriterionIds(manifest));
   const criteria = manifest.acceptanceCriteria.map((criterion) => {
     const tests = manifest.testPlan.filter((test) => test.criterionIds.includes(criterion.criterionId));
     const executable = tests.filter((test) => Boolean(test.command));
+    const deterministicScopeAttestation = deterministicScopeCriteria.has(criterion.criterionId);
     return CriterionVerificationCoverageSchema.parse({
       criterionId: criterion.criterionId,
       priority: criterion.priority,
       testIds: tests.map((test) => test.testId),
       executableTestIds: executable.map((test) => test.testId),
-      status: executable.length > 0 ? "COVERED" : "UNCOVERED",
+      ...(deterministicScopeAttestation ? { deterministicScopeAttestation: true as const } : {}),
+      status: executable.length > 0 || deterministicScopeAttestation ? "COVERED" : "UNCOVERED",
     });
   });
   const content = {

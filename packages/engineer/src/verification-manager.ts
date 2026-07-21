@@ -39,10 +39,26 @@ import { BudgetPausedError, BuilderModelCallLimitError, HardeningGenericOperatio
   HardeningWorkspaceRecoveryAuthorityInvalidError } from "./errors.js";
 import { isWorkerAuthorityLoss, type EngineerWorkerLeaseManager, type WorkerLeaseGrant } from "./worker-lease.js";
 import { TestIntegrityGuard, TestIntegrityViolationError, type TestIntegrityComparison } from "./test-integrity.js";
+import { loadTestCommandBaseline } from "./test-command-baseline.js";
+import { assertWorkspaceSatisfiesExplicitApiContract, ExplicitContractViolationError } from "./explicit-contract.js";
 import {
   buildAdversarialCoverageReport,
   type AdversarialCoverageReport,
 } from "./adversarial-coverage.js";
+
+const REPAIR_DIAGNOSTIC_MAX_BYTES = 6_000;
+
+/** Keep repair prompts actionable without forwarding credentials or local paths. */
+function boundedRepairDiagnostic(value: string): string {
+  const redacted = value
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, "[REDACTED_SECRET]")
+    .replace(/\b((?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|password)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/(?:\/Users|\/home|\/var|\/tmp|\/private|\/etc|\/opt|\/root)\/[^\s:'\"`]+/g, "[REDACTED_PATH]");
+  const bytes = Buffer.from(redacted, "utf8");
+  if (bytes.byteLength <= REPAIR_DIAGNOSTIC_MAX_BYTES) return redacted;
+  const marker = `\n[diagnostic truncated at ${REPAIR_DIAGNOSTIC_MAX_BYTES} bytes]`;
+  return `${bytes.subarray(0, REPAIR_DIAGNOSTIC_MAX_BYTES - Buffer.byteLength(marker, "utf8")).toString("utf8")}${marker}`;
+}
 import {
   ClaimEvidenceRecordSchema,
   EvidenceBundleRecordSchema,
@@ -584,6 +600,22 @@ export class EngineerVerificationManager {
       const preVerificationIntegrity = testIntegrity.attest("PRE_VERIFICATION");
       const executor = this.executor(manifest, sandbox);
       try {
+      // A locally checkable explicit API contract must hold before any advisor
+      // or Reviewer model dispatch. This catches planner drift (for example a
+      // requested exported class implemented as a different functional API)
+      // with zero additional provider cost.
+      try {
+        assertWorkspaceSatisfiesExplicitApiContract(sandbox.workspace.workspaceRoot, manifest);
+      } catch (error) {
+        if (!(error instanceof ExplicitContractViolationError)) throw error;
+        throw new IndependentVerificationFailure({
+          failureClass: "IMPLEMENTATION_FAILURE",
+          reasonCode: "EXPLICIT_CONTRACT_VIOLATION",
+          evidenceIds: [],
+          details: { violations: error.violations },
+          message: error.message,
+        });
+      }
       const verification = new IndependentVerifier({
         supervisor,
         artifactStore: this.options.artifactStore,
@@ -598,6 +630,7 @@ export class EngineerVerificationManager {
         afterCommand: (command, beforeSnapshot) => testIntegrity.assertCommandDidNotMutate(beforeSnapshot, command),
         now: this.options.now,
         idFactory: this.options.idFactory,
+        commandBaseline: loadTestCommandBaseline({ supervisor, artifactStore: this.options.artifactStore, manifest }),
       }).run();
       verified = await verification;
       verified.trustedEvidence.unshift(this.testIntegrityEvidence(preVerificationIntegrity.artifact, preVerificationIntegrity.comparison));
@@ -620,7 +653,9 @@ export class EngineerVerificationManager {
           return this.repairStableRequiredTest(manifest, sandbox, resultCommitSha, diff, error);
         }
         if (error instanceof IndependentVerificationFailure) {
-          if(!hardeningChild)await this.recordLunaFailureAdvisory(manifest, error).catch(() => undefined);
+          // An explicit-contract failure is already a deterministic, local
+          // fact. Do not pay an advisory model merely to restate it.
+          if(!hardeningChild && error.reasonCode !== "EXPLICIT_CONTRACT_VIOLATION") await this.recordLunaFailureAdvisory(manifest, error).catch(() => undefined);
         }
         throw error;
       }
@@ -1234,8 +1269,14 @@ export class EngineerVerificationManager {
         this.transition(runId, "HUMAN_REVIEW_REQUIRED", "CLASSIFIED_REVIEW_REQUIRES_HUMAN", authorityIds);
         return result;
       case "REPAIR_REQUIRED":
-        this.transition(runId, "VERIFICATION_RECOVERY", "CLASSIFIED_REQUIRED_TEST_EVIDENCE_MISSING", authorityIds);
-        return result;
+        // Missing deterministic test evidence is re-verification work, not a
+        // code change. A concrete in-scope Reviewer repair candidate follows
+        // the bounded repair path below instead.
+        if (!classification.classifications.some((item) => item.reasonCode === "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE")) {
+          this.transition(runId, "VERIFICATION_RECOVERY", "CLASSIFIED_REQUIRED_TEST_EVIDENCE_MISSING", authorityIds);
+          return result;
+        }
+        break;
       case "BLOCKED":
         break;
       default: {
@@ -1243,10 +1284,11 @@ export class EngineerVerificationManager {
         throw new Error(`unsupported classified outcome: ${String(exhaustive)}`);
       }
     }
-    const blockingIds = new Set(classification.classifications
-      .filter((item) => item.disposition === "BLOCKING").map((item) => item.findingId));
-    const blockingFindings = findings.filter((finding) => blockingIds.has(finding.findingId));
-    if (blockingFindings.length === 0) {
+    const repairableIds = new Set(classification.classifications
+      .filter((item) => item.disposition === "BLOCKING" || item.reasonCode === "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE")
+      .map((item) => item.findingId));
+    const repairableFindings = findings.filter((finding) => repairableIds.has(finding.findingId));
+    if (repairableFindings.length === 0) {
       this.transition(runId, "HUMAN_REVIEW_REQUIRED", "CLASSIFIED_REPAIR_REQUIRES_HUMAN", authorityIds);
       return result;
     }
@@ -1262,10 +1304,12 @@ export class EngineerVerificationManager {
       kind: "REVIEWER_FIX",
       failureFingerprint: sha256({
         policyVersion: classification.policyVersion, contractHash: classification.contractHash,
-        blockingFingerprints: blockingFindings.map((finding) => finding.fingerprint).sort(),
+        // Keep the durable retry identity stable for existing deterministic
+        // blockers; repair candidates merely join the same bounded lane.
+        blockingFingerprints: repairableFindings.map((finding) => finding.fingerprint).sort(),
       }),
       patchHash: reviewerInput.diffHash,
-      progressMetric: -blockingFindings.length,
+      progressMetric: -repairableFindings.length,
     });
     if (!retry.allowed) {
       this.transition(runId, "HUMAN_REVIEW_REQUIRED", "CLASSIFIED_REPAIR_BUDGET_REQUIRED", authorityIds);
@@ -1273,7 +1317,7 @@ export class EngineerVerificationManager {
     }
     const classificationAuthority = [session.reviewerSessionId, classification.classificationHash];
     const blockingRawFindings = session.output.findings.filter((finding) =>
-      blockingFindings.some((record) => record.findingId === sha256({
+      repairableFindings.some((record) => record.findingId === sha256({
         namespace: "review-finding-record-v1", reviewerSessionId: session.reviewerSessionId,
         providerFindingId: finding.findingId,
       })));
@@ -1350,6 +1394,31 @@ export class EngineerVerificationManager {
       requiredChange: `Repair the implementation within frozen scope so ${failure.test.command ?? failure.test.testId} passes. Do not weaken, remove, or skip the test.`,
       evidenceIds,
     }];
+    const artifactsById = new Map(supervisor.listArtifacts(runId).map((artifact) => [artifact.artifactId, artifact]));
+    const stderrArtifactIds = failure.evidence.flatMap((evidence) => {
+      const candidate = evidence.payload.stderrArtifact;
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return [];
+      const artifactId = (candidate as Record<string, unknown>).artifactId;
+      return typeof artifactId === "string" ? [artifactId] : [];
+    });
+    const diagnosticParts = stderrArtifactIds.flatMap((artifactId) => {
+      const artifact = artifactsById.get(artifactId);
+      if (!artifact) return [];
+      try {
+        const value = boundedRepairDiagnostic(this.options.artifactStore.read(artifact).toString("utf8").trim());
+        return value ? [value] : [];
+      } catch {
+        // Evidence remains authoritative even when an optional prompt summary
+        // cannot be read. A missing hint must never weaken the verification gate.
+        return [];
+      }
+    });
+    const uniqueDiagnosticParts = [...new Set(diagnosticParts)];
+    // Each individual artifact is bounded, but up to three independently
+    // observed failures can be joined here. Bound the assembled value too;
+    // otherwise valid verbose diagnostics can violate RepairContextSchema and
+    // terminate verification before the Builder sees the repair context.
+    const diagnosticSummary = boundedRepairDiagnostic(uniqueDiagnosticParts.join("\n\n--- repeated independent execution ---\n\n"));
     const repairContext = RepairContextSchema.parse({
       runId,
       manifestHash: manifest.manifestHash,
@@ -1359,6 +1428,14 @@ export class EngineerVerificationManager {
       currentCommitSha,
       allowedPaths: manifest.allowedPaths,
       remainingReviewFixAttempts: retry.remainingKindAttempts,
+      ...(diagnosticSummary ? {
+        repairDiagnostics: [{
+          testId: failure.test.testId,
+          command: failure.test.command ?? failure.test.testId,
+          summary: diagnosticSummary,
+          evidenceIds,
+        }],
+      } : {}),
     });
     const repairContextArtifact = supervisor.recordArtifact(this.options.artifactStore.put({
       runId,
@@ -1558,7 +1635,7 @@ export class EngineerVerificationManager {
       ...(sandbox.commandRunnerAsync ? { runnerAsync: sandbox.commandRunnerAsync } : {}),
       currentCommit: () => this.options.sandboxManager.currentCommit(sandbox.workspace),
       currentCommitAsync: () => this.options.sandboxManager.currentCommitAsync(sandbox.workspace),
-      onRecord: (record) => { this.options.supervisor.recordCommandExecution(record); },
+      onRecord: (record) => this.options.supervisor.recordCommandExecution(record),
       now: this.options.now,
       idFactory: this.options.idFactory,
       signal: this.abortControllers.get(manifest.runId)?.signal,
@@ -2104,6 +2181,25 @@ export class EngineerVerificationManager {
     const message = error instanceof Error ? error.message : String(error);
     const current = this.options.supervisor.getRun(runId);
     if (!this.options.supervisor.isOptionalHardeningChild(runId)&&isProviderModelTimeout(error) && canTransition(current.state, "MODEL_PROVIDER_RETRY_PENDING")) {
+      // A completed deterministic verification must not be held hostage by an
+      // unavailable reviewer. One retry is useful for a transient provider
+      // blip; repeating it merely spends budget while producing no new code or
+      // evidence. Escalate the second ambiguous Reviewer outcome to a durable
+      // human gate instead. This is deliberately Reviewer-only: Tester and
+      // Security calls still need their normal retry semantics because their
+      // evidence is not otherwise complete.
+      const priorReviewerTimeout = role === "REVIEWER" && this.options.supervisor.listFailures(runId)
+        .some((failure) => failure.reasonCode === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS");
+      if (priorReviewerTimeout && canTransition(current.state, "HUMAN_REVIEW_REQUIRED")) {
+        this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+          failureId: this.id(), runId, failureClass: "MODEL_FAILURE",
+          reasonCode: "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW",
+          fingerprint: sha256({ role, message, reasonCode: "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW" }),
+          evidenceIds: [], retryable: false, createdAt: this.timestamp(),
+        }));
+        this.transition(runId, "HUMAN_REVIEW_REQUIRED", "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW");
+        return false;
+      }
       this.options.supervisor.recordFailure(FailureRecordSchema.parse({
         failureId: this.id(), runId, failureClass: "MODEL_FAILURE",
         reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS",

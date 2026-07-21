@@ -7,6 +7,7 @@ import {
   type RequiredLaneContract,
 } from "./required-lane-contracts.js";
 import { REQUIRED_LANE_REVIEWER_MAPPING_POLICY_VERSION } from "./required-lane-policy-versions.js";
+import { ADVERSARIAL_COVERAGE_POLICY_VERSION, AdversarialCoverageReportSchema } from "./adversarial-coverage.js";
 import {
   ReviewFindingRecordSchema,
   ReviewerSessionRecordSchema,
@@ -42,6 +43,7 @@ const ReviewFindingClassificationContentSchema = z.object({
     "REQUIRED_CRITERION_FAILURE",
     "DETERMINISTIC_SECURITY_FAILURE",
     "DETERMINISTIC_SCOPE_FAILURE",
+    "ATTESTED_COVERAGE_GAP",
     "NONE",
   ]),
   authorityRefs: z.array(IdentifierSchema),
@@ -50,6 +52,8 @@ const ReviewFindingClassificationContentSchema = z.object({
     "FAILED_REQUIRED_TEST",
     "DETERMINISTIC_HIGH_RISK_SECURITY_FINDING",
     "DETERMINISTIC_SCOPE_VIOLATION",
+    "ATTESTED_MUST_COVERAGE_GAP",
+    "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE",
     "UNSUBSTANTIATED_REQUIRED_CRITERION_CLAIM",
     "UNPROVEN_SECURITY_CLAIM",
     "REPAIR_OUTSIDE_FROZEN_SCOPE",
@@ -191,6 +195,23 @@ function failedRequiredTest(
   return null;
 }
 
+// A hash-bound system coverage report may authorize one repair, but only for a
+// MUST gap in an already-allowed test file. Model prose alone remains human-only.
+function attestedCoverageGap(finding: ReviewFindingRecord, contract: Extract<RequiredLaneContract, { schemaVersion: 2 }>, manifest: TaskManifest, session: ReviewerSessionRecord, evidence: TrustedEvidence[]): Classification | null {
+  if (!finding.file || !isManifestPathAllowed(finding.file, manifest) || !/(?:^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:test|spec)\./i.test(finding.file)) return null;
+  const providerFinding = session.output.findings.find((item) => normalizedFindingFromOutput(session.reviewerSessionId, item).findingId === finding.findingId);
+  if (!providerFinding) return null;
+  for (const item of evidence) {
+    if (item.eventType !== "ADVERSARIAL_COVERAGE_REPORT" || item.producerType !== "SYSTEM" || item.producerId !== "adversarial-coverage-policy") continue;
+    const report = AdversarialCoverageReportSchema.safeParse(item.payload);
+    if (!report.success || report.data.policyVersion !== ADVERSARIAL_COVERAGE_POLICY_VERSION || report.data.runId !== contract.runId || report.data.manifestHash !== contract.manifestHash) continue;
+    const gap = report.data.gaps.find((value) => value.gapId === providerFinding.findingId && value.blocking);
+    if (!gap || !gap.criterionIds.some((id) => contract.requiredCriterionIds.includes(id))) continue;
+    return { findingId: finding.findingId, findingFingerprint: finding.fingerprint, disposition: "BLOCKING", authority: "ATTESTED_COVERAGE_GAP", authorityRefs: [...gap.criterionIds].sort(codeUnitCompare), evidenceIds: [item.evidenceId], reasonCode: "ATTESTED_MUST_COVERAGE_GAP" };
+  }
+  return null;
+}
+
 function deterministicSecurityFailure(
   finding: ReviewFindingRecord,
   contract: Extract<RequiredLaneContract, { schemaVersion: 2 }>,
@@ -293,8 +314,14 @@ export function classifyReviewerOutput(input: ClassifyReviewerOutputInput): Revi
     });
     let classification = deterministicScopeFailure(finding, contract, session, referenced)
       ?? deterministicSecurityFailure(finding, contract, session, referenced)
-      ?? failedRequiredTest(finding, contract, referenced);
-    if (!classification && !isManifestPathAllowed(finding.file, manifest)) {
+      ?? failedRequiredTest(finding, contract, referenced)
+      ?? attestedCoverageGap(finding, contract, manifest, session, referenced);
+    // A Reviewer may report a project-level finding (for example a failed
+    // repository command or a Supervisor-owned scope attestation) with no
+    // single source file. Empty is a valid display label in that case, not a
+    // filesystem path. Only concrete file findings enter manifest path scope
+    // classification; they remain strictly validated there.
+    if (!classification && finding.file !== "" && !isManifestPathAllowed(finding.file, manifest)) {
       classification = ReviewFindingClassificationContentSchema.parse({
           findingId: finding.findingId, findingFingerprint: finding.fingerprint, disposition: "HUMAN_REQUIRED", authority: "NONE",
           authorityRefs: [], evidenceIds: [], reasonCode: "REPAIR_OUTSIDE_FROZEN_SCOPE",
@@ -306,10 +333,23 @@ export function classifyReviewerOutput(input: ClassifyReviewerOutputInput): Revi
         authorityRefs: [], evidenceIds: [], reasonCode: "UNPROVEN_SECURITY_CLAIM",
       });
     }
+    // A concrete, in-scope correction is safe to attempt once even when the
+    // reviewer supplied no executor evidence. It is *not* a publishing gate:
+    // we give the Builder a bounded repair opportunity, then rerun the same
+    // deterministic checks and an independent review. Security, out-of-scope,
+    // project-level, and vague findings continue to require a human decision.
+    if (!classification && finding.file !== "" && finding.lineStart >= 0 && finding.lineEnd >= finding.lineStart &&
+        finding.description.trim().length > 0 && finding.requiredChange.trim().length > 0 &&
+        finding.criterionIds.some((id) => contract.requiredCriterionIds.includes(id))) {
+      classification = ReviewFindingClassificationContentSchema.parse({
+          findingId: finding.findingId, findingFingerprint: finding.fingerprint, disposition: "ADVISORY", authority: "NONE",
+          authorityRefs: [], evidenceIds: [], reasonCode: "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE",
+      });
+    }
     if (!classification && finding.criterionIds.some((id) => contract.requiredCriterionIds.includes(id))) {
       classification = ReviewFindingClassificationContentSchema.parse({
-          findingId: finding.findingId, findingFingerprint: finding.fingerprint, disposition: "HUMAN_REQUIRED", authority: "NONE",
-          authorityRefs: [], evidenceIds: [], reasonCode: "UNSUBSTANTIATED_REQUIRED_CRITERION_CLAIM",
+        findingId: finding.findingId, findingFingerprint: finding.fingerprint, disposition: "HUMAN_REQUIRED", authority: "NONE",
+        authorityRefs: [], evidenceIds: [], reasonCode: "UNSUBSTANTIATED_REQUIRED_CRITERION_CLAIM",
       });
     }
     return classification ?? ReviewFindingClassificationContentSchema.parse({
@@ -352,6 +392,7 @@ export function classifyReviewerOutput(input: ClassifyReviewerOutputInput): Revi
     : systemGateReasons.length > 0 || hashedClassifications.some((item) => item.disposition === "HUMAN_REQUIRED")
     ? "HUMAN_REVIEW_REQUIRED"
     : hashedClassifications.some((item) => item.disposition === "BLOCKING") ? "BLOCKED"
+    : hashedClassifications.some((item) => item.reasonCode === "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE") ? "REPAIR_REQUIRED"
     : hashedClassifications.length > 0 ? "READY_WITH_ADVISORIES" : "READY";
   const content = ReviewClassificationBatchContentSchema.parse({
     schemaVersion: 1,

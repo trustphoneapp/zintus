@@ -15,14 +15,11 @@ import { REQUIRED_LANE_REVIEWER_MAPPING_POLICY_VERSION } from "./required-lane-p
 
 // R8-1 immutability regression.
 //
-// This fixture is a HARDCODED, byte-literal copy of the migration-18 SQL as it
-// GENUINELY SHIPPED — i.e. review_classification_batches WITHOUT the
-// reviewer_input_json / normalized_output_json columns. It deliberately does
-// NOT reference ENGINEER_DATABASE_MIGRATION_18_SQL: a real historical database
-// created by the shipped v18 code has exactly this shape, and if a future edit
-// re-mutates the migration-18 constant this literal must stay frozen so the
-// regression stays honest. Do not "DRY" this against the live constant.
-const ORIGINAL_SHIPPED_MIGRATION_18_SQL = `
+// This fixture freezes a mapped legacy-v18 variant with a populated historical
+// classification but without the later JSON columns or artifact FK. The exact
+// installed empty-batch pilot variant is independently frozen in the release
+// archive and exercised by deployed-v18-compatibility.test.ts.
+const LEGACY_MAPPED_MIGRATION_18_SQL = `
   CREATE TABLE review_classification_batches (
     classification_hash TEXT PRIMARY KEY NOT NULL,
     reviewer_session_id TEXT NOT NULL UNIQUE REFERENCES reviewer_sessions(id) ON DELETE RESTRICT,
@@ -30,7 +27,7 @@ const ORIGINAL_SHIPPED_MIGRATION_18_SQL = `
     contract_hash TEXT NOT NULL REFERENCES required_lane_contracts(contract_hash) ON DELETE RESTRICT,
     schema_version INTEGER NOT NULL CHECK(schema_version = 1),
     policy_version TEXT NOT NULL,
-    raw_output_artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE RESTRICT,
+    raw_output_artifact_id TEXT NOT NULL,
     raw_output_hash TEXT NOT NULL,
     normalized_output_hash TEXT NOT NULL,
     normalized_session_hash TEXT NOT NULL,
@@ -126,21 +123,21 @@ const ORIGINAL_SHIPPED_MIGRATION_18_SQL = `
 `;
 
 /**
- * Build a genuinely-shipped v18 database: base v14 schema, the immutable
- * migrations 15-17 applied by the real code, then the ORIGINAL migration-18 SQL
+ * Build a mapped legacy-v18 database: base v14 schema, the immutable
+ * migrations 15-17 applied by the real code, then the mapped migration-18 SQL
  * literal above (no reviewer_input_json / normalized_output_json). One historical
  * review_classification_batches row is seeded to prove the forward migration
  * preserves existing rows.
  */
-function seedGenuinelyShippedV18Database(at: string): Database {
+function seedMappedLegacyV18Database(at: string): Database {
   const db = new Database(":memory:");
   db.exec("PRAGMA foreign_keys=ON");
   db.exec(ENGINEER_DATABASE_SCHEMA_SQL);
   db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (14, ?)").run(at);
   // Real, immutable migrations 15-17.
   migrateEngineerDatabase(db, at, 17);
-  // The genuinely-shipped migration 18 (pre-mutation shape).
-  db.exec(ORIGINAL_SHIPPED_MIGRATION_18_SQL);
+  // The mapped legacy-v18 variant (pre-v38 JSON capture).
+  db.exec(LEGACY_MAPPED_MIGRATION_18_SQL);
   db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (18, ?)").run(at);
 
   const contractHash = sha256("hist-contract");
@@ -184,14 +181,19 @@ function seedGenuinelyShippedV18Database(at: string): Database {
 }
 
 describe("migration 18 immutability", () => {
-  test("original shipped v18 database (no json columns) upgrades cleanly on current code", () => {
+  test("mapped legacy v18 database (no json columns) upgrades cleanly on current code", () => {
     const at = "2026-07-19T00:00:00.000Z";
-    const db = seedGenuinelyShippedV18Database(at);
+    const db = seedMappedLegacyV18Database(at);
     // Sanity: the seeded historical table genuinely lacks the mutated columns.
     const seededColumns = new Set((db.query("PRAGMA table_info(review_classification_batches)").all() as Array<{ name: string }>)
       .map((row) => row.name));
     expect(seededColumns.has("reviewer_input_json")).toBe(false);
     expect(seededColumns.has("normalized_output_json")).toBe(false);
+    const seededForeignKeys = db.query("PRAGMA foreign_key_list(review_classification_batches)").all() as Array<{
+      table: string; from: string; to: string;
+    }>;
+    expect(seededForeignKeys.some((row) => row.table === "artifacts" &&
+      row.from === "raw_output_artifact_id" && row.to === "id")).toBe(false);
 
     // The gateway open path: run every forward migration on the historical DB.
     // On pre-fix code this THROWS (the validator demands columns the shipped v18
@@ -223,11 +225,10 @@ describe("migration 18 immutability", () => {
 });
 
 /**
- * Seed a file-backed genuinely-shipped v18 database whose review_classification_batches
+ * Seed a file-backed mapped legacy-v18 database whose review_classification_batches
  * row is a COMPLETE, schema-valid classification (valid batch_json, matching artifact,
- * schema_version=2 required-lane contract) recorded in the ORIGINAL 13-column shape via
- * the same frozen migration-18 literal above. This is exactly the durable footprint a
- * real v18 database held: a fully valid batch that simply predates the reviewer-input /
+ * schema_version=2 required-lane contract) recorded in the 13-column shape via
+ * the same frozen mapped-v18 literal above. It represents a fully valid batch that predates the reviewer-input /
  * normalized-output columns. Returns the artifact bytes so the replay path's artifact
  * binding is satisfiable and the guard (not an upstream check) is what fires.
  */
@@ -239,7 +240,7 @@ function seedHistoricalReplayableV18Ledger(at: string): { dbPath: string; rawByt
   db.exec(ENGINEER_DATABASE_SCHEMA_SQL);
   db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (14, ?)").run(at);
   migrateEngineerDatabase(db, at, 17);
-  db.exec(ORIGINAL_SHIPPED_MIGRATION_18_SQL);
+  db.exec(LEGACY_MAPPED_MIGRATION_18_SQL);
   db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (18, ?)").run(at);
 
   const manifestHash = sha256("hist-replay-manifest");
@@ -308,7 +309,7 @@ function seedHistoricalReplayableV18Ledger(at: string): { dbPath: string; rawByt
 }
 
 describe("v38 pre-capture replay guard", () => {
-  test("replaying a genuinely-shipped v18 classification fails with a controlled typed error, not a raw JSON.parse crash", () => {
+  test("replaying a mapped legacy v18 classification fails with a controlled typed error, not a raw JSON.parse crash", () => {
     const at = "2026-07-19T00:00:00.000Z";
     const { dbPath, rawBytes, reviewerSessionId } = seedHistoricalReplayableV18Ledger(at);
     // Opening the ledger runs the full chain to head (v38), turning the never-captured

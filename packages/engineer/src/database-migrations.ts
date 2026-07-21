@@ -50,6 +50,56 @@ interface Migration {
   sql: string;
 }
 
+function tableRowCounts(db: Database): Map<string, number> {
+  const tables = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'schema_migrations'")
+    .all() as Array<{ name: string }>;
+  return new Map(tables.map(({ name }) => {
+    const quoted = `"${name.replaceAll('"', '""')}"`;
+    const count = (db.query(`SELECT COUNT(*) AS count FROM ${quoted}`).get() as { count: number }).count;
+    return [name, count] as const;
+  }));
+}
+
+function assertMigrationPreservedRows(db: Database, before: Map<string, number>, version: number): void {
+  for (const [table, expected] of before) {
+    const current = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table);
+    if (!current) throw new Error(`Engineer schema v${version} removed pre-existing table ${table}`);
+    const quoted = `"${table.replaceAll('"', '""')}"`;
+    const actual = (db.query(`SELECT COUNT(*) AS count FROM ${quoted}`).get() as { count: number }).count;
+    if (actual !== expected) {
+      throw new Error(`Engineer schema v${version} changed ${table} row count from ${expected} to ${actual}`);
+    }
+  }
+}
+
+/**
+ * Migration 25's immutable SQL uses positional `SELECT *`. One deployed pre-v25
+ * ledger acquired the two ambiguity columns through ALTER TABLE, placing them
+ * after `updated_at` instead of before `status`. Execute the same table rebuild
+ * with an explicit projection so both column-order variants converge on the
+ * intended v25 schema. Individual run() calls also surface every SQLite error;
+ * Bun Database.exec can otherwise continue after a failed middle statement.
+ */
+function executeMigrationSql(db: Database, migration: Migration): void {
+  if (migration.version !== 25) {
+    db.exec(migration.sql);
+    return;
+  }
+  const createTable = ENGINEER_DATABASE_MIGRATION_25_SQL.match(/CREATE TABLE run_budgets_v25[\s\S]*?;\s*(?=INSERT)/)?.[0];
+  if (!createTable) throw new Error("Engineer schema v25 migration definition is malformed");
+  const columns = [
+    "run_id", "cost_limit_usd", "token_limit", "time_limit_seconds", "lifetime_cost_limit_usd",
+    "lifetime_token_limit", "lifetime_time_limit_seconds", "used_cost_usd", "used_tokens", "used_time_seconds",
+    "reserved_cost_usd", "reserved_tokens", "ambiguous_cost_usd", "ambiguous_tokens", "status", "pause_reason",
+    "resume_state", "warning_threshold", "revision", "active_since", "created_at", "updated_at",
+  ];
+  const projection = columns.join(", ");
+  db.run(createTable);
+  db.run(`INSERT INTO run_budgets_v25 (${projection}) SELECT ${projection} FROM run_budgets`);
+  db.run("DROP TABLE run_budgets");
+  db.run("ALTER TABLE run_budgets_v25 RENAME TO run_budgets");
+}
+
 const MIGRATIONS: readonly Migration[] = [
   { version: 15, sql: ENGINEER_DATABASE_MIGRATION_15_SQL },
   { version: 16, sql: ENGINEER_DATABASE_MIGRATION_16_SQL },
@@ -78,6 +128,66 @@ const MIGRATIONS: readonly Migration[] = [
   { version: 38, sql: ENGINEER_DATABASE_MIGRATION_38_SQL },
   { version: 39, sql: ENGINEER_DATABASE_MIGRATION_39_SQL },
 ];
+
+const DEPLOYED_V18_REVIEW_MAPPING_BRIDGE_ID = "deployed-v18-review-mapping-v1";
+const DEPLOYED_V18_REVIEW_MAPPING_BRIDGE_SQL = `
+  CREATE UNIQUE INDEX idx_review_findings_id_session_v18
+    ON review_findings(id, reviewer_session_id);
+
+  CREATE TABLE review_finding_classifications (
+    classification_hash TEXT PRIMARY KEY NOT NULL,
+    batch_hash TEXT NOT NULL,
+    reviewer_session_id TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    finding_fingerprint TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK(disposition IN ('BLOCKING', 'HUMAN_REQUIRED', 'ADVISORY')),
+    authority TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    classification_json TEXT NOT NULL,
+    UNIQUE(batch_hash, finding_id),
+    FOREIGN KEY(batch_hash) REFERENCES review_classification_batches(classification_hash)
+      ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(finding_id, reviewer_session_id) REFERENCES review_findings(id, reviewer_session_id)
+      ON DELETE RESTRICT
+  );
+
+  CREATE TRIGGER require_complete_review_classification_batch_v18
+    BEFORE INSERT ON review_classification_batches BEGIN
+      SELECT CASE WHEN
+        (SELECT COUNT(*) FROM review_findings WHERE reviewer_session_id = NEW.reviewer_session_id) !=
+        (SELECT COUNT(*) FROM review_finding_classifications WHERE batch_hash = NEW.classification_hash)
+        OR EXISTS (
+          SELECT 1 FROM review_findings f
+          LEFT JOIN review_finding_classifications c
+            ON c.finding_id = f.id AND c.reviewer_session_id = f.reviewer_session_id
+              AND c.batch_hash = NEW.classification_hash
+          WHERE f.reviewer_session_id = NEW.reviewer_session_id AND c.finding_id IS NULL
+        )
+      THEN RAISE(ABORT, 'review classification mapping is incomplete') END;
+    END;
+  CREATE TRIGGER prevent_sealed_review_classification_insert_v18
+    BEFORE INSERT ON review_finding_classifications
+    WHEN EXISTS (
+      SELECT 1 FROM review_classification_batches WHERE classification_hash = NEW.batch_hash
+    ) BEGIN
+      SELECT RAISE(ABORT, 'sealed review classification batches cannot accept new findings');
+    END;
+  CREATE TRIGGER prevent_sealed_review_finding_insert_v18
+    BEFORE INSERT ON review_findings
+    WHEN EXISTS (
+      SELECT 1 FROM review_classification_batches WHERE reviewer_session_id = NEW.reviewer_session_id
+    ) BEGIN
+      SELECT RAISE(ABORT, 'sealed review sessions cannot accept new findings');
+    END;
+  CREATE TRIGGER prevent_review_finding_classifications_update_v18
+    BEFORE UPDATE ON review_finding_classifications BEGIN
+      SELECT RAISE(ABORT, 'review finding classifications are immutable');
+    END;
+  CREATE TRIGGER prevent_review_finding_classifications_delete_v18
+    BEFORE DELETE ON review_finding_classifications BEGIN
+      SELECT RAISE(ABORT, 'review finding classifications are immutable');
+    END;
+`;
 
 function assertHardeningBudgetShape(db: Database): void {
   const expected = new Map<string, string>();
@@ -549,10 +659,15 @@ function assertForeignKeys(db: Database): void {
 }
 
 // The reviewer-input / normalized-output columns are NOT part of the immutable
-// migration-18 shape. A genuinely-shipped v18 database lacks them ("ABSENT"); the
-// v38 forward migration adds them ("PRESENT"). The validator must accept exactly
-// the shape implied by the database's applied version, and never demand the extra
-// columns from an at-rest original-v18 database.
+// migration-18 shape. A deployed v18 database lacks them ("ABSENT"); the v38
+// forward migration adds them ("PRESENT"). The validator must accept exactly the
+// shape implied by the database's applied version, and never demand the extra
+// columns from an at-rest v18 database.
+//
+// There are two deployed v18 FK variants: the checked-in migration includes the
+// raw-output artifact FK, while the installed pilot ledger predates that clause.
+// Both retain the three authority FKs and immutable hash binding. Accept only
+// those two exact sets so compatibility does not become a general schema bypass.
 const REVIEW_CLASSIFICATION_JSON_COLUMNS = ["reviewer_input_json", "normalized_output_json"] as const;
 
 function assertReviewClassificationShape(db: Database, jsonColumns: "ABSENT" | "PRESENT"): void {
@@ -597,16 +712,28 @@ function assertReviewClassificationShape(db: Database, jsonColumns: "ABSENT" | "
   const foreignKeys = db.query("PRAGMA foreign_key_list(review_classification_batches)").all() as Array<{
     table: string; from: string; to: string; on_delete: string;
   }>;
-  for (const expectedForeignKey of [
+  const requiredForeignKeys = [
     { table: "reviewer_sessions", from: "reviewer_session_id", to: "id" },
     { table: "engineer_runs", from: "run_id", to: "id" },
     { table: "required_lane_contracts", from: "contract_hash", to: "contract_hash" },
-    { table: "artifacts", from: "raw_output_artifact_id", to: "id" },
-  ]) {
+  ];
+  const artifactForeignKey = { table: "artifacts", from: "raw_output_artifact_id", to: "id" };
+  for (const expectedForeignKey of requiredForeignKeys) {
     if (!foreignKeys.some((row) => row.table === expectedForeignKey.table && row.from === expectedForeignKey.from &&
         row.to === expectedForeignKey.to && row.on_delete === "RESTRICT")) {
       throw new Error(`Engineer schema v18 has an invalid ${expectedForeignKey.from} foreign key`);
     }
+  }
+  const normalizedForeignKeys = foreignKeys.map((row) =>
+    `${row.table}:${row.from}:${row.to}:${row.on_delete}`).sort();
+  const expectedBaseForeignKeys = requiredForeignKeys.map((row) =>
+    `${row.table}:${row.from}:${row.to}:RESTRICT`).sort();
+  const expectedWithArtifactForeignKey = [...expectedBaseForeignKeys,
+    `${artifactForeignKey.table}:${artifactForeignKey.from}:${artifactForeignKey.to}:RESTRICT`].sort();
+  const exactKnownVariant = normalizedForeignKeys.join("|") === expectedBaseForeignKeys.join("|") ||
+    normalizedForeignKeys.join("|") === expectedWithArtifactForeignKey.join("|");
+  if (!exactKnownVariant) {
+    throw new Error("Engineer schema v18 has an unknown review_classification_batches foreign-key shape");
   }
   const indexes = db.query("PRAGMA index_list(review_classification_batches)").all() as Array<{
     name: string; unique: number; origin: string; partial: number;
@@ -711,6 +838,84 @@ function assertReviewClassificationShape(db: Database, jsonColumns: "ABSENT" | "
     (db.query(`PRAGMA index_info(${JSON.stringify(index.name)})`).all() as Array<{ seqno: number; name: string }>)
       .sort((left, right) => left.seqno - right.seqno).map((row) => row.name).join(",") === "batch_hash,finding_id");
   if (!exactUnique) throw new Error("Engineer schema v18 is missing exact batch/finding uniqueness");
+}
+
+/**
+ * One installed pilot ledger was created from an early v18 build whose batch
+ * table and six parent immutability triggers were durable, but whose per-finding
+ * mapping table and five sealing triggers had not yet landed. It contains no
+ * classification batches, so the missing mapping can be completed additively
+ * without inventing or rewriting historical evidence.
+ *
+ * This is deliberately not folded into migration 18 (or 19): applied migration
+ * definitions are immutable. The bridge is narrowly gated to the exact v18
+ * ancestry, exact 13-column/no-artifact-FK batch shape, an absent mapping table,
+ * and zero sealed batches. Its own durable record makes the exceptional upgrade
+ * visible during audit.
+ */
+function bridgeDeployedV18ReviewMappingIfRequired(db: Database, now: string, targetVersion: number): void {
+  if (targetVersion <= 18 || maximumAppliedVersion(db) !== 18) return;
+  const mappingTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='review_finding_classifications'").get();
+  if (mappingTable) return;
+
+  const columns = (db.query("PRAGMA table_info(review_classification_batches)").all() as Array<{
+    name: string; type: string; notnull: number; pk: number;
+  }>).map((column) => `${column.name}:${column.type.toUpperCase()}:${column.notnull}:${column.pk}`);
+  const expectedColumns = [
+    "classification_hash:TEXT:1:1", "reviewer_session_id:TEXT:1:0", "run_id:TEXT:1:0",
+    "contract_hash:TEXT:1:0", "schema_version:INTEGER:1:0", "policy_version:TEXT:1:0",
+    "raw_output_artifact_id:TEXT:1:0", "raw_output_hash:TEXT:1:0", "normalized_output_hash:TEXT:1:0",
+    "normalized_session_hash:TEXT:1:0", "normalized_findings_hash:TEXT:1:0", "batch_json:TEXT:1:0",
+    "created_at:TEXT:1:0",
+  ];
+  const foreignKeys = (db.query("PRAGMA foreign_key_list(review_classification_batches)").all() as Array<{
+    table: string; from: string; to: string; on_delete: string;
+  }>).map((row) => `${row.table}:${row.from}:${row.to}:${row.on_delete}`).sort();
+  const expectedForeignKeys = [
+    "reviewer_sessions:reviewer_session_id:id:RESTRICT",
+    "engineer_runs:run_id:id:RESTRICT",
+    "required_lane_contracts:contract_hash:contract_hash:RESTRICT",
+  ].sort();
+  const batchCount = (db.query("SELECT COUNT(*) AS count FROM review_classification_batches").get() as { count: number }).count;
+  if (columns.join("|") !== expectedColumns.join("|") ||
+      foreignKeys.join("|") !== expectedForeignKeys.join("|") || batchCount !== 0) {
+    throw new Error("Engineer deployed-v18 review mapping bridge refused an unknown or populated historical shape");
+  }
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // A concurrent gateway may have completed the bridge while this process
+    // waited for the write lock. Re-read under the lock and converge on its
+    // durable result rather than replaying CREATE statements.
+    const mappedUnderLock = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='review_finding_classifications'").get();
+    if (mappedUnderLock) {
+      const bridgeTable = db.query("SELECT name FROM sqlite_master WHERE type='table' AND name='engineer_compatibility_migrations'").get();
+      const bridgeRecord = bridgeTable
+        ? db.query("SELECT id FROM engineer_compatibility_migrations WHERE id=?").get(DEPLOYED_V18_REVIEW_MAPPING_BRIDGE_ID)
+        : null;
+      if (!bridgeRecord) throw new Error("Engineer review mapping appeared without a durable compatibility bridge record");
+      assertReviewClassificationShape(db, "ABSENT");
+      db.exec("COMMIT");
+      return;
+    }
+    db.exec(`CREATE TABLE IF NOT EXISTS engineer_compatibility_migrations (
+      id TEXT PRIMARY KEY NOT NULL,
+      source_version INTEGER NOT NULL,
+      applied_at TEXT NOT NULL
+    )`);
+    const existing = db.query("SELECT id FROM engineer_compatibility_migrations WHERE id=?")
+      .get(DEPLOYED_V18_REVIEW_MAPPING_BRIDGE_ID);
+    if (existing) throw new Error("Engineer compatibility bridge record exists without its mapped schema");
+    db.exec(DEPLOYED_V18_REVIEW_MAPPING_BRIDGE_SQL);
+    assertReviewClassificationShape(db, "ABSENT");
+    assertForeignKeys(db);
+    db.query("INSERT INTO engineer_compatibility_migrations(id, source_version, applied_at) VALUES (?, 18, ?)")
+      .run(DEPLOYED_V18_REVIEW_MAPPING_BRIDGE_ID, now);
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch { /* preserve the bridge failure */ }
+    throw error;
+  }
 }
 
 function assertApprovalClassificationShape(db: Database): void {
@@ -1299,6 +1504,11 @@ export function migrateEngineerDatabase(
     throw new Error("Engineer schema v39 is missing required migration ancestry");
   }
 
+  // Complete the one exact, empty-batch deployed-v18 variant before migration
+  // 19 adds approval references to the classification authority. This bridge is
+  // separately recorded and never edits the SQL of an applied migration.
+  bridgeDeployedV18ReviewMappingIfRequired(db, now, targetVersion);
+
   for (const migration of MIGRATIONS) {
     if (migration.version > targetVersion) break;
     if (maximumAppliedVersion(db) >= migration.version) continue;
@@ -1310,6 +1520,7 @@ export function migrateEngineerDatabase(
         db.exec("COMMIT");
         continue;
       }
+      const rowCountsBeforeMigration = tableRowCounts(db);
       if (migration.version === 16) assertRequiredLaneContractShape(db, 0, "V1_ONLY");
       if (migration.version === 17) assertRequiredLaneContractShape(db, 1, "V1_ONLY");
       if (migration.version === 18) assertRequiredLaneContractShape(db, 1, "V1_AND_V2");
@@ -1324,7 +1535,7 @@ export function migrateEngineerDatabase(
       }
       // The forward migration must land on the original (columns-absent) v18 shape.
       if (migration.version === 38) assertReviewClassificationShape(db, "ABSENT");
-      db.exec(migration.sql);
+      executeMigrationSql(db, migration);
       assertForeignKeys(db);
       if (migration.version === 18) assertReviewClassificationShape(db, "ABSENT");
       if (migration.version === 19) assertApprovalClassificationShape(db);
@@ -1349,6 +1560,7 @@ export function migrateEngineerDatabase(
       if (migration.version === 35) assertAttestationStorageShape(db);
       if (migration.version === 37) assertPublicationFreezeShape(db);
       if (migration.version === 38) assertReviewClassificationShape(db, "PRESENT");
+      assertMigrationPreservedRows(db, rowCountsBeforeMigration, migration.version);
       db.query("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)")
         .run(migration.version, now);
       db.exec("COMMIT");

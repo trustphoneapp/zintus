@@ -13,10 +13,43 @@ export interface EngineerRunStatus {
   run: EngineerRun;
   lastError: string | null;
   activity: { active: boolean; role: "PLANNER" | "BUILDER" | "VERIFIER" | null; detail: string };
+  capabilities: EngineerRunCapabilities;
+}
+export type EngineerRunAction =
+  | "PLAN" | "FREEZE_PLAN" | "START_EXECUTION" | "REPLAN_EXPLICIT_CONTRACT"
+  | "RETRY_PROVIDER" | "RETRY_REVIEWER" | "RESUME_BUDGET" | "TOP_UP_BUDGET" | "CANCEL_RUN"
+  | "OPEN_RESOLUTION_CASE" | "PREPARE_NEW_INTAKE";
+export interface EngineerActionCapability {
+  action: EngineerRunAction;
+  availability: "AVAILABLE" | "UNAVAILABLE" | "NOT_APPLICABLE";
+  reasonCode: string;
+  message: string;
+  nextSafeAction: EngineerRunAction | null;
+  expectedStateVersion: number;
+  expectedBudgetRevision?: number;
+  costImpact: "NONE" | "MAY_CALL_MODEL" | "NEW_SIGNED_BUDGET_REQUIRED";
+}
+export interface EngineerRunCapabilities {
+  schemaVersion: 1;
+  runId: string;
+  state: EngineerState;
+  stateVersion: number;
+  budget: { revision: number; canIncreaseWithinLifetime: boolean; isResolutionReplacement: boolean; isOptionalHardeningChild: boolean };
+  actions: EngineerActionCapability[];
 }
 export type EngineerHardeningReadiness =
   | { state: "READY"; code: null }
   | { state: "DEGRADED"; code: "HARDENING_PROMPT_CACHE_AUTHORITY_UNAVAILABLE" | "HARDENING_PROMPT_CACHE_AUTHORITY_MISMATCH" };
+/** Read-only server authority projection for the separate P8 publication lane. */
+export type EngineerPublicationReadiness =
+  | { state: "READY"; message: string }
+  | { state: "UNAVAILABLE"; message: string };
+
+export type EngineerJudgeSession = {
+  expiresAt: string;
+  fixtureRepositoryId: string;
+  limits: { costUsd: number; tokens: number; timeSeconds: number };
+};
 export interface EngineerBudgetAmounts { costUsd: number; tokens: number; timeSeconds: number; }
 export interface EngineerBudgetLimits { costBudgetUsd: number; tokenBudget: number; timeBudgetSeconds: number; }
 export interface EngineerBudgetSnapshot {
@@ -253,10 +286,25 @@ function parseEngineerOptionalHardeningCreation(value: unknown): EngineerOptiona
   return value as unknown as EngineerOptionalHardeningCreation;
 }
 
+class EngineerGatewayRequestError extends Error {
+  readonly code: string | null;
+  constructor(message: string, code: string | null) {
+    super(message);
+    this.name = "EngineerGatewayRequestError";
+    this.code = code;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${GATEWAY_URL}${path}`, { ...init, cache: "no-store", headers: { "Content-Type": "application/json", ...gatewayAuthHeaders(), ...init?.headers } });
-  const body = await response.json().catch(() => ({})) as { error?: string | { message?: string } };
-  if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : body.error?.message ?? `Engineer request failed (${response.status})`);
+  const body = await response.json().catch(() => ({})) as { error?: string | { message?: string; code?: string } };
+  if (!response.ok) {
+    const structured = typeof body.error === "object" && body.error !== null ? body.error : null;
+    throw new EngineerGatewayRequestError(
+      typeof body.error === "string" ? body.error : structured?.message ?? `Engineer request failed (${response.status})`,
+      structured?.code ?? null,
+    );
+  }
   return body as T;
 }
 
@@ -274,6 +322,28 @@ export async function getEngineerHardeningReadiness():Promise<EngineerHardeningR
     return {state:"DEGRADED",code:hardening.code};
   throw new Error("Engineer optional-hardening readiness is unavailable");
 }
+export async function getEngineerPublicationReadiness(): Promise<EngineerPublicationReadiness> {
+  const body = await request<{ publication?: unknown }>("/v1/engineer/publication-readiness");
+  const publication = body.publication;
+  if (!publication || typeof publication !== "object") throw new Error("Engineer publication readiness is unavailable");
+  const value = publication as { state?: unknown; message?: unknown };
+  if ((value.state === "READY" || value.state === "UNAVAILABLE") && typeof value.message === "string") {
+    return { state: value.state, message: value.message };
+  }
+  throw new Error("Engineer publication readiness is unavailable");
+}
+/** Public judge deployment only: reads a same-origin, HttpOnly-cookie session projection. */
+export async function getEngineerJudgeSession(): Promise<EngineerJudgeSession | null> {
+  const response = await fetch("/api/judge/session", { cache: "no-store", credentials: "same-origin" });
+  if (response.status === 401 || response.status === 404) return null;
+  const body = await response.json().catch(() => null) as { session?: unknown } | null;
+  if (!response.ok || !body?.session || typeof body.session !== "object") return null;
+  const session = body.session as { expiresAt?: unknown; fixtureRepositoryId?: unknown; limits?: { costUsd?: unknown; tokens?: unknown; timeSeconds?: unknown } };
+  if (typeof session.expiresAt !== "string" || typeof session.fixtureRepositoryId !== "string" ||
+      !session.limits || typeof session.limits.costUsd !== "number" || typeof session.limits.tokens !== "number" || typeof session.limits.timeSeconds !== "number") return null;
+  return { expiresAt: session.expiresAt, fixtureRepositoryId: session.fixtureRepositoryId,
+    limits: { costUsd: session.limits.costUsd, tokens: session.limits.tokens, timeSeconds: session.limits.timeSeconds } };
+}
 const RELAY_URL = (process.env.NEXT_PUBLIC_RELAY_URL ?? "http://localhost:8787").replace(/\/$/, "");
 async function relayRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${RELAY_URL}${path}`, { ...init, credentials: "include", cache: "no-store", headers: { "Content-Type": "application/json", ...init?.headers } });
@@ -287,20 +357,23 @@ export async function listGithubConnectorRepositories(): Promise<GithubConnector
 export async function getGithubBranchCommit(owner: string, repo: string, branch: string): Promise<string> { return (await relayRequest<{ sha: string }>(`/api/connectors/github/commit?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&branch=${encodeURIComponent(branch)}`)).sha; }
 export async function disconnectGithubConnector(): Promise<void> { await relayRequest("/api/connectors/github", { method: "DELETE" }); }
 
-export async function createEngineerRun(input: { repository: EngineerRepository; request: string; budget?: EngineerBudgetLimits }): Promise<EngineerRun> {
+export async function createEngineerRun(input: { runId?: string; repository: EngineerRepository; request: string; budget?: EngineerBudgetLimits }): Promise<EngineerRun> {
   return (await request<{ run: EngineerRun }>("/v1/engineer/runs", { method: "POST", body: JSON.stringify(input) })).run;
 }
 export async function getEngineerRepository(): Promise<EngineerRepository> { return (await request<{ repository: EngineerRepository }>("/v1/engineer/repository")).repository; }
+/** Repositories the gateway has durably admitted for Engineer execution. */
+export async function listEngineerRepositories(): Promise<EngineerRepository[]> { return (await request<{ repositories: EngineerRepository[] }>("/v1/engineer/repositories")).repositories; }
 export async function getEngineerObservability(): Promise<EngineerObservability> { return (await request<{ snapshot: EngineerObservability }>("/v1/engineer/observability")).snapshot; }
-export async function planEngineerRun(runId: string, signal?: AbortSignal): Promise<PlanProposal> { return (await request<{ plan: PlanProposal }>(`/v1/engineer/runs/${runId}/plan`, { method: "POST", signal })).plan; }
+type EngineerActionFence = { expectedStateVersion: number; idempotencyKey?: string };
+function actionFence(action: string, runId: string, expectedStateVersion: number, idempotencyKey?: string): Required<EngineerActionFence> {
+  return { expectedStateVersion, idempotencyKey: idempotencyKey ?? `ui:${action}:${runId}:${expectedStateVersion}` };
+}
+export async function planEngineerRun(runId: string, expectedStateVersion: number, signal?: AbortSignal): Promise<PlanProposal> { return (await request<{ plan: PlanProposal }>(`/v1/engineer/runs/${runId}/plan`, { method: "POST", signal, body: JSON.stringify(actionFence("plan", runId, expectedStateVersion)) })).plan; }
 export async function getEngineerPlan(runId: string): Promise<PlanProposal | null> { return (await request<{ plan: PlanProposal | null }>(`/v1/engineer/runs/${runId}/plan`)).plan; }
 export async function freezeEngineerPlan(run: EngineerRun, manifest: EngineerManifest): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${run.runId}/freeze-plan`, { method: "POST", body: JSON.stringify({ expectedStateVersion: run.stateVersion, manifest, idempotencyKey: `ui:freeze:${run.runId}:${manifest.manifestVersion}` }) })).run; }
-export async function startEngineerRun(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST" })).run; }
-export async function retryEngineerProviderTimeout(runId: string): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/retry-provider-timeout`, { method: "POST" })).run; }
-export async function recoverEngineerStaleBase(runId: string): Promise<EngineerRun> { return (await request<{ replacementRun: EngineerRun }>(`/v1/engineer/runs/${runId}/recover-stale-base`, { method: "POST" })).replacementRun; }
-export async function createCorrectedEngineerRun(runId: string): Promise<{ replacementRun: EngineerRun; plan: PlanProposal }> {
-  return request<{ replacementRun: EngineerRun; plan: PlanProposal }>(`/v1/engineer/runs/${runId}/corrected-run`, { method: "POST" });
-}
+export async function replanEngineerExplicitContract(runId: string, expectedStateVersion: number): Promise<PlanProposal> { return (await request<{ plan: PlanProposal }>(`/v1/engineer/runs/${runId}/replan-explicit-contract`, { method: "POST", body: JSON.stringify(actionFence("replan-explicit-contract", runId, expectedStateVersion)) })).plan; }
+export async function startEngineerRun(runId: string, expectedStateVersion: number): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/start`, { method: "POST", body: JSON.stringify(actionFence("start", runId, expectedStateVersion)) })).run; }
+export async function retryEngineerProviderTimeout(runId: string, expectedStateVersion: number): Promise<EngineerRun> { return (await request<{ run: EngineerRun }>(`/v1/engineer/runs/${runId}/retry-provider-timeout`, { method: "POST", body: JSON.stringify(actionFence("retry-provider", runId, expectedStateVersion)) })).run; }
 export async function getEngineerRunStatus(runId: string): Promise<EngineerRunStatus> { return request<EngineerRunStatus>(`/v1/engineer/runs/${runId}`); }
 /** Lightweight live projection used between durable SSE events. */
 export async function getEngineerLiveSummary(runId: string): Promise<{ status: EngineerRunStatus; budget: EngineerBudgetSnapshot | null }> {
@@ -446,7 +519,7 @@ export async function engineerDecision(
   if (action !== "cancel" && !authority) throw new Error("Refresh the approval before deciding.");
   await request(`/v1/engineer/runs/${runId}/${action}`, { method: "POST", body: JSON.stringify({ reason, ...authority }) });
 }
-export async function resolveHumanEngineerReview(runId: string, decision: "reject" | "retry", reason: string): Promise<void> { await request(`/v1/engineer/runs/${runId}/human-review`, { method: "POST", body: JSON.stringify({ decision, reason }) }); }
+export async function resolveHumanEngineerReview(runId: string, decision: "reject" | "retry", reason: string, expectedStateVersion: number): Promise<void> { await request(`/v1/engineer/runs/${runId}/human-review`, { method: "POST", body: JSON.stringify({ decision, reason, ...actionFence(`human-review:${decision}`, runId, expectedStateVersion) }) }); }
 export async function extendEngineerApproval(runId: string, reason: string, authority: EngineerApprovalAuthority, extensionSeconds = 86_400): Promise<void> { await request(`/v1/engineer/runs/${runId}/extend-approval`, { method: "POST", body: JSON.stringify({ reason, extensionSeconds, ...authority }) }); }
 export async function resolveEngineerDecision(run: EngineerRun, decisionId: string, selectedOptionId: string, rationale: string): Promise<{ plan: PlanProposal | null; planningError: string | null; publication?: { status: string } | null }> {
   return request(`/v1/engineer/runs/${run.runId}/decisions/${decisionId}/resolve`, {
@@ -469,8 +542,12 @@ export async function streamEngineerEvents(
   let cursor = options.afterSequence ?? 0;
   let reconnects = 0;
   let retryMs = options.reconnectDelayMs ?? 1_000;
-  const maximum = options.maxReconnects ?? 5;
-  const terminalStates = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "PAUSED_BUDGET", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
+  // A durable run can outlive a local gateway restart. The default therefore
+  // reconnects until the page explicitly aborts the stream; callers may still
+  // request a finite retry budget for a bounded operation or a test. A sequence
+  // gap is different: it is an integrity error, not transient connectivity.
+  const maximum = options.maxReconnects ?? Number.POSITIVE_INFINITY;
+  const terminalStates = new Set(["COMPLETED", "REJECTED", "CANCELLED", "TIMED_OUT", "RETRY_BUDGET_EXHAUSTED", "PAUSED_BUDGET", "CLARIFICATION_REQUIRED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING", "BLOCKED_BY_ENVIRONMENT", "BLOCKED_BY_EXTERNAL_DEPENDENCY", "SECURITY_ESCALATION", "VERIFICATION_INCOMPLETE", "ROLLED_BACK", "FAILED"]);
   while (!signal.aborted) {
     let receivedEvent = false;
     try {
@@ -499,6 +576,7 @@ export async function streamEngineerEvents(
       if (status && (terminalStates.has(status.run.state) || (reviewApprovedIsTerminal && status.run.state === "REVIEW_APPROVED"))) return;
     } catch (error) {
       if (signal.aborted) return;
+      if (error instanceof Error && /Engineer event sequence gap/.test(error.message)) throw error;
       if (reconnects >= maximum) throw error;
     }
     if (signal.aborted) return;

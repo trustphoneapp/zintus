@@ -11,6 +11,7 @@ export * from "./decision-policy.js";
 export * from "./decision-feature-extractor.js";
 export * from "./failure-policy.js";
 export * from "./manifest-files.js";
+export * from "./explicit-contract.js";
 export * from "./test-integrity.js";
 export * from "./trusted-executor.js";
 export * from "./async-process.js";

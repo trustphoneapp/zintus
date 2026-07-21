@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EngineerSupervisor } from "./supervisor.js";
+import { LocalArtifactStore } from "./artifact-store.js";
 
 const repository = {
   repositoryId: "repo-budget",
@@ -215,5 +219,42 @@ describe("durable Engineer budgets", () => {
     now += 15_000;
     expect(sup.getBudget(run.runId).used.timeSeconds).toBe(45);
     sup.close();
+  });
+
+  // Regression (P1): a run resting in PAUSED_BUDGET must remain cancellable.
+  // The Supervisor guard previously fenced every transition off PAUSED_BUDGET,
+  // making paused runs unkillable; cancellation to CANCELLATION_PENDING is now
+  // exempt so requestRunCancellation + finalization complete end-to-end.
+  test("cancels a run resting in PAUSED_BUDGET through to CANCELLED", () => {
+    const root = mkdtempSync(join(tmpdir(), "engineer-budget-cancel-"));
+    try {
+      const sup = supervisor();
+      const run = sup.receiveRequest({
+        runId: "run-cancel-paused", userId: "user-1", repository, request: "bounded task",
+        budget: { tokenBudget: 0, lifetimeTokenBudget: 1_000 },
+      });
+      sup.reconcileBudget(run.runId);
+      const paused = sup.getRun(run.runId);
+      expect(paused.state).toBe("PAUSED_BUDGET");
+
+      const store = new LocalArtifactStore({ root: join(root, "artifacts") });
+      const artifact = store.put({
+        runId: run.runId, type: "CANCELLATION_REQUEST",
+        bytes: JSON.stringify({ actorId: "user-1", reason: "user cancelled", requestedAt: "2026-07-15T12:00:00.000Z" }),
+        producerType: "SYSTEM", producerId: "engineer-supervisor", trusted: true,
+      });
+      const requested = sup.requestRunCancellation({ runId: run.runId, actorId: "user-1", artifact });
+      expect(requested.applied).toBe(true);
+      expect(requested.run.state).toBe("CANCELLATION_PENDING");
+
+      const finalized = sup.finalizeRunCancellation({
+        runId: run.runId, outcome: "CANCELLED",
+        expectedLastError: sup.getLastError(run.runId), lastError: null,
+      });
+      expect(finalized.state).toBe("CANCELLED");
+      sup.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

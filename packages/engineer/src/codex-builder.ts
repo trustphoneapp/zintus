@@ -34,6 +34,7 @@ export const MAX_BUILDER_DISCOVERY_ROUNDS_BEFORE_MUTATION = 6;
 export const BUILDER_CONTEXT_COMPACTION_THRESHOLD_TOKENS = 48_000;
 export const BUILDER_MAX_OUTPUT_TOKENS = 6_000;
 export const MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES = 32 * 1024;
+export const MAX_BUILDER_COMMAND_DIAGNOSTIC_BYTES = 12 * 1024;
 export const MAX_BUILDER_SEARCH_RESULTS = 100;
 export const MAX_BUILDER_SEARCH_BYTES = 8 * 1024 * 1024;
 export const MAX_BUILDER_RANGE_LINES = 400;
@@ -69,6 +70,18 @@ function boundedModelToolOutput(output: string): string {
   const marker = `\n[MODEL_VIEW_TRUNCATED full_bytes=${bytes.byteLength} full_sha256=${sha256(bytes)}; use search_files then read_file_range instead of repeating this read]`;
   const prefixBytes = Math.max(0, MAX_BUILDER_MODEL_TOOL_OUTPUT_BYTES - Buffer.byteLength(marker, "utf8"));
   return `${bytes.subarray(0, prefixBytes).toString("utf8")}${marker}`;
+}
+
+/** A failed trusted command is useful repair context, never a raw log upload. */
+function boundedCommandDiagnostic(value: string): string {
+  const redacted = value
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_-]{12,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b/g, "[REDACTED_SECRET]")
+    .replace(/\b((?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|password)\s*[:=]\s*)[^\s,;]+/gi, "$1[REDACTED]")
+    .replace(/(?:\/Users|\/home|\/var|\/tmp|\/private|\/etc|\/opt|\/root)\/[^\s:'\"`]+/g, "[REDACTED_PATH]");
+  const bytes = Buffer.from(redacted, "utf8");
+  if (bytes.byteLength <= MAX_BUILDER_COMMAND_DIAGNOSTIC_BYTES) return redacted;
+  const marker = `\n[diagnostic truncated at ${MAX_BUILDER_COMMAND_DIAGNOSTIC_BYTES} bytes]`;
+  return `${bytes.subarray(0, MAX_BUILDER_COMMAND_DIAGNOSTIC_BYTES - Buffer.byteLength(marker, "utf8")).toString("utf8")}${marker}`;
 }
 
 const ResponsesFunctionCallSchema = z.object({
@@ -896,10 +909,21 @@ export class CodexBuilder {
                 successfulEvidenceCommand = null;
               }
             }
+            const commandOutput = record.status === "SUCCEEDED"
+              ? null
+              : this.options.executor.readCommandOutput(record);
             output = JSON.stringify({
               commandExecutionId: record.commandExecutionId,
               status: record.status,
               exitCode: record.exitCode,
+              timedOut: record.timedOut,
+              ...(commandOutput ? {
+                diagnostic: {
+                  stdout: boundedCommandDiagnostic(commandOutput.stdout),
+                  stderr: boundedCommandDiagnostic(commandOutput.stderr),
+                  instruction: "Inspect this bounded failure output, then make a targeted allowed-path edit before running this command again. Do not repeat an unchanged failing command.",
+                },
+              } : {}),
               stdoutArtifactId: record.stdoutArtifact.artifactId,
               stderrArtifactId: record.stderrArtifact.artifactId,
               commitSha: record.commitSha,

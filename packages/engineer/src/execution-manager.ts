@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { z } from "zod";
 import {
   BuilderResultSchema,
@@ -24,6 +26,7 @@ import { RuntimeBudgetExhaustedError } from "./runtime-budget.js";
 import { canTransition } from "./state-machine.js";
 import { TestIntegrityGuard, TestIntegrityViolationError } from "./test-integrity.js";
 import { TestIntegrityComparisonSchema } from "./test-integrity.js";
+import { captureTestCommandBaseline } from "./test-command-baseline.js";
 import { BudgetPausedError, BuilderModelCallLimitError, HardeningGenericOperationForbiddenError,
   HardeningPromptCacheAuthorityUnavailableError } from "./errors.js";
 import { CorrectedRunDirectiveSchema, type SafeCorrectionAction } from "./corrected-run.js";
@@ -68,6 +71,50 @@ class BuilderDispatchClaimLostError extends Error {
   constructor(runId: string) {
     super(`another worker owns the durable initial Builder dispatch for ${runId}`);
     this.name = "BuilderDispatchClaimLostError";
+  }
+}
+
+/**
+ * A frozen verification command that is already red on the immutable base is
+ * an environment/repository-health blocker, not a Builder repair task.  In
+ * particular, asking a narrow change to run a broken root suite must never
+ * purchase repeated attempts to repair files outside the frozen scope.
+ */
+class BaselineTestFailureError extends Error {
+  readonly failedTestIds: readonly string[];
+
+  constructor(failedTestIds: readonly string[]) {
+    super(`frozen base verification failed before Builder dispatch: ${failedTestIds.join(", ")}`);
+    this.name = "BaselineTestFailureError";
+    this.failedTestIds = failedTestIds;
+  }
+}
+
+/**
+ * A target test file created by this task cannot pass in the pristine base.
+ * Broad suites, root scripts, and existing repository targets can and must be
+ * checked before admitting any paid Builder work.
+ */
+export function isBaselineRunnableCommand(command: string, workspaceRoot: string): boolean {
+  const tokens = command.trim().split(/\s+/);
+  if (tokens[0] !== "bun") return false;
+  if (tokens[1] === "run") return tokens.length === 3;
+  if (tokens[1] !== "test") return false;
+  if (tokens.length === 2) return true;
+  if (tokens.length !== 3) return false;
+  const target = tokens[2]!;
+  if (target.startsWith("/") || target.includes("\\") || target.split("/").some((part) => part === "" || part === "." || part === "..")) return false;
+  const targetPath = resolve(workspaceRoot, target);
+  // A directory (for example `bun test packages/engineer/src/`) is an
+  // unbounded suite, not the exact existing test file that this preflight can
+  // safely baseline. Treat it as task-created/non-baselineable; the Planner
+  // canonicalizer will replace it with a single allowed test file when that is
+  // unambiguous. This prevents an unrelated suite failure from reaching a
+  // paid Builder repair loop.
+  try {
+    return existsSync(targetPath) && statSync(targetPath).isFile();
+  } catch {
+    return false;
   }
 }
 
@@ -309,7 +356,12 @@ export class EngineerExecutionManager {
     if(matches.length!==1)throw new HardeningGenericOperationForbiddenError();
     const result=BuilderResultSchema.parse(JSON.parse(this.options.artifactStore.readVerifiedExact(matches[0]!).toString("utf8")));
     if(new Set(result.commandExecutionIds).size!==result.commandExecutionIds.length)throw new HardeningGenericOperationForbiddenError();
-    const allCommandRows=(records.command_executions??[]).filter((row)=>row.run_id===runId);
+    // The Supervisor may run its trusted `baseline:` commands before the
+    // Builder receives control. They are independently attested by the test
+    // integrity lane and are not Builder tool calls, so they must not be
+    // compared with BuilderResult.commandExecutionIds.
+    const allCommandRows=(records.command_executions??[]).filter((row)=>row.run_id===runId&&
+      !String(row.idempotency_key).startsWith("baseline:"));
     if(allCommandRows.length!==result.commandExecutionIds.length)throw new HardeningGenericOperationForbiddenError();
     const commandRows=result.commandExecutionIds.map((id)=>{
       const matches=allCommandRows.filter((row)=>row.id===id);
@@ -329,8 +381,9 @@ export class EngineerExecutionManager {
         !Number.isFinite(currentFinished)||currentStarted<previousFinished||currentFinished<previousFinished)
         throw new HardeningGenericOperationForbiddenError();
     }
+    // Baseline commands have their own trusted integrity authority, so the
+    // Builder lane need only require one exact audit for each Builder command.
     const commandAudits=(records.audit_events??[]).filter((row)=>row.run_id===runId&&row.action==="COMMAND_EXECUTED");
-    if(commandAudits.length!==commandRows.length)throw new HardeningGenericOperationForbiddenError();
     const commandAuditProjections:Array<Record<string,unknown>>=[];
     for(const row of commandRows){
       const audits=commandAudits.filter((audit)=>{
@@ -781,7 +834,7 @@ export class EngineerExecutionManager {
     return this.runQueued(runId);
   }
 
-  enqueue(runId: string) {
+  enqueue(runId: string, actionIdempotencyKey?: string) {
     this.assertOptionalHardeningPromptAuthority(runId);
     // Verify corrected-run lineage before mutating state or admitting any paid
     // work. A tampered replacement therefore remains PLAN_FROZEN with zero
@@ -798,7 +851,7 @@ export class EngineerExecutionManager {
       nextState: "QUEUED",
       reasonCode: "EXECUTION_QUEUED",
       manifestHash: run.manifestHash,
-      idempotencyKey: `phase2:queued:${run.stateVersion + 1}`,
+      idempotencyKey: actionIdempotencyKey ?? `phase2:queued:${run.stateVersion + 1}`,
     }).run;
   }
 
@@ -851,13 +904,29 @@ export class EngineerExecutionManager {
   }
 
   /** Human-authorized retry after an ambiguous provider timeout. */
-  async retryProviderTimeout(runId: string): Promise<ReturnType<EngineerSupervisor["getRun"]>> {
+  async retryProviderTimeout(runId: string, actionIdempotencyKey?: string): Promise<ReturnType<EngineerSupervisor["getRun"]>> {
     const run = this.options.supervisor.getRun(runId);
     if (run.state !== "MODEL_PROVIDER_RETRY_PENDING" || !run.manifestHash) {
       throw new Error(`provider retry requires MODEL_PROVIDER_RETRY_PENDING, not ${run.state}`);
     }
     const timeouts = this.options.supervisor.listFailures(runId)
       .filter((failure) => failure.reasonCode === "MODEL_PROVIDER_TIMEOUT").length;
+    const ambiguousVerificationOutcomes = this.options.supervisor.listFailures(runId)
+      .filter((failure) => failure.reasonCode === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS").length;
+    // The deterministic verification checkpoint is already durable. Retrying a
+    // repeatedly unavailable Reviewer would only buy another provider call and
+    // cannot improve the candidate. Convert the user's retry click into a
+    // no-cost human evidence review instead.
+    if (ambiguousVerificationOutcomes >= 2) {
+      return this.options.supervisor.transition({
+        runId,
+        expectedStateVersion: run.stateVersion,
+        nextState: "HUMAN_REVIEW_REQUIRED",
+        reasonCode: "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW",
+        manifestHash: run.manifestHash,
+        idempotencyKey: actionIdempotencyKey ?? `provider-timeout-human-review:${run.stateVersion}`,
+      }).run;
+    }
     if (timeouts > 2) throw new Error("provider timeout retry limit reached; create a new bounded run instead");
     await this.recoverSandbox(runId, false);
     return this.options.supervisor.transition({
@@ -866,7 +935,7 @@ export class EngineerExecutionManager {
       nextState: "QUEUED",
       reasonCode: "HUMAN_RETRY_FROM_WORKSPACE_CHECKPOINT",
       manifestHash: run.manifestHash,
-      idempotencyKey: `provider-retry:${run.stateVersion}:${timeouts}`,
+      idempotencyKey: actionIdempotencyKey ?? `provider-retry:${run.stateVersion}:${timeouts}`,
     }).run;
   }
 
@@ -1052,6 +1121,16 @@ export class EngineerExecutionManager {
     if (!manifest) throw new Error("frozen manifest is unavailable");
     const hardeningChild = supervisor.isOptionalHardeningChild(runId);
     const route = resolveEngineerModel("BUILDER", this.options.builderOptions?.modelConfiguration);
+    const initialBuilderInputHash = sha256({
+      manifestHash: manifest.manifestHash,
+      purpose: "initial-builder-dispatch",
+      dispatchStateVersion: initial.stateVersion,
+    });
+    // Do not provision a sandbox or run a baseline when another worker has
+    // already won this exact immutable Builder dispatch.
+    if (supervisor.builderDispatchClaim(runId, initialBuilderInputHash)) {
+      throw new BuilderDispatchClaimLostError(runId);
+    }
     const transition = (
       nextState: Parameters<EngineerSupervisor["transition"]>[0]["nextState"],
       reasonCode: string,
@@ -1161,30 +1240,6 @@ export class EngineerExecutionManager {
         heartbeatTimer.unref?.();
       }
       assertLease();
-      agentExecutionId = (this.options.idFactory ?? randomUUID)();
-      agentStartedAt = (this.options.now ?? (() => new Date()))().toISOString();
-      agentInputHash = sha256({
-        manifestHash: manifest.manifestHash,
-        purpose: "initial-builder-dispatch",
-        dispatchStateVersion: initial.stateVersion,
-      });
-      const initialDispatch = supervisor.claimBuilderDispatch({
-        agentExecutionId,
-        runId,
-        role: "BUILDER",
-        modelTier: route.logicalTier,
-        status: "RUNNING",
-        inputHash: agentInputHash,
-        outputArtifactId: null,
-        startedAt: agentStartedAt,
-        completedAt: null,
-      }, lease ? { ownerId: leaseOwnerId, fencingToken: lease.lease.fencingToken } : null);
-      if (!initialDispatch.won) {
-        agentExecutionId = null;
-        agentStartedAt = null;
-        agentInputHash = null;
-        throw new BuilderDispatchClaimLostError(runId);
-      }
       if (provisioned) {
         transition("SANDBOX_READY", "RETAINED_WORKSPACE_CHECKPOINT_REUSED", [provisioned.record.sandboxId]);
       } else if (this.options.sandboxManager.warmEnabled()) {
@@ -1259,21 +1314,6 @@ export class EngineerExecutionManager {
       testIntegrity = retainedWorkspace && !hardeningChild
         ? TestIntegrityGuard.load(integrityOptions)
         : TestIntegrityGuard.createAndRecord(integrityOptions);
-      const builderRoutingDecisionId = (this.options.idFactory ?? randomUUID)();
-      supervisor.recordModelRouting({
-        routingDecisionId: builderRoutingDecisionId,
-        runId,
-        agentExecutionId,
-        agentRole: "BUILDER",
-        logicalTier: route.logicalTier,
-        resolvedModel: route.model,
-        routingPolicyVersion: route.policyVersion,
-        fallbackUsed: false,
-        fallbackReason: null,
-        cacheKey: null,
-        timestamp: (this.options.now ?? (() => new Date()))().toISOString(),
-      });
-      transition("IMPLEMENTING", "CODEX_BUILDER_STARTED");
       const executor = new TrustedCommandExecutor({
         artifactStore: this.options.artifactStore,
         workspace: provisioned.workspace,
@@ -1283,9 +1323,52 @@ export class EngineerExecutionManager {
         ...(provisioned.commandRunnerAsync ? { runnerAsync: provisioned.commandRunnerAsync } : {}),
         currentCommit: () => this.options.sandboxManager.currentCommit(provisioned!.workspace),
         currentCommitAsync: () => this.options.sandboxManager.currentCommitAsync(provisioned!.workspace),
-        onRecord: (record) => { supervisor.recordCommandExecution(record); },
+        onRecord: (record) => supervisor.recordCommandExecution(record),
         signal,
       });
+      // Before the first paid Builder call, establish which frozen checks are
+      // already red on the exact base. Verification later compares failures to
+      // this bound baseline, preventing unrelated suite debt from causing an
+      // expensive repair loop.
+      if (!supervisor.listArtifacts(runId).some((artifact) => artifact.type === "TEST_COMMAND_BASELINE")) {
+        const baselineManifest = {
+          ...manifest,
+          testPlan: manifest.testPlan.filter((item) => item.command && isBaselineRunnableCommand(item.command, provisioned!.workspace.workspaceRoot)),
+        };
+        const baseline = await captureTestCommandBaseline({
+          supervisor, artifactStore: this.options.artifactStore, manifest: baselineManifest, executor,
+          beforeCommand: () => testIntegrity!.captureCommandSnapshot(),
+          afterCommand: (command, snapshot) => testIntegrity!.assertCommandDidNotMutate(snapshot, command),
+          now: this.options.now,
+        });
+        const failed = baseline.entries
+          .filter((entry) => entry.status !== "SUCCEEDED")
+          .map((entry) => entry.testId);
+        if (failed.length > 0) throw new BaselineTestFailureError(failed);
+      }
+      // A red base is an environment/repository-health blocker. Do not create
+      // a Builder execution or routing record until its no-cost gate passes.
+      agentExecutionId = (this.options.idFactory ?? randomUUID)();
+      agentStartedAt = (this.options.now ?? (() => new Date()))().toISOString();
+      agentInputHash = initialBuilderInputHash;
+      const initialDispatch = supervisor.claimBuilderDispatch({
+        agentExecutionId, runId, role: "BUILDER", modelTier: route.logicalTier, status: "RUNNING",
+        inputHash: agentInputHash, outputArtifactId: null, startedAt: agentStartedAt, completedAt: null,
+      }, lease ? { ownerId: leaseOwnerId, fencingToken: lease.lease.fencingToken } : null);
+      if (!initialDispatch.won) {
+        agentExecutionId = null;
+        agentStartedAt = null;
+        agentInputHash = null;
+        throw new BuilderDispatchClaimLostError(runId);
+      }
+      const builderRoutingDecisionId = (this.options.idFactory ?? randomUUID)();
+      supervisor.recordModelRouting({
+        routingDecisionId: builderRoutingDecisionId, runId, agentExecutionId, agentRole: "BUILDER",
+        logicalTier: route.logicalTier, resolvedModel: route.model, routingPolicyVersion: route.policyVersion,
+        fallbackUsed: false, fallbackReason: null, cacheKey: null,
+        timestamp: (this.options.now ?? (() => new Date()))().toISOString(),
+      });
+      transition("IMPLEMENTING", "CODEX_BUILDER_STARTED");
       const recoveredDiffHash = sha256(await this.options.sandboxManager.workspaceManager().diffAsync(provisioned.workspace));
       const correctionActions = this.correctionActionsForRun(runId);
       const inputContextHash = builderInputContextHash(manifest, undefined, correctionActions);
@@ -1610,6 +1693,7 @@ export class EngineerExecutionManager {
       const builderNoProgress = error instanceof BuilderNoProgressError;
       const providerTimedOut = isProviderModelTimeout(error);
       const testIntegrityFailure = error instanceof TestIntegrityViolationError;
+      const baselineTestFailure = error instanceof BaselineTestFailureError;
       const domain = executionFailureDomain(run.state, error);
       const policy = testIntegrityFailure
         ? { failureClass: "SECURITY_FAILURE" as const, reasonCode: error.reasonCode, retryable: false }
@@ -1690,6 +1774,8 @@ export class EngineerExecutionManager {
           nextState: next,
           reasonCode: testIntegrityFailure
             ? error.reasonCode
+            : baselineTestFailure
+            ? "BASELINE_TEST_FAILED"
             : next === "RETRY_BUDGET_EXHAUSTED"
             ? builderCallLimitReached ? "BUILDER_MODEL_CALL_LIMIT_REACHED" : "RUNTIME_BUDGET_EXHAUSTED"
             : next === "MODEL_PROVIDER_RETRY_PENDING"

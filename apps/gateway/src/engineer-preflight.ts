@@ -10,6 +10,8 @@ export interface EngineerModelCapability {
   available: boolean;
   responsesApi: boolean;
   strictStructuredOutputs: boolean;
+  /** Safe, actionable reason for an unavailable probe; never contains provider output or credentials. */
+  unavailableReason?: "provider_key_missing" | "provider_key_invalid" | "provider_unreachable";
 }
 
 export interface EngineerCapabilityProbe {
@@ -59,7 +61,7 @@ export class EngineerCapabilityPreflight {
     this.options = options;
     this.admissionRegistry = options.admissionRegistry ?? new StaticEngineerRepositoryAdmissionRegistry(options.repository);
     this.readinessState = options.unavailableReason
-      ? { state: "DISABLED", error: null }
+      ? { state: "FAILED", error: `Engineer preflight failed: ${options.unavailableReason}` }
       : { state: "NOT_STARTED", error: null };
   }
 
@@ -134,6 +136,15 @@ export class EngineerCapabilityPreflight {
       if (this.verifiedModels.has(model)) continue;
       const capability = await this.options.probe.model(model);
       if (!capability.available || !capability.responsesApi || !capability.strictStructuredOutputs) {
+        if (capability.unavailableReason === "provider_key_missing") {
+          throw new Error("Engineer preflight failed: OpenAI API key is not configured; add a valid key in Settings, then retry readiness");
+        }
+        if (capability.unavailableReason === "provider_key_invalid") {
+          throw new Error("Engineer preflight failed: OpenAI rejected the configured API key; replace it in Settings, then retry readiness");
+        }
+        if (capability.unavailableReason === "provider_unreachable") {
+          throw new Error(`Engineer preflight failed: OpenAI could not verify ${model}; check provider connectivity, quota, and model access, then retry readiness`);
+        }
         throw new Error(`Engineer preflight failed: ${model} lacks required Responses/structured-output capabilities`);
       }
       this.verifiedModels.add(model);
@@ -219,8 +230,22 @@ export function createLocalEngineerCapabilityProbe(options: {
           } catch { ready = false; }
         }
         return { available: ready, responsesApi: ready, strictStructuredOutputs: ready };
-      } catch {
-        return { available: false, responsesApi: false, strictStructuredOutputs: false };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const record = error && typeof error === "object" ? error as Record<string, unknown> : {};
+        const invalidCredential = record.status === 401 || record.status === 403 ||
+          record.code === "invalid_api_key" || record.code === "authentication_error" ||
+          /incorrect api key|invalid api key|authentication failed|unauthorized/i.test(message);
+        return {
+          available: false,
+          responsesApi: false,
+          strictStructuredOutputs: false,
+          unavailableReason: /BYOK key is required|API key is not configured/i.test(message)
+            ? "provider_key_missing"
+            : invalidCredential
+              ? "provider_key_invalid"
+            : "provider_unreachable",
+        };
       }
     },
     async docker() {

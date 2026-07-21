@@ -89,8 +89,12 @@ export function parseTrustedCommand(command: string): string[] {
 }
 
 function runtimeEnvironment(runId: string): NodeJS.ProcessEnv {
-  const keep = ["PATH", "HOME", "TMPDIR", "TZ"] as const;
-  const env: NodeJS.ProcessEnv = { CI: "1", ZINTUS_ENGINEER_RUN_ID: runId };
+  // Commands execute inside a Linux container. A host TMPDIR such as macOS's
+  // /var/folders/... is not mounted there, so forwarding it turns otherwise
+  // valid test setup (mkdtemp/tmpdir) into an ENOENT failure. Pin the
+  // container-visible temporary directory instead of inheriting host state.
+  const keep = ["PATH", "HOME", "TZ"] as const;
+  const env: NodeJS.ProcessEnv = { CI: "1", TMPDIR: "/tmp", ZINTUS_ENGINEER_RUN_ID: runId };
   for (const key of keep) if (process.env[key]) env[key] = process.env[key];
   return env;
 }
@@ -108,7 +112,12 @@ export interface TrustedCommandExecutorOptions {
   idFactory?: () => string;
   currentCommit: () => string;
   currentCommitAsync?: () => Promise<string>;
-  onRecord?: (record: CommandExecutionRecord) => void;
+  /**
+   * A durable ledger may canonicalize content-addressed artifacts while it
+   * records a command. Return that canonical record so any downstream
+   * evidence binds to the same artifact identities as the ledger.
+   */
+  onRecord?: (record: CommandExecutionRecord) => CommandExecutionRecord | void;
   signal?: AbortSignal;
 }
 
@@ -187,6 +196,21 @@ export class TrustedCommandExecutor {
     return promise;
   }
 
+  /**
+   * Return integrity-checked command output to a trusted in-process consumer.
+   * The caller remains responsible for any narrower model-view redaction and
+   * truncation; artifact storage is never exposed as a path or URL.
+   */
+  readCommandOutput(record: CommandExecutionRecord): { stdout: string; stderr: string } {
+    if (record.runId !== this.options.manifest.runId) {
+      throw new Error("command output belongs to a different run");
+    }
+    return {
+      stdout: this.options.artifactStore.read(record.stdoutArtifact).toString("utf8"),
+      stderr: this.options.artifactStore.read(record.stderrArtifact).toString("utf8"),
+    };
+  }
+
   private validate(command: string): string[] {
     if (!this.options.manifest.allowedCommands.includes(command)) {
       throw new Error("command is not present in the frozen manifest allowlist");
@@ -251,8 +275,13 @@ export class TrustedCommandExecutor {
       status,
       idempotencyKey,
     });
-    this.seen.set(idempotencyKey, record);
-    this.options.onRecord?.(record);
-    return record;
+    // `recordArtifact` is content-addressed. When stdout is identical across
+    // several commands, the ledger can legitimately replace this freshly
+    // allocated artifact id with the durable canonical id. Propagating that
+    // returned record prevents Reviewer evidence from pointing to an orphaned
+    // temporary id and then being rejected as stale.
+    const durableRecord = this.options.onRecord?.(record) ?? record;
+    this.seen.set(idempotencyKey, durableRecord);
+    return durableRecord;
   }
 }

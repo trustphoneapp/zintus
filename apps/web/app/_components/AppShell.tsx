@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import {
   fetchGatewayConnection,
+  GATEWAY_CREDENTIAL_CHANGED_EVENT,
   type GatewayConnectionState,
   GATEWAY_URL,
 } from "@/lib/gateway";
@@ -21,6 +22,8 @@ const TITLES: Record<string, string> = {
   "/research": "Research",
   "/agent": "Agent",
   "/engineer": "Engineer",
+  "/engineer/live": "Engineer walkthrough",
+  "/engineer/online": "Engineer online",
   "/terminal": "Terminal",
   "/providers": "Providers",
   "/usage": "Usage",
@@ -67,10 +70,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let active = true;
+    let timer: number | null = null;
+    let refreshing = false;
+    let queued = false;
+    let handshakeFailures = 0;
+
+    const schedule = (delayMs: number) => {
+      if (!active) return;
+      if (timer !== null) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = null; void refresh(); }, delayMs);
+    };
 
     async function refresh() {
+      if (refreshing) { queued = true; return; }
+      refreshing = true;
       const connection = await fetchGatewayConnection();
       if (!active) {
+        refreshing = false;
         return;
       }
       const health = connection.health;
@@ -80,13 +96,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         health?.savings,
       );
       setConnectionState(connection.state);
+      refreshing = false;
+      if (queued) { queued = false; schedule(0); return; }
+      if (connection.state === "authentication-required") return;
+      if (connection.state === "local-handshake-unavailable") {
+        handshakeFailures += 1;
+        // Bound unauthorized retries. After five failed local handshakes, wait
+        // for focus or an explicit credential change instead of polling forever.
+        if (handshakeFailures < 5) schedule(Math.min(30_000, 3_000 * 2 ** (handshakeFailures - 1)));
+        return;
+      }
+      handshakeFailures = 0;
+      schedule(3_000);
     }
 
-    refresh();
-    const interval = window.setInterval(refresh, 3000);
+    const retryNow = () => { handshakeFailures = 0; void refresh(); };
+    void refresh();
+    window.addEventListener(GATEWAY_CREDENTIAL_CHANGED_EVENT, retryNow);
+    window.addEventListener("focus", retryNow);
     return () => {
       active = false;
-      window.clearInterval(interval);
+      if (timer !== null) window.clearTimeout(timer);
+      window.removeEventListener(GATEWAY_CREDENTIAL_CHANGED_EVENT, retryNow);
+      window.removeEventListener("focus", retryNow);
     };
   }, [setGatewayStatus]);
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -703,16 +704,42 @@ describe("Phase 2 trusted executor", () => {
       artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
       workspace, sandbox, manifest: manifest("run-1", "1".repeat(40)), currentCommit: () => "1".repeat(40),
       runner(executable, args, options) {
-        invocation = [executable, args, options.cwd];
+        invocation = [executable, args, options.cwd, options.env.TMPDIR];
         return { status: 0, stdout: "1 pass", stderr: "" };
       },
     });
     const result = executor.execute("bun run test", "command-1");
-    expect(invocation).toEqual(["bun", ["run", "test"], root]);
+    expect(invocation).toEqual(["bun", ["run", "test"], root, "/tmp"]);
     expect(result.status).toBe("SUCCEEDED");
     expect(result.environmentDigest).toBe(sandbox.environmentDigest);
     expect(readFileSync(result.stdoutArtifact.storageReference, "utf8")).toBe("1 pass");
     expect(executor.execute("bun run test", "command-1")).toEqual(result);
+  });
+
+  test("uses the ledger's canonical artifact identities in returned and replayed command evidence", () => {
+    const root = temporaryRoot();
+    const { workspace, sandbox } = records(root, "run-1", "1".repeat(40));
+    const canonicalStdoutId = randomUUID();
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "artifacts") }),
+      workspace,
+      sandbox,
+      manifest: manifest("run-1", "1".repeat(40)),
+      currentCommit: () => "1".repeat(40),
+      runner: () => ({ status: 0, stdout: "shared output", stderr: "" }),
+      onRecord: (record) => ({
+        ...record,
+        // This models content-addressed ledger deduplication of identical
+        // command stdout across distinct verification commands.
+        stdoutArtifact: { ...record.stdoutArtifact, artifactId: canonicalStdoutId },
+      }),
+    });
+
+    const first = executor.execute("bun run test", "command-1");
+    const replay = executor.execute("bun run test", "command-1");
+
+    expect(first.stdoutArtifact.artifactId).toBe(canonicalStdoutId);
+    expect(replay).toEqual(first);
   });
 
   test("rejects shell injection before invoking a runner", () => {
@@ -755,6 +782,7 @@ describe("Phase 2 Docker sandbox", () => {
     expect(run).toContain("--cap-drop=ALL");
     expect(run).toContain("no-new-privileges");
     expect(run).toContain("1000:1000");
+    expect(run).toContain("/workspace/node_modules/.vite-temp:rw,noexec,nosuid,size=128m,uid=1000,gid=1000,mode=700");
     expect(run).toContain("--env");
     expect(run).toContain("PATH=/bin");
     expect(run).toContain(`type=bind,src=${sandbox.workspace.workspaceRoot},dst=/workspace`);
@@ -842,6 +870,7 @@ describe("Phase 2 offline dependency bundle", () => {
     const repository = initRepository(root, true);
     const bundleRoot = join(root, "dependency-bundle");
     mkdirSync(join(bundleRoot, "node_modules", "fixture"), { recursive: true });
+    mkdirSync(join(bundleRoot, "node_modules", ".vite-temp"), { recursive: true });
     writeFileSync(join(bundleRoot, "node_modules", "fixture", "index.js"), "export const fixture = true;\n");
     const contentHash = await hashDependencyTree(join(bundleRoot, "node_modules"));
     const lockfileHash = workspaceLockfileHash(repository.path);
@@ -853,6 +882,24 @@ describe("Phase 2 offline dependency bundle", () => {
     await expect(bundle.verify()).resolves.toBeUndefined();
     writeFileSync(join(bundle.nodeModulesRoot, "fixture", "index.js"), "tampered\n");
     await expect(bundle.verify()).rejects.toThrow("content hash mismatch");
+  });
+
+  test("rejects a bundle that lacks the writable Vite tmpfs mountpoint before execution", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root, true);
+    const bundleRoot = join(root, "missing-vite-mountpoint-bundle");
+    mkdirSync(join(bundleRoot, "node_modules", "fixture"), { recursive: true });
+    writeFileSync(join(bundleRoot, "node_modules", "fixture", "index.js"), "export {};\n");
+    const lockfileHash = workspaceLockfileHash(repository.path);
+    const toolchainHash = sha256("vite-mountpoint-toolchain");
+    writeFileSync(join(bundleRoot, OFFLINE_DEPENDENCY_MANIFEST), JSON.stringify({
+      schemaVersion: 2, lockfileHash, toolchainHash, repositoryCommit: repository.sha,
+      contentHash: await hashDependencyTree(join(bundleRoot, "node_modules")), nodeModulesPath: "node_modules",
+    }));
+    const bundle = new OfflineDependencyBundle({
+      root: bundleRoot, expectedLockfileHash: lockfileHash, expectedToolchainHash: toolchainHash, expectedRepositoryCommit: repository.sha,
+    });
+    await expect(bundle.verify()).rejects.toThrow("required node_modules/.vite-temp mountpoint");
   });
 
   test("fails closed without a bundle and mounts an admitted bundle read-only", async () => {
@@ -876,6 +923,7 @@ describe("Phase 2 offline dependency bundle", () => {
 
     const bundleRoot = join(root, "dependency-bundle");
     mkdirSync(join(bundleRoot, "node_modules", "fixture"), { recursive: true });
+    mkdirSync(join(bundleRoot, "node_modules", ".vite-temp"), { recursive: true });
     writeFileSync(join(bundleRoot, "node_modules", "fixture", "index.js"), "export {};\n");
     const lockfileHash = workspaceLockfileHash(repository.path);
     const toolchainHash = sha256("bun-test-toolchain");
@@ -896,6 +944,7 @@ describe("Phase 2 offline dependency bundle", () => {
     expect(runArgs).toContain(`type=bind,src=${sandbox.workspace.workspaceRoot},dst=/workspace`);
     expect(runArgs.some((argument) => argument.endsWith("dst=/workspace,rw"))).toBe(false);
     expect(runArgs).toContain(`type=bind,src=${offlineDependencies.nodeModulesRoot},dst=/workspace/node_modules,readonly`);
+    expect(runArgs).toContain("/workspace/node_modules/.vite-temp:rw,noexec,nosuid,size=128m,uid=1000,gid=1000,mode=700");
     await manager.destroyAsync(sandbox);
   });
 });
@@ -1542,6 +1591,55 @@ describe("Phase 2 Codex Builder", () => {
     });
     await expect(builder.run()).rejects.toBeInstanceOf(BuilderNoProgressError);
     expect(calls).toBe(2);
+    workspaceManager.remove(workspace);
+  });
+
+  test("gives the Builder bounded redacted diagnostics before it repairs a failed command", async () => {
+    const root = temporaryRoot();
+    const repository = initRepository(root);
+    const workspaceManager = new GitWorkspaceManager({ workspaceRoot: join(root, "diagnostic-workspaces"), gitSpawn: bunGitSpawn });
+    const workspace = workspaceManager.create({ runId: "run-command-diagnostic", repositoryRoot: repository.path, baseCommitSha: repository.sha });
+    const task = manifest("run-command-diagnostic", repository.sha);
+    const { sandbox } = records(workspace.workspaceRoot, task.runId, repository.sha);
+    let commandRuns = 0;
+    const executor = new TrustedCommandExecutor({
+      artifactStore: new LocalArtifactStore({ root: join(root, "diagnostic-artifacts") }),
+      workspace, sandbox, manifest: task,
+      currentCommit: () => workspaceManager.currentCommit(workspace),
+      runner: () => {
+        commandRuns += 1;
+        return commandRuns === 1
+          ? { status: 1, stdout: "partial test output", stderr: "Assertion failed at /Users/tester/project/test.ts token=sk-abcdefghijklmnop" }
+          : { status: 0, stdout: "1 pass", stderr: "" };
+      },
+    });
+    const requests: Record<string, unknown>[] = [];
+    let calls = 0;
+    const result = await new CodexBuilder({
+      manifest: task, workspace, workspaceManager, executor,
+      transport: { async create(request) {
+        requests.push(request);
+        calls += 1;
+        if (calls === 1) return { id: "diagnostic-fail", output: [{
+          type: "function_call", call_id: "diagnostic-fail-call", name: "run_command", arguments: JSON.stringify({ command: "bun run test" }),
+        }] };
+        if (calls === 2) return { id: "diagnostic-write", output: [{
+          type: "function_call", call_id: "diagnostic-write-call", name: "write_file", arguments: JSON.stringify({ path: "src/value.ts", content: "export const value = 2;\n" }),
+        }] };
+        return { id: "diagnostic-pass", output: [{
+          type: "function_call", call_id: "diagnostic-pass-call", name: "run_command", arguments: JSON.stringify({ command: "bun run test" }),
+        }] };
+      } },
+    }).run();
+    const repairInput = JSON.stringify(requests[1]);
+    expect(repairInput).toContain("Assertion failed");
+    expect(repairInput).toContain("partial test output");
+    expect(repairInput).toContain("[REDACTED_PATH]");
+    expect(repairInput).toContain("[REDACTED_SECRET]");
+    expect(repairInput).not.toContain("/Users/tester");
+    expect(repairInput).not.toContain("sk-abcdefghijklmnop");
+    expect(commandRuns).toBe(2);
+    expect(result.changedFiles).toEqual(["src/value.ts"]);
     workspaceManager.remove(workspace);
   });
 
@@ -2212,7 +2310,9 @@ describe("Phase 2 authoritative execution worker", () => {
     expect(artifacts.map((artifact) => artifact.type)).toContain("TEST_BASELINE_MANIFEST");
     expect(artifacts.map((artifact) => artifact.type)).toContain("TEST_INTEGRITY_COMPARISON");
     const auditDb = new Database(join(root, "engineer.db"), { readonly: true });
-    expect((auditDb.query("SELECT COUNT(*) AS count FROM command_executions").get() as { count: number }).count).toBe(1);
+    // One deterministic base-command baseline is captured before paid Builder
+    // work, followed by the Builder-authorized command itself.
+    expect((auditDb.query("SELECT COUNT(*) AS count FROM command_executions").get() as { count: number }).count).toBe(2);
     expect((auditDb.query("SELECT COUNT(*) AS count FROM agent_executions WHERE run_id = ?").get(run.runId) as { count: number }).count).toBe(1);
     expect(auditDb.query(`SELECT d.agent_execution_id, d.model_tier, d.worker_owner_id, d.worker_fencing_token,
       a.status, a.output_artifact_id FROM builder_dispatch_claims d

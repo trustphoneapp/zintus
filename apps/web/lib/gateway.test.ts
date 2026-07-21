@@ -64,7 +64,89 @@ describe("gateway connection classification", () => {
     expect(await fetchGatewayConnection()).toEqual({
       state: "authentication-required",
     });
-    expect(paths).toEqual(["/v1/status", "/health"]);
+    expect(paths).toEqual(["/v1/status", "/v1/handshake", "/health"]);
+  });
+
+  test("performs the loopback handshake once and keeps the minted session only in memory", async () => {
+    const challenge = "a".repeat(64);
+    const proof = "b".repeat(64);
+    const token = "c".repeat(64);
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), "http://localhost:3000").pathname;
+      calls.push(`${init?.method ?? "GET"} ${path}`);
+      if (path === "/v1/status" && new Headers(init?.headers).get("Authorization") === `Bearer ${token}`) {
+        return Response.json({ ok: true, providers: [] });
+      }
+      if (path === "/v1/status") return new Response("Unauthorized", { status: 401 });
+      if (path === "/v1/handshake" && (init?.method ?? "GET") === "GET") {
+        return Response.json({ challenge, expiresAt: Date.now() + 30_000 });
+      }
+      if (path === "/api/local-gateway/handshake-proof") return Response.json({ proof });
+      if (path === "/v1/handshake" && init?.method === "POST") {
+        return Response.json({ token, expires_at: Date.now() + 60_000 });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    expect(await fetchGatewayConnection()).toEqual({
+      state: "connected",
+      health: { ok: true, providers: [] },
+    });
+    expect(gatewayAuthHeaders()).toEqual({ Authorization: `Bearer ${token}` });
+    expect(calls).toEqual([
+      "GET /v1/status", "GET /v1/handshake", "POST /api/local-gateway/handshake-proof",
+      "POST /v1/handshake", "GET /v1/status",
+    ]);
+  });
+
+  test("deduplicates concurrent handshake attempts from shell and Engineer dashboard", async () => {
+    const challenge = "a".repeat(64);
+    const proof = "b".repeat(64);
+    const token = "c".repeat(64);
+    let challengeCalls = 0;
+    let releaseProof!: () => void;
+    const proofGate = new Promise<void>((resolve) => { releaseProof = resolve; });
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), "http://localhost:3000").pathname;
+      if (path === "/v1/status" && new Headers(init?.headers).get("Authorization") === `Bearer ${token}`) {
+        return Response.json({ ok: true, providers: [] });
+      }
+      if (path === "/v1/status") return new Response("Unauthorized", { status: 401 });
+      if (path === "/v1/handshake" && (init?.method ?? "GET") === "GET") {
+        challengeCalls += 1;
+        return Response.json({ challenge, expiresAt: Date.now() + 30_000 });
+      }
+      if (path === "/api/local-gateway/handshake-proof") {
+        await proofGate;
+        return Response.json({ proof });
+      }
+      if (path === "/v1/handshake" && init?.method === "POST") {
+        return Response.json({ token, expires_at: Date.now() + 60_000 });
+      }
+      return new Response("Not found", { status: 404 });
+    }) as typeof fetch;
+
+    const shell = fetchGatewayConnection();
+    const engineer = fetchGatewayConnection();
+    await Promise.resolve();
+    releaseProof();
+    expect(await Promise.all([shell, engineer])).toEqual([
+      { state: "connected", health: { ok: true, providers: [] } },
+      { state: "connected", health: { ok: true, providers: [] } },
+    ]);
+    expect(challengeCalls).toBe(1);
+  });
+
+  test("reports a broken tokenless proof channel separately from operator-token auth", async () => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const path = new URL(String(input), "http://localhost:3000").pathname;
+      if (path === "/v1/status") return new Response("Unauthorized", { status: 401 });
+      if (path === "/v1/handshake") return Response.json({ challenge: "a".repeat(64), expiresAt: Date.now() + 30_000 });
+      if (path === "/api/local-gateway/handshake-proof") return new Response("Unavailable", { status: 503 });
+      return Response.json({ ok: true, auth: "disabled" });
+    }) as typeof fetch;
+    expect(await fetchGatewayConnection()).toEqual({ state: "local-handshake-unavailable" });
   });
 
   test("keeps a rejected status offline when public health is unavailable", async () => {

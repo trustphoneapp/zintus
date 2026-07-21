@@ -157,6 +157,12 @@ export interface ResolutionCaseDetail extends ResolutionCase {
   events: ResolutionCaseEvent[];
 }
 
+/** Gateway response envelope for the case detail route. */
+export interface ResolutionCaseDetailResponse {
+  case: ResolutionCase;
+  events: ResolutionCaseEvent[];
+}
+
 export type ResolutionDirectiveType = "CREATE_CORRECTED_RUN" | "CREATE_REVERIFY_RUN" | "REJECT_AND_CLOSE";
 
 export interface ReplacementBudget {
@@ -436,6 +442,11 @@ export async function applyResolutionDirective(directiveId: string): Promise<Res
   });
 }
 
+/** Read the hash-bound event chain needed to resume an already-issued directive. */
+export async function getResolutionCaseDetail(caseId: string): Promise<ResolutionCaseDetailResponse> {
+  return request<ResolutionCaseDetailResponse>(`/v1/engineer/resolution-cases/${encodeURIComponent(caseId)}`);
+}
+
 /**
  * Client-side mirror of the server's ceiling rule (§2: "server rejects when
  * prior actual + ambiguous + new cap exceeds the root/case cumulative
@@ -456,6 +467,20 @@ export function projectsWithinCumulativeCeiling(spending: ResolutionSpending, ne
 
 export async function getPublicationCandidates(runId: string): Promise<PublicationCandidate[]> {
   return (await request<{ candidates: PublicationCandidate[] }>(`/v1/engineer/runs/${encodeURIComponent(runId)}/publication-candidates`)).candidates;
+}
+
+/**
+ * Persist the user's candidate choice before an approver can decide. The body
+ * contains only the opaque checkpoint id; lineage, repository, commit, and
+ * requester identity are derived by the publication authority from the
+ * verified checkpoint. Without this write, a browser could show a selected
+ * candidate while the server correctly rejects its approval as unselected.
+ */
+export async function selectPublicationCandidate(runId: string, checkpointId: string): Promise<PublicationCandidate> {
+  return (await request<{ candidate: PublicationCandidate }>(`/v1/engineer/runs/${encodeURIComponent(runId)}/publication-candidates`, {
+    method: "POST",
+    body: JSON.stringify({ checkpointId }),
+  })).candidate;
 }
 
 /**

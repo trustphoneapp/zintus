@@ -17,6 +17,7 @@ import {
 export { VERIFICATION_POLICY_VERSION, SECURITY_POLICY_VERSION } from "./required-lane-policy-versions.js";
 import { VERIFICATION_POLICY_VERSION, SECURITY_POLICY_VERSION } from "./required-lane-policy-versions.js";
 import { scanDiffForSecurity } from "./deterministic-security-scan.js";
+import { isInheritedBaselineFailure, type TestCommandBaseline } from "./test-command-baseline.js";
 
 type TestPlanItem = TaskManifest["testPlan"][number];
 
@@ -33,6 +34,7 @@ export interface IndependentVerifierOptions {
   deterministicSecurityGateCovered?: boolean;
   beforeCommand?: (command: string) => string | Promise<string>;
   afterCommand?: (command: string, beforeSnapshot: string) => void | Promise<void>;
+  commandBaseline?: TestCommandBaseline | null;
 }
 
 export interface IndependentVerificationOutput {
@@ -188,6 +190,12 @@ export class IndependentVerifier {
         executions.push(result.execution);
         trustedEvidence.push(result.evidence);
         if (result.execution.status !== "PASSED") {
+          if (isInheritedBaselineFailure({ baseline: this.options.commandBaseline, testId: item.testId, record: result.command, artifactStore: this.options.artifactStore })) {
+            // The base commit failed this exact command with no newly observed
+            // failing test names. Keep the execution as evidence, but never
+            // spend a Builder repair trying to fix unrelated repository debt.
+            continue;
+          }
           const repeated = [result];
           for (let attempt = 2; attempt <= 3; attempt += 1) {
             const confirmation = await this.runItem(item, attempt);

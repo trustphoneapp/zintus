@@ -79,20 +79,28 @@ const MAX_ANCESTOR_DEPTH = 256;
  * the source freeze (the v31 freeze triggers key off the case row's existence),
  * which is the durable-authority freeze the terminal-only rule otherwise gave us
  * for free — so an adopted legacy run is frozen exactly like a terminal one from
- * the moment its case exists. Every OTHER non-terminal state stays refused.
+ * the moment its case exists.
+ *
+ * `HUMAN_REVIEW_REQUIRED` is also adoptable, but for a narrower reason: its
+ * execution pipeline is paused at a durable human decision and has no active
+ * worker. The gateway advertises `OPEN_RESOLUTION_CASE` for that state, and
+ * case creation installs the same source freeze before any directive can issue.
+ * This permits a bounded, auditable evidence correction without silently
+ * resuming the old run. Every other non-terminal state stays refused.
  *
  * Adoption derives an honest, CORRECTABLE terminal-style blocker (see
  * `strandedStateBackstop`), so the operator's recovery is a real corrected run
  * that re-verifies and can publish through the current surface — never a
  * fabricated defect on unrelated durable evidence, never a raw state mutation.
  */
-const ADOPTABLE_LEGACY_STATES: ReadonlySet<string> = new Set([
+const ADOPTABLE_SUSPENDED_STATES: ReadonlySet<string> = new Set([
   "HUMAN_APPROVAL_PENDING",
   "BASE_BRANCH_STALE",
+  "HUMAN_REVIEW_REQUIRED",
 ]);
 
-function isAdoptableLegacyState(state: string): boolean {
-  return ADOPTABLE_LEGACY_STATES.has(state);
+function isAdoptableSuspendedState(state: string): boolean {
+  return ADOPTABLE_SUSPENDED_STATES.has(state);
 }
 
 /**
@@ -166,14 +174,14 @@ export function deriveCaseCreationInput(
   ).get(runId) as RunRow | null;
   if (!run) throw new ResolutionDeskError("DERIVATION_RUN_NOT_FOUND", "resolution source run not found", 404);
   // A case may be opened for a run whose durable authority is frozen: either a
-  // TERMINAL run, or a stranded LEGACY-gate run (HUMAN_APPROVAL_PENDING /
-  // BASE_BRANCH_STALE) whose only entry path — the retired legacy publication
-  // manager — no longer exists, and whose case row installs the source freeze.
+  // TERMINAL run, or an adoptable suspended run (the stranded legacy gates or
+  // a paused HUMAN_REVIEW_REQUIRED state) whose case row installs the source
+  // freeze.
   // Every other non-terminal state (a genuinely live run) stays refused.
-  if (!isTerminalState(run.state as RunState) && !isAdoptableLegacyState(run.state)) {
+  if (!isTerminalState(run.state as RunState) && !isAdoptableSuspendedState(run.state)) {
     throw new ResolutionDeskError(
       "DERIVATION_RUN_NOT_TERMINAL",
-      `a resolution case may only be opened for a terminal or stranded-legacy run; run ${runId} is ${run.state}`,
+      `a resolution case may only be opened for a terminal or adoptable suspended run; run ${runId} is ${run.state}`,
       409,
       { state: run.state },
     );
@@ -352,9 +360,12 @@ function strandedStateBackstop(runId: string, state: string): CanonicalBlocker {
     ROLLED_BACK: "RUN_ROLLED_BACK",
     HUMAN_APPROVAL_PENDING: "LEGACY_HUMAN_APPROVAL_GATE_RETIRED",
     BASE_BRANCH_STALE: "LEGACY_BASE_BRANCH_STALE",
+    HUMAN_REVIEW_REQUIRED: "HUMAN_REVIEW_EVIDENCE_RECOVERY",
   };
   const reasonCode = reasonByState[state] ?? "RUN_TERMINAL_UNCLASSIFIED";
-  const description = isAdoptableLegacyState(state)
+  const description = state === "HUMAN_REVIEW_REQUIRED"
+    ? truncate(`human review is required and no active worker may advance this run; adopted as a bounded correctable blocker`)
+    : isAdoptableSuspendedState(state)
     ? truncate(`stranded legacy run state ${state}: the retired legacy approval lane can no longer advance it; adopted as a correctable blocker`)
     : truncate(`terminal run state ${state} with no durable blocker record; failed closed to a blocking correction`);
   return {

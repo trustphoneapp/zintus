@@ -53,6 +53,16 @@ describe("gateway-offline UX honesty", () => {
     expect(shell).toContain("fetchGatewayConnection");
   });
 
+  it("distinguishes a failed tokenless handshake and bounds unauthorized retries", () => {
+    const banner = read("app/_components/GatewayOfflineBanner.tsx");
+    const shell = read("app/_components/AppShell.tsx");
+    expect(banner).toContain("Local authorization needs attention.");
+    expect(banner).toContain("no token copy is required");
+    expect(shell).toContain('connection.state === "local-handshake-unavailable"');
+    expect(shell).toContain("handshakeFailures < 5");
+    expect(shell).toContain("GATEWAY_CREDENTIAL_CHANGED_EVENT");
+  });
+
   it("gives Engineer users actionable feedback for a rejected token", () => {
     const engineer = read("app/(app)/engineer/page.tsx");
     expect(engineer).toContain("The operator token was rejected.");

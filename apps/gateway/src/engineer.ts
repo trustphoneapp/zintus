@@ -6,6 +6,7 @@ import {
   type EngineerPublicationManager,
   type PublicationStartResult,
   type EngineerPlanningManager,
+  type PlanProposal,
   type EngineerVerificationManager,
   type EngineerRun,
   type EngineerSupervisor,
@@ -15,6 +16,7 @@ import {
   type ArtifactRecord,
   type BudgetTopUp,
   type EngineerBudgetSelection,
+  EngineerBudgetSelectionSchema,
   type EngineerBudgetSnapshot,
   engineerObservabilitySnapshot,
   isCancellationAllowed,
@@ -47,6 +49,8 @@ import {
   ENGINEER_DEFAULT_ORG_ID,
   EngineerNotFoundError,
   type AuditExport,
+  assertManifestPreservesExplicitApiContract,
+  ExplicitContractViolationError,
 } from "@zintus/engineer";
 import type { EngineerPrincipal } from "./engineer-identity.js";
 import { previewEngineerArtifact } from "./engineer-artifact-preview.js";
@@ -57,6 +61,27 @@ import { unlinkSync } from "node:fs";
 
 class CancellationStillPendingError extends Error {
   constructor(message:string){super(message);this.name="CancellationStillPendingError";}
+}
+
+export class EngineerCreateIdempotencyConflictError extends Error {
+  readonly code = "IDEMPOTENCY_CONFLICT";
+  readonly httpStatus = 409;
+  constructor() {
+    super("run id was already used for a different Engineer request");
+    this.name = "EngineerCreateIdempotencyConflictError";
+  }
+}
+
+/** The planner always reserves this fixed maximum completion before a call. */
+export const MINIMUM_ENGINEER_PLANNER_TOKENS = 8_000;
+
+export class EngineerPlanningBudgetTooSmallError extends Error {
+  readonly code = "PLANNER_BUDGET_MINIMUM";
+  readonly httpStatus = 400;
+  constructor() {
+    super(`token budget must be at least ${MINIMUM_ENGINEER_PLANNER_TOKENS.toLocaleString()} to fund the first planning reservation`);
+    this.name = "EngineerPlanningBudgetTooSmallError";
+  }
 }
 
 // R8-3 P1 #3: the legacy human-gate approval WRITE lane (approve / request-changes
@@ -102,6 +127,83 @@ export interface EngineerRunManagerOptions {
 export type EngineerHardeningReadiness=
   |{state:"READY";code:null;message:null}
   |{state:"DEGRADED";code:"HARDENING_PROMPT_CACHE_AUTHORITY_UNAVAILABLE"|"HARDENING_PROMPT_CACHE_AUTHORITY_MISMATCH";message:string};
+
+/**
+ * A read-only projection of what the gateway will admit at this exact durable
+ * run/budget revision.  This is deliberately not an authority token: every
+ * mutation still performs its ownership, state, budget, and idempotency checks.
+ * Its job is to prevent the browser from presenting a button that the ledger
+ * already knows it must reject.
+ */
+export type EngineerRunAction =
+  | "PLAN" | "FREEZE_PLAN" | "START_EXECUTION" | "REPLAN_EXPLICIT_CONTRACT"
+  | "RETRY_PROVIDER" | "RETRY_REVIEWER" | "RESUME_BUDGET" | "TOP_UP_BUDGET" | "CANCEL_RUN"
+  | "OPEN_RESOLUTION_CASE" | "PREPARE_NEW_INTAKE";
+export type EngineerActionAvailability = "AVAILABLE" | "UNAVAILABLE" | "NOT_APPLICABLE";
+export interface EngineerActionCapability {
+  action: EngineerRunAction;
+  availability: EngineerActionAvailability;
+  reasonCode: string;
+  message: string;
+  nextSafeAction: EngineerRunAction | null;
+  expectedStateVersion: number;
+  expectedBudgetRevision?: number;
+  costImpact: "NONE" | "MAY_CALL_MODEL" | "NEW_SIGNED_BUDGET_REQUIRED";
+}
+export interface EngineerRunCapabilities {
+  schemaVersion: 1;
+  runId: string;
+  state: EngineerRun["state"];
+  stateVersion: number;
+  budget: {
+    revision: number;
+    canIncreaseWithinLifetime: boolean;
+    isResolutionReplacement: boolean;
+    isOptionalHardeningChild: boolean;
+  };
+  actions: EngineerActionCapability[];
+}
+
+/** A browser attempted an action against a run revision it no longer owns. */
+export class EngineerStaleClientStateError extends Error {
+  readonly code = "STALE_CLIENT_STATE" as const;
+  readonly httpStatus = 409 as const;
+  constructor() {
+    super("This run changed in another action. Refresh the run before trying again.");
+    this.name = "EngineerStaleClientStateError";
+  }
+}
+
+export class EngineerControlIdempotencyConflictError extends Error {
+  readonly code = "IDEMPOTENCY_CONFLICT" as const;
+  readonly httpStatus = 409 as const;
+  constructor() {
+    super("This action key was already used for a different Engineer operation.");
+    this.name = "EngineerControlIdempotencyConflictError";
+  }
+}
+
+/**
+ * Raised only after a durable, zero-cost clarification has been recorded. The
+ * browser refreshes the run and presents the decision instead of sending a
+ * planner or Builder request that cannot satisfy the user's frozen scope.
+ */
+export class EngineerVerificationScopeDecisionRequiredError extends Error {
+  readonly code = "VERIFICATION_SCOPE_DECISION_REQUIRED" as const;
+  readonly httpStatus = 409 as const;
+  constructor() {
+    super("Choose whether to verify the task-specific test or require the existing repository-wide suite.");
+    this.name = "EngineerVerificationScopeDecisionRequiredError";
+  }
+}
+
+const VERIFICATION_SCOPE_DECISION_KEY = "verification-scope-before-planning-v1";
+const ROOT_SUITE_REQUEST = /\b(?:run|execute|verify)\b[^.\n]{0,100}\b(?:repository(?:['’]s)?|existing|root|full)\b[^.\n]{0,100}\b(?:test(?:s| suite| command)?|suite)\b/i;
+const NEW_FILES_ONLY_REQUEST = /\bdo not modify\b[^.\n]{0,100}\b(?:existing files?|configuration|lockfiles?|dependencies)\b/i;
+
+function hasVerificationScopeConflict(request: string): boolean {
+  return ROOT_SUITE_REQUEST.test(request) && NEW_FILES_ONLY_REQUEST.test(request);
+}
 
 const unavailableCheckpointAttestor: CheckpointAttestor = {
   algorithm: "unavailable",
@@ -167,6 +269,8 @@ export class EngineerRunManager {
   private readonly activePlanning = new Map<string, AbortController>();
   private readonly activePlanningSettled = new Map<string, Promise<void>>();
   private readonly activePlanningRevocations = new Map<string, () => void>();
+  /** In-memory completion promises make an in-flight replan retry await the new proposal, never the prior one. */
+  private readonly replanReplay = new Map<string, Promise<PlanProposal>>();
   private readonly hardeningRecovery = new Map<string, Promise<unknown>>();
   private readonly recoveredHardeningAuthorities = new Set<string>();
   private readonly cancellationRecovery = new Map<string, Promise<void>>();
@@ -452,15 +556,64 @@ export class EngineerRunManager {
   }): Promise<EngineerRun> {
     this.assertPrincipal(principal);
     const repository = RepositoryReferenceSchema.parse(input.repository);
+    const selectedBudget = EngineerBudgetSelectionSchema.parse(input.budget ?? {});
+    const matchesExistingIntake = (existing: EngineerRun): boolean => {
+      const existingBudget = this.options.supervisor.reconcileBudget(existing.runId);
+      return existing.requestOriginal === input.request.trim() &&
+        sha256(existing.repository) === sha256(repository) &&
+        existingBudget.limits.costUsd === selectedBudget.costBudgetUsd &&
+        existingBudget.limits.tokens === selectedBudget.tokenBudget &&
+        existingBudget.limits.timeSeconds === selectedBudget.timeBudgetSeconds &&
+        existingBudget.lifetimeLimits.costUsd === selectedBudget.lifetimeCostBudgetUsd &&
+        existingBudget.lifetimeLimits.tokens === selectedBudget.lifetimeTokenBudget &&
+        existingBudget.lifetimeLimits.timeSeconds === selectedBudget.lifetimeTimeBudgetSeconds;
+    };
+    // A browser may lose the response after submitting a create request.  The
+    // caller-generated run ID is therefore a durable idempotency identity, not
+    // a cosmetic field: replaying the same logical create returns its existing
+    // owner-scoped run and never begins a second paid planning lane.
+    if (input.runId) {
+      try {
+        const existing = this.options.supervisor.getRun(input.runId);
+        this.assertOwner(input.runId, principal);
+        if (!matchesExistingIntake(existing)) throw new EngineerCreateIdempotencyConflictError();
+        return existing;
+      } catch (error) {
+        if (!(error instanceof EngineerNotFoundError)) throw error;
+      }
+    }
+    // The planner has a fixed 8k completion ceiling. Reject a run that cannot
+    // pay that known minimum before we create a durable record that will pause
+    // at zero usage. Context-derived input tokens remain a later hard admission
+    // check because they cannot be known safely until the trusted context exists.
+    if (this.options.planning && (selectedBudget.tokenBudget < MINIMUM_ENGINEER_PLANNER_TOKENS || selectedBudget.lifetimeTokenBudget < MINIMUM_ENGINEER_PLANNER_TOKENS)) {
+      throw new EngineerPlanningBudgetTooSmallError();
+    }
     await this.options.preflight.assertRunAdmission(repository);
-    return this.options.supervisor.receiveRequest({
-      ...input,
-      userId: principal.ownerId,
-      repository,
-    });
+    try {
+      return this.options.supervisor.receiveRequest({
+        ...input, budget: selectedBudget,
+        userId: principal.ownerId,
+        repository,
+      });
+    } catch (error) {
+      // Concurrent identical creates race at the unique run-id constraint.
+      // Re-read only our own matching run; a different payload still fails
+      // closed rather than becoming an accidental replay.
+      if (!input.runId) throw error;
+      try {
+        const existing = this.options.supervisor.getRun(input.runId);
+        this.assertOwner(input.runId, principal);
+        if (matchesExistingIntake(existing)) return existing;
+        throw new EngineerCreateIdempotencyConflictError();
+      } catch (readError) {
+        if (!(readError instanceof EngineerNotFoundError)) throw readError;
+      }
+      throw error;
+    }
   }
 
-  get(runId: string): { run: EngineerRun; budget: EngineerBudgetSnapshot; lastError: string | null; activity: { active: boolean; role: "PLANNER" | "BUILDER" | "VERIFIER" | null; detail: string } } {
+  get(runId: string): { run: EngineerRun; budget: EngineerBudgetSnapshot; lastError: string | null; activity: { active: boolean; role: "PLANNER" | "BUILDER" | "VERIFIER" | null; detail: string }; capabilities: EngineerRunCapabilities } {
     this.assertOwner(runId, this.options.principal);
     const budget = this.options.supervisor.reconcileBudget(runId);
     const run = this.options.supervisor.getRun(runId);
@@ -475,7 +628,120 @@ export class EngineerRunManager {
     const durableLastError = this.options.supervisor.getLastError(runId);
     const legacySafePauseError = run.state === "PAUSED_BUDGET" && durableLastError !== null &&
       / paused safely: (?:TOKEN_LIMIT_REACHED|COST_LIMIT_REACHED|TIME_LIMIT_REACHED)$/.test(durableLastError);
-    return { run, budget, lastError: legacySafePauseError ? null : durableLastError, activity };
+    return { run, budget, lastError: legacySafePauseError ? null : durableLastError, activity, capabilities: this.capabilitiesFor(run, budget) };
+  }
+
+  /**
+   * Keep action admission in one place.  The browser consumes this projection,
+   * but the mutation methods below remain the security boundary.
+   */
+  private capabilitiesFor(run: EngineerRun, budget: EngineerBudgetSnapshot): EngineerRunCapabilities {
+    // Status/snapshot callers in older integrations may provide a deliberately
+    // partial budget projection. Fail closed in that compatibility seam rather
+    // than turning a read-only status request into a 500 or inventing controls.
+    if (!budget || !budget.limits || !budget.lifetimeLimits || !budget.remaining) {
+      const actions: EngineerRunAction[] = ["PLAN", "FREEZE_PLAN", "START_EXECUTION", "REPLAN_EXPLICIT_CONTRACT", "RETRY_PROVIDER", "RETRY_REVIEWER", "RESUME_BUDGET", "TOP_UP_BUDGET", "CANCEL_RUN", "OPEN_RESOLUTION_CASE", "PREPARE_NEW_INTAKE"];
+      return {
+        schemaVersion: 1, runId: run.runId, state: run.state, stateVersion: run.stateVersion,
+        budget: { revision: 0, canIncreaseWithinLifetime: false, isResolutionReplacement: false, isOptionalHardeningChild: false },
+        actions: actions.map((action) => ({ action, availability: "UNAVAILABLE", reasonCode: "READINESS_NOT_MET", message: "The gateway has not produced a complete budget projection for this run.", nextSafeAction: null, expectedStateVersion: run.stateVersion, costImpact: "NONE" })),
+      };
+    }
+    const isResolutionReplacement = Boolean(this.options.supervisor.resolutionCorrectedRunDirective?.(run.runId));
+    const isOptionalHardeningChild = Boolean(this.options.supervisor.isOptionalHardeningChild?.(run.runId));
+    const canIncreaseWithinLifetime =
+      budget.limits.costUsd < budget.lifetimeLimits.costUsd - Number.EPSILON ||
+      budget.limits.tokens < budget.lifetimeLimits.tokens ||
+      budget.limits.timeSeconds < budget.lifetimeLimits.timeSeconds;
+    const hasRemainingBudget = budget.remaining.costUsd > 0 && budget.remaining.tokens > 0 && budget.remaining.timeSeconds > 0;
+    const isTerminal = run.terminalAt !== null;
+    const action = (input: Omit<EngineerActionCapability, "expectedStateVersion">): EngineerActionCapability => ({
+      ...input,
+      expectedStateVersion: run.stateVersion,
+      ...(input.action === "TOP_UP_BUDGET" || input.action === "RESUME_BUDGET" ? { expectedBudgetRevision: budget.revision } : {}),
+    });
+    const unavailable = (name: EngineerRunAction, reasonCode: string, message: string, nextSafeAction: EngineerRunAction | null = null): EngineerActionCapability =>
+      action({ action: name, availability: "UNAVAILABLE", reasonCode, message, nextSafeAction, costImpact: "NONE" });
+    const available = (name: EngineerRunAction, message: string, costImpact: EngineerActionCapability["costImpact"] = "NONE"): EngineerActionCapability =>
+      action({ action: name, availability: "AVAILABLE", reasonCode: "READY", message, nextSafeAction: null, costImpact });
+
+    const actions: EngineerActionCapability[] = [];
+    const planningActive = this.activePlanning.has(run.runId);
+    actions.push(run.state === "REQUEST_RECEIVED" || ((run.state === "PLANNING" || run.state === "REPLANNING") && !planningActive)
+      ? available("PLAN", run.state === "REQUEST_RECEIVED" ? "Planning can begin once the gateway worker claims this run." : "Retry the interrupted planning checkpoint.", "MAY_CALL_MODEL")
+      : unavailable("PLAN", planningActive ? "PENDING_OPERATION" : (isTerminal ? "RUN_TERMINAL" : "STATE_NOT_ELIGIBLE"), planningActive ? "Planning is already in progress." : "Planning is not the safe next action for this run."));
+    actions.push(run.state === "PLAN_READY"
+      ? available("FREEZE_PLAN", "Freeze the reviewed contract before execution.")
+      : unavailable("FREEZE_PLAN", isTerminal ? "RUN_TERMINAL" : "STATE_NOT_ELIGIBLE", "A ready plan is required before it can be frozen."));
+    actions.push(run.state === "PLAN_FROZEN"
+      ? available("START_EXECUTION", "Start the already frozen contract.", "MAY_CALL_MODEL")
+      : unavailable("START_EXECUTION", isTerminal ? "RUN_TERMINAL" : "STATE_NOT_ELIGIBLE", "Execution can start only from a frozen contract."));
+    actions.push(run.state === "PLAN_READY"
+      ? available("REPLAN_EXPLICIT_CONTRACT", "Regenerate the plan only when the explicit contract needs correction.", "MAY_CALL_MODEL")
+      : unavailable("REPLAN_EXPLICIT_CONTRACT", isTerminal ? "RUN_TERMINAL" : "STATE_NOT_ELIGIBLE", "There is no ready plan to correct."));
+    actions.push(run.state === "MODEL_PROVIDER_RETRY_PENDING"
+      ? available("RETRY_PROVIDER", "Retry the recorded provider checkpoint only within the gateway retry policy.", "MAY_CALL_MODEL")
+      : unavailable("RETRY_PROVIDER", isTerminal ? "RUN_TERMINAL" : "STATE_NOT_ELIGIBLE", "No provider retry is currently authorized."));
+    // A Reviewer provider outcome can be ambiguous after deterministic checks
+    // have already passed.  That is evidence recovery, not a failed candidate:
+    // retain the checkpoint and permit only a reviewer pass from it.  The
+    // browser must never infer this from a stale event list.
+    const reviewerFailures = this.options.supervisor.listFailures(run.runId) ?? [];
+    const reviewerAmbiguousTimeoutCount = reviewerFailures.filter((failure) =>
+      failure.reasonCode === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS" ||
+      failure.reasonCode === "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW",
+    ).length;
+    const reviewerEvidenceRecovery = run.state === "HUMAN_REVIEW_REQUIRED" &&
+      reviewerFailures.some((failure) =>
+        failure.reasonCode === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS" ||
+        failure.reasonCode === "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW" ||
+        (failure.reasonCode === "PHASE3_UNEXPECTED_FAILURE" && failure.failureClass === "WORKFLOW_FAILURE"));
+    // Initial review plus one explicit recovery is the entire paid Reviewer
+    // allowance. A Human Review button must not bypass this same guard and
+    // create an unbounded series of ambiguous provider reservations.
+    const reviewerRetryExhausted = reviewerEvidenceRecovery && reviewerAmbiguousTimeoutCount >= 2;
+    actions.push(reviewerEvidenceRecovery && !reviewerRetryExhausted
+      ? available("RETRY_REVIEWER", "Retry only the recorded Reviewer evidence from the verified checkpoint. This does not rebuild code or re-run tests.", "MAY_CALL_MODEL")
+      : unavailable("RETRY_REVIEWER", reviewerRetryExhausted ? "REVIEWER_RETRY_LIMIT_REACHED" : (isTerminal ? "RUN_TERMINAL" : "STATE_NOT_ELIGIBLE"), reviewerRetryExhausted
+        ? "Reviewer is unavailable after two attempts. The verified checkpoint is preserved; no further Reviewer charge is authorized."
+        : "No Reviewer-only recovery is authorized for this run."));
+
+    if (run.state !== "PAUSED_BUDGET") {
+      actions.push(unavailable("RESUME_BUDGET", "STATE_NOT_ELIGIBLE", "This run is not paused for budget review."));
+      actions.push(unavailable("TOP_UP_BUDGET", "STATE_NOT_ELIGIBLE", "Budget changes are allowed only while a run is paused."));
+    } else {
+      actions.push(hasRemainingBudget
+        ? available("RESUME_BUDGET", "Resume from the retained checkpoint using the current allowance.", "MAY_CALL_MODEL")
+        : unavailable("RESUME_BUDGET", "NO_REMAINING_BUDGET", "No current allowance remains to resume safely.", canIncreaseWithinLifetime ? "TOP_UP_BUDGET" : "PREPARE_NEW_INTAKE"));
+      if (isOptionalHardeningChild) {
+        actions.push(unavailable("TOP_UP_BUDGET", "NEW_SIGNED_BUDGET_REQUIRED", "Optional hardening runs use a separately approved fixed budget.", "PREPARE_NEW_INTAKE"));
+      } else if (isResolutionReplacement) {
+        actions.push(unavailable("TOP_UP_BUDGET", "SIGNED_CORRECTION_BUDGET_FIXED", "This corrected run has the fixed budget you approved in the Resolution Desk. It cannot be extended.", "PREPARE_NEW_INTAKE"));
+      } else if (!canIncreaseWithinLifetime) {
+        actions.push(unavailable("TOP_UP_BUDGET", "LIFETIME_BUDGET_EXHAUSTED", "This run has reached its lifetime budget ceiling. Prepare a new request with a fresh, explicit budget instead.", "PREPARE_NEW_INTAKE"));
+      } else {
+        actions.push(available("TOP_UP_BUDGET", "Add only allowance within this run's pre-approved lifetime ceiling."));
+      }
+    }
+
+    actions.push(!isTerminal && isCancellationAllowed(run.state)
+      ? available("CANCEL_RUN", "Stop this run and retain its durable audit record.")
+      : unavailable("CANCEL_RUN", isTerminal ? "RUN_TERMINAL" : "STATE_NOT_ELIGIBLE", "Cancellation is not safe during this durable operation."));
+    const resolutionEligible = ["BASE_BRANCH_STALE", "HUMAN_APPROVAL_PENDING", "HUMAN_REVIEW_REQUIRED", "FAILED", "REJECTED"].includes(run.state) && !reviewerEvidenceRecovery;
+    actions.push(resolutionEligible
+      ? available("OPEN_RESOLUTION_CASE", "Open the Resolution Desk for a bounded, auditable correction.")
+      : unavailable("OPEN_RESOLUTION_CASE", reviewerEvidenceRecovery ? "REVIEWER_EVIDENCE_RECOVERY_REQUIRED" : "STATE_NOT_ELIGIBLE", reviewerEvidenceRecovery ? "This candidate already has a verified checkpoint. Retry the Reviewer only; do not create a replacement run." : "This run has no Resolution Desk recovery path at this state."));
+    actions.push(run.state === "PAUSED_BUDGET" && !canIncreaseWithinLifetime
+      ? available("PREPARE_NEW_INTAKE", "Prepare a separate fresh request. It does not reuse this unverified checkpoint or budget.")
+      : unavailable("PREPARE_NEW_INTAKE", "STATE_NOT_ELIGIBLE", "Continue this run with its current safe action instead."));
+    return {
+      schemaVersion: 1,
+      runId: run.runId,
+      state: run.state,
+      stateVersion: run.stateVersion,
+      budget: { revision: budget.revision, canIncreaseWithinLifetime, isResolutionReplacement, isOptionalHardeningChild },
+      actions,
+    };
   }
 
   /** One ownership-checked projection for the active UI; individual routes remain for compatibility. */
@@ -504,12 +770,16 @@ export class EngineerRunManager {
         "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING",
         "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED",
       ].includes(event.nextState));
-      const reachedReviewDecision = events.some((event) => [
-        "REVIEW_APPROVED", "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED",
-        "HUMAN_APPROVAL_PENDING", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED",
+      // Publication evidence is created only for a reviewer-approved candidate.
+      // A reviewer escalation intentionally has no approved candidate (and therefore
+      // no publication binding) to expose. Looking it up for HUMAN_REVIEW_REQUIRED
+      // converted an honest escalation into a misleading snapshot read error.
+      const reachedPublicationReview = events.some((event) => [
+        "REVIEW_APPROVED", "HUMAN_APPROVAL_PENDING", "HUMAN_APPROVED",
+        "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED",
       ].includes(event.nextState));
       const status = this.get(runId);
-      const reviewBinding = reachedReviewDecision ? section<{
+      const reviewBinding = reachedPublicationReview ? section<{
         reviewerSessionId: string;
         reviewerDecision: string;
         reviewerDiffHash: string;
@@ -614,6 +884,12 @@ export class EngineerRunManager {
     return this.options.supervisor.reconcileBudget(runId);
   }
 
+  capabilities(principal: EngineerPrincipal, runId: string): EngineerRunCapabilities {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    return this.get(runId).capabilities;
+  }
+
   topUpBudget(principal: EngineerPrincipal, runId: string, input: {
     expectedRevision: number; topUp: BudgetTopUp; idempotencyKey: string;
   }): EngineerBudgetSnapshot {
@@ -630,7 +906,10 @@ export class EngineerRunManager {
     const verificationOwnedCheckpoint = this.options.verification?.ownsBudgetCheckpoint(runId) ?? false;
     const result = this.options.supervisor.resumeBudget({ runId, ...input, actorId: principal.ownerId });
     this.clearError(runId);
-    if (result.run.state === "PLANNING" && this.options.planning) {
+    // A budget can pause either the initial evidence plan or an explicit
+    // contract correction. Both states own the same Planner checkpoint and
+    // must restart it after a successful durable budget resume.
+    if (["PLANNING", "REPLANNING"].includes(result.run.state) && this.options.planning) {
       const job = (async () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         await this.plan(principal, runId);
@@ -695,6 +974,15 @@ export class EngineerRunManager {
     this.assertOwner(runId, principal);
     this.assertRequiredLaneAction(runId);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    // This is deliberately before freeze and before enqueue/model admission:
+    // planner choices may fill gaps, but cannot replace an explicitly requested
+    // public API with a different architecture.
+    try {
+      assertManifestPreservesExplicitApiContract(TaskManifestContentSchema.parse(input.manifest));
+    } catch (error) {
+      if (error instanceof ExplicitContractViolationError) this.options.supervisor.setLastError(runId, error.message);
+      throw error;
+    }
     return this.options.supervisor.freezePlan({
       runId,
       expectedStateVersion: input.expectedStateVersion,
@@ -704,11 +992,97 @@ export class EngineerRunManager {
     }).run;
   }
 
-  async plan(principal: EngineerPrincipal, runId: string) {
+  /**
+   * A narrow, new-files-only request cannot safely promise a red root suite.
+   * Ask before planning so the first model call is made against a contract the
+   * Builder can actually satisfy. A resolved decision is carried into the
+   * planner's normal human-decision reconciliation payload.
+   */
+  private requireVerificationScopeChoice(runId: string, expectedStateVersion?: number): void {
+    const run = this.options.supervisor.getRun(runId);
+    if (!hasVerificationScopeConflict(run.requestOriginal)) return;
+    const existing = this.options.supervisor.listDecisions(runId)
+      .find((decision) => decision.idempotencyKey === VERIFICATION_SCOPE_DECISION_KEY);
+    if (existing && this.options.supervisor.getDecisionResolution(runId, existing.decisionId)) return;
+    if (existing) throw new EngineerVerificationScopeDecisionRequiredError();
+    if (expectedStateVersion !== undefined && run.stateVersion !== expectedStateVersion) {
+      throw new EngineerStaleClientStateError();
+    }
+    const evidenceId = "verification-scope-user-request";
+    this.options.supervisor.createDecision({
+      runId,
+      expectedStateVersion: run.stateVersion,
+      question: "This request forbids editing existing files but also requires the repository-wide existing test suite. Which verification contract should Zintus use?",
+      factors: {
+        affectsMustCriterion: true,
+        changesScope: false,
+        affectsAuthentication: false,
+        affectsAuthorization: false,
+        handlesSecrets: false,
+        requiresMigration: false,
+        changesPublicApi: false,
+        destructiveAction: false,
+        externalSideEffect: false,
+        changesBudget: false,
+        noSafeDefault: true,
+        safeDocumentedDefault: false,
+        reversible: true,
+        withinFrozenScope: false,
+        raisesRisk: false,
+        riskFloorRequiresHuman: false,
+      },
+      options: [
+        {
+          optionId: "scoped-task-test",
+          label: "Verify only the generated task test",
+          impact: "Keeps the requested file scope and verifies the new test directly. Existing repository failures remain recorded separately.",
+          reversibility: "REVERSIBLE",
+          riskTier: "MEDIUM",
+          sourceEvidenceIds: [evidenceId],
+          recommended: true,
+        },
+        {
+          optionId: "preserve-root-suite",
+          label: "Require the existing repository-wide suite",
+          impact: "Preserves the original full-suite requirement. The run will stop before Builder work if the immutable base suite is already failing.",
+          reversibility: "REVERSIBLE",
+          riskTier: "MEDIUM",
+          sourceEvidenceIds: [evidenceId],
+          recommended: false,
+        },
+      ],
+      recommendedOptionId: "scoped-task-test",
+      sourceEvidence: [{
+        evidenceId,
+        runId,
+        sourceType: "USER_REQUEST",
+        trust: "TRUSTED_SYSTEM",
+        summary: "The authenticated gateway normalized a user request that combines a new-files-only scope with an existing repository-wide test requirement.",
+      }],
+      idempotencyKey: VERIFICATION_SCOPE_DECISION_KEY,
+    });
+    throw new EngineerVerificationScopeDecisionRequiredError();
+  }
+
+  async plan(principal: EngineerPrincipal, runId: string, fence?: { expectedStateVersion: number; idempotencyKey: string }) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
-    this.assertRequiredLaneAction(runId);
+    this.assertExpectedStateVersion(runId, fence?.expectedStateVersion);
+    // Admission is deliberately before normalization: a rejected repository
+    // must leave the durable run byte-for-byte unchanged, including request
+    // identity state.
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
+    // Normalize the immutable request identity before asking an early
+    // deterministic clarification.  Otherwise an ASK_NOW decision can resume
+    // directly into PLANNING with requestNormalized still empty; the Planner
+    // then creates a valid proposal that the freeze guard must reject.
+    const normalizedRun = this.normalizeRequestForPlanning(runId, fence?.idempotencyKey);
+    const planningFence = fence ? { ...fence, expectedStateVersion: normalizedRun.stateVersion } : undefined;
+    this.requireVerificationScopeChoice(runId, planningFence?.expectedStateVersion);
+    this.assertRequiredLaneAction(runId);
+    const operation = this.controlOperation(runId, "PLAN", planningFence, { expectedStateVersion: planningFence?.expectedStateVersion });
+    if (operation.replayed) return this.replayedPlan(runId);
+    this.assertExpectedStateVersion(runId, planningFence?.expectedStateVersion);
     if (!this.options.context) throw new Error("Engineer context is not configured on this gateway");
     if (!this.options.planning) throw new Error("Engineer planning is not configured on this gateway");
     if (this.activePlanning.has(runId)) throw new Error("Evidence planning is already active for this run");
@@ -777,7 +1151,7 @@ export class EngineerRunManager {
         }
       }
     };
-    this.beginPlanning(runId);
+    this.beginPlanning(runId, operation.key);
     this.clearError(runId);
     const failureCountBefore = this.options.supervisor.listFailures(runId).length;
     try {
@@ -860,6 +1234,50 @@ export class EngineerRunManager {
       if (this.activePlanning.get(runId) === cancellation) this.activePlanning.delete(runId);
       if (this.activePlanningSettled.get(runId) === planningSettled) this.activePlanningSettled.delete(runId);
       markPlanningSettled();
+    }
+  }
+
+  /** Explicit user API drift is corrected through the same durable run, never by silently weakening the contract. */
+  async replanExplicitContract(principal: EngineerPrincipal, runId: string, fence?: { expectedStateVersion: number; idempotencyKey: string }): Promise<PlanProposal> {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
+    const run = this.options.supervisor.getRun(runId);
+    const operation = this.controlOperation(runId, "REPLAN_EXPLICIT_CONTRACT", fence, { expectedStateVersion: fence?.expectedStateVersion });
+    if (operation.replayed) {
+      const inFlight = operation.key ? this.replanReplay.get(operation.key) : undefined;
+      if (inFlight) return inFlight;
+      return this.replayedPlan(runId, { requireReplanCompletion: true });
+    }
+    this.assertExpectedStateVersion(runId, fence?.expectedStateVersion);
+    if (run.state !== "PLAN_READY") throw new Error(`explicit contract replan requires PLAN_READY, not ${run.state}`);
+    const message = this.options.supervisor.getLastError(runId) ?? "Frozen plan omitted explicit user API requirements";
+    this.options.supervisor.transition({
+      runId, expectedStateVersion: run.stateVersion, nextState: "REPLANNING",
+      // The browser authorizes this recovery request, but it does not directly
+      // promote the state machine.  The gateway records the request above and
+      // performs the deterministic transition as the execution authority.
+      reasonCode: "EXPLICIT_CONTRACT_REPLAN_REQUESTED", actorType: "SYSTEM", actorId: "engineer-gateway",
+      idempotencyKey: operation.key ?? `explicit-contract-replan:${run.stateVersion}`,
+    });
+    // Persist this correction cause only after the state transition succeeds.
+    // It guides the next plan but is not a provider failure and never burns a
+    // Planner retry allowance; repeated failed clicks are therefore harmless.
+    const fingerprint = sha256({ runId, manifestHash: run.manifestHash, message });
+    if (!this.options.supervisor.listFailures(runId).some((failure) =>
+      failure.reasonCode === "EXPLICIT_CONTRACT_PLAN_DRIFT" && failure.fingerprint === fingerprint,
+    )) {
+      this.options.supervisor.recordFailure(FailureRecordSchema.parse({
+        failureId: randomUUID(), runId, failureClass: "REQUEST_FAILURE", reasonCode: "EXPLICIT_CONTRACT_PLAN_DRIFT",
+        fingerprint, evidenceIds: [], retryable: true, createdAt: new Date().toISOString(),
+      }));
+    }
+    const planning = this.plan(principal, runId);
+    if (operation.key) this.replanReplay.set(operation.key, planning);
+    try {
+      return await planning;
+    } finally {
+      if (operation.key && this.replanReplay.get(operation.key) === planning) this.replanReplay.delete(operation.key);
     }
   }
 
@@ -956,29 +1374,81 @@ export class EngineerRunManager {
     return this.options.supervisor.latestPlanProposal(runId);
   }
 
-  async start(principal: EngineerPrincipal, runId: string): Promise<EngineerRun> {
+  async start(principal: EngineerPrincipal, runId: string, fence?: { expectedStateVersion: number; idempotencyKey: string }): Promise<EngineerRun> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     this.assertRequiredLaneAction(runId);
+    const operation = this.controlOperation(runId, "START_EXECUTION", fence, { expectedStateVersion: fence?.expectedStateVersion });
+    if (operation.replayed) return this.options.supervisor.getRun(runId);
+    this.assertExpectedStateVersion(runId, fence?.expectedStateVersion);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
-    const run = this.options.execution.enqueue(runId);
+    const run = (this.options.execution.enqueue as (id: string, actionIdempotencyKey?: string) => EngineerRun)(runId, operation.key);
     this.clearError(runId);
     this.launchExecution(runId);
     return run;
   }
 
-  async retryProviderTimeout(principal: EngineerPrincipal, runId: string): Promise<EngineerRun> {
+  /**
+   * A Resolution Desk directive is explicit human authorization for a fresh,
+   * bounded replacement budget. Its executable run must enter the ordinary
+   * planner lane; otherwise it is durable but inert at REQUEST_RECEIVED with no
+   * user control that can advance it.
+   */
+  async launchCorrectedReplacement(principal: EngineerPrincipal, runId: string): Promise<EngineerRun> {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     this.assertRequiredLaneAction(runId);
+    if (!this.options.supervisor.resolutionCorrectedRunDirective(runId)) {
+      throw new Error("resolution replacement lineage is required");
+    }
+    let run = this.options.supervisor.getRun(runId);
+    if (run.state === "REQUEST_RECEIVED") {
+      try {
+        await this.options.preflight.assertRunAdmission(run.repository);
+        this.beginPlanning(runId);
+        run = this.options.supervisor.getRun(runId);
+      } catch (error) {
+        this.persistError(runId, error);
+        return this.options.supervisor.getRun(runId);
+      }
+    }
+    if (run.state !== "PLANNING" || this.activePlanning.has(runId)) return run;
+    const job = this.plan(principal, runId)
+      .then(() => undefined)
+      .catch((error) => {
+        // `plan` persists lifecycle failures itself. This covers a failure before
+        // that lifecycle begins, so an auto-launched correction cannot stall
+        // silently (for example, when the worker lease is unavailable).
+        if (!(error instanceof BudgetPausedError)) this.persistError(runId, error);
+      });
+    this.background.add(job);
+    void job.finally(() => this.background.delete(job));
+    return this.options.supervisor.getRun(runId);
+  }
+
+  /** Restart-safe recovery for corrected runs committed before a gateway restart. */
+  recoverCorrectedReplacements(): Array<{ runId: string; promise: Promise<EngineerRun> }> {
+    return this.options.supervisor.listRuns(["REQUEST_RECEIVED"])
+      .filter((run) => !this.options.supervisor.isOptionalHardeningChild(run.runId))
+      .filter((run) => this.options.supervisor.resolutionCorrectedRunDirective(run.runId) !== null)
+      .map((run) => ({ runId: run.runId, promise: this.launchCorrectedReplacement(this.options.principal, run.runId) }));
+  }
+
+  async retryProviderTimeout(principal: EngineerPrincipal, runId: string, fence?: { expectedStateVersion: number; idempotencyKey: string }): Promise<EngineerRun> {
+    this.assertPrincipal(principal);
+    this.assertOwner(runId, principal);
+    this.assertRequiredLaneAction(runId);
+    const operation = this.controlOperation(runId, "RETRY_PROVIDER", fence, { expectedStateVersion: fence?.expectedStateVersion });
+    if (operation.replayed) return this.options.supervisor.getRun(runId);
+    this.assertExpectedStateVersion(runId, fence?.expectedStateVersion);
     await this.options.preflight.assertRunAdmission(this.options.supervisor.getRun(runId).repository);
     const pending = this.options.supervisor.getRun(runId);
     const reason = this.options.supervisor.listEvents(runId).at(-1)?.reasonCode;
     if (reason === "PLANNING_PROVIDER_OUTCOME_AMBIGUOUS") {
       const run = this.options.supervisor.transition({
         runId, expectedStateVersion: pending.stateVersion, nextState: "PLANNING",
-        reasonCode: "HUMAN_RETRY_PLANNING_PROVIDER", idempotencyKey: `human-retry-planning:${pending.stateVersion}`,
+        reasonCode: "HUMAN_RETRY_PLANNING_PROVIDER", idempotencyKey: operation.key ?? `human-retry-planning:${pending.stateVersion}`,
       }).run;
       this.clearError(runId);
       this.resumePlanning(runId);
@@ -986,16 +1456,28 @@ export class EngineerRunManager {
     }
     if (reason === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS") {
       if (!this.options.verification) throw new Error("Engineer verification is not configured on this gateway");
+      const priorAmbiguousOutcomes = this.options.supervisor.listFailures(runId)
+        .filter((failure) => failure.reasonCode === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS").length;
+      // The gateway owns this resume route, so it must enforce the same
+      // Reviewer-timeout policy as the verification worker. Otherwise a click
+      // here could repeatedly redispatch an already-ambiguous paid review.
+      if (priorAmbiguousOutcomes >= 2) {
+        return this.options.supervisor.transition({
+          runId, expectedStateVersion: pending.stateVersion, nextState: "HUMAN_REVIEW_REQUIRED",
+          reasonCode: "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW",
+          idempotencyKey: operation.key ?? `verification-provider-timeout-human-review:${pending.stateVersion}`,
+        }).run;
+      }
       const run = this.options.supervisor.transition({
         runId, expectedStateVersion: pending.stateVersion, nextState: "SECURITY_REVIEW",
-        reasonCode: "HUMAN_RETRY_VERIFICATION_PROVIDER", idempotencyKey: `human-retry-verification:${pending.stateVersion}`,
+        reasonCode: "HUMAN_RETRY_VERIFICATION_PROVIDER", idempotencyKey: operation.key ?? `human-retry-verification:${pending.stateVersion}`,
       }).run;
       this.clearError(runId);
       this.options.verification.resumeRecovered(runId);
       return run;
     }
     if (!this.options.execution) throw new Error("Engineer execution is not configured on this gateway");
-    const run = await this.options.execution.retryProviderTimeout(runId);
+    const run = await (this.options.execution.retryProviderTimeout as (id: string, actionIdempotencyKey?: string) => Promise<EngineerRun>)(runId, operation.key);
     this.clearError(runId);
     this.launchExecution(runId);
     return run;
@@ -1322,10 +1804,17 @@ export class EngineerRunManager {
     let plan = null;
     let planningError: string | null = null;
     if (this.options.supervisor.getRun(runId).state === "PLANNING") {
-      if (!this.options.planning) {
+      if (!this.options.context) {
+        planningError = "Engineer context is not configured on this gateway";
+      } else if (!this.options.planning) {
         planningError = "Engineer planning is not configured on this gateway";
       } else {
         try {
+          // An ASK_NOW resolution resumes directly into PLANNING.  It must take
+          // the same durable exact-base context path as a normal plan request;
+          // otherwise the Planner correctly refuses an unbound proposal and the
+          // browser misleadingly offers a retry for a deterministic omission.
+          await this.options.context.build(runId);
           plan = await this.options.planning.plan(runId);
           this.clearError(runId);
         } catch (error) {
@@ -1356,22 +1845,28 @@ export class EngineerRunManager {
     return { resolution, plan, planningError, publication };
   }
 
-  private beginPlanning(runId: string): void {
+  private beginPlanning(runId: string, actionIdempotencyKey?: string): void {
     let run = this.options.supervisor.getRun(runId);
-    if (run.state !== "REQUEST_RECEIVED") return;
-    run = this.options.supervisor.normalizeRequest({
-      runId,
-      expectedStateVersion: run.stateVersion,
-      normalizedRequest: run.requestOriginal,
-      idempotencyKey: `gateway:planning-normalize:${sha256(run.requestOriginal)}`,
-    }).run;
+    if (run.state === "REQUEST_RECEIVED") run = this.normalizeRequestForPlanning(runId, actionIdempotencyKey);
+    if (run.state !== "REQUEST_NORMALIZED") return;
     this.options.supervisor.transition({
       runId,
       expectedStateVersion: run.stateVersion,
       nextState: "PLANNING",
       reasonCode: "EVIDENCE_PLANNING_STARTED",
-      idempotencyKey: `gateway:planning-start:${run.stateVersion}`,
+      idempotencyKey: actionIdempotencyKey ?? `gateway:planning-start:${run.stateVersion}`,
     });
+  }
+
+  private normalizeRequestForPlanning(runId: string, actionIdempotencyKey?: string): EngineerRun {
+    const run = this.options.supervisor.getRun(runId);
+    if (run.state !== "REQUEST_RECEIVED") return run;
+    return this.options.supervisor.normalizeRequest({
+      runId,
+      expectedStateVersion: run.stateVersion,
+      normalizedRequest: run.requestOriginal,
+      idempotencyKey: actionIdempotencyKey ? `planning-normalize:${sha256(actionIdempotencyKey)}` : `gateway:planning-normalize:${sha256(run.requestOriginal)}`,
+    }).run;
   }
 
   private persistError(runId: string, error: unknown): string {
@@ -1399,7 +1894,7 @@ export class EngineerRunManager {
   // approval WRITE lane, retired from every run path by R5A and removed here.
   // Recovery for a stranded run now runs exclusively through the Resolution Desk.
 
-  async resolveHumanReview(principal: EngineerPrincipal, runId: string, decision: "reject" | "retry", reason: string) {
+  async resolveHumanReview(principal: EngineerPrincipal, runId: string, decision: "reject" | "retry", reason: string, fence?: { expectedStateVersion: number; idempotencyKey: string }) {
     this.assertPrincipal(principal);
     this.assertOwner(runId, principal);
     if ((decision as string) === "approve") throw new VerifiedCandidateRequiredError();
@@ -1408,7 +1903,13 @@ export class EngineerRunManager {
     // canonical branch advances after verification. Any configured publication
     // path performs its own current-base checks before a remote mutation.
     const run = this.options.supervisor.getRun(runId);
+    const reviewOperation = this.controlOperation(runId, `HUMAN_REVIEW_${decision.toUpperCase()}`, fence, {
+      expectedStateVersion: fence?.expectedStateVersion, decision, reason,
+    });
+    if (reviewOperation.replayed) return { run: this.options.supervisor.getRun(runId), publication: null };
+    this.assertExpectedStateVersion(runId, fence?.expectedStateVersion);
     if (run.state !== "HUMAN_REVIEW_REQUIRED") throw new Error(`human review requires HUMAN_REVIEW_REQUIRED, not ${run.state}`);
+    const reviewOperationKey = reviewOperation.key;
     if(decision==="retry")this.assertRequiredLaneAction(runId);
     const flakeFailure = (this.options.supervisor.listFailures?.(runId) ?? [])
       .find((failure) => failure.reasonCode === "FLAKY_TEST_QUARANTINED");
@@ -1418,7 +1919,7 @@ export class EngineerRunManager {
           runId, expectedStateVersion: run.stateVersion, nextState: "REJECTED",
           reasonCode: "HUMAN_REJECTED_FLAKY_CANDIDATE", actorType: "HUMAN", actorId: principal.reviewerId,
           evidenceIds: flakeFailure.evidenceIds, manifestHash: run.manifestHash,
-          idempotencyKey: `human-flake:reject:${run.stateVersion}:${sha256(reason)}`,
+          idempotencyKey: reviewOperationKey ?? `human-flake:reject:${run.stateVersion}:${sha256(reason)}`,
         }).run };
       }
       if (!this.options.verification) throw new Error("Engineer verification is not configured for a quarantined-test retry");
@@ -1426,7 +1927,7 @@ export class EngineerRunManager {
         runId, expectedStateVersion: run.stateVersion, nextState: "VERIFICATION_RECOVERY",
         reasonCode: "HUMAN_RETRY_FLAKY_TEST", actorType: "HUMAN", actorId: principal.reviewerId,
         evidenceIds: flakeFailure.evidenceIds.length ? flakeFailure.evidenceIds : [flakeFailure.failureId], manifestHash: run.manifestHash,
-        idempotencyKey: `human-flake:retry:${run.stateVersion}:${sha256(reason)}`,
+        idempotencyKey: reviewOperationKey ?? `human-flake:retry:${run.stateVersion}:${sha256(reason)}`,
         facts: { reviewerRetryAuthorized: true },
       }).run;
       this.options.verification.resumeRecovered(runId);
@@ -1438,23 +1939,32 @@ export class EngineerRunManager {
       return { run: this.options.supervisor.transition({
         runId, expectedStateVersion: run.stateVersion, nextState: "REJECTED",
         reasonCode: "HUMAN_REVIEW_REJECTED", actorType: "HUMAN", actorId: principal.reviewerId,
-        evidenceIds, manifestHash: run.manifestHash, idempotencyKey: `human-review:reject:${run.stateVersion}:${sha256(reason)}`,
+        evidenceIds, manifestHash: run.manifestHash, idempotencyKey: reviewOperationKey ?? `human-review:reject:${run.stateVersion}:${sha256(reason)}`,
       }).run };
     }
     if (decision === "retry") {
       if (!this.options.verification) throw new Error("Engineer verification is not configured for Reviewer recovery");
-      const sequence = this.options.supervisor.latestEventSequence(runId);
-      const latestEvent = sequence > 0 ? this.options.supervisor.listEvents(runId, sequence - 1, 1)[0] : undefined;
-      const reviewerFailure = [...(this.options.supervisor.listFailures(runId) ?? [])].reverse().find((failure) =>
-        failure.reasonCode === "PHASE3_UNEXPECTED_FAILURE" && failure.failureClass === "WORKFLOW_FAILURE");
-      if (!reviewerFailure || latestEvent?.reasonCode !== "PHASE3_UNEXPECTED_FAILURE" || latestEvent.previousState !== "REVIEWING") {
+      const retryableFailure = [...(this.options.supervisor.listFailures(runId) ?? [])].reverse().find((failure) =>
+        ["VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW"].includes(failure.reasonCode) ||
+        (failure.reasonCode === "PHASE3_UNEXPECTED_FAILURE" && failure.failureClass === "WORKFLOW_FAILURE"));
+      if (!retryableFailure) {
         throw new Error("Reviewer retry requires a recorded failed Reviewer attempt");
+      }
+      const timeoutRecovery = ["VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW"].includes(retryableFailure.reasonCode);
+      if (timeoutRecovery) {
+        const timeoutCount = (this.options.supervisor.listFailures(runId) ?? []).filter((failure) =>
+          failure.reasonCode === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS" ||
+          failure.reasonCode === "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW",
+        ).length;
+        if (timeoutCount >= 2) {
+          throw new Error("Reviewer retry limit reached; the verified checkpoint is preserved and no further Reviewer charge is authorized");
+        }
       }
       const recovery = this.options.supervisor.transition({
         runId, expectedStateVersion: run.stateVersion, nextState: "VERIFICATION_RECOVERY",
-        reasonCode: "HUMAN_RETRY_FAILED_REVIEWER", actorType: "HUMAN", actorId: principal.reviewerId,
-        evidenceIds: [reviewerFailure.failureId], manifestHash: run.manifestHash,
-        idempotencyKey: `human-review:retry:${run.stateVersion}:${sha256(reason)}`,
+        reasonCode: timeoutRecovery ? "HUMAN_RETRY_VERIFICATION_PROVIDER" : "HUMAN_RETRY_FAILED_REVIEWER", actorType: "HUMAN", actorId: principal.reviewerId,
+        evidenceIds: [retryableFailure.failureId], manifestHash: run.manifestHash,
+        idempotencyKey: reviewOperationKey ?? `human-review:retry:${run.stateVersion}:${sha256(reason)}`,
         facts: { reviewerRetryAuthorized: true },
       }).run;
       this.options.supervisor.setLastError(runId, null);
@@ -1653,6 +2163,53 @@ export class EngineerRunManager {
       throw new Error("untrusted Engineer principal");
     }
   }
+
+  private assertExpectedStateVersion(runId: string, expectedStateVersion: number | undefined): void {
+    if (expectedStateVersion === undefined) return;
+    if (this.options.supervisor.getRun(runId).stateVersion !== expectedStateVersion) {
+      throw new EngineerStaleClientStateError();
+    }
+  }
+
+  /**
+   * Bind a caller key to an exact canonical action payload using the existing
+   * append-only state-event idempotency record. The raw caller key remains a
+   * searchable prefix, so reusing it with changed intent fails before a paid
+   * dispatch; the derived key makes exact retries replay the same transition.
+   */
+  private controlOperation(
+    runId: string,
+    action: string,
+    fence: { expectedStateVersion: number; idempotencyKey: string } | undefined,
+    payload: unknown,
+  ): { key: string | undefined; replayed: boolean } {
+    if (!fence) return { key: undefined, replayed: false };
+    if (fence.idempotencyKey.length < 1 || fence.idempotencyKey.length > 200) {
+      throw new Error("idempotencyKey must be between 1 and 200 characters");
+    }
+    const prefix = `control:${fence.idempotencyKey}:`;
+    const key = `${prefix}${sha256({ action, payload })}`;
+    const previous = this.options.supervisor.listEvents(runId).find((event) => event.idempotencyKey.startsWith(prefix));
+    if (previous && previous.idempotencyKey !== key) throw new EngineerControlIdempotencyConflictError();
+    return { key, replayed: previous?.idempotencyKey === key };
+  }
+
+  /** Return the already-durable planning result after a lost client response; never plan twice. */
+  private async replayedPlan(runId: string, options: { requireReplanCompletion?: boolean } = {}): Promise<PlanProposal> {
+    const current = this.options.supervisor.latestPlanProposal(runId);
+    const run = this.options.supervisor.getRun(runId);
+    // A correction replay must never surface the proposal it was specifically
+    // asked to replace. Only a fresh PLAN_READY state can certify completion;
+    // any failure, timeout, clarification, or retry-pending state is returned
+    // to the UI as an explicit refresh-needed outcome instead.
+    if (current && (!options.requireReplanCompletion || run.state === "PLAN_READY")) return current;
+    const pending = this.activePlanningSettled.get(runId);
+    if (pending) await pending;
+    const proposal = this.options.supervisor.latestPlanProposal(runId);
+    if (proposal && (!options.requireReplanCompletion || this.options.supervisor.getRun(runId).state === "PLAN_READY")) return proposal;
+    throw new Error("The previous planning request finished without a durable proposal; refresh the run before choosing a new action.");
+  }
+
 
   private requestCancellationWithoutPublication(runId:string,actorId:string,reason:string):void{
     const artifactStore = this.options.artifactStore;

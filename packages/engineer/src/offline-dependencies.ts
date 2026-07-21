@@ -5,6 +5,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 
 export const OFFLINE_DEPENDENCY_MANIFEST = "zintus-engineer-dependencies.json";
+const VITE_TMPFS_MOUNTPOINT = ".vite-temp";
 const HashSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
 const CommitSchema = z.string().regex(/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i);
 
@@ -98,6 +99,14 @@ export class OfflineDependencyBundle {
   async verify(): Promise<void> {
     const actualRoot = await realpath(this.nodeModulesRoot);
     if (actualRoot !== this.nodeModulesRoot || !inside(this.root, actualRoot)) throw new Error("offline dependency bundle path changed after admission");
+    // Docker can only overlay the writable Vite tmpfs onto an existing path
+    // beneath the read-only dependency bind. Without this preflight invariant,
+    // every authorized test command fails after Builder spend with an OCI mount
+    // error rather than before planning.
+    const viteTemp = await lstat(join(actualRoot, VITE_TMPFS_MOUNTPOINT)).catch(() => undefined);
+    if (!viteTemp?.isDirectory() || viteTemp.isSymbolicLink()) {
+      throw new Error("offline dependency bundle lacks required node_modules/.vite-temp mountpoint");
+    }
     if ((await hashDependencyTree(actualRoot)) !== this.manifest.contentHash) {
       throw new Error("offline dependency content hash mismatch");
     }

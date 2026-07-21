@@ -29,6 +29,8 @@ export function GatewayOfflineBanner({
       title={
         state === "authentication-required"
           ? `The gateway at ${url} is running but requires an operator token.`
+          : state === "local-handshake-unavailable"
+            ? `The gateway at ${url} is running, but its local secure handshake could not be completed.`
           : `Looking for the gateway at ${url} — set NEXT_PUBLIC_GATEWAY_URL to point elsewhere.`
       }
     >
@@ -42,6 +44,13 @@ export function GatewayOfflineBanner({
           <span className="app-offline-links">
             <a href="/engineer#gateway-access">Enter token</a>
           </span>
+        </>
+      ) : state === "local-handshake-unavailable" ? (
+        <>
+          <span className="app-offline-text">
+            <strong>Local authorization needs attention.</strong> Restart the local gateway and Zintus web app; no token copy is required.
+          </span>
+          <span className="app-offline-links"><a href="/engineer#gateway-access">Troubleshoot</a></span>
         </>
       ) : (
         <>

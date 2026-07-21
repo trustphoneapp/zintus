@@ -56,6 +56,7 @@ import {
   NO_LOCKFILE_HASH,
   resolveEngineerModel,
   ResolutionDesk,
+  ResolutionDeskError,
   ResolutionReplacementRunFactory,
   deriveCaseCreationInput,
   serverPricingPolicyDigest,
@@ -63,8 +64,8 @@ import {
   type PublicationAuthorityService,
 } from "@zintus/engineer";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { chmodSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
 import {
   createHash,
   createHmac,
@@ -122,30 +123,35 @@ const HANDSHAKE_SECRET_FILE = join(
 /**
  * Build the loopback handshake authority for a TOKENLESS gateway. The bootstrap
  * secret is taken from GATEWAY_HANDSHAKE_SECRET when the launcher injects one
- * (the desktop shell), otherwise minted here and written to a 0600 session file
- * so the legitimate local app can read it and perform the handshake. Never
- * called when a GATEWAY_TOKEN is configured.
+ * (the desktop shell), otherwise minted here. In both cases it is atomically
+ * written to a 0600 session file so the legitimate local web app can perform
+ * the proof step. This is especially important after a watch/restart: leaving
+ * an old file would make the browser prove knowledge of a stale secret and
+ * appear as an authentication failure. Never called when a GATEWAY_TOKEN is
+ * configured.
  */
-function establishLoopbackAuthority(log: LogFn): LoopbackAuthority {
-  const injected = process.env.GATEWAY_HANDSHAKE_SECRET?.trim();
+export function establishLoopbackAuthority(
+  log: LogFn,
+  options: { injectedSecret?: string; secretFile?: string } = {},
+): LoopbackAuthority {
+  const injected = options.injectedSecret?.trim() ?? process.env.GATEWAY_HANDSHAKE_SECRET?.trim();
   const secret = injected || randomBytes(32).toString("hex");
-  if (!injected) {
-    // Persist the minted secret out-of-band (0600) so the local app can read it.
-    // Best-effort: if this fails the gateway still runs, and a launcher that
-    // injects GATEWAY_HANDSHAKE_SECRET does not depend on the file at all.
-    try {
-      mkdirSync(join(homedir(), ".zintus"), { recursive: true });
-      writeFileSync(
-        HANDSHAKE_SECRET_FILE,
-        `${JSON.stringify({ handshakeSecret: secret, pid: process.pid })}\n`,
-        { mode: 0o600 },
-      );
-      chmodSync(HANDSHAKE_SECRET_FILE, 0o600);
-    } catch (error) {
-      log("warn", "gateway.handshake_secret_persist_failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+  const secretFile = options.secretFile ?? HANDSHAKE_SECRET_FILE;
+  try {
+    mkdirSync(dirname(secretFile), { recursive: true });
+    const temporary = `${secretFile}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+    writeFileSync(
+      temporary,
+      `${JSON.stringify({ handshakeSecret: secret, pid: process.pid })}\n`,
+      { mode: 0o600 },
+    );
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, secretFile);
+    chmodSync(secretFile, 0o600);
+  } catch (error) {
+    log("warn", "gateway.handshake_secret_persist_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
   return new LoopbackAuthority({ bootstrapSecret: secret });
 }
@@ -303,6 +309,20 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
   let engineerSandboxManager: DockerSandboxManager | undefined;
   let engineerPrewarmConfig: { repositoryId: string; repositoryRoot: string; getBaseCommitSha: () => string } | undefined;
   let recoverHardeningPaidCalls: (() => HardeningPaidCallRecoverySweepResult) | undefined;
+  const engineerConfigurationUnavailableReason = !engineerRepositoryRoot || !engineerRepositoryId ||
+      !engineerRepositoryOwner || !engineerRepositoryName || !engineerBaseBranch || !engineerOriginUrl ||
+      (engineerRepositoryProvider !== "local" && engineerRepositoryProvider !== "github")
+    ? "canonical repository configuration is incomplete"
+    : !engineerBaseCommitSha || !/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(engineerBaseCommitSha)
+      ? "exact repository base commit is unavailable"
+      : !engineerImage || !engineerImageDigest || !/^sha256:[a-f0-9]{64}$/i.test(engineerImageDigest) ||
+          !engineerImage.endsWith(`@${engineerImageDigest}`)
+        ? "pinned execution image configuration is incomplete"
+        : !engineerDependenciesReady
+          ? engineerDependencyLockfileError
+            ? "exact-base dependency lockfile identity is unavailable"
+            : "offline dependency bundle and toolchain hash are unavailable"
+          : "Engineer configuration is unavailable";
   const unavailablePreflight = new EngineerCapabilityPreflight({
     models: [], publicationEnabled: false,
     repository: { repositoryId: "unconfigured", provider: "local", owner: "unconfigured", name: "unconfigured", baseBranch: "unconfigured", baseCommitSha: "0".repeat(40), originUrl: "unconfigured" },
@@ -312,7 +332,7 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
       repository: async () => ({ readable: false, exactBaseCommit: false }),
       publication: async () => ({ available: false, pullRequestsWritable: false }),
     },
-    unavailableReason: "canonical repository, exact base, model, Docker, and image configuration is incomplete",
+    unavailableReason: engineerConfigurationUnavailableReason,
   });
   let engineerRuns = new EngineerRunManager({ supervisor: engineerSupervisor, planning: engineerPlanning, artifactStore: engineerArtifactStore, principal: engineerPrincipal, preflight: unavailablePreflight });
   // F6 (R5F-2): the REAL result-tree-hash source for the v35 provenance
@@ -871,6 +891,18 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
     };
     resolutionDesk = {
       createCase: (_principal, runId) => {
+        const run = engineerSupervisor.getRun(runId);
+        const reviewerEvidenceRecovery = run.state === "HUMAN_REVIEW_REQUIRED" && engineerSupervisor.listFailures(runId).some((failure) =>
+          failure.reasonCode === "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS" ||
+          failure.reasonCode === "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW" ||
+          (failure.reasonCode === "PHASE3_UNEXPECTED_FAILURE" && failure.failureClass === "WORKFLOW_FAILURE"));
+        if (reviewerEvidenceRecovery) {
+          throw new ResolutionDeskError(
+            "REVIEWER_EVIDENCE_RECOVERY_REQUIRED",
+            "This candidate has a verified checkpoint. Retry the Reviewer from that checkpoint instead of creating a replacement run.",
+            409,
+          );
+        }
         const input = deriveCaseCreationInput(resolutionConnection, runId, { pricingPolicyDigest: resolutionPricingDigest });
         requireOwner(input.ownerUserId);
         return desk.createCase(input);
@@ -890,13 +922,31 @@ export function startGateway(options: StartGatewayOptions = {}): RunningGateway 
         requireCaseOwner(caseId);
         return desk.issueDirective(caseId, body, idempotencyKey);
       },
-      applyDirective: (_principal, directiveId, idempotencyKey) => {
+      applyDirective: async (_principal, directiveId, idempotencyKey) => {
         requireDirectiveOwner(directiveId);
-        return desk.applyDirective(directiveId, idempotencyKey);
+        const result = desk.applyDirective(directiveId, idempotencyKey);
+        // The directive is the user's explicit authorization to consume the
+        // replacement budget. Once it commits atomically, hand the replacement
+        // into the ordinary planner rather than leaving it inert at stage 1.
+        await engineerRuns.launchCorrectedReplacement(engineerPrincipal, result.replacementRunId);
+        return result;
       },
     };
   } else {
     log("warn", "engineer.resolution_desk_unavailable", { detail: resolutionSigning.detail });
+  }
+
+  // A corrected replacement is explicitly budget-authorized by its signed
+  // Resolution Desk directive. This must run after the signing authority is
+  // bound above; otherwise the lineage check correctly fails closed during boot
+  // and a committed replacement can remain at REQUEST_RECEIVED.
+  for (const recovery of engineerRuns.recoverCorrectedReplacements()) {
+    recovery.promise.catch((error) => {
+      log("error", "engineer.corrected_replacement_recovery_failed", {
+        runId: recovery.runId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   // P8 publication-authority facade. The routes forward JSON; this facade derives

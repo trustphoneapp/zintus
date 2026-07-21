@@ -5,11 +5,13 @@ import { useSearchParams } from "next/navigation";
 import { getEngineerBudget, getEngineerHardeningReadiness, getEngineerRun, type EngineerBudgetSnapshot, type EngineerRun } from "@/lib/engineer";
 import { estimateEngineerCost } from "@/lib/engineer-cost";
 import { EngineerActionLock } from "@/lib/engineer-action-lock";
+import { fetchGatewayConnection, type GatewayConnectionState } from "@/lib/gateway";
 import { HardeningReadinessBanner, type EngineerHardeningReadinessState } from "../EngineerHardeningReadiness";
 import {
   applyResolutionDirective,
   createResolutionCase,
   createResolutionDirective,
+  getResolutionCaseDetail,
   listResolutionCases,
   type ResolutionCase,
   type ResolutionDirectiveType,
@@ -38,6 +40,7 @@ function ResolutionDeskInner() {
   const [budget, setBudget] = useState<EngineerBudgetSnapshot | null>(null);
   const [resolutionCase, setResolutionCase] = useState<ResolutionCase | null>(null);
   const [readiness, setReadiness] = useState<EngineerHardeningReadinessState>("READY");
+  const [gatewayState, setGatewayState] = useState<GatewayConnectionState>("offline");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
@@ -53,9 +56,24 @@ function ResolutionDeskInner() {
     setError(null);
     setActionError(null);
     try {
+      // A Resolution Desk URL may be opened directly, before AppShell has had
+      // a chance to establish the memory-only loopback session. Establish it
+      // here before making protected resolution calls; otherwise a legitimate
+      // fresh navigation races the shell and renders an unhelpful raw 401.
+      const connection = await fetchGatewayConnection();
+      setGatewayState(connection.state);
+      if (connection.state !== "connected") {
+        throw new Error(
+          connection.state === "offline"
+            ? "Your local Engineer gateway is not running. Start it, then try again."
+            : "Connecting to your local Engineer gateway was not completed. Check the local connection and try again.",
+        );
+      }
       const [nextRun, cases] = await Promise.all([getEngineerRun(id), listResolutionCases(id)]);
       setRun(nextRun);
-      setResolutionCase(cases[0] ?? null);
+      const selectedCase = cases[0] ?? null;
+      const detail = selectedCase ? await getResolutionCaseDetail(selectedCase.caseId).catch(() => null) : null;
+      setResolutionCase(detail?.case ?? selectedCase);
       await getEngineerBudget(id).then(setBudget).catch(() => setBudget(null));
       await getEngineerHardeningReadiness().then((next) => setReadiness(next.state)).catch(() => setReadiness("UNKNOWN"));
     } catch (cause) {
@@ -113,6 +131,18 @@ function ResolutionDeskInner() {
     });
   }, [resolutionCase, run, budgetValue, withMutation, runId, load]);
 
+  const resumeIssuedDirective = useCallback(async () => {
+    if (!resolutionCase || !runId) return;
+    const detail = await getResolutionCaseDetail(resolutionCase.caseId);
+    const directiveId = [...detail.events].reverse().find((event) => event.eventType === "DIRECTIVE_ISSUED")?.directiveId;
+    if (!directiveId) throw new Error("The issued directive is unavailable. Reload the case before retrying.");
+    await withMutation("resolution:resume-issued", async () => {
+      const result = await applyResolutionDirective(directiveId);
+      if (result.replacementRunId) setLastReplacementRunId(result.replacementRunId);
+      await load(runId);
+    });
+  }, [resolutionCase, runId, withMutation, load]);
+
   const correctedEstimate = useMemo(() => {
     if (!run) return null;
     const estimate = estimateEngineerCost(run.requestNormalized, run.repository.name);
@@ -133,7 +163,7 @@ function ResolutionDeskInner() {
       {readiness !== "READY" ? <HardeningReadinessBanner state={readiness} /> : null}
       {error ? <ResolutionErrorState message={error} /> : null}
       {actionError ? <ResolutionActionError error={actionError} /> : null}
-      {loading && runId ? <section className="engineer-card"><p className="engineer-muted">Loading the resolution case…</p></section> : null}
+      {loading && runId ? <section className="engineer-card"><p className="engineer-muted">{gatewayState === "offline" ? "Connecting to your local Engineer gateway…" : "Loading the resolution case…"}</p></section> : null}
 
       {!loading && runId && !error && !resolutionCase
         ? <ResolutionEmptyState onStart={() => void startCase()} starting={starting} />
@@ -148,7 +178,7 @@ function ResolutionDeskInner() {
         <BlockerSections blockers={resolutionCase.blockers} />
         <ResolutionSpendingSummary spending={resolutionCase.spending} />
         {budget ? <RunBudgetSpendSummary budget={budget} /> : null}
-        <ResolutionDecisions
+        {resolutionCase.state === "DIRECTIVE_ISSUED" ? <section className="engineer-card engineer-gate"><div><span className="engineer-kicker">Directive issued</span><h2>Resume the safe apply</h2><p>The correction decision is already durable. This retries only its idempotent apply step; it does not create another directive or charge another model call.</p></div><div className="engineer-actions"><button className="engineer-primary" disabled={pendingAction !== null} onClick={() => void resumeIssuedDirective()}>{pendingAction === "resolution:resume-issued" ? "Resuming…" : "Resume apply"}</button></div></section> : <ResolutionDecisions
           resolutionCase={resolutionCase}
           pendingAction={pendingAction}
           disabled={disabled}
@@ -159,7 +189,7 @@ function ResolutionDeskInner() {
           onCorrected={() => void issueAndApply("CREATE_CORRECTED_RUN", "resolution:corrected")}
           onReverify={() => void issueAndApply("CREATE_REVERIFY_RUN", "resolution:reverify")}
           onRejectClose={() => void issueAndApply("REJECT_AND_CLOSE", "resolution:reject-close")}
-        />
+        />}
       </> : null}
     </main>
   );

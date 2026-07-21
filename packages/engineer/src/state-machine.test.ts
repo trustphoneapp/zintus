@@ -50,6 +50,7 @@ describe("Engineer state machine", () => {
   test("provider timeout recovery is human-bounded and remains cancellable", () => {
     expect(canTransition("IMPLEMENTING", "MODEL_PROVIDER_RETRY_PENDING")).toBe(true);
     expect(canTransition("MODEL_PROVIDER_RETRY_PENDING", "QUEUED")).toBe(true);
+    expect(canTransition("MODEL_PROVIDER_RETRY_PENDING", "HUMAN_REVIEW_REQUIRED")).toBe(true);
     expect(canTransition("MODEL_PROVIDER_RETRY_PENDING", "CANCELLATION_PENDING")).toBe(true);
     expect(canTransition("MODEL_PROVIDER_RETRY_PENDING", "FAST_CHECKS")).toBe(false);
     expect(isTerminalState("MODEL_PROVIDER_RETRY_PENDING")).toBe(false);

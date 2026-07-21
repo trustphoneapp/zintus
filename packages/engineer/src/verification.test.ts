@@ -471,6 +471,54 @@ describe("Phase 3 independent verification", () => {
     setup.supervisor.close();
   });
 
+  test("covers a scope-only MUST through the deterministic final scope attestation", () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const content = {
+      ...setup.manifest,
+      acceptanceCriteria: [
+        ...setup.manifest.acceptanceCriteria,
+        {
+          criterionId: "criterion-scope",
+          statement: "Only authorized files may change.",
+          verificationMethod: "Review the final changed-file list against the authorized paths.",
+          priority: "MUST" as const,
+        },
+      ],
+    };
+    const { manifestHash: _oldHash, ...withoutHash } = content;
+    const manifest = TaskManifestSchema.parse({ ...withoutHash, manifestHash: sha256(withoutHash) });
+    const matrix = buildVerificationCoverageMatrix(manifest);
+    expect(matrix.allMustCriteriaCovered).toBe(true);
+    expect(matrix.criteria.find((criterion) => criterion.criterionId === "criterion-scope"))
+      .toMatchObject({ status: "COVERED", executableTestIds: [], deterministicScopeAttestation: true });
+    setup.supervisor.close();
+  });
+
+  test("keeps a scope-worded functional MUST uncovered without final-diff verification", () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const content = {
+      ...setup.manifest,
+      acceptanceCriteria: [
+        ...setup.manifest.acceptanceCriteria,
+        {
+          criterionId: "criterion-not-final-scope",
+          statement: "The scheduler preserves the requested scope.",
+          verificationMethod: "Exercise scheduling behavior with a unit test.",
+          priority: "MUST" as const,
+        },
+      ],
+    };
+    const { manifestHash: _oldHash, ...withoutHash } = content;
+    const manifest = TaskManifestSchema.parse({ ...withoutHash, manifestHash: sha256(withoutHash) });
+    const matrix = buildVerificationCoverageMatrix(manifest);
+    expect(matrix.allMustCriteriaCovered).toBe(false);
+    expect(matrix.criteria.find((criterion) => criterion.criterionId === "criterion-not-final-scope"))
+      .toMatchObject({ status: "UNCOVERED", executableTestIds: [] });
+    setup.supervisor.close();
+  });
+
   test("executes the frozen test plan independently and persists objective evidence", async () => {
     const path = root();
     const setup = setupFastChecks(path);
@@ -960,14 +1008,14 @@ describe("Phase 3 isolated Reviewer", () => {
     expect(reviewerFindingRecordId({ reviewerSessionId: "review-2", providerFindingId: "F-1" })).not.toBe(first);
   });
 
-  test("synthesizes a bounded blocking gap when Terra marks a MUST criterion uncovered", () => {
+  test("records Terra MUST-criterion coverage suggestions as advisory rather than creating a repair authority", () => {
     const manifest = task("run-synthetic-gap", "1".repeat(40));
     const report = buildAdversarialCoverageReport(manifest, TestAdvisorySchema.parse({
       uncoveredCriterionIds: ["criterion-1"], warnings: ["Evidence is too broad."], adversarialGaps: [],
     }));
-    expect(report.blockingGapIds).toHaveLength(1);
+    expect(report.blockingGapIds).toEqual([]);
     expect(report.gaps[0]).toMatchObject({
-      criterionIds: ["criterion-1"], criterionPriorities: ["MUST"], blocking: true,
+      criterionIds: ["criterion-1"], criterionPriorities: ["MUST"], blocking: false,
     });
     expect(() => AdversarialCoverageReportSchema.parse({
       ...report, warnings: [...report.warnings, "tampered after hashing"],
@@ -1134,7 +1182,7 @@ describe("Phase 3 isolated Reviewer", () => {
       .rejects.toThrow("REQUEST_CHANGES requires at least one structured finding");
   });
 
-  test("cannot approve a MUST-level adversarial gap and requires an evidence-bound repair finding", async () => {
+  test("keeps a MUST-level adversarial suggestion advisory until the Reviewer independently proves a defect", async () => {
     const manifest = task("run-adversarial-review", "1".repeat(40));
     const executorEvidence = TrustedEvidenceSchema.parse({
       evidenceId: "executor-evidence", runId: manifest.runId, eventType: "INDEPENDENT_VERIFICATION",
@@ -1152,7 +1200,7 @@ describe("Phase 3 isolated Reviewer", () => {
       }],
     });
     const report = buildAdversarialCoverageReport(manifest, advisory);
-    expect(report.blockingGapIds).toEqual(["cancelled-executor-still-running"]);
+    expect(report.blockingGapIds).toEqual([]);
     const gapEvidence = TrustedEvidenceSchema.parse({
       evidenceId: "adversarial-report", runId: manifest.runId, eventType: "ADVERSARIAL_COVERAGE_REPORT",
       producerType: "SYSTEM", producerId: "adversarial-coverage-policy", sha256: sha256(report),
@@ -1206,7 +1254,7 @@ describe("Phase 3 isolated Reviewer", () => {
       }] };
     } };
     await expect(new IsolatedReviewer({ transport: invalidApproval }).review(input, 2))
-      .rejects.toThrow("blocking adversarial coverage gaps require Reviewer changes");
+      .resolves.toMatchObject({ session: { decision: "APPROVE" } });
   });
 });
 
@@ -1982,6 +2030,62 @@ describe("Phase 3 authoritative verification manager", () => {
     }
   });
 
+  test("repairs one concrete in-scope Reviewer candidate before asking a human", async () => {
+    const path = root();
+    const manifest = task("run-in-scope-reviewer-candidate", "a".repeat(40));
+    let state: EngineerRun["state"] = "REVIEWING";
+    let stateVersion = 10;
+    let repairs = 0;
+    const reviewerSessionId = "in-scope-reviewer";
+    const providerFindingId = "parser-edge-case";
+    const findingId = sha256({ namespace: "review-finding-record-v1", reviewerSessionId, providerFindingId });
+    const rawFinding = {
+      findingId: providerFindingId, severity: "MEDIUM" as const, category: "PARSER_CORRECTNESS", file: "src/value.ts",
+      lineStart: 2, lineEnd: 2, criterionIds: ["criterion-1"], description: "A valid supported input is rejected.",
+      requiredChange: "Add the missing supported-input branch and a regression test.", evidenceIds: [],
+    };
+    const finding = {
+      reviewerSessionId, ...rawFinding, findingId,
+      fingerprint: sha256({ severity: rawFinding.severity, category: rawFinding.category.toLowerCase(), file: rawFinding.file,
+        description: rawFinding.description.toLowerCase(), requiredChange: rawFinding.requiredChange.toLowerCase() }), status: "OPEN" as const,
+    };
+    const supervisor = {
+      getRun: () => ({ runId: manifest.runId, state, stateVersion, manifestHash: manifest.manifestHash }),
+      transition: (input: { nextState: EngineerRun["state"] }) => {
+        state = input.nextState; stateVersion += 1;
+        return { run: { runId: manifest.runId, state, stateVersion, manifestHash: manifest.manifestHash } };
+      },
+      authorizeRetry: () => ({ allowed: true, remainingKindAttempts: 1 }),
+      recordArtifact: (artifact: unknown) => artifact,
+    } as unknown as EngineerSupervisor;
+    const manager = new EngineerVerificationManager({
+      supervisor, executionManager: {} as EngineerExecutionManager, sandboxManager: {} as ISandbox,
+      artifactStore: new LocalArtifactStore({ root: join(path, "candidate-artifacts") }),
+      transportForRole: () => ({ async create() { throw new Error("candidate repair test does not call a provider directly"); } }),
+    });
+    const internal = manager as unknown as {
+      applyClassifiedOutcome(input: unknown): Promise<unknown>;
+      repair(...args: unknown[]): Promise<void>;
+      verifyPass(runId: string): Promise<unknown>;
+    };
+    internal.repair = async () => { repairs += 1; };
+    internal.verifyPass = async () => ({ evidenceBundle: { evidenceBundleId: "reverified" } });
+    await internal.applyClassifiedOutcome({
+      manifest, sandbox: { record: { sandboxId: "sandbox" } },
+      reviewerInput: { diffHash: sha256("candidate-diff"), resultCommitSha: "b".repeat(40) },
+      classification: {
+        result: "REPAIR_REQUIRED", classificationHash: sha256("candidate-classification"),
+        policyVersion: "engineer-required-lane-reviewer-mapping-v1", contractHash: sha256("contract"),
+        createdAt: "2026-07-20T00:00:00.000Z", rawOutput: { artifactId: "raw-output" },
+        classifications: [{ findingId, disposition: "ADVISORY", reasonCode: "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE" }],
+      },
+      session: { reviewerSessionId, output: { findings: [rawFinding] } }, findings: [finding],
+      result: { evidenceBundle: { evidenceBundleId: "bundle" } }, evidenceIds: ["raw-output"],
+    });
+    expect(repairs).toBe(1);
+    expect(state as EngineerRun["state"]).toBe("IMPLEMENTING");
+  });
+
   test("classified recovery bundle lookup is exact and never timestamp-selected", () => {
     const expected = {
       evidenceBundleId: "bundle-exact",
@@ -2448,6 +2552,43 @@ describe("Phase 3 authoritative verification manager", () => {
     expect(setup.supervisor.getRun(run.runId).state).toBe("MODEL_PROVIDER_RETRY_PENDING");
     expect(setup.supervisor.listFailures(run.runId)).toContainEqual(expect.objectContaining({
       reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", retryable: true,
+    }));
+    setup.supervisor.close();
+  });
+
+  test("a repeated Reviewer timeout stops at human review instead of consuming another retry", () => {
+    const path = root();
+    const setup = setupFastChecks(path);
+    const artifactStore = new LocalArtifactStore({ root: join(path, "artifacts") });
+    setup.supervisor.recordFailure({
+      failureId: "prior-reviewer-timeout", runId: setup.manifest.runId, failureClass: "MODEL_FAILURE",
+      reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", fingerprint: sha256("prior-reviewer-timeout"),
+      evidenceIds: [], retryable: true, createdAt: "2026-07-14T12:00:00.000Z",
+    });
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS",
+    }));
+    let current = setup.supervisor.getRun(setup.manifest.runId);
+    for (const nextState of ["UNIT_TESTING", "INTEGRATION_TESTING", "SECURITY_REVIEW"] as const) {
+      current = setup.supervisor.transition({
+        runId: current.runId, expectedStateVersion: current.stateVersion, nextState,
+        reasonCode: `TEST_${nextState}`, idempotencyKey: `repeated-reviewer-timeout:${nextState}`,
+      }).run;
+    }
+    const manager = new EngineerVerificationManager({
+      supervisor: setup.supervisor, executionManager: {} as EngineerExecutionManager,
+      sandboxManager: {} as ISandbox, artifactStore,
+      transportForRole: async () => { throw new Error("provider is not used by this policy test"); },
+    });
+
+    const timeout = new Error("provider unavailable");
+    timeout.name = "APIConnectionTimeoutError";
+    expect((manager as any).authorizeTransientModelRetry(
+      setup.manifest.runId, "REVIEWER", timeout, 2,
+    )).toBe(false);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("HUMAN_REVIEW_REQUIRED");
+    expect(setup.supervisor.listFailures(setup.manifest.runId)).toContainEqual(expect.objectContaining({
+      reasonCode: "VERIFICATION_PROVIDER_TIMEOUT_REQUIRES_HUMAN_REVIEW", retryable: false,
     }));
     setup.supervisor.close();
   });
@@ -2938,7 +3079,9 @@ describe("Phase 3 authoritative verification manager", () => {
         const repaired = readFileSync(join(setup.workspace.workspaceRoot, "src", "value.ts"), "utf8").includes("stable-test-repair");
         return repaired
           ? { status: 0, stdout: "1 pass", stderr: "" }
-          : { status: 1, stdout: "0 pass", stderr: "expected repair" };
+          // Distinct verbose stderr from each independent execution reproduces
+          // the aggregation path that used to exceed the repair-context limit.
+          : { status: 1, stdout: "0 pass", stderr: `expected repair ${commandRuns} ${"x".repeat(4_000)}` };
       },
     };
     const executionManager = {
@@ -2953,6 +3096,7 @@ describe("Phase 3 authoritative verification manager", () => {
           builderCalls += 1;
           if (builderCalls === 1) {
             expect(JSON.stringify(request)).toContain("REQUIRED_TEST_FAILURE");
+            expect(JSON.stringify(request)).toContain("expected repair");
             return { id: "stable-repair-tool", output: [{
               type: "function_call", call_id: "stable-repair-write", name: "write_file",
               arguments: JSON.stringify({ path: "src/value.ts", content: "// stable-test-repair\nexport const value = 2;\n" }),
@@ -3008,6 +3152,13 @@ describe("Phase 3 authoritative verification manager", () => {
     const contextArtifact = setup.supervisor.listArtifacts(setup.manifest.runId)
       .find((artifact) => artifact.type === "STABLE_REQUIRED_TEST_REPAIR_CONTEXT");
     expect(contextArtifact).toMatchObject({ trusted: true, producerId: "engineer-verification" });
+    const context = JSON.parse(artifactStore.read(contextArtifact!).toString("utf8"));
+    expect(context.repairDiagnostics).toEqual([expect.objectContaining({
+      testId: "test-1",
+      command: "bun run test",
+      summary: expect.stringContaining("expected repair"),
+    })]);
+    expect(context.repairDiagnostics[0].summary.length).toBeLessThanOrEqual(8_000);
 
     const recoveredManager = new EngineerVerificationManager({
       supervisor: setup.supervisor,
@@ -3670,21 +3821,21 @@ describe("Phase 3 authoritative verification manager", () => {
       checkpointAttestor,
     });
     const result = await manager.verify(setup.manifest.runId);
-    expect(reviewAttempt).toBe(1);
-    expect(builderRound).toBe(0);
-    expect(setup.supervisor.modelCallCountForRole(setup.manifest.runId, "BUILDER")).toBe(0);
-    expect(result.reviewerSession.attempt).toBe(1);
-    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("HUMAN_REVIEW_REQUIRED");
+    expect(reviewAttempt).toBe(2);
+    expect(builderRound).toBe(2);
+    expect(setup.supervisor.modelCallCountForRole(setup.manifest.runId, "BUILDER")).toBe(2);
+    expect(result.reviewerSession.attempt).toBe(2);
+    expect(setup.supervisor.getRun(setup.manifest.runId).state).toBe("REVIEW_APPROVED");
     expect(result.evidenceBundle.bundle.reviewerSessionId).toBe(result.reviewerSession.reviewerSessionId);
     const passDb = new Database(setup.dbPath, { readonly: true });
     const passRows = passDb.query("SELECT verification_pass AS pass FROM test_executions WHERE run_id = ?")
       .all(setup.manifest.runId) as Array<{ pass: number }>;
     passDb.close();
-    expect(passRows).toHaveLength(1);
+    expect(passRows).toHaveLength(2);
     const db = new Database(setup.dbPath, { readonly: true });
-    expect((db.query("SELECT COUNT(*) AS count FROM reviewer_sessions").get() as { count: number }).count).toBe(1);
-    expect((db.query("SELECT COUNT(*) AS count FROM retry_attempts").get() as { count: number }).count).toBe(0);
-    expect((db.query("SELECT COUNT(*) AS count FROM test_executions").get() as { count: number }).count).toBe(1);
+    expect((db.query("SELECT COUNT(*) AS count FROM reviewer_sessions").get() as { count: number }).count).toBe(2);
+    expect((db.query("SELECT COUNT(*) AS count FROM retry_attempts").get() as { count: number }).count).toBe(1);
+    expect((db.query("SELECT COUNT(*) AS count FROM test_executions").get() as { count: number }).count).toBe(2);
     db.close();
     setup.supervisor.close();
   });

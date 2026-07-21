@@ -35,3 +35,10 @@ test("the stranded-run UI routes to the Resolution Desk, not the retired stale-b
   expect(source).toContain('latestState === "BASE_BRANCH_STALE"');
   expect(source).toContain('latestState === "HUMAN_APPROVAL_PENDING"');
 });
+
+test("a human-review run uses the gateway capability projection for either bounded correction or Reviewer-only recovery", () => {
+  expect(source).toContain('latestState === "HUMAN_REVIEW_REQUIRED"');
+  expect(source).toContain('capability.action === "OPEN_RESOLUTION_CASE" && capability.availability === "AVAILABLE"');
+  expect(source).toContain('resolutionDeskAvailable ? <button className="engineer-primary" disabled={busy} onClick={openResolutionDesk}>Open Resolution Desk</button> : null');
+  expect(source).toContain('capability.action === "RETRY_REVIEWER"');
+});

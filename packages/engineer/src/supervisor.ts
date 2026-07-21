@@ -494,6 +494,7 @@ export class EngineerSupervisor {
     return this.transitionInternal(run, input);
   }
 
+
   freezePlan(input: FreezePlanInput): LedgerTransitionResult {
     const run = this.ledger.getRun(input.runId);
     const content = TaskManifestContentSchema.parse(input.manifest);
@@ -735,7 +736,7 @@ export class EngineerSupervisor {
     }
     if (isTerminalState(run.state)) throw new InvalidTransitionError(`terminal state ${run.state} cannot create a decision`);
     if (policy.classification === "ASK_NOW" &&
-        !["REQUEST_NORMALIZED", "PLANNING", "PLAN_READY", "REPLANNING", "CLARIFICATION_REQUIRED"].includes(run.state)) {
+        !["REQUEST_RECEIVED", "REQUEST_NORMALIZED", "PLANNING", "PLAN_READY", "REPLANNING", "CLARIFICATION_REQUIRED"].includes(run.state)) {
       throw new InvalidTransitionError(`ASK_NOW cannot safely interrupt ${run.state}`);
     }
     const createdAt = this.timestamp();
@@ -1693,7 +1694,7 @@ export class EngineerSupervisor {
   recordCommandExecution(record: CommandExecutionRecord): CommandExecutionRecord {
     const run = this.ledger.getRun(record.runId);
     if (run.manifestHash === null) throw new ManifestIntegrityError("commands require a frozen manifest");
-    if (!["IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "SECURITY_REVIEW", "REVERIFYING"]
+    if (!["CONTEXT_BUILDING", "IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "SECURITY_REVIEW", "REVERIFYING"]
       .includes(run.state)) {
       throw new InvalidTransitionError(`commands cannot be recorded while run is ${run.state}`);
     }
@@ -1726,6 +1727,10 @@ export class EngineerSupervisor {
   ): { won: boolean; claim: BuilderDispatchClaim; execution: AgentExecutionRecord } {
     this.assertRuntimeBudget(record.runId);
     return this.ledger.claimBuilderDispatch(record, worker);
+  }
+
+  builderDispatchClaim(runId: string, inputHash: string): BuilderDispatchClaim | null {
+    return this.ledger.builderDispatchClaim(runId, inputHash);
   }
 
   finalizeRunningAgentExecutions(
@@ -2177,7 +2182,7 @@ export class EngineerSupervisor {
     if (input.nextState === "PLAN_FROZEN") {
       throw new InvalidTransitionError("PLAN_FROZEN requires freezePlan so the manifest and event commit atomically");
     }
-    if (input.nextState === "PAUSED_BUDGET" || run.state === "PAUSED_BUDGET") {
+    if (input.nextState === "PAUSED_BUDGET" || (run.state === "PAUSED_BUDGET" && input.nextState !== "CANCELLATION_PENDING")) {
       throw new InvalidTransitionError("budget pause and resume require the dedicated Supervisor controls");
     }
     if (!canTransition(run.state, input.nextState)) {

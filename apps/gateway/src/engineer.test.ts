@@ -9,7 +9,7 @@ import {
   VerifiedCandidateIntegrityError, createVerifiedCandidateCheckpoint, createVerifiedHardeningCandidateCheckpoint, sha256,
   type CheckpointAttestor, type EngineerRun, type WorkerLeaseGrant,
 } from "@zintus/engineer";
-import { EngineerRunManager } from "./engineer.js";
+import { EngineerControlIdempotencyConflictError, EngineerPlanningBudgetTooSmallError, EngineerRunManager, EngineerStaleClientStateError, EngineerVerificationScopeDecisionRequiredError, MINIMUM_ENGINEER_PLANNER_TOKENS } from "./engineer.js";
 import { deriveEngineerPrincipal, loadOrCreateEngineerPrincipal } from "./engineer-identity.js";
 import { createLocalEngineerCapabilityProbe, EngineerCapabilityPreflight, type EngineerCapabilityProbe } from "./engineer-preflight.js";
 
@@ -91,6 +91,61 @@ describe("Engineer trusted identity and admission", () => {
   // R8-3 FINDING 2: the orphaned `createCorrectedRun` bypass and its
   // `correctedRunRepository` helper are removed — the Resolution Desk's signed
   // CREATE_CORRECTED_RUN directive is the sole corrected-run authority.
+
+  test("projects a fixed correction budget as unavailable instead of offering an impossible top-up", () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-capabilities-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "capability-owner-secret" });
+    const run = supervisor.receiveRequest({
+      runId: "fixed-correction-budget", userId: principal.ownerId, repository, request: "bounded correction",
+      budget: { costBudgetUsd: 1, lifetimeCostBudgetUsd: 1, tokenBudget: 0, lifetimeTokenBudget: 0, timeBudgetSeconds: 60, lifetimeTimeBudgetSeconds: 60 },
+    });
+    supervisor.reconcileBudget(run.runId);
+    const manager = new EngineerRunManager({ supervisor, principal, preflight: preflight() });
+    const capability = manager.get(run.runId).capabilities.actions.find((item) => item.action === "TOP_UP_BUDGET");
+    expect(supervisor.getRun(run.runId).state).toBe("PAUSED_BUDGET");
+    expect(capability).toMatchObject({ availability: "UNAVAILABLE", reasonCode: "LIFETIME_BUDGET_EXHAUSTED", nextSafeAction: "PREPARE_NEW_INTAKE" });
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("replays a browser create id without creating a second run or re-running preflight", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-create-replay-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "create-replay-owner-secret" });
+    let admissions = 0;
+    const manager = new EngineerRunManager({
+      supervisor,
+      principal,
+      preflight: { repositories: () => [repository], assertRunAdmission: async () => { admissions += 1; } } as never,
+    });
+    const input = { runId: "browser-create-operation", repository, request: "Add a bounded test", budget: { costBudgetUsd: 1, tokenBudget: 1_000, timeBudgetSeconds: 60 } };
+    const first = await manager.create(principal, input);
+    const replay = await manager.create(principal, input);
+    expect(replay.runId).toBe(first.runId);
+    expect(admissions).toBe(1);
+    expect(supervisor.listRuns()).toHaveLength(1);
+    await expect(manager.create(principal, { ...input, budget: { costBudgetUsd: 2, tokenBudget: 1_000, timeBudgetSeconds: 60 } }))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT", httpStatus: 409 });
+    supervisor.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("rejects an intake that cannot fund the planner's fixed output reservation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-planner-minimum-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "planner-minimum-owner-secret" });
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      planning: { plan: async () => null } as never,
+    });
+    await expect(manager.create(principal, {
+      runId: "planner-minimum", repository, request: "Plan a bounded task",
+      budget: { tokenBudget: MINIMUM_ENGINEER_PLANNER_TOKENS - 1, lifetimeTokenBudget: MINIMUM_ENGINEER_PLANNER_TOKENS - 1 },
+    })).rejects.toBeInstanceOf(EngineerPlanningBudgetTooSmallError);
+    expect(supervisor.listRuns()).toEqual([]);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
 
   test("legacy human-review approval cannot bypass verified-candidate promotion", async () => {
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
@@ -190,6 +245,121 @@ describe("Engineer trusted identity and admission", () => {
       .resolves.toEqual({ run: expect.objectContaining({ state: "VERIFICATION_RECOVERY" }), publication: null });
     expect(cleared).toBeNull();
     expect(resumed).toBe(1);
+  });
+
+  test("retries an ambiguous Reviewer outcome after the human-review classification without rebuilding", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const now = "2026-07-20T20:00:00.000Z";
+    let run: EngineerRun = {
+      runId: "retry-ambiguous-reviewer", userId: principal.ownerId, repository,
+      requestOriginal: "Review verified work", requestNormalized: "Review verified work",
+      state: "HUMAN_REVIEW_REQUIRED", stateVersion: 10, manifestHash: `sha256:${"a".repeat(64)}`,
+      riskTier: "MEDIUM", humanGateRequired: true, createdAt: now, updatedAt: now, terminalAt: null,
+    };
+    let resumed = 0;
+    const manager = new EngineerRunManager({
+      supervisor: {
+        getRun: () => run,
+        listEvidenceBundles: () => [{ evidenceBundleId: "verified-bundle" }],
+        latestEventSequence: () => 13,
+        // The final classification event intentionally follows the timeout.
+        // It must not erase the authority to recover the retained evidence.
+        listEvents: () => [{ previousState: "REVIEWING", reasonCode: "CLASSIFIED_REVIEW_REQUIRES_HUMAN" }],
+        listFailures: () => [{
+          failureId: "ambiguous-reviewer", failureClass: "PROVIDER_FAILURE",
+          reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", evidenceIds: ["verified-bundle"],
+        }],
+        setLastError: () => undefined,
+        transition: (input: { nextState: EngineerRun["state"]; reasonCode: string; evidenceIds?: string[]; facts?: { reviewerRetryAuthorized?: boolean } }) => {
+          expect(input.nextState).toBe("VERIFICATION_RECOVERY");
+          expect(input.reasonCode).toBe("HUMAN_RETRY_VERIFICATION_PROVIDER");
+          expect(input.evidenceIds).toEqual(["ambiguous-reviewer"]);
+          expect(input.facts?.reviewerRetryAuthorized).toBe(true);
+          run = { ...run, state: input.nextState, stateVersion: run.stateVersion + 1 };
+          return { run };
+        },
+      } as never,
+      verification: { resumeRecovered: () => { resumed += 1; } } as never,
+      principal,
+      preflight: preflight(),
+    });
+
+    await expect(manager.resolveHumanReview(principal, run.runId, "retry", "Retry only the missing reviewer evidence."))
+      .resolves.toEqual({ run: expect.objectContaining({ state: "VERIFICATION_RECOVERY" }), publication: null });
+    expect(resumed).toBe(1);
+  });
+
+  test("projects Reviewer-only recovery and blocks Resolution Desk for retained reviewer evidence", () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "reviewer-recovery-owner-secret" });
+    const run: EngineerRun = {
+      runId: "reviewer-recovery-capabilities", userId: principal.ownerId, repository,
+      requestOriginal: "Review verified work", requestNormalized: "Review verified work",
+      state: "HUMAN_REVIEW_REQUIRED", stateVersion: 12, manifestHash: `sha256:${"a".repeat(64)}`,
+      riskTier: "MEDIUM", humanGateRequired: true, createdAt: "2026-07-20T00:00:00.000Z", updatedAt: "2026-07-20T00:00:00.000Z", terminalAt: null,
+    };
+    const manager = new EngineerRunManager({
+      supervisor: {
+        getRun: () => run,
+        getLastError: () => null,
+        reconcileBudget: () => ({
+          revision: 1,
+          limits: { costUsd: 1, tokens: 1_000, timeSeconds: 60 },
+          lifetimeLimits: { costUsd: 1, tokens: 1_000, timeSeconds: 60 },
+          remaining: { costUsd: 1, tokens: 1_000, timeSeconds: 60 },
+          used: { costUsd: 0, tokens: 0, timeSeconds: 0 },
+          reserved: { costUsd: 0, tokens: 0, timeSeconds: 0 },
+          ambiguous: { costUsd: 0, tokens: 0, timeSeconds: 0 },
+        }),
+        listFailures: () => [{ failureId: "ambiguous-reviewer", reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", failureClass: "PROVIDER_FAILURE" }],
+      } as never,
+      principal,
+      preflight: preflight(),
+    });
+    const capabilities = manager.get(run.runId).capabilities.actions;
+    expect(capabilities.find((item) => item.action === "RETRY_REVIEWER")).toMatchObject({ availability: "AVAILABLE" });
+    expect(capabilities.find((item) => item.action === "OPEN_RESOLUTION_CASE")).toMatchObject({ availability: "UNAVAILABLE", reasonCode: "REVIEWER_EVIDENCE_RECOVERY_REQUIRED" });
+  });
+
+  test("does not offer a third paid Reviewer attempt after two ambiguous outcomes", () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "reviewer-retry-ceiling-owner-secret" });
+    const run: EngineerRun = {
+      runId: "reviewer-retry-ceiling", userId: principal.ownerId, repository,
+      requestOriginal: "Review verified work", requestNormalized: "Review verified work",
+      state: "HUMAN_REVIEW_REQUIRED", stateVersion: 12, manifestHash: `sha256:${"a".repeat(64)}`,
+      riskTier: "MEDIUM", humanGateRequired: true, createdAt: "2026-07-20T00:00:00.000Z", updatedAt: "2026-07-20T00:00:00.000Z", terminalAt: null,
+    };
+    const manager = new EngineerRunManager({
+      supervisor: {
+        getRun: () => run,
+        getLastError: () => null,
+        reconcileBudget: () => ({ revision: 1, limits: { costUsd: 1, tokens: 1_000, timeSeconds: 60 }, lifetimeLimits: { costUsd: 1, tokens: 1_000, timeSeconds: 60 }, remaining: { costUsd: 1, tokens: 1_000, timeSeconds: 60 }, used: { costUsd: 0, tokens: 0, timeSeconds: 0 }, reserved: { costUsd: 0, tokens: 0, timeSeconds: 0 }, ambiguous: { costUsd: 0, tokens: 0, timeSeconds: 0 } }),
+        listFailures: () => ["first", "second"].map((failureId) => ({ failureId, reasonCode: "VERIFICATION_PROVIDER_OUTCOME_AMBIGUOUS", failureClass: "PROVIDER_FAILURE" })),
+      } as never,
+      principal,
+      preflight: preflight(),
+    });
+    expect(manager.get(run.runId).capabilities.actions.find((item) => item.action === "RETRY_REVIEWER"))
+      .toMatchObject({ availability: "UNAVAILABLE", reasonCode: "REVIEWER_RETRY_LIMIT_REACHED" });
+  });
+
+  test("rejects a reused human-review key when its rationale changes before reviewer recovery", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const run: EngineerRun = {
+      runId: "review-key-conflict", userId: principal.ownerId, repository,
+      requestOriginal: "Review verified work", requestNormalized: "Review verified work",
+      state: "HUMAN_REVIEW_REQUIRED", stateVersion: 4, manifestHash: null, riskTier: "MEDIUM", humanGateRequired: true,
+      createdAt: "2026-07-20T00:00:00.000Z", updatedAt: "2026-07-20T00:00:00.000Z", terminalAt: null,
+    };
+    const manager = new EngineerRunManager({
+      supervisor: {
+        getRun: () => run,
+        listEvents: () => [{ idempotencyKey: "control:review-key:deadbeef" }],
+      } as never,
+      principal, preflight: preflight(),
+    });
+    await expect(manager.resolveHumanReview(principal, run.runId, "reject", "A different rationale", {
+      expectedStateVersion: run.stateVersion, idempotencyKey: "review-key",
+    })).rejects.toBeInstanceOf(EngineerControlIdempotencyConflictError);
   });
 
   test("resolves flake quarantine without requiring a not-yet-created evidence bundle", async () => {
@@ -578,6 +748,216 @@ describe("Engineer trusted identity and admission", () => {
     reopened.close(); rmSync(root, { recursive: true, force: true });
   });
 
+  test("rejects a paid planning admission from a stale browser state before any planner call", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-stale-plan-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const run = supervisor.receiveRequest({ runId: "stale-plan", userId: principal.ownerId, repository, request: "Plan safely" });
+    let plannerCalls = 0;
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => ({}) } as never,
+      planning: { plan: async (runId: string) => {
+        plannerCalls += 1;
+        expect(supervisor.getRun(runId).requestNormalized).toBe(supervisor.getRun(runId).requestOriginal);
+        return {} as never;
+      } } as never,
+    });
+
+    await expect(manager.plan(principal, run.runId, { expectedStateVersion: run.stateVersion + 1, idempotencyKey: "stale-plan" }))
+      .rejects.toBeInstanceOf(EngineerStaleClientStateError);
+    expect(plannerCalls).toBe(0);
+    expect(supervisor.getRun(run.runId).state).toBe("REQUEST_RECEIVED");
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("asks for verification scope before planning a new-files-only request with a root-suite requirement", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-verification-scope-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "verification-scope-owner-secret" });
+    const run = supervisor.receiveRequest({
+      runId: "verification-scope", userId: principal.ownerId, repository,
+      request: "Create test/new-feature.test.ts. Run the repository’s existing test command. Do not modify any existing files, configuration, lockfiles, or dependencies.",
+    });
+    let plannerCalls = 0;
+    let contextBuilds = 0;
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => { contextBuilds += 1; return {} as never; } } as never,
+      planning: { plan: async () => { plannerCalls += 1; return {} as never; } } as never,
+    });
+
+    await expect(manager.plan(principal, run.runId, { expectedStateVersion: run.stateVersion, idempotencyKey: "verification-scope-plan" }))
+      .rejects.toBeInstanceOf(EngineerVerificationScopeDecisionRequiredError);
+    expect(plannerCalls).toBe(0);
+    expect(supervisor.getRun(run.runId).state).toBe("CLARIFICATION_REQUIRED");
+    expect(supervisor.getRun(run.runId).requestNormalized).toBe(run.requestOriginal);
+    expect(supervisor.listOpenDecisions(run.runId)).toMatchObject([{
+      classification: "ASK_NOW", recommendedOptionId: "scoped-task-test",
+    }]);
+
+    const decision = supervisor.listOpenDecisions(run.runId)[0]!;
+    await manager.resolveDecision(principal, run.runId, decision.decisionId, {
+      expectedStateVersion: supervisor.getRun(run.runId).stateVersion,
+      selectedOptionId: "scoped-task-test",
+      rationale: "Keep verification within the requested new-file scope.",
+      idempotencyKey: "verification-scope-resolution",
+    });
+    expect(contextBuilds).toBe(1);
+    expect(plannerCalls).toBe(1);
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("replays a lost start response from its durable action key without a second worker dispatch", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    let run: EngineerRun = {
+      runId: "replay-start", userId: principal.ownerId, repository,
+      requestOriginal: "Start safely", requestNormalized: "Start safely",
+      state: "PLAN_FROZEN", stateVersion: 2, manifestHash: "a".repeat(64), riskTier: "MEDIUM", humanGateRequired: true,
+      createdAt: "2026-07-20T12:00:00.000Z", updatedAt: "2026-07-20T12:00:00.000Z", terminalAt: null,
+    };
+    const events: Array<{ idempotencyKey: string }> = [];
+    let dispatches = 0;
+    const supervisor = {
+      getRun: () => run,
+      listEvents: () => events,
+      setLastError: () => undefined,
+      isOptionalHardeningChild: () => false,
+    };
+    const manager = new EngineerRunManager({
+      supervisor: supervisor as never, principal, preflight: preflight(),
+      execution: {
+        enqueue: (_runId: string, idempotencyKey?: string) => {
+          dispatches += 1;
+          events.push({ idempotencyKey: idempotencyKey! });
+          run = { ...run, state: "QUEUED", stateVersion: run.stateVersion + 1 };
+          return run;
+        },
+        runQueued: async () => undefined,
+      } as never,
+    });
+    const originalFence = { expectedStateVersion: 2, idempotencyKey: "lost-start-response" };
+
+    const first = await manager.start(principal, run.runId, originalFence);
+    const replay = await manager.start(principal, run.runId, originalFence);
+
+    expect(first).toEqual(replay);
+    expect(replay.state).toBe("QUEUED");
+    expect(dispatches).toBe(1);
+  });
+
+  test("replans an explicit-contract drift in the same durable run before Builder admission", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    let run: EngineerRun = {
+      runId: "explicit-contract-replan", userId: principal.ownerId, repository,
+      requestOriginal: "Export class DagScheduler in src/scheduler.ts and test/scheduler.test.ts",
+      requestNormalized: "Export class DagScheduler in src/scheduler.ts and test/scheduler.test.ts",
+      state: "PLAN_READY", stateVersion: 3, manifestHash: null, riskTier: "MEDIUM", humanGateRequired: true,
+      createdAt: "2026-07-20T12:00:00.000Z", updatedAt: "2026-07-20T12:00:00.000Z", terminalAt: null,
+    };
+    let lastError = "Frozen contract does not preserve explicit user requirements: required export class DagScheduler is absent from MUST criteria/tests";
+    const failures: Array<{ reasonCode: string; retryable: boolean }> = [];
+    const transitions: Array<{ nextState: string; reasonCode: string; actorType?: string; actorId?: string }> = [];
+    const supervisor = {
+      getRun: () => run,
+      getLastError: () => lastError,
+      setLastError: (_runId: string, value: string | null) => { lastError = value ?? ""; },
+      recordFailure: (failure: { reasonCode: string; retryable: boolean }) => { failures.push(failure); },
+      listFailures: () => failures,
+      transition: (input: { nextState: EngineerRun["state"]; reasonCode: string; actorType?: string; actorId?: string }) => {
+        transitions.push(input); run = { ...run, state: input.nextState, stateVersion: run.stateVersion + 1 };
+        return { run };
+      },
+    } as never;
+    let contextBuilds = 0;
+    let planningCalls = 0;
+    const manager = new EngineerRunManager({
+      supervisor, principal, preflight: preflight(),
+      context: { build: async () => { contextBuilds += 1; return {}; } } as never,
+      planning: { plan: async () => { planningCalls += 1; return {} as never; } } as never,
+    });
+
+    await manager.replanExplicitContract(principal, run.runId);
+
+    expect(contextBuilds).toBe(1);
+    expect(planningCalls).toBe(1);
+    expect(failures.at(-1)).toMatchObject({ reasonCode: "EXPLICIT_CONTRACT_PLAN_DRIFT", retryable: true });
+    expect(transitions.at(-1)).toMatchObject({ nextState: "REPLANNING", reasonCode: "EXPLICIT_CONTRACT_REPLAN_REQUESTED", actorType: "SYSTEM", actorId: "engineer-gateway" });
+  });
+
+  test("waits for the corrected proposal when an in-flight replan response is lost", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    let run: EngineerRun = {
+      runId: "replan-replay", userId: principal.ownerId, repository,
+      requestOriginal: "Export DagScheduler", requestNormalized: "Export DagScheduler",
+      state: "PLAN_READY", stateVersion: 3, manifestHash: null, riskTier: "MEDIUM", humanGateRequired: true,
+      createdAt: "2026-07-20T12:00:00.000Z", updatedAt: "2026-07-20T12:00:00.000Z", terminalAt: null,
+    };
+    const proposalA = { planProposalId: "proposal-a" } as never;
+    const proposalB = { planProposalId: "proposal-b" } as never;
+    let latest = proposalA;
+    let plannerCalls = 0;
+    let entered!: () => void;
+    let release!: () => void;
+    const enteredPlanning = new Promise<void>((resolve) => { entered = resolve; });
+    const releasePlanning = new Promise<void>((resolve) => { release = resolve; });
+    const events: Array<{ idempotencyKey: string }> = [];
+    const supervisor = {
+      getRun: () => run,
+      getLastError: () => "Explicit API drift",
+      setLastError: () => undefined,
+      listEvents: () => events,
+      listFailures: () => [],
+      recordFailure: () => undefined,
+      latestPlanProposal: () => latest,
+      transition: (input: { nextState: EngineerRun["state"]; idempotencyKey: string }) => {
+        events.push({ idempotencyKey: input.idempotencyKey });
+        run = { ...run, state: input.nextState, stateVersion: run.stateVersion + 1 };
+        return { run };
+      },
+    };
+    const manager = new EngineerRunManager({
+      supervisor: supervisor as never, principal, preflight: preflight(),
+      context: { build: async () => ({}) } as never,
+      planning: { plan: async () => {
+        plannerCalls += 1;
+        entered();
+        await releasePlanning;
+        latest = proposalB;
+        run = { ...run, state: "PLAN_READY", stateVersion: run.stateVersion + 1 };
+        return proposalB;
+      } } as never,
+    });
+    const originalFence = { expectedStateVersion: 3, idempotencyKey: "lost-replan-response" };
+    const first = manager.replanExplicitContract(principal, run.runId, originalFence);
+    await enteredPlanning;
+    const replay = manager.replanExplicitContract(principal, run.runId, originalFence);
+    release();
+
+    expect(await first).toBe(proposalB);
+    expect(await replay).toBe(proposalB);
+    expect(plannerCalls).toBe(1);
+  });
+
+  test("never replays the prior proposal after a corrected replan fails", async () => {
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
+    const priorProposal = { planProposalId: "invalid-prior-proposal" } as never;
+    const run = {
+      runId: "failed-replan-replay", userId: principal.ownerId, repository,
+      requestOriginal: "Export DagScheduler", requestNormalized: "Export DagScheduler",
+      state: "MODEL_PROVIDER_RETRY_PENDING", stateVersion: 5, manifestHash: null, riskTier: "MEDIUM", humanGateRequired: true,
+      createdAt: "2026-07-20T12:00:00.000Z", updatedAt: "2026-07-20T12:00:00.000Z", terminalAt: null,
+    } as EngineerRun;
+    const manager = new EngineerRunManager({
+      supervisor: { getRun: () => run, latestPlanProposal: () => priorProposal } as never,
+      principal, preflight: preflight(),
+    });
+
+    await expect((manager as unknown as { replayedPlan: (runId: string, options: { requireReplanCompletion: boolean }) => Promise<unknown> })
+      .replayedPlan(run.runId, { requireReplanCompletion: true }))
+      .rejects.toThrow("finished without a durable proposal");
+  });
+
   test("boot recovery resumes a planning run that has no in-memory owner", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-recover-planning-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
@@ -681,7 +1061,7 @@ describe("Engineer trusted identity and admission", () => {
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
-  test("automatically restarts planning after a budget pause resumes to PLANNING", async () => {
+  test("automatically restarts planning after a budget pause resumes to REPLANNING", async () => {
     const root = mkdtempSync(join(tmpdir(), "zintus-engineer-budget-resume-plan-"));
     const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
     const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "owner-secret" });
@@ -697,11 +1077,15 @@ describe("Engineer trusted identity and admission", () => {
       runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "PLANNING",
       reasonCode: "PLANNING_STARTED", idempotencyKey: "resume-plan-started",
     }).run;
+    run = supervisor.transition({
+      runId: run.runId, expectedStateVersion: run.stateVersion, nextState: "REPLANNING",
+      reasonCode: "EXPLICIT_CONTRACT_REPLAN_REQUESTED", idempotencyKey: "resume-plan-replanning",
+    }).run;
     supervisor.reconcileBudget(run.runId);
     const paused = supervisor.getRun(run.runId);
     const pausedBudget = supervisor.getBudget(run.runId);
     expect(paused).toMatchObject({ state: "PAUSED_BUDGET" });
-    expect(pausedBudget).toMatchObject({ resumeState: "PLANNING" });
+    expect(pausedBudget).toMatchObject({ resumeState: "REPLANNING" });
     const topped = supervisor.topUpBudget({
       runId: run.runId, expectedRevision: pausedBudget.revision,
       topUp: { addTokenBudget: 100, addCostBudgetUsd: 0, addTimeBudgetSeconds: 0 },
@@ -719,7 +1103,7 @@ describe("Engineer trusted identity and admission", () => {
       expectedStateVersion: paused.stateVersion, expectedBudgetRevision: topped.revision,
       idempotencyKey: "resume-plan-budget",
     });
-    expect(resumed.state).toBe("PLANNING");
+    expect(resumed.state).toBe("REPLANNING");
     await planningStarted;
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(planningCalls).toBe(1);
@@ -884,6 +1268,25 @@ describe("Engineer trusted identity and admission", () => {
     expect(snapshot.events.at(-1)).toMatchObject({ sequence: 1, nextState: "REQUEST_NORMALIZED", stateVersion: 1 });
     expect(snapshot.snapshotFence).toEqual({ stateVersion: 1, eventSequence: 1 });
     expect(snapshot.data.verifiedCandidate).toBeNull();
+    supervisor.close(); rmSync(root, { recursive: true, force: true });
+  });
+
+  test("does not request an approval-only review binding for a human-review escalation", async () => {
+    const root = mkdtempSync(join(tmpdir(), "zintus-engineer-human-review-snapshot-"));
+    const supervisor = new EngineerSupervisor({ dbPath: join(root, "engineer.db") });
+    const principal = deriveEngineerPrincipal({ gatewayIdentitySecret: "human-review-snapshot-owner" });
+    const received = supervisor.receiveRequest({ runId: "human-review-snapshot", userId: principal.ownerId, repository, request: "work" });
+    const actualGetRun = supervisor.getRun.bind(supervisor);
+    supervisor.getRun = ((runId: string) => ({ ...actualGetRun(runId), state: "HUMAN_REVIEW_REQUIRED", stateVersion: 1 })) as typeof supervisor.getRun;
+    supervisor.latestEventSequence = (() => 1) as typeof supervisor.latestEventSequence;
+    supervisor.listEvents = (() => [{
+      eventId: "human-review-event", runId: received.runId, sequence: 1, stateVersion: 1,
+      nextState: "HUMAN_REVIEW_REQUIRED", reasonCode: "CLASSIFIED_REVIEW_REQUIRES_HUMAN",
+    }]) as unknown as typeof supervisor.listEvents;
+    const manager = new EngineerRunManager({ supervisor, principal, preflight: preflight() });
+    const snapshot = await manager.snapshot(principal, received.runId);
+    expect(snapshot.data.reviewBinding).toBeNull();
+    expect(snapshot.data.errors.map((error) => error.section)).not.toContain("reviewBinding");
     supervisor.close(); rmSync(root, { recursive: true, force: true });
   });
 
@@ -1145,6 +1548,57 @@ describe("Engineer trusted identity and admission", () => {
       expect((await capability(invalid)).strictStructuredOutputs).toBe(false);
     }
     expect((await capability([{ type: "function_call", name: "capability_ready", arguments: JSON.stringify({ ready: true }) }], "different-model")).strictStructuredOutputs).toBe(false);
+  });
+
+  test("reports missing provider credentials separately from model capability failures", async () => {
+    const missingKeyProbe = createLocalEngineerCapabilityProbe({
+      repositoryId: repository.repositoryId,
+      repositoryRoot: tmpdir(),
+      expectedOriginUrl: "file:///fixture",
+      transport: async () => { throw new Error("OpenAI BYOK key is required for Zintus Engineer"); },
+    });
+    expect(await missingKeyProbe.model("exact-model")).toEqual({
+      available: false,
+      responsesApi: false,
+      strictStructuredOutputs: false,
+      unavailableReason: "provider_key_missing",
+    });
+    const gate = preflight(missingKeyProbe);
+    await expect(gate.assertStartup()).rejects.toThrow("OpenAI API key is not configured");
+    expect(gate.readiness()).toEqual({
+      state: "FAILED",
+      error: "Engineer preflight failed: OpenAI API key is not configured; add a valid key in Settings, then retry readiness",
+    });
+
+    const invalidKeyProbe = createLocalEngineerCapabilityProbe({
+      repositoryId: repository.repositoryId,
+      repositoryRoot: tmpdir(),
+      expectedOriginUrl: "file:///fixture",
+      transport: async () => { throw Object.assign(new Error("Incorrect API key provided"), { status: 401 }); },
+    });
+    expect((await invalidKeyProbe.model("exact-model")).unavailableReason).toBe("provider_key_invalid");
+    await expect(preflight(invalidKeyProbe).assertStartup()).rejects.toThrow("OpenAI rejected the configured API key");
+
+    const networkProbe = createLocalEngineerCapabilityProbe({
+      repositoryId: repository.repositoryId,
+      repositoryRoot: tmpdir(),
+      expectedOriginUrl: "file:///fixture",
+      transport: async () => { throw new Error("ECONNRESET"); },
+    });
+    expect((await networkProbe.model("exact-model")).unavailableReason).toBe("provider_unreachable");
+    await expect(preflight(networkProbe).assertStartup()).rejects.toThrow("check provider connectivity, quota, and model access");
+  });
+
+  test("treats an incomplete configured Engineer as failed, not disabled or healthy", async () => {
+    const gate = new EngineerCapabilityPreflight({
+      models: [], publicationEnabled: false, repository: canonicalRepository, probe: probe(),
+      unavailableReason: "offline dependency bundle and toolchain hash are unavailable",
+    });
+    expect(gate.readiness()).toEqual({
+      state: "FAILED",
+      error: "Engineer preflight failed: offline dependency bundle and toolchain hash are unavailable",
+    });
+    await expect(gate.assertStartup()).rejects.toThrow("offline dependency bundle and toolchain hash are unavailable");
   });
 
   test("rechecks publication authority and rejects every forged principal mutation", async () => {
