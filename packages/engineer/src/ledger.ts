@@ -4180,6 +4180,30 @@ export class EngineerLedger {
     const expectedClaimIds = historicalCheckpoint
       ? historicalCheckpoint.claimSummary.claimIds
       : bundle.claims.map((claim) => claim.claimId);
+    // Fresh promotion: claim rows that are not part of the promoted bundle are
+    // only tolerated when they are genuine repair history, i.e. they were sealed
+    // into some other durable Evidence Bundle v2 for this run. A claim row that no
+    // bundle vouches for is tampering and must reject; otherwise the repair-history
+    // tolerance would silently neutralize the durable-claim binding. (Historical
+    // checkpoint reads keep their own semantics below, where later advisory-only
+    // claims recorded after the checkpoint are expected and ignored.)
+    if (!historicalCheckpoint) {
+      const durableBundleClaimIds = new Set<string>(
+        (this.db.query("SELECT manifest_json FROM evidence_bundles WHERE run_id = ? AND org_id = ?")
+          .all(input.runId, this.tenantOrgId) as Array<{ manifest_json: string }>)
+          .flatMap((candidate) => {
+            try {
+              return EvidenceBundleRecordSchema.shape.bundle.parse(JSON.parse(candidate.manifest_json))
+                .claims.map((claim) => claim.claimId);
+            } catch { return []; }
+          }),
+      );
+      for (const claim of allClaims) {
+        if (!expectedClaimIds.includes(claim.claimId) && !durableBundleClaimIds.has(claim.claimId)) {
+          throw new Error("verified candidate durable claims do not match Evidence Bundle v2");
+        }
+      }
+    }
     const claims = allClaims.filter((claim) => expectedClaimIds.includes(claim.claimId))
       .sort((left, right) => compareCodeUnits(left.claimId, right.claimId));
     if (claims.length !== expectedClaimIds.length || new Set(expectedClaimIds).size !== expectedClaimIds.length) {

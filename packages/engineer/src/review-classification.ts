@@ -212,6 +212,27 @@ function attestedCoverageGap(finding: ReviewFindingRecord, contract: Extract<Req
   return null;
 }
 
+// A concrete in-scope finding earns one bounded repair only when the Reviewer
+// actually stands behind a defect on a required criterion: it either declined to
+// mark that criterion satisfied, or it bound the finding to a hash-verified
+// adversarial coverage gap for it. A finding raised while the Reviewer marks the
+// same required criterion satisfied, with no evidence binding, is contradictory
+// opinion — not repair authority — and stays human-only.
+function reviewerStandsBehindInScopeDefect(finding: ReviewFindingRecord, contract: Extract<RequiredLaneContract, { schemaVersion: 2 }>, session: ReviewerSessionRecord, evidence: TrustedEvidence[]): boolean {
+  const requiredFindingCriteria = finding.criterionIds.filter((id) => contract.requiredCriterionIds.includes(id));
+  if (requiredFindingCriteria.length === 0) return false;
+  const coverageStatus = new Map(session.output.requirementCoverage.map((item) => [item.criterionId, item.status]));
+  if (requiredFindingCriteria.some((id) => coverageStatus.get(id) !== "SATISFIED")) return true;
+  const providerFinding = session.output.findings.find((item) => normalizedFindingFromOutput(session.reviewerSessionId, item).findingId === finding.findingId);
+  if (!providerFinding) return false;
+  return evidence.some((item) => {
+    if (item.eventType !== "ADVERSARIAL_COVERAGE_REPORT" || item.producerType !== "SYSTEM" || item.producerId !== "adversarial-coverage-policy") return false;
+    const report = AdversarialCoverageReportSchema.safeParse(item.payload);
+    if (!report.success || report.data.policyVersion !== ADVERSARIAL_COVERAGE_POLICY_VERSION || report.data.runId !== contract.runId || report.data.manifestHash !== contract.manifestHash) return false;
+    return report.data.gaps.some((gap) => gap.gapId === providerFinding.findingId && gap.criterionIds.some((id) => requiredFindingCriteria.includes(id)));
+  });
+}
+
 function deterministicSecurityFailure(
   finding: ReviewFindingRecord,
   contract: Extract<RequiredLaneContract, { schemaVersion: 2 }>,
@@ -340,7 +361,8 @@ export function classifyReviewerOutput(input: ClassifyReviewerOutputInput): Revi
     // project-level, and vague findings continue to require a human decision.
     if (!classification && finding.file !== "" && finding.lineStart >= 0 && finding.lineEnd >= finding.lineStart &&
         finding.description.trim().length > 0 && finding.requiredChange.trim().length > 0 &&
-        finding.criterionIds.some((id) => contract.requiredCriterionIds.includes(id))) {
+        finding.criterionIds.some((id) => contract.requiredCriterionIds.includes(id)) &&
+        reviewerStandsBehindInScopeDefect(finding, contract, session, referenced)) {
       classification = ReviewFindingClassificationContentSchema.parse({
           findingId: finding.findingId, findingFingerprint: finding.fingerprint, disposition: "ADVISORY", authority: "NONE",
           authorityRefs: [], evidenceIds: [], reasonCode: "IN_SCOPE_REVIEWER_REPAIR_CANDIDATE",
