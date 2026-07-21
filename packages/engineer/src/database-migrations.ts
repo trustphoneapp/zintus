@@ -80,7 +80,60 @@ function assertMigrationPreservedRows(db: Database, before: Map<string, number>,
  * intended v25 schema. Individual run() calls also surface every SQLite error;
  * Bun Database.exec can otherwise continue after a failed middle statement.
  */
+// Tables rebuilt via create-copy-drop-rename, keyed by migration version.
+// SQLite >= 3.52 re-parses every trigger body during ALTER TABLE RENAME, so a
+// trigger on ANOTHER table whose body references the just-dropped name aborts
+// the rename ("no such table"). macOS system SQLite (3.51) tolerated this;
+// bun's bundled Linux SQLite (3.53) does not. Preserve those triggers around
+// the rebuild and restore them byte-identically from sqlite_master afterwards,
+// so every schema-shape validator still sees the original definitions.
+const REBUILT_TABLES: Record<number, string> = { 27: "verified_candidate_checkpoints", 29: "hardening_quotes" };
+
+/**
+ * Drops the triggers on OTHER tables whose bodies reference `table` (they abort
+ * the rebuild's RENAME on SQLite >= 3.52), runs `action`, then rebuilds every
+ * affected table's complete trigger set in original creation (rowid) order —
+ * same-table triggers fire in creation order, so partial re-creation would
+ * silently reorder trigger firing and change which guard rejects first.
+ */
+export function withReferencingTriggersPreserved(
+  db: Database,
+  table: string,
+  keep: (trigger: { name: string; sql: string }) => boolean,
+  action: () => void,
+): void {
+  const preserved = (db.query(`SELECT name, sql, tbl_name FROM sqlite_master WHERE type='trigger'
+      AND tbl_name != ?1 AND sql LIKE '%' || ?1 || '%' ORDER BY rowid`).all(table) as
+    Array<{ name: string; sql: string; tbl_name: string }>).filter(keep);
+  const affectedTables = [...new Set(preserved.map((trigger) => trigger.tbl_name))];
+  const fullSets = new Map(affectedTables.map((owner) => [owner,
+    db.query("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name = ? ORDER BY rowid")
+      .all(owner) as Array<{ name: string; sql: string }>]));
+  const preservedNames = new Set(preserved.map((trigger) => trigger.name));
+  for (const trigger of preserved) db.exec(`DROP TRIGGER "${trigger.name}"`);
+  action();
+  // Rebuild each affected table's originally-existing triggers in original
+  // rowid order. Triggers the action itself dropped stay dropped; triggers the
+  // action created are left untouched (they follow, in their creation order).
+  for (const [owner, triggers] of fullSets) {
+    const capturedNames = new Set(triggers.map((trigger) => trigger.name));
+    const survivors = new Set((db.query("SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name = ?")
+      .all(owner) as Array<{ name: string }>).map((trigger) => trigger.name));
+    for (const name of survivors) if (capturedNames.has(name)) db.exec(`DROP TRIGGER "${name}"`);
+    for (const trigger of triggers) {
+      if (preservedNames.has(trigger.name) || survivors.has(trigger.name)) db.exec(trigger.sql);
+    }
+  }
+}
+
 function executeMigrationSql(db: Database, migration: Migration): void {
+  const rebuiltTable = REBUILT_TABLES[migration.version];
+  if (rebuiltTable) {
+    withReferencingTriggersPreserved(db, rebuiltTable,
+      (trigger) => !migration.sql.includes(`CREATE TRIGGER ${trigger.name}`),
+      () => db.exec(migration.sql));
+    return;
+  }
   if (migration.version !== 25) {
     db.exec(migration.sql);
     return;

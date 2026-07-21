@@ -28,7 +28,7 @@ import {
   TENANT_OWNED_TABLES,
   V34_ADDITIVE_COLUMN_NAMES,
 } from "./database-schema.js";
-import { migrateEngineerDatabase } from "./database-migrations.js";
+import { migrateEngineerDatabase, withReferencingTriggersPreserved } from "./database-migrations.js";
 import { TaskManifestSchema, type TaskManifestContent } from "./contracts.js";
 import { canonicalJson, sha256 } from "./hash.js";
 import { EngineerLedger } from "./ledger.js";
@@ -168,6 +168,13 @@ function insertParentPublicationSelection(fixture: ReturnType<typeof checkpointB
   return selection;
 }
 
+// SQLite >= 3.52 re-parses every trigger body during ALTER TABLE RENAME, so a
+// trigger on another table referencing the just-dropped name aborts the rename.
+// Reuse the production migration runner's order-preserving helper.
+function withTriggersPreserved(db: Database, table: string, action: () => void): void {
+  withReferencingTriggersPreserved(db, table, () => true, action);
+}
+
 function restoreLegacyCheckpointTable(db: Database): void {
   const hasV27 = (db.query("PRAGMA table_info(verified_candidate_checkpoints)").all() as Array<{name:string}>)
     .some((column) => column.name === "parent_checkpoint_hash");
@@ -180,7 +187,7 @@ function restoreLegacyCheckpointTable(db: Database): void {
     )?.[0];
     if (!legacyTable || !legacyObjects) throw new Error("test fixture cannot restore the v21 checkpoint table");
     db.exec(legacyTable.replace("CREATE TABLE verified_candidate_checkpoints", "CREATE TABLE verified_candidate_checkpoints_legacy"));
-    db.exec(`INSERT INTO verified_candidate_checkpoints_legacy
+    withTriggersPreserved(db, "verified_candidate_checkpoints", () => db.exec(`INSERT INTO verified_candidate_checkpoints_legacy
       (id,checkpoint_hash,parent_checkpoint_id,run_id,requester_user_id,repository_id,required_lane_contract_hash,
        manifest_hash,base_commit_sha,result_commit_sha,diff_hash,reviewer_session_id,classification_hash,
        classification_result,evidence_bundle_id,evidence_bundle_hash,environment_digest,checkpoint_json,
@@ -191,7 +198,7 @@ function restoreLegacyCheckpointTable(db: Database): void {
        statement_json,statement_hash,signature_algorithm,signature_key_id,signature,created_at
       FROM verified_candidate_checkpoints;
       DROP TABLE verified_candidate_checkpoints;
-      ALTER TABLE verified_candidate_checkpoints_legacy RENAME TO verified_candidate_checkpoints;`);
+      ALTER TABLE verified_candidate_checkpoints_legacy RENAME TO verified_candidate_checkpoints;`));
     db.exec(legacyObjects);
     db.exec("DROP INDEX IF EXISTS uq_hardening_seed_attestation_pair_v27");
   }
@@ -347,7 +354,7 @@ function removeV28Schema(db: Database): void {
     if (!legacyQuoteTable || legacyQuoteObjects.some((statement) => !statement)) {
       throw new Error("test fixture cannot restore the v23 hardening quote table");
     }
-    db.exec(`
+    withTriggersPreserved(db, "hardening_quotes", () => db.exec(`
       DROP TRIGGER IF EXISTS require_quote_binding_v23;
       DROP TRIGGER IF EXISTS require_hardening_quote_version_projection_v29;
       DROP TRIGGER IF EXISTS prevent_hardening_quotes_update_v23;
@@ -369,7 +376,7 @@ function removeV28Schema(db: Database): void {
       DROP TABLE hardening_quotes;
       ALTER TABLE hardening_quotes_v28 RENAME TO hardening_quotes;
       ${legacyQuoteObjects.join("\n")}
-    `);
+    `));
   }
   db.exec(`
     DROP TRIGGER IF EXISTS require_hardening_quote_sizing_authority_projection_v29;
@@ -657,7 +664,8 @@ describe("Engineer database schema", () => {
       const counterfeit=checkpointBindingFixture("READY");
       counterfeit.db.exec("PRAGMA foreign_keys=OFF");restoreLegacyCheckpointTable(counterfeit.db);
       counterfeit.db.query("DELETE FROM schema_migrations WHERE version=27").run();
-      counterfeit.db.exec(mutation(ENGINEER_DATABASE_MIGRATION_27_SQL));
+      withTriggersPreserved(counterfeit.db, "verified_candidate_checkpoints",
+        () => counterfeit.db.exec(mutation(ENGINEER_DATABASE_MIGRATION_27_SQL)));
       counterfeit.db.query("INSERT INTO schema_migrations(version,applied_at) VALUES(27,?)").run(counterfeit.at);
       counterfeit.db.exec("PRAGMA foreign_keys=ON");
       expect(()=>migrateEngineerDatabase(counterfeit.db,counterfeit.at),label).toThrow("Engineer schema");

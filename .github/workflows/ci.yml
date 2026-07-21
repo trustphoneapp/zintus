@@ -25,6 +25,9 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: for i in 1 2 3; do if bun install; then exit 0; fi; sleep 15; done; exit 1
+      # Engineer strict-HTTP tests import the gateway handler, which resolves
+      # "tokzen" to its gitignored ./dist build — build it or those tests crash.
+      - run: bun run --filter tokzen build
       - run: bun run --filter @zintus/engineer typecheck
       - run: bun run --filter @zintus/engineer test
 
