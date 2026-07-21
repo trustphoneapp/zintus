@@ -13,7 +13,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test src/"
+    "test": "bun test --parallel=1 src/"
   },
   "dependencies": {
     "openai": "^6.46.0",
