@@ -96,6 +96,31 @@ describe("hosted Judge Live Mode", () => {
     expect(calls).toEqual(["https://gateway.example/v1/engineer/runs"]);
   });
 
+  test("accepts a browser same-origin GET that has Sec-Fetch-Site but no Origin header", async () => {
+    const { token } = issueJudgeSession(config, 10_000);
+    const calls: string[] = [];
+    const response = await proxyJudgeGatewayRequest(new Request("https://judge.example/api/judge/gateway/v1/status", {
+      headers: { "Sec-Fetch-Site": "same-origin", Cookie: `${JUDGE_SESSION_COOKIE}=${token}` },
+    }), ["v1", "status"], {
+      config, fetchImpl: async (input) => { calls.push(String(input)); return Response.json({ ok: true }); }, now: 10_001,
+    });
+    expect(response.status).toBe(200);
+    expect(calls).toEqual(["https://gateway.example/v1/status"]);
+  });
+
+  test("rejects Origin-less requests that are not browser-attested same-origin", async () => {
+    const { token } = issueJudgeSession(config, 10_000);
+    const headerVariants: Record<string, string>[] = [{}, { "Sec-Fetch-Site": "cross-site" }, { "Sec-Fetch-Site": "same-site" }, { "Sec-Fetch-Site": "none" }];
+    for (const headers of headerVariants) {
+      const response = await proxyJudgeGatewayRequest(new Request("https://judge.example/api/judge/gateway/v1/status", {
+        headers: { ...headers, Cookie: `${JUDGE_SESSION_COOKIE}=${token}` },
+      }), ["v1", "status"], {
+        config, fetchImpl: async () => Response.json({ ok: true }), now: 10_001,
+      });
+      expect(response.status).toBe(403);
+    }
+  });
+
   test("rejects publication and cross-site routes before they reach the private gateway", async () => {
     const { token } = issueJudgeSession(config, 10_000);
     const calls: unknown[] = [];
