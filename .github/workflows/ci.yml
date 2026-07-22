@@ -86,8 +86,7 @@ jobs:
       # the suite never depends on a writable $HOME (hermetic on any runner).
       TOKZEN_HOME: ${{ github.workspace }}/.tokzen-ci
       # The root test script shells out to several `bun test` invocations.
-      # Propagating the explicit limit prevents valid SQLite recovery tests
-      # from being killed by Bun's 5-second default on hosted runners.
+      # Propagate the bounded per-test deadline to every child process.
       BUN_OPTIONS: --timeout=30000
     steps:
       - uses: actions/checkout@v4
@@ -105,7 +104,14 @@ jobs:
       # tokzen resolves to ./dist (a build artifact, gitignored). Build it so
       # gateway code importing "tokzen" loads at runtime in tests.
       - run: bun run --filter tokzen build
-      - run: bun run test
+      # The root script has nested `bun test` calls. Route those through the
+      # checked-in shim so only test files are serial; build/install commands
+      # still use the real Bun executable directly.
+      - name: Run test suite with isolated test-file scheduling
+        run: |
+          export ZINTUS_REAL_BUN="$(command -v bun)"
+          export PATH="$GITHUB_WORKSPACE/scripts/ci-bin:$PATH"
+          bun run test
 
   coverage:
     runs-on: ubuntu-latest
