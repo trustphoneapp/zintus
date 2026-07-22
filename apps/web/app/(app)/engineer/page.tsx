@@ -335,7 +335,7 @@ export default function EngineerPage() {
 
   const refresh = useCallback(async (runId: string) => {
     const snapshot = await getEngineerSnapshot(runId);
-    if (activeRunIdRef.current !== runId) return;
+    if (activeRunIdRef.current !== runId) return 0;
     const status = snapshot.status; const nextData = snapshot.data; const nextBudget = snapshot.status.budget;
     setRun((current) => !current || status.run.runId !== current.runId || status.run.stateVersion >= current.stateVersion ? status.run : current);
     setManagerError(status.lastError);
@@ -344,6 +344,7 @@ export default function EngineerPage() {
     setData(nextData);
     setBudget(nextBudget);
     setEvents(snapshot.events);
+    return snapshot.latestEventSequence;
   }, []);
 
   const refreshLiveSummary = useCallback(async (runId: string) => {
@@ -367,7 +368,7 @@ export default function EngineerPage() {
       if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
       refreshTimerRef.current = setTimeout(() => {
         refreshTimerRef.current = null;
-        if (event.reasonCode === "VERIFIED_CANDIDATE_PROMOTED" || /^(HUMAN_APPROVAL_|HUMAN_(APPROVED|REJECTED|REQUESTED_CHANGES))/.test(event.reasonCode)) void refresh(runId);
+        if (event.reasonCode === "VERIFIED_CANDIDATE_PROMOTED" || /^(IMPLEMENTING|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|SECURITY_REVIEW|CODE_REVIEW|EVIDENCE_SYNTHESIS|REVIEW_|HUMAN_APPROVAL_|HUMAN_(APPROVED|REJECTED|REQUESTED_CHANGES))/.test(event.nextState)) void refresh(runId);
         else void refreshLiveSummary(runId);
       }, 100);
     }, controller.signal, {
@@ -388,7 +389,7 @@ export default function EngineerPage() {
     const runId = run.runId;
     const update = async () => {
       await refreshLiveSummary(runId).catch(() => undefined);
-      if (run.state === "IMPLEMENTING") {
+      if (/^(IMPLEMENTING|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|SECURITY_REVIEW|CODE_REVIEW|EVIDENCE_SYNTHESIS|REVIEW_)/.test(run.state)) {
         const diff = await getEngineerDiff(runId).catch(() => null);
         if (diff !== null && activeRunIdRef.current === runId) {
           setData((current) => current ? { ...current, diff } : current);
@@ -399,6 +400,16 @@ export default function EngineerPage() {
     const timer = window.setInterval(() => void update(), 2_000);
     return () => window.clearInterval(timer);
   }, [refreshLiveSummary, run?.runId, run?.state]);
+
+  // A hot reload, tab restore, or brief SSE reconnect can leave the browser
+  // with the current run state but without its already-durable history. Load
+  // the existing snapshot before rendering a blank timeline or hiding review.
+  useEffect(() => {
+    if (!run || events.length || !/^(IMPLEMENTING|MODEL_PROVIDER_|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|FLAKE_|VERIFICATION_|REVERIFYING|SECURITY_REVIEW|CODE_REVIEW|EVIDENCE_SYNTHESIS|REVIEW_|HUMAN_|PR_|BASE_BRANCH|COMPLETED|RETRY_BUDGET_EXHAUSTED|VERIFICATION_INCOMPLETE|SECURITY_ESCALATION|FAILED|TIMED_OUT|ROLLED_BACK)$/.test(run.state)) return;
+    void refresh(run.runId).then((latestSequence) => {
+      if (latestSequence && activeRunIdRef.current === run.runId) watch(run.runId, latestSequence);
+    }).catch(() => undefined);
+  }, [events.length, refresh, run?.runId, run?.state, watch]);
 
   useEffect(() => {
     let current = true;
@@ -680,7 +691,7 @@ export default function EngineerPage() {
         const frozen = await freezeEngineerPlan(run, plan.manifest);
         setRun(frozen);
         const queued = await startEngineerRun(frozen.runId, frozen.stateVersion);
-        setRun(queued); setEvents([]); watch(queued.runId);
+        setRun(queued); setEvents([]); const latestSequence = await refresh(queued.runId); watch(queued.runId, latestSequence);
       } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
     });
   };
@@ -701,7 +712,7 @@ export default function EngineerPage() {
     if (!run || run.state !== "PLAN_FROZEN") return;
     await withRunMutation("start-frozen", async () => {
       setError(null);
-      try { const queued = await startEngineerRun(run.runId, run.stateVersion); setRun(queued); setEvents([]); watch(queued.runId); }
+      try { const queued = await startEngineerRun(run.runId, run.stateVersion); setRun(queued); setEvents([]); const latestSequence = await refresh(queued.runId); watch(queued.runId, latestSequence); }
       catch (cause) { const status = await getEngineerRunStatus(run.runId).catch(() => null); if (status) { setRun(status.run); setManagerError(status.lastError); } setError(cause instanceof Error ? cause.message : "Unable to start Engineer run"); }
     });
   };
@@ -887,8 +898,8 @@ export default function EngineerPage() {
     .filter((reasonCode): reasonCode is string => Boolean(reasonCode))
     .filter((reasonCode, index, values) => values.indexOf(reasonCode) === index)
     .slice(0, 3);
-  const reachedImplementation = events.some((event) => ["IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "VERIFICATION_RECOVERY", "REVERIFYING"].includes(event.nextState));
-  const reachedVerification = events.some((event) => ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE", "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING", "REVIEW_APPROVED", "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED"].includes(event.nextState));
+  const reachedImplementation = /^(IMPLEMENTING|MODEL_PROVIDER_|FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|FLAKE_|VERIFICATION_|REVERIFYING|SECURITY_REVIEW|CODE_REVIEW|EVIDENCE_SYNTHESIS|REVIEW_|HUMAN_|PR_|BASE_BRANCH|COMPLETED|RETRY_BUDGET_EXHAUSTED|VERIFICATION_INCOMPLETE|SECURITY_ESCALATION|FAILED|TIMED_OUT|ROLLED_BACK)$/.test(latestState) || events.some((event) => ["IMPLEMENTING", "FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "VERIFICATION_RECOVERY", "REVERIFYING"].includes(event.nextState));
+  const reachedVerification = /^(FAST_CHECKS|UNIT_TESTING|INTEGRATION_TESTING|E2E_TESTING|FLAKE_|VERIFICATION_|REVERIFYING|SECURITY_REVIEW|CODE_REVIEW|EVIDENCE_SYNTHESIS|REVIEW_|HUMAN_|PR_|BASE_BRANCH|COMPLETED|RETRY_BUDGET_EXHAUSTED|VERIFICATION_INCOMPLETE|SECURITY_ESCALATION|FAILED|TIMED_OUT|ROLLED_BACK)$/.test(latestState) || events.some((event) => ["FAST_CHECKS", "UNIT_TESTING", "INTEGRATION_TESTING", "E2E_TESTING", "FLAKE_QUARANTINE", "SECURITY_REVIEW", "CODE_REVIEW", "EVIDENCE_SYNTHESIS", "REVIEWING", "REVIEW_APPROVED", "REVIEW_CHANGES_REQUESTED", "REVIEW_REJECTED", "HUMAN_REVIEW_REQUIRED", "HUMAN_APPROVAL_PENDING", "HUMAN_APPROVED", "PR_PREFLIGHT", "PR_CREATING", "PR_CREATED", "COMPLETED"].includes(event.nextState));
   const visibleEvidenceErrors = reachedVerification ? (data?.errors ?? []) : [];
   const visibleTabs = ["timeline", ...(reachedImplementation ? ["diff"] : []), ...(reachedVerification ? ["evidence"] : [])] as Array<"timeline" | "diff" | "evidence">;
   useEffect(() => {
@@ -950,9 +961,9 @@ export default function EngineerPage() {
         <div className="engineer-actions"><span className={`engineer-status engineer-status--${gatewayState}`}>{gatewayState.replaceAll("-", " ")}</span><button onClick={() => setShowAdvancedGateway((value) => !value)}>{showAdvancedGateway ? "Hide advanced security" : "Advanced security"}</button></div>
         {showAdvancedGateway ? <div className="engineer-actions"><label>Operator token<input type="password" value={gatewayToken} autoComplete="off" onChange={(event) => setGatewayToken(event.target.value)} placeholder="Paste GATEWAY_TOKEN" /></label><button disabled={!gatewayToken.trim()} onClick={() => { setEphemeralGatewayToken(gatewayToken); setGatewayToken(""); setGatewayAuthenticated(true); void loadDashboard(true); }}>Use token for this tab</button>{gatewayAuthenticated ? <button onClick={() => { clearEphemeralGatewayToken(); setGatewayAuthenticated(false); void loadDashboard(); }}>Clear token</button> : null}</div> : null}
       </section> : null}
-      <section className="engineer-card" id="repository-connector">
+      {!onlineMode ? <section className="engineer-card" id="repository-connector">
         <div className="engineer-section-title"><span>{onlineMode ? "01" : "02"}</span><div><h2>Repository</h2><p>{onlineMode ? "This run is bound to the connected workspace selected by the hosted Engineer gateway." : "Choose the exact source snapshot. Local remains the safe default."}</p></div></div>
-        {onlineMode ? <div className="engineer-connector-grid"><div className="engineer-connector selected"><span aria-hidden="true">✓</span><div><strong>Connected workspace</strong><small>{repository.owner}/{repository.name} · {repository.baseBranch} · verified {repository.baseCommitSha ? repository.baseCommitSha.slice(0, 12) : "loading"}</small></div><i>Active</i></div></div> : <><div className="engineer-connector-grid">
+        <><div className="engineer-connector-grid">
           <button type="button" className={`engineer-connector${repository.provider === "local" ? " selected" : ""}`} onClick={() => void useLocalRepository()} disabled={busy}>
             <span aria-hidden="true">⌂</span><div><strong>Local repository</strong><small>{repository.provider === "local" ? `${repository.owner}/${repository.name}` : "Verified by the local gateway"}</small></div><i>{repository.provider === "local" ? "Active" : "Use local"}</i>
           </button>
@@ -967,8 +978,8 @@ export default function EngineerPage() {
           <div><strong>Inspect a local folder in this browser</strong><p className="engineer-muted">Read-only inventory only. This does not change the repository used by Engineer; execution remains bound to the verified gateway repository.</p></div>
           <div className="engineer-actions"><button onClick={() => void chooseLocalFolder()} disabled={folderBusy}>{folderBusy ? "Reading folder…" : "Inspect folder"}</button></div>
           {folderSnapshot ? <div className="engineer-folder-snapshot"><p className="engineer-muted"><strong>{folderSnapshot.name}</strong> · {folderSnapshot.files.toLocaleString()} files · {(folderSnapshot.bytes / 1024 / 1024).toFixed(1)} MB · scanned in {folderSnapshot.scannedMs.toLocaleString()} ms{folderSnapshot.truncated ? " · preview safely truncated" : ""}</p><FolderTree nodes={folderSnapshot.tree} /></div> : null}
-        </div></>}
-      </section>
+        </div></>
+      </section> : null}
       {recentRuns.length ? <section className="engineer-card" id="recent-runs">
         <div className="engineer-section-title"><span>03</span><div><h2>Recent durable runs</h2><p>Reopen a gateway-ledger run after any browser restart.</p></div></div>
         <div className="engineer-list">{(showAllRuns ? recentRuns : recentRuns.slice(0, 2)).map((item) => <button key={item.runId} onClick={() => void openRun(item.runId)}>
@@ -978,17 +989,20 @@ export default function EngineerPage() {
         {recentRuns.length > 2 ? <button className="engineer-secondary" onClick={() => setShowAllRuns((value) => !value)}>{showAllRuns ? "Show fewer runs" : `Show ${recentRuns.length - 2} more runs`}</button> : null}
         {showAllRuns && recentRunsCursor ? <button className="engineer-secondary" disabled={busy} onClick={() => void loadOlderRuns()}>{busy ? "Loading…" : "Load older runs"}</button> : null}
       </section> : null}
-      <section className="engineer-card engineer-new-run">
-        <div className="engineer-section-title"><span>{onlineMode ? "02" : "04"}</span><div><h2>New engineering run</h2><p>One bounded request. One evidence-driven workflow.</p></div></div>
-        <label>Feature or bug<textarea value={request} onChange={(event) => { createRunIdRef.current = null; setRequest(event.target.value); }} rows={5} placeholder="Add a bounded feature with measurable acceptance criteria…" /></label>
-        <div className="engineer-form-grid">
+      <section className={`engineer-card engineer-new-run${onlineMode ? " engineer-new-run--online" : ""}`}>
+        {onlineMode ? <div className="engineer-online-intro"><span className="engineer-kicker">Zintus Engineer</span><h1>Turn a clear request into verified code.</h1><p>Describe the outcome. Zintus creates a bounded plan, works in an isolated sandbox, then shows the diff, tests, evidence, and review decision.</p><div className="engineer-online-workspace"><span aria-hidden="true">✓</span><div><strong>Connected workspace</strong><small>{repository.owner}/{repository.name} · verified snapshot</small></div><i>Ready</i></div></div> : <div className="engineer-section-title"><span>04</span><div><h2>New engineering run</h2><p>One bounded request. One evidence-driven workflow.</p></div></div>}
+        <label className={onlineMode ? "engineer-online-request" : undefined}>{onlineMode ? "What should Zintus build or fix?" : "Feature or bug"}<textarea value={request} onChange={(event) => { createRunIdRef.current = null; setRequest(event.target.value); }} rows={onlineMode ? 6 : 5} placeholder={onlineMode ? "For example: Add a secure webhook signature verifier with replay protection, tests, and clear failure codes." : "Add a bounded feature with measurable acceptance criteria…"} /></label>
+        <details className={`engineer-technical-details${onlineMode ? " engineer-technical-details--online" : ""}`}>
+          <summary>Technical details <span>Verified source snapshot</span></summary>
+          <div className="engineer-form-grid">
           <label>Provider<input value={repository.provider === "github" ? "GitHub" : "Local repository"} readOnly /></label>
           <label>Repository ID<input value={repository.repositoryId} readOnly /></label>
           <label>Owner<input value={repository.owner} readOnly /></label>
           <label>Name<input value={repository.name} readOnly /></label>
           <label>Base branch<input value={repository.baseBranch} readOnly /></label>
           <label>Verified base commit<input className="engineer-mono" value={repository.baseCommitSha} readOnly /></label>
-        </div>
+          </div>
+        </details>
         <aside className="engineer-cost-card" aria-live="polite">
           <div><span className="engineer-kicker">Preflight cost estimate</span><strong>{formatUsd(costEstimate.lowerUsd)}–{formatUsd(costEstimate.upperUsd)}</strong></div>
           <span className="engineer-chip">{costEstimate.complexity} scope</span>
@@ -997,7 +1011,7 @@ export default function EngineerPage() {
         </aside>
         {judgeSession ? <section className="engineer-budget-picker"><div className="engineer-card-heading"><div><h3>Live demo budget</h3><p>This session is server-enforced. The browser cannot raise it.</p></div><span className="engineer-chip">No overages</span></div><div className="engineer-budget-readout"><div><span>Max cost</span><strong>${judgeSession.limits.costUsd}</strong></div><div><span>Max tokens</span><strong>{formatEngineerTokenLimit(judgeSession.limits.tokens)}</strong></div><div><span>Max minutes</span><strong>{Math.round(judgeSession.limits.timeSeconds / 60)}</strong></div></div><p className="engineer-budget-note">Prepared environment only · one run for this session · expires {new Date(judgeSession.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · publication and budget top-ups are disabled.</p></section> : <BudgetSlider index={budgetPresetIndex} recommendedIndex={recommendedPresetIndex} onChange={(index) => { setBudgetPresetTouched(true); setBudgetPresetIndex(index); }} />}
         {error ? <p className="engineer-error">{error}</p> : null}
-        <button className="engineer-primary" onClick={() => void submit()} disabled={busy || !request.trim() || !repository.baseCommitSha}>{busy ? "Planning…" : "Create evidence plan"}</button>
+        <button className="engineer-primary" onClick={() => void submit()} disabled={busy || !request.trim() || !repository.baseCommitSha}>{busy ? "Creating plan…" : onlineMode ? "Create verified plan" : "Create evidence plan"}</button>
       </section>
     </main>
   );

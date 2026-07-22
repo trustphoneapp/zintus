@@ -66,7 +66,26 @@ export async function proxyJudgeGatewayRequest(request: Request, pathSegments: s
   const session = readJudgeSession(config, parseCookie(request.headers.get("cookie"), JUDGE_SESSION_COOKIE), options.now);
   if (!session) return jsonError("Start a judge live session before using Engineer.", 401);
   if (!ownedBySession(path, session)) return jsonError("This run is not part of the current judge session.", 403);
-  if (path === "/v1/engineer/runs" && request.method === "GET") return Response.json({ runs: [], nextCursor: null }, { headers: { "Cache-Control": "no-store" } });
+  if (path === "/v1/engineer/runs" && request.method === "GET") {
+    // The private gateway lists the owner-wide ledger. The online browser is
+    // entitled only to run ids carried by its signed session, so filter on the
+    // server and never expose a cursor that could enumerate other runs.
+    const upstreamUrl = new URL(path, `${config.gatewayUrl}/`);
+    const upstream = await (options.fetchImpl ?? fetch)(upstreamUrl, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${config.gatewayToken}`, Accept: request.headers.get("accept") ?? "application/json" },
+      cache: "no-store",
+      redirect: "error",
+    });
+    if (!upstream.ok) return new Response(upstream.body, { status: upstream.status, headers: filteredResponseHeaders(upstream) });
+    const payload = await upstream.json().catch(() => null) as { runs?: unknown } | null;
+    const ownedRunIds = new Set(session.runIds);
+    const runs = Array.isArray(payload?.runs) ? payload.runs.filter((run) => {
+      const runId = typeof run === "object" && run !== null ? (run as { runId?: unknown }).runId : null;
+      return typeof runId === "string" && ownedRunIds.has(runId);
+    }) : [];
+    return Response.json({ runs, nextCursor: null }, { headers: { "Cache-Control": "no-store" } });
+  }
   if (path === "/v1/engineer/runs" && request.method === "POST" && session.runIds.length > 0) return jsonError("Each judge session is limited to one live run.", 409);
 
   let body: string | undefined;

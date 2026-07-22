@@ -65,6 +65,15 @@ describe("Engineer live UI lifecycle guards", () => {
     expect(source).toContain("void refresh(runId)");
   });
 
+  it("hydrates a durable snapshot immediately after starting and unlocks Diff/Evidence from authoritative state on reconnect", () => {
+    expect(source).toContain("const latestSequence = await refresh(queued.runId); watch(queued.runId, latestSequence);");
+    expect(source).toContain('test(latestState) || events.some((event) => ["IMPLEMENTING"');
+    expect(source).toContain('test(latestState) || events.some((event) => ["FAST_CHECKS"');
+    expect(source).toContain('event.nextState)) void refresh(runId);');
+    expect(source).toContain("with the current run state but without its already-durable history");
+    expect(source).toContain("watch(run.runId, latestSequence)");
+  });
+
   it("shows durable verification failure reasons at the human gate instead of a generic recovery story", () => {
     expect(source).toContain("const humanReviewFailureReasons = failures");
     expect(source).toContain('aria-label="Verification blockers"');
