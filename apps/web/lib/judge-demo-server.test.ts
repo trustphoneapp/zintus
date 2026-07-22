@@ -79,6 +79,37 @@ describe("hosted Judge Live Mode", () => {
     expect((await proxyJudgeGatewayRequest(request("/v1/engineer/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }, `${JUDGE_SESSION_COOKIE}=${nextCookie}`), ["v1", "engineer", "runs"], { config, fetchImpl, now: 10_002 })).status).toBe(409);
   });
 
+  test("shows only the signed session's one durable run after a browser refresh", async () => {
+    const { token } = issueJudgeSession(config, 10_000, ["run-owned"]);
+    const response = await proxyJudgeGatewayRequest(
+      request("/v1/engineer/runs", {}, `${JUDGE_SESSION_COOKIE}=${token}`),
+      ["v1", "engineer", "runs"],
+      {
+        config,
+        fetchImpl: async () => Response.json({
+          runs: [
+            { runId: "run-other", requestNormalized: "must stay private" },
+            { runId: "run-owned", requestNormalized: "visible after refresh" },
+          ],
+          nextCursor: "gateway-private-cursor",
+        }),
+        now: 10_001,
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ runs: [{ runId: "run-owned", requestNormalized: "visible after refresh" }], nextCursor: null });
+  });
+
+  test("shows an empty recent list for a signed session with no run, without widening access", async () => {
+    const { token } = issueJudgeSession(config, 10_000);
+    const response = await proxyJudgeGatewayRequest(
+      request("/v1/engineer/runs", {}, `${JUDGE_SESSION_COOKIE}=${token}`),
+      ["v1", "engineer", "runs"],
+      { config, fetchImpl: async () => Response.json({ runs: [{ runId: "run-other" }] }), now: 10_001 },
+    );
+    expect(await response.json()).toEqual({ runs: [], nextCursor: null });
+  });
+
   test("allows an official custom-domain origin even when the route URL is an internal deployment host", async () => {
     const publicConfig = { ...config, allowedOrigins: ["https://www.zintus.ai", "https://zintus.ai"] };
     const { token } = issueJudgeSession(publicConfig, 10_000);
