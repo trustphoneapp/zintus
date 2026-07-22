@@ -5,6 +5,7 @@ const encoder = new TextEncoder();
 
 export interface JudgeDemoConfig {
   accessCodeHash: string;
+  allowedOrigins: readonly string[];
   premiumEnabled: boolean;
   premiumExpiresAt: number | null;
   fixtureRepositoryId: string;
@@ -41,6 +42,27 @@ function boundedNumber(value: string | undefined, fallback: number, minimum: num
   return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum ? parsed : null;
 }
 
+function normalizeOrigin(value: string | undefined): string | null {
+  if (!value?.trim()) return null;
+  try { return new URL(value).origin; } catch { return null; }
+}
+
+function loadJudgeAllowedOrigins(env: Environment): string[] {
+  const origins = new Set(["https://www.zintus.ai", "https://zintus.ai"]);
+  for (const item of (env.ZINTUS_JUDGE_ALLOWED_ORIGINS ?? "").split(",")) {
+    const origin = normalizeOrigin(item);
+    if (origin) origins.add(origin);
+  }
+  const siteOrigin = normalizeOrigin(env.NEXT_PUBLIC_SITE_URL);
+  if (siteOrigin) {
+    origins.add(siteOrigin);
+    const site = new URL(siteOrigin);
+    if (site.hostname.startsWith("www.")) origins.add(`${site.protocol}//${site.hostname.slice(4)}`);
+    else origins.add(`${site.protocol}//www.${site.hostname}`);
+  }
+  return [...origins];
+}
+
 /** Returns null unless every authority needed for public judge mode is explicit. */
 export function loadJudgeDemoConfig(env: Environment = process.env): JudgeDemoConfig | null {
   const premiumEnabled = env.ZINTUS_ENGINEER_PREMIUM_ENABLED === "1";
@@ -61,7 +83,7 @@ export function loadJudgeDemoConfig(env: Environment = process.env): JudgeDemoCo
       !gatewayUrl || !/^https:\/\//.test(gatewayUrl) || !gatewayToken || !fixtureRepositoryId ||
       (!premiumEnabled && (!accessCodeHash || !/^[a-f0-9]{64}$/.test(accessCodeHash))) || !sessionSecret || sessionSecret.length < 32 ||
       tokenBudget == null || timeBudgetSeconds == null || costBudgetUsd == null || sessionTtlSeconds == null || maxRequestChars == null) return null;
-  return { accessCodeHash: accessCodeHash ?? "", premiumEnabled, premiumExpiresAt, fixtureRepositoryId, gatewayToken, gatewayUrl, maxRequestChars,
+  return { accessCodeHash: accessCodeHash ?? "", allowedOrigins: loadJudgeAllowedOrigins(env), premiumEnabled, premiumExpiresAt, fixtureRepositoryId, gatewayToken, gatewayUrl, maxRequestChars,
     runBudget: { costBudgetUsd, timeBudgetSeconds, tokenBudget }, sessionSecret, sessionTtlSeconds };
 }
 
@@ -126,8 +148,13 @@ export function judgeAccessCodeIsValid(config: JudgeDemoConfig, submitted: strin
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-export function judgeSameOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin");
+export function judgeSameOrigin(request: Request, config?: Pick<JudgeDemoConfig, "allowedOrigins">): boolean {
+  const origin = normalizeOrigin(request.headers.get("origin") ?? undefined);
   if (!origin) return false;
-  try { return new URL(origin).origin === new URL(request.url).origin; } catch { return false; }
+  const allowed = new Set(config?.allowedOrigins ?? []);
+  allowed.add(new URL(request.url).origin);
+  const forwardedProto = request.headers.get("x-forwarded-proto") ?? new URL(request.url).protocol.replace(":", "");
+  const forwardedHost = request.headers.get("x-forwarded-host") ?? request.headers.get("host");
+  if (forwardedHost && /^https?$/.test(forwardedProto)) allowed.add(`${forwardedProto}://${forwardedHost}`);
+  return allowed.has(origin);
 }

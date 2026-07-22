@@ -22,7 +22,7 @@ export async function GET(request: Request): Promise<Response> {
 export async function POST(request: Request): Promise<Response> {
   const config = loadJudgeDemoConfig();
   if (!config) return Response.json({ error: "Judge live mode is not configured." }, { status: 503, headers: { "Cache-Control": "no-store" } });
-  if (!judgeSameOrigin(request)) return Response.json({ error: "Cross-site judge session requests are not allowed." }, { status: 403, headers: { "Cache-Control": "no-store" } });
+  if (!judgeSameOrigin(request, config)) return Response.json({ error: "Cross-site judge session requests are not allowed." }, { status: 403, headers: { "Cache-Control": "no-store" } });
   const body = await request.json().catch(() => null) as { accessCode?: unknown } | null;
   if (!config.premiumEnabled && (!body || typeof body.accessCode !== "string" || body.accessCode.length > 256 || !judgeAccessCodeIsValid(config, body.accessCode))) {
     return Response.json({ error: "The live-demo access code is invalid." }, { status: 401, headers: { "Cache-Control": "no-store" } });

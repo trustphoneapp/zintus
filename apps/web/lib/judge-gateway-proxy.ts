@@ -1,4 +1,4 @@
-import { JUDGE_SESSION_COOKIE, issueJudgeSession, judgeSessionCookie, loadJudgeDemoConfig, parseCookie, readJudgeSession, type JudgeDemoConfig, type JudgeSession } from "./judge-demo-server";
+import { JUDGE_SESSION_COOKIE, issueJudgeSession, judgeSameOrigin, judgeSessionCookie, loadJudgeDemoConfig, parseCookie, readJudgeSession, type JudgeDemoConfig, type JudgeSession } from "./judge-demo-server";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -22,12 +22,6 @@ function isAllowedJudgeRoute(method: string, path: string): boolean {
   if (path === "/v1/engineer/runs") return true;
   return /^\/v1\/engineer\/runs\/[A-Za-z0-9_-]{1,200}\/(?:plan|freeze-plan|start|replan-explicit-contract|retry-provider-timeout|cancel|answers)$/.test(path) ||
     /^\/v1\/engineer\/runs\/[A-Za-z0-9_-]{1,200}\/decisions\/[A-Za-z0-9_-]{1,200}\/resolve$/.test(path);
-}
-
-function isSameGatewayOrigin(request: Request): boolean {
-  const origin = request.headers.get("origin");
-  if (!origin) return false;
-  try { return new URL(origin).origin === new URL(request.url).origin; } catch { return false; }
 }
 
 function ownedBySession(path: string, session: JudgeSession): boolean {
@@ -66,7 +60,7 @@ function boundedCreateBody(config: JudgeDemoConfig, body: unknown): { body: stri
 export async function proxyJudgeGatewayRequest(request: Request, pathSegments: string[], options: { config?: JudgeDemoConfig | null; fetchImpl?: FetchLike; now?: number } = {}): Promise<Response> {
   const config = options.config ?? loadJudgeDemoConfig();
   if (!config) return jsonError("Judge live mode is not configured.", 503);
-  if (!isSameGatewayOrigin(request)) return jsonError("Cross-site gateway requests are not allowed.", 403);
+  if (!judgeSameOrigin(request, config)) return jsonError("Cross-site gateway requests are not allowed.", 403);
   const path = `/${pathSegments.join("/")}`;
   if (!path.startsWith("/v1/") || path.includes("..") || !isAllowedJudgeRoute(request.method, path)) return jsonError("This operation is not available in judge live mode.", 403);
   const session = readJudgeSession(config, parseCookie(request.headers.get("cookie"), JUDGE_SESSION_COOKIE), options.now);

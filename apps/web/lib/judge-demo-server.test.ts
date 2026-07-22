@@ -3,12 +3,12 @@ import { issueJudgeSession, judgeAccessCodeIsValid, loadJudgeDemoConfig, parseCo
 import { proxyJudgeGatewayRequest } from "./judge-gateway-proxy";
 
 const config = {
-  accessCodeHash: "d".repeat(64), premiumEnabled: false, premiumExpiresAt: null, fixtureRepositoryId: "judge-fixture", gatewayToken: "gateway-secret", gatewayUrl: "https://gateway.example",
+  accessCodeHash: "d".repeat(64), allowedOrigins: [], premiumEnabled: false, premiumExpiresAt: null, fixtureRepositoryId: "judge-fixture", gatewayToken: "gateway-secret", gatewayUrl: "https://gateway.example",
   maxRequestChars: 6_000, runBudget: { costBudgetUsd: 10, tokenBudget: 700_000, timeBudgetSeconds: 1_500 }, sessionSecret: "s".repeat(40), sessionTtlSeconds: 1_200,
 } as const;
 
-function request(path: string, init: RequestInit = {}, cookie?: string): Request {
-  return new Request(`https://judge.example/api/judge/gateway${path}`, {
+function request(path: string, init: RequestInit = {}, cookie?: string, url = `https://judge.example/api/judge/gateway${path}`): Request {
+  return new Request(url, {
     ...init,
     headers: { Origin: "https://judge.example", ...(init.headers ?? {}), ...(cookie ? { Cookie: cookie } : {}) },
   });
@@ -22,6 +22,16 @@ describe("hosted Judge Live Mode", () => {
       ZINTUS_JUDGE_SESSION_SECRET: "s".repeat(32), ZINTUS_JUDGE_ACCESS_CODE_HASH: "a".repeat(64), ZINTUS_JUDGE_FIXTURE_REPOSITORY_ID: "fixture",
     });
     expect(live?.runBudget).toEqual({ costBudgetUsd: 10, tokenBudget: 700_000, timeBudgetSeconds: 1_500 });
+  });
+
+  test("derives the official apex/www origins from the configured public site URL", () => {
+    const live = loadJudgeDemoConfig({
+      ZINTUS_ENGINEER_PREMIUM_ENABLED: "1", NEXT_PUBLIC_SITE_URL: "https://www.zintus.ai",
+      ZINTUS_JUDGE_GATEWAY_URL: "https://gateway.example", ZINTUS_JUDGE_GATEWAY_TOKEN: "token",
+      ZINTUS_JUDGE_SESSION_SECRET: "s".repeat(32), ZINTUS_JUDGE_FIXTURE_REPOSITORY_ID: "fixture",
+    });
+    expect(live?.allowedOrigins).toContain("https://www.zintus.ai");
+    expect(live?.allowedOrigins).toContain("https://zintus.ai");
   });
 
   test("allows an Engineer-only Premium deployment without an invitation-code hash", () => {
@@ -67,6 +77,23 @@ describe("hosted Judge Live Mode", () => {
     expect(readJudgeSession(config, nextCookie, 10_002)?.runIds).toEqual(["run-1"]);
     expect((await proxyJudgeGatewayRequest(request("/v1/engineer/runs/run-other", {}, `${JUDGE_SESSION_COOKIE}=${nextCookie}`), ["v1", "engineer", "runs", "run-other"], { config, fetchImpl, now: 10_002 })).status).toBe(403);
     expect((await proxyJudgeGatewayRequest(request("/v1/engineer/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }, `${JUDGE_SESSION_COOKIE}=${nextCookie}`), ["v1", "engineer", "runs"], { config, fetchImpl, now: 10_002 })).status).toBe(409);
+  });
+
+  test("allows an official custom-domain origin even when the route URL is an internal deployment host", async () => {
+    const publicConfig = { ...config, allowedOrigins: ["https://www.zintus.ai", "https://zintus.ai"] };
+    const { token } = issueJudgeSession(publicConfig, 10_000);
+    const calls: string[] = [];
+    const response = await proxyJudgeGatewayRequest(request("/v1/engineer/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "https://zintus.ai" },
+      body: JSON.stringify({ repository: { repositoryId: "judge-fixture" }, request: "Implement the fixture" }),
+    }, `${JUDGE_SESSION_COOKIE}=${token}`, "https://zintus-web-git-main-ys-ventures.vercel.app/api/judge/gateway/v1/engineer/runs"), ["v1", "engineer", "runs"], {
+      config: publicConfig,
+      fetchImpl: async (input) => { calls.push(String(input)); return Response.json({ run: { runId: "run-1" } }, { status: 201 }); },
+      now: 10_001,
+    });
+    expect(response.status).toBe(201);
+    expect(calls).toEqual(["https://gateway.example/v1/engineer/runs"]);
   });
 
   test("rejects publication and cross-site routes before they reach the private gateway", async () => {
