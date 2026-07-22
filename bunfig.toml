@@ -1,0 +1,7 @@
+# Engineer exercises migration, recovery, and multi-connection SQLite paths.
+# The Bun default is 5s per test, which is below the observed valid duration of
+# those deterministic tests on GitHub-hosted runners. Keep the suite serialized
+# where it needs shared filesystem discipline, but give each test a bounded,
+# explicit 30s deadline rather than relying on runner speed.
+[test]
+timeout = 30000

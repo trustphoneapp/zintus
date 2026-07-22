@@ -19,6 +19,12 @@ jobs:
   engineer-foundation:
     runs-on: ubuntu-latest
     needs: typecheck
+    # Match the hermetic keychain/cache setup used by the full-suite job. Some
+    # Engineer imports transitively reach key-backed modules, so this must not
+    # depend on an OS Secret Service being present on the hosted runner.
+    env:
+      CI_KEYCHAIN: memory
+      TOKZEN_HOME: ${{ github.workspace }}/.tokzen-ci
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
