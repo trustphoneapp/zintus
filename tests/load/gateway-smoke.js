@@ -11,6 +11,7 @@ import { check, sleep } from "k6";
 //              2xx. The failure this guards against is the handler hanging,
 //              dropping the connection, or crashing the process under load.
 const GATEWAY_URL = __ENV.GATEWAY_URL || "http://localhost:8788";
+const GATEWAY_TOKEN = __ENV.GATEWAY_TOKEN || "";
 
 export const options = {
   scenarios: {
@@ -48,12 +49,19 @@ const CHAT_BODY = JSON.stringify({
 });
 
 export function health() {
-  const res = http.get(`${GATEWAY_URL}/health`);
+  // `/health` is a liveness endpoint that intentionally returns 503 while an
+  // optional Engineer execution configuration is unavailable. Both statuses
+  // prove the gateway accepted and handled the request; Engineer readiness has
+  // its own dedicated capability suite.
+  const res = http.get(`${GATEWAY_URL}/health`, {
+    responseCallback: http.expectedStatuses(200, 503),
+  });
   check(res, {
-    "health returns 200": (r) => r.status === 200,
-    "body has ok:true": (r) => {
+    "health returns a gateway liveness status": (r) => r.status === 200 || r.status === 503,
+    "body has gateway health shape": (r) => {
       try {
-        return JSON.parse(r.body).ok === true;
+        const body = JSON.parse(r.body);
+        return typeof body.ok === "boolean" && typeof body.auth === "string";
       } catch {
         return false;
       }
@@ -64,7 +72,10 @@ export function health() {
 
 export function chat() {
   const res = http.post(`${GATEWAY_URL}/v1/chat/completions`, CHAT_BODY, {
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(GATEWAY_TOKEN ? { Authorization: `Bearer ${GATEWAY_TOKEN}` } : {}),
+    },
   });
   check(res, {
     // status 0 == request never completed (timeout / dropped socket) — the hang
