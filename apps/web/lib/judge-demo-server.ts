@@ -150,7 +150,13 @@ export function judgeAccessCodeIsValid(config: JudgeDemoConfig, submitted: strin
 
 export function judgeSameOrigin(request: Request, config?: Pick<JudgeDemoConfig, "allowedOrigins">): boolean {
   const origin = normalizeOrigin(request.headers.get("origin") ?? undefined);
-  if (!origin) return false;
+  if (!origin) {
+    // Browsers omit the Origin header on same-origin GET/HEAD fetches, but send
+    // Sec-Fetch-Site (a forbidden header a cross-site page cannot forge) on
+    // every fetch. Without it, a missing Origin stays rejected, so cross-site
+    // POSTs and non-browser callers are unaffected.
+    return request.headers.get("sec-fetch-site") === "same-origin";
+  }
   const allowed = new Set(config?.allowedOrigins ?? []);
   allowed.add(new URL(request.url).origin);
   const forwardedProto = request.headers.get("x-forwarded-proto") ?? new URL(request.url).protocol.replace(":", "");
