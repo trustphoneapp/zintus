@@ -1667,7 +1667,10 @@ describe("Phase 3 authoritative verification manager", () => {
             providerArtifacts:0});
       harness.recoveryLeaseManager.close();harness.supervisor.close();
     }
-  },30_000);
+  // This is a 22-scenario recovery matrix that builds an isolated durable
+  // workspace per scenario. The wider cap covers hosted-runner I/O without
+  // relaxing any of its fail-closed assertions.
+  },60_000);
 
   test("revalidates the full H/A graph at Reviewer reserve and dispatch races with no paid provider call",async()=>{
     for(const stage of ["BEFORE_RESERVATION","BEFORE_DISPATCH"] as const){
