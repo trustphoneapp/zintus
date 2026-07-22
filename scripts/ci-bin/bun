@@ -1,0 +1,15 @@
+#!/bin/sh
+# CI-only Bun shim. The root `test` script invokes several nested `bun test`
+# commands, some of whose files temporarily modify process.env. Serialize those
+# test files to prevent cross-file state leakage, while leaving all other Bun
+# subcommands untouched.
+set -eu
+
+: "${ZINTUS_REAL_BUN:?ZINTUS_REAL_BUN must name the trusted Bun executable}"
+
+if [ "${1:-}" = "test" ]; then
+  shift
+  exec "$ZINTUS_REAL_BUN" test --parallel=1 "$@"
+fi
+
+exec "$ZINTUS_REAL_BUN" "$@"

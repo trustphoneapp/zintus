@@ -6,7 +6,9 @@
  * `POST /v1/chat/completions` requests at a running gateway, and prints
  * p50/p95/p99 latency for the health checks.
  *
- * PERFORMANCE TARGET: /health p95 < 500ms.
+ * PERFORMANCE TARGET: /health p95 < 500ms. The endpoint reports either 200
+ * (all configured capabilities ready) or 503 (the gateway is live but its
+ * optional Engineer capability is unavailable), and both prove liveness.
  *
  * Usage:
  *   bun run scripts/gateway-load-smoke.ts
@@ -73,7 +75,10 @@ async function timedHealth(): Promise<number | null> {
       signal: AbortSignal.timeout(10_000),
     });
     await res.body?.cancel().catch(() => {});
-    if (!res.ok) return null;
+    // A failed optional Engineer preflight intentionally makes /health 503.
+    // Count that as a response for this liveness/latency probe; the dedicated
+    // Engineer suite owns readiness correctness.
+    if (res.status !== 200 && res.status !== 503) return null;
     return performance.now() - start;
   } catch {
     return null;

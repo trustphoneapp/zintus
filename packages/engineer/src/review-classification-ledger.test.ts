@@ -3600,6 +3600,7 @@ describe("classified Reviewer ledger persistence", () => {
   // Builds 13 independent full-P5 fixtures, each on its own database. The v34
   // tenancy migration adds a one-time additive-ALTER cost (~140ms) to every
   // fresh database build, so this loop-of-fixtures test needs a wider timeout.
+  // GitHub's hosted filesystem can take roughly 30 seconds for this matrix.
   test("promotion and strict reads reject every invalid successful Builder output binding", async () => {
     const modes = [
       "zero", "type", "producer", "trusted", "symlink", "hash", "size", "completion",
@@ -3673,7 +3674,7 @@ describe("classified Reviewer ledger persistence", () => {
         rmSync(value.root, { recursive: true, force: true });
       }
     }
-  }, 20_000);
+  }, 60_000);
 
   test("promotion and strict reads require one canonical executor-authored verification audit", async () => {
     const modes = ["actor-type", "actor-id", "noncanonical", "extra", "test-id", "criteria", "command", "type", "status", "timestamp"] as const;
@@ -3717,7 +3718,7 @@ describe("classified Reviewer ledger persistence", () => {
         rmSync(value.root, { recursive: true, force: true });
       }
     }
-  }, 20_000);
+  }, 60_000);
 
   test("strict checkpoint reads fail closed on immutable-row and signature tampering", async () => {
     const value = promotionFixture("run-checkpoint-tamper");

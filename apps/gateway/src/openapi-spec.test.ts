@@ -124,6 +124,7 @@ describe("docs/openapi.yaml", () => {
     // Durable Zintus Engineer workflow.
     "/v1/engineer/readiness": '"/v1/engineer/readiness"',
     "/v1/engineer/readiness/retry": '"/v1/engineer/readiness/retry"',
+    "/v1/engineer/publication-readiness": '"/v1/engineer/publication-readiness"',
     "/v1/engineer/observability": '"/v1/engineer/observability"',
     "/v1/engineer/repository": '"/v1/engineer/repository"',
     "/v1/engineer/repositories": '"/v1/engineer/repositories"',
