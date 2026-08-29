@@ -30,11 +30,11 @@ describe("isStripePriceConfigured", () => {
 });
 
 describe("checkoutAvailability", () => {
-  test("production constant is ON — the managed backend exists (src/managed.ts)", () => {
-    // Flipped 2026-07-03 together with the /v1/managed/* routes. Purchasability
-    // is still gated by the placeholder-price check below until [HUMAN] fills
-    // real STRIPE_PRICES.
-    expect(MANAGED_KEYS_AVAILABLE).toBe(true);
+  test("production constant is OFF — managed tiers are not purchasable", () => {
+    // Flipped back 2026-08-28. Real STRIPE_PRICES are configured, so the
+    // placeholder-price check no longer blocks anything and this constant is
+    // the only gate left before a live Stripe subscription.
+    expect(MANAGED_KEYS_AVAILABLE).toBe(false);
   });
 
   test("blocks managed-key tiers with 503 managed_keys_unavailable while gated off", () => {

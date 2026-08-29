@@ -118,13 +118,21 @@ describe("tiers match the public pricing page", () => {
     expect(TIERS.ultra.tokens_per_month).toBe(200_000_000);
   });
 
-  test("managed backend flag is on and pro is a managed tier", () => {
-    expect(MANAGED_KEYS_AVAILABLE).toBe(true);
+  test("managed backend flag is off and pro is a managed tier", () => {
+    expect(MANAGED_KEYS_AVAILABLE).toBe(false);
     expect(MANAGED_KEY_TIERS).toContain("ultra");
   });
 
-  test("checkout is open now that test-mode Stripe prices are configured", () => {
-    expect(checkoutAvailability("starter")).toBeNull();
+  // Stripe prices ARE configured in production, so this gate is the only thing
+  // standing between a click and a live `cs_live_` subscription. Every managed
+  // tier must be refused while the flag is off.
+  test("checkout is closed for every managed tier while the flag is off", () => {
+    for (const tier of MANAGED_KEY_TIERS) {
+      const block = checkoutAvailability(tier);
+      expect(block).not.toBeNull();
+      expect(block!.status).toBe(503);
+      expect(block!.code).toBe("managed_keys_unavailable");
+    }
   });
 });
 

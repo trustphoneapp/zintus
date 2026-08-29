@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { InteractiveCard } from "@/components/marketing/InteractiveCard";
-import { createCheckout } from "@/lib/billing";
+import { PAYMENTS_ENABLED, createCheckout } from "@/lib/billing";
 import { getMe } from "@/lib/cloud";
 
 // Client island for the pricing page: the tier grid + Ultra bar carry the only
@@ -135,6 +135,9 @@ export function PricingTiers() {
   const [checkoutError, setCheckoutError] = useState("");
 
   async function handleCheckout(tierId: string) {
+    // Managed tiers are not for sale. Free/BYOK is unaffected — its CTA is a
+    // plain link to /chat and never reaches this function.
+    if (!PAYMENTS_ENABLED) return;
     if (!PAID_TIERS.includes(tierId) || busyTier) return;
     setBusyTier(tierId);
     setCheckoutError("");
@@ -160,8 +163,11 @@ export function PricingTiers() {
     setBusyTier(null);
   }
 
-  // Resume a checkout the user started before signing in.
+  // Resume a checkout the user started before signing in. Skipped entirely
+  // while payments are off, so /pricing?checkout=pro cannot auto-open checkout
+  // without a click.
   useEffect(() => {
+    if (!PAYMENTS_ENABLED) return;
     const tier = new URLSearchParams(window.location.search).get("checkout");
     if (tier && PAID_TIERS.includes(tier)) void handleCheckout(tier);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -290,9 +296,13 @@ export function PricingTiers() {
                 className={`mk-btn ${popular ? "mk-btn-primary" : "mk-btn-secondary"}`}
                 style={{ width: "100%" }}
                 onClick={() => handleCheckout(tier.id)}
-                disabled={busyTier !== null}
+                disabled={!PAYMENTS_ENABLED || busyTier !== null}
               >
-                {busyTier === tier.id ? "Opening checkout…" : tier.cta.label}
+                {!PAYMENTS_ENABLED
+                  ? "Coming soon"
+                  : busyTier === tier.id
+                    ? "Opening checkout…"
+                    : tier.cta.label}
               </button>
             )}
           </InteractiveCard>
@@ -336,9 +346,13 @@ export function PricingTiers() {
                   className="mk-btn mk-btn-primary"
                   style={{ width: "100%" }}
                   onClick={() => handleCheckout(ultra.id)}
-                  disabled={busyTier !== null}
+                  disabled={!PAYMENTS_ENABLED || busyTier !== null}
                 >
-                  {busyTier === ultra.id ? "Opening checkout…" : ultra.cta.label}
+                  {!PAYMENTS_ENABLED
+                    ? "Coming soon"
+                    : busyTier === ultra.id
+                      ? "Opening checkout…"
+                      : ultra.cta.label}
                 </button>
               </div>
             </InteractiveCard>
