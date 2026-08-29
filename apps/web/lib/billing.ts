@@ -128,8 +128,11 @@ export async function createCheckout(tier: 'starter' | 'pro' | 'max' | 'ultra', 
   } catch { return null; }
 }
 
+// NOT gated by PAYMENTS_ENABLED, deliberately. Managed tiers were purchasable
+// between 2026-07-03 and 2026-08-28, so real subscriptions may exist. The Stripe
+// portal is how someone cancels; closing it would trap paying users with no
+// self-serve exit. Blocking new sales is createCheckout's job, not this one.
 export async function openBillingPortal(): Promise<string | null> {
-  if (!PAYMENTS_ENABLED) return null;
   try {
     const res = await fetch(`${RELAY_URL}/api/billing/portal`, {
       method: 'POST',
