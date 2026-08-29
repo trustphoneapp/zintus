@@ -1,10 +1,21 @@
 // ── Managed-keys availability gate ────────────────────────────────────────
-// Flipped to `true` on 2026-07-03: the managed backend now EXISTS — see
+// Flipped to `true` on 2026-07-03 once the managed backend existed — see
 // src/managed.ts (`/v1/managed/*`): operator provider keys live as Cloudflare
-// secrets, requests are served relay-side and metered via QuotaCounter. Actual
-// purchasability is still (correctly) blocked by checkoutAvailability() until
-// the [HUMAN] steps land: real STRIPE_PRICES + MANAGED_KEY_* secrets set.
-export const MANAGED_KEYS_AVAILABLE = true;
+// secrets, requests are served relay-side and metered via QuotaCounter.
+//
+// Flipped BACK to `false` on 2026-08-28. The assumption behind the `true` state
+// was that checkoutAvailability() would still block purchase until real
+// STRIPE_PRICES landed — but those prices ARE configured in production, so both
+// gates were passing and zintus.ai/pricing was minting live Stripe sessions
+// (`cs_live_…`, Subscribe to Pro US$49.00/mo) against real payment methods.
+// Meanwhile the public changelog, apps/web/lib/billing.ts, Sidebar.tsx,
+// api/premium/route.ts and apps/mobile/lib/route-options.ts all still told
+// users managed tiers were gated off. Nobody should be charged for a tier the
+// rest of the product describes as unavailable.
+//
+// Flip back to `true` only when managed tiers are genuinely ready to sell AND
+// those five surfaces are updated to say so.
+export const MANAGED_KEYS_AVAILABLE = false;
 
 // Tiers that require the managed-keys backend (i.e. everything except free/BYOK).
 export const MANAGED_KEY_TIERS = ['starter', 'pro', 'max', 'ultra'] as const;

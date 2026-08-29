@@ -105,7 +105,16 @@ export async function fetchReferralStats(): Promise<ReferralStats | null> {
   } catch { return null; }
 }
 
+// Payments are switched off at the client edge. No checkout or portal session is
+// requested while this is false, so every entry point (pricing CTAs, the
+// ?checkout= resume param, both dashboard portal buttons) is dead at the source
+// rather than one button at a time. The relay stays the enforcement source of
+// truth (workers/relay/src/tiers.ts MANAGED_KEYS_AVAILABLE); this only stops the
+// UI from starting a flow it should not start.
+export const PAYMENTS_ENABLED = false;
+
 export async function createCheckout(tier: 'starter' | 'pro' | 'max' | 'ultra', ref?: string): Promise<string | null> {
+  if (!PAYMENTS_ENABLED) return null;
   try {
     const res = await fetch(`${RELAY_URL}/api/billing/checkout`, {
       method: 'POST',
@@ -120,6 +129,7 @@ export async function createCheckout(tier: 'starter' | 'pro' | 'max' | 'ultra', 
 }
 
 export async function openBillingPortal(): Promise<string | null> {
+  if (!PAYMENTS_ENABLED) return null;
   try {
     const res = await fetch(`${RELAY_URL}/api/billing/portal`, {
       method: 'POST',
